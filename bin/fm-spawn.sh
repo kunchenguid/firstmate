@@ -1914,8 +1914,8 @@ ${auth_file##*/}
 EOF
       SPAWN_GROK_TOKEN_CREATED=1
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
-      GROK_HOOK_SCRIPT="$GROK_HOOKS_DIR/fm-firstmate-turn-end.sh"
-      GROK_HOOK_CONFIG="$GROK_HOOKS_DIR/fm-firstmate-turn-end.json"
+      GROK_HOOK_SCRIPT="$GROK_HOOKS_DIR/fm-turn-end.sh"
+      GROK_HOOK_CONFIG="$GROK_HOOKS_DIR/fm-turn-end.json"
       spawn_create_or_reuse_artifact "$GROK_HOOK_SCRIPT" <<EOF || exit 1
 #!/usr/bin/env bash
 set -u

@@ -146,7 +146,7 @@ run_grok_spawn() {
 
 test_grok_hook_requires_registered_token() {
   local rec case_dir home proj wt fakebin grok_home id out status hook config token target evil evil_target
-  rec=$(make_spawn_case hook-auth)
+  rec=$(make_spawn_case hook-conflict)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
 EOF
@@ -156,17 +156,28 @@ EOF
   start_grok_agent "$home" "$wt" "$id"
   out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
   status=$?
-  expect_code 0 "$status" "grok spawn should succeed"
-  assert_contains "$out" "spawned $id harness=grok" "grok spawn did not report success"
-
-  hook="$grok_home/hooks/fm-firstmate-turn-end.sh"
-  config="$grok_home/hooks/fm-firstmate-turn-end.json"
-  assert_present "$hook" "grok hook script was not installed"
-  assert_present "$config" "grok hook configuration was not installed"
+  expect_code 1 "$status" "grok spawn should refuse a conflicting global hook"
   [ "$(cat "$grok_home/hooks/fm-turn-end.sh")" = user-hook ] \
     || fail "grok spawn overwrote the user's global hook script"
   [ "$(cat "$grok_home/hooks/fm-turn-end.json")" = user-config ] \
     || fail "grok spawn overwrote the user's global hook configuration"
+  kill -KILL "$GROK_AGENT_PID" 2>/dev/null || true
+  wait "$GROK_AGENT_PID" 2>/dev/null || true
+
+  rec=$(make_spawn_case hook-auth)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  start_grok_agent "$home" "$wt" "$id"
+  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  status=$?
+  expect_code 0 "$status" "grok spawn should succeed"
+  assert_contains "$out" "spawned $id harness=grok" "grok spawn did not report success"
+
+  hook="$grok_home/hooks/fm-turn-end.sh"
+  config="$grok_home/hooks/fm-turn-end.json"
+  assert_present "$hook" "grok hook script was not installed"
+  assert_present "$config" "grok hook configuration was not installed"
   assert_grep 'token=' "$wt/.fm-grok-turnend" "grok pointer did not contain a token"
   target="$home/state/$id.turn-ended"
   assert_no_grep "$target" "$wt/.fm-grok-turnend" "grok pointer exposed the turn-end path"

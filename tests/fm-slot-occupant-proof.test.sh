@@ -205,6 +205,46 @@ pass "an incomplete self-owner home contract retains the durable lease"
 kill "$CONTRACT_PID" 2>/dev/null || true
 wait "$CONTRACT_PID" 2>/dev/null || true
 
+(
+  cd "$WORKTREE" || exit 1
+  exec sleep 300
+) >/dev/null 2>&1 &
+MUTATION_PID=$!
+BG_PIDS+=("$MUTATION_PID")
+for _ in $(seq 1 50); do
+  [ "$(readlink "/proc/$MUTATION_PID/cwd" 2>/dev/null || true)" = "$WORKTREE" ] && break
+  sleep 0.02
+done
+MUTATION_STATE="$TMP_ROOT/mutation-environ-calls"
+: > "$MUTATION_STATE"
+mutation_verdict=$(
+  ENDPOINT_PID=$MUTATION_PID
+  fm_agent_environ() {
+    mutation_call=$(cat "$MUTATION_STATE")
+    mutation_call=$((mutation_call + 1))
+    printf '%s' "$mutation_call" > "$MUTATION_STATE"
+    if [ "$mutation_call" -eq 1 ]; then
+      printf 'FM_AGENT_TASK=task-a\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=crewmate\n' "$HOME_DIR"
+    else
+      printf 'FM_AGENT_TASK=task-a\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=crewmate\nFM_HOME=%s\n' \
+        "$HOME_DIR" "$OTHER_HOME"
+    fi
+  }
+  fm_backend_foreground_process_pid() {
+    [ "$1" = herdr ] && [ "$2" = lab:pane-a ] || return 1
+    printf '%s' "$MUTATION_PID"
+  }
+  fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+    "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a
+)
+case "$mutation_verdict" in
+  "retain: the endpoint-bound process for task(s) task-a is running in the slot"*) ;;
+  *) fail "a changed home contract snapshot released the slot: $mutation_verdict" ;;
+esac
+pass "a changed current home contract retains the durable lease"
+kill "$MUTATION_PID" 2>/dev/null || true
+wait "$MUTATION_PID" 2>/dev/null || true
+
 fm_backend_foreground_process_pid() { return 1; }
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
