@@ -22,9 +22,8 @@
 #
 # transport says how the sweep reaches that home:
 #   agent     - a live secondmate agent owns the home; dispatch it through
-#               bin/fm-stow-delegate.sh, which sends the marked request with
-#               bin/fm-send.sh, correlates the completion receipt, and bounds
-#               the foreground wait across every live secondmate.
+#               bin/fm-stow-delegate.sh, which bounds the foreground wait for
+#               its correlated completion receipt.
 #   direct    - a local home with no live agent; curate its editable memory
 #               files in place.
 #   deferred  - a remote home with no live agent. There is deliberately no
