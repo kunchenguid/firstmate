@@ -587,6 +587,14 @@ include "fm-decision-readiness";
 # --------------------------------------------------------------------------
 def dash($v): if ($v // "") == "" then "-" else ($v | tostring) end;
 
+# A partial snapshot is still a useful board, but it cannot claim a render time
+# it did not receive.
+def generated_freshness:
+  (.generated? // null) as $generated |
+  if ($generated | type) != "string" then "unavailable"
+  elif ($generated | gsub("^[[:space:]]+|[[:space:]]+$"; "")) == "" then "unavailable"
+  else $generated end;
+
 def plural($n; $one; $many): if $n == 1 then $one else $many end;
 
 # A backlog row may record its repo as a bare name or as a full clone path.
@@ -2530,7 +2538,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       <p class=\"sub\">Your fleet at a glance, Captain.</p>
     </div>
     <span class=\"live\" id=\"live\"><span class=\"dot\"></span><span id=\"age\">live &middot; rendered "
-+ (@html "\(.generated)") + "</span></span>
++ (@html "\(generated_freshness)") + "</span></span>
   </header>
 
   <div class=\"stats\">"
@@ -2670,7 +2678,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   </div>
 
 "
-+ (@html "<footer>firstmate &middot; mission control &middot; home \(.fm_home) &middot; snapshot \(.schema) &middot; rendered \(.generated) &middot; self-reload \($refresh)s</footer>")
++ (@html "<footer>firstmate &middot; mission control &middot; home \(.fm_home) &middot; snapshot \(.schema) &middot; rendered \(generated_freshness) &middot; self-reload \($refresh)s</footer>")
 + "
 </div>
 

@@ -899,6 +899,35 @@ test_absent_sources_render_empty_sections() {
   pass "absent sources render as explicit empty sections instead of failing"
 }
 
+test_header_freshness_discloses_an_unknown_render_time() {
+  local known_snap unknown_snap known_board unknown_board
+  known_snap=$TMP_ROOT/freshness-known.json
+  unknown_snap=$TMP_ROOT/freshness-unknown.json
+  known_board=$TMP_ROOT/freshness-known.html
+  unknown_board=$TMP_ROOT/freshness-unknown.html
+  snapshot_json '[]' '[]' > "$known_snap"
+  jq 'del(.generated)' "$known_snap" > "$unknown_snap"
+
+  "$BOARD" --snapshot "$known_snap" --no-quota --out "$known_board" >/dev/null \
+    || fail "a board with a generated timestamp must render"
+  "$BOARD" --snapshot "$unknown_snap" --no-quota --out "$unknown_board" >/dev/null \
+    || fail "a partial snapshot with no generated timestamp must render"
+
+  assert_grep '<span id="age">live &middot; rendered 2026-01-04T00:00:00Z</span>' "$known_board" \
+    "a known generated timestamp must keep the existing header label"
+  assert_grep '<footer>firstmate &middot; mission control &middot; home /fixture/home &middot; snapshot fm-fleet-snapshot.v1 &middot; rendered 2026-01-04T00:00:00Z &middot; self-reload 60s</footer>' "$known_board" \
+    "a known generated timestamp must keep the existing footer label"
+  assert_grep '<span id="age">live &middot; rendered unavailable</span>' "$unknown_board" \
+    "a missing generated timestamp must be disclosed as unavailable in the header"
+  assert_grep '<footer>firstmate &middot; mission control &middot; home /fixture/home &middot; snapshot fm-fleet-snapshot.v1 &middot; rendered unavailable &middot; self-reload 60s</footer>' "$unknown_board" \
+    "a missing generated timestamp must be disclosed as unavailable in the footer"
+  assert_no_grep '<span id="age">live &middot; rendered null</span>' "$unknown_board" \
+    "the header must never expose a raw null generated timestamp"
+  assert_no_grep '<footer>firstmate &middot; mission control &middot; home /fixture/home &middot; snapshot fm-fleet-snapshot.v1 &middot; rendered null &middot; self-reload 60s</footer>' "$unknown_board" \
+    "the footer must never expose a raw null generated timestamp"
+  pass "the header and footer keep known render times and disclose an unavailable one"
+}
+
 test_recent_autonomous_actions_are_bounded_and_appendable() {
   local home fakebin board content
   home=$(make_home recent-actions)
@@ -3652,6 +3681,7 @@ test_yesterday_uses_local_calendar_arithmetic
 test_missing_change_time_degrades_to_a_dash
 test_render_writes_nothing_into_the_project_clones
 test_absent_sources_render_empty_sections
+test_header_freshness_discloses_an_unknown_render_time
 test_recent_autonomous_actions_are_bounded_and_appendable
 test_hostile_text_is_escaped
 test_missing_backlog_is_disclosed_as_unavailable

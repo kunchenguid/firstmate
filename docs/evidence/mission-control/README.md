@@ -11,6 +11,9 @@ The after images show each row carrying only the controls it can resolve: the tw
 
 `controls-served-statically.png` is the safety property that matters most, so it is captured rather than asserted in prose: it is the very same `--controls` file opened directly with no Lavish server, and it renders as the read-only board with no controls and no dead affordances.
 
+`after-freshness-known-desktop.png` and `after-freshness-known-mobile.png` show the existing generated-timestamp header at desktop width and 390px.
+`after-freshness-unknown-desktop.png` and `after-freshness-unknown-mobile.png` show a snapshot without that timestamp reading `live · rendered unavailable` in the header and `rendered unavailable` in the footer without wrapping or colliding with its live indicator.
+
 `before-decision-context-desktop.png` and `after-decision-context-desktop.png` show an ordinary five-item Awaiting Decision list at 1280px with the first Answer form open.
 `before-decision-context-mobile.png` and `after-decision-context-mobile.png` show the same state at exactly 390px by 844px.
 The after images retain the complete long question, add the explicit private decision-aid link, give Answer and Set aside distinct calm treatments, and put the exact recorded question in the Answer prompt without horizontal overflow.
@@ -49,6 +52,9 @@ The required acceptance run passed on 2026-08-08 with `ok - a privacy-safe live 
 
 That the selected tab survives the board's managed reload was checked in Chrome after selecting the Projects tab and reloading the document without a fragment; the Projects panel remained selected.
 The same browser regression replaced the served HTML with fixtures that inserted rows above the current decision or temporarily omitted that decision, then verified the exact reading offset and identity-bound draft survived when the row returned.
+
+The freshness header was verified on 2026-08-11 with `chrome-devtools-axi 0.1.27` at 1280px by 844px and 390px by 844px.
+Both timestamp states kept the header inside the viewport, and the unavailable label remained on one line at 390px.
 
 The allowance integration was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27`.
 The desktop run used `chrome-devtools-axi emulate --viewport '1280x1000x1'`, rendered all three allowance cards at 228.28125px by 254px, and returned `overflow: false` for the 1280px document.
