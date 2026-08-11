@@ -376,8 +376,11 @@ test_primary_origin_requires_state_attestation() {
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = refused ] || fail "a primary without a state attestation was accepted"
-  out=$(cd "$primary_home" && FM_HOME="$primary_home" FM_ROOT_OVERRIDE="$primary_home" \
-    FM_STATE_OVERRIDE="$primary_home/state" bash -c \
+  ( cd "$primary_home" && CODEX_THREAD_ID=attestation-thread FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
+    "$LOCK" >/dev/null ) || fail "primary startup could not acquire its session lock"
+  out=$(cd "$primary_home" && CODEX_THREAD_ID=attestation-thread FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" bash -c \
     '. "$1"; fm_worker_primary_attestation_establish && fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "primary startup could not establish a genuine attestation"
@@ -385,8 +388,9 @@ test_primary_origin_requires_state_attestation() {
   token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
     "$primary_home/state/.primary-attestation")
   [ -n "$token" ] || fail "primary startup persisted an empty attestation token"
-  out=$(cd "$primary_home" && FM_HOME="$primary_home" FM_ROOT_OVERRIDE="$primary_home" \
-    FM_STATE_OVERRIDE="$primary_home/state" FM_PRIMARY_ATTESTATION="$token" \
+  out=$(cd "$primary_home" && CODEX_THREAD_ID=attestation-thread FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
+    FM_PRIMARY_ATTESTATION="$token" \
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "a persisted state attestation rejected a genuine primary"
@@ -608,7 +612,7 @@ make_primary_root() {
   git -C "$dir" init -q
   git -C "$dir" symbolic-ref HEAD refs/heads/main
   printf '# agents\n' > "$dir/AGENTS.md"
-  ln -s "$ROOT/bin" "$dir/bin"
+  cp -a "$ROOT/bin" "$dir/bin"
   git -C "$dir" add AGENTS.md bin
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
@@ -626,6 +630,7 @@ make_launch_case() {
   token="launch-$id"
   printf 'root=%s\ntoken=%s\n' "$primary" "$token" > "$home/state/.primary-attestation"
   chmod 600 "$home/state/.primary-attestation"
+  printf '%s|codex:launch-thread|fallback\n' "$$" > "$home/state/.lock"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -649,8 +654,10 @@ test_every_verified_harness_launches_with_its_home_declaration() {
     rec=$(make_launch_case "launch-$harness" "$id")
     read_launch_record "$rec"
     pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
-    out=$(cd "$PRIMARY_ROOT" && HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
+    out=$(cd "$PRIMARY_ROOT" && env -u NO_MISTAKES_GATE \
+      HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+      CODEX_THREAD_ID=launch-thread \
       FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -658,7 +665,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
       FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
       FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
       PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --harness "$harness" 2>&1)
+      "$PRIMARY_ROOT/bin/fm-spawn.sh" "$id" "$PROJ_DIR" --harness "$harness" 2>&1)
     status=$?
     expect_code 0 "$status" "$harness spawn should succeed"$'\n'"$out"
     launch=$(cat "$CASE_DIR/launch.log")
@@ -706,8 +713,12 @@ test_primary_scope_requires_authoritative_primary_proof() {
   token="scope-$RUN_TAG"
   printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
   chmod 600 "$primary_home/state/.primary-attestation"
+  ( cd "$primary_home" && CODEX_THREAD_ID=scope-thread FM_ROOT_OVERRIDE="$primary_home" \
+    FM_HOME="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" "$LOCK" >/dev/null ) \
+    || fail "primary scope fixture could not acquire its session lock"
   out=$(cd "$primary_home" && env \
     -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME -u FM_ROOT \
+    CODEX_THREAD_ID=scope-thread \
     FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     FM_STATE_OVERRIDE="$primary_home/state" FM_PRIMARY_ATTESTATION="$token" \
     bash -c '. "$1" && fm_primary_scope_matches "$2" "$2/state" && printf primary || printf not-primary' _ \
@@ -1008,7 +1019,9 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   fm_git_init_commit "$lying"
   pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
 
-  out=$(cd "$PRIMARY_ROOT" && FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+  out=$(cd "$PRIMARY_ROOT" && env -u NO_MISTAKES_GATE \
+    FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+    CODEX_THREAD_ID=launch-thread \
     FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1017,7 +1030,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
+    "$PRIMARY_ROOT/bin/fm-spawn.sh" "$id" "$PROJ_DIR" --harness claude 2>&1)
   status=$?
   expect_code 0 "$status" "spawn should settle on the process evidence"$'\n'"$out"
   assert_grep "worktree=$(cd "$WT_DIR" && pwd -P)" "$HOME_DIR/state/$id.meta" \
@@ -1032,7 +1045,9 @@ test_spawn_does_not_promote_an_unproven_pane_path() {
   id="settle-hint-d4-$RUN_TAG"
   rec=$(make_launch_case settle-hint "$id")
   read_launch_record "$rec"
-  out=$(cd "$PRIMARY_ROOT" && FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+  out=$(cd "$PRIMARY_ROOT" && env -u NO_MISTAKES_GATE \
+    FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+    CODEX_THREAD_ID=launch-thread \
     FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1041,7 +1056,7 @@ test_spawn_does_not_promote_an_unproven_pane_path() {
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
+    "$PRIMARY_ROOT/bin/fm-spawn.sh" "$id" "$PROJ_DIR" --harness claude 2>&1)
   status=$?
   expect_code 1 "$status" "spawn must refuse a valid-looking pane hint without proof"
   assert_contains "$out" "treehouse get did not enter a worktree" \

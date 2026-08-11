@@ -22,14 +22,24 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-fm_watch_primary_entry_trusted() {
-  fm_verified_harness_ancestry_pid >/dev/null 2>&1 && return 0
-  fm_session_lock_owned_by_self "$STATE"
+fm_watch_require_session_lock() {
+  if fm_session_lock_owned_by_self "$STATE"; then
+    return 0
+  fi
+  if ! fm_worker_primary_bootstrap_proven; then
+    fm_worker_refuse_primary_operation "watch session" || return 1
+  fi
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    echo "watch-session: FAILED - session-lock ownership is unproven" >&2
+    return 1
+  fi
 }
 
-fm_watch_primary_entry_trusted || {
-  echo "watch-session: FAILED - primary harness or session-lock ownership is unproven" >&2
-  exit 1
+refuse_grok_primary() {
+  [ "${GROK_AGENT:-}" = "1" ] || return 0
+  [ "${FM_ALLOW_WATCH_SESSION_WITH_GROK:-}" = "1" ] && return 0
+  echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
+  return 1
 }
 
 fm_worker_primary_attestation_load 2>/dev/null || true
@@ -40,6 +50,8 @@ write_primary_attestation() {
 
 case "${1:-start}" in
   start|--start|restart|--restart)
+    refuse_grok_primary || exit 1
+    fm_watch_require_session_lock || exit 1
     if ! fm_worker_primary_bootstrap_proven; then
       fm_worker_refuse_primary_operation "watch session" || exit 1
       echo "watch-session: FAILED - primary bootstrap provenance is unproven" >&2
@@ -51,18 +63,15 @@ case "${1:-start}" in
     }
     ;;
 esac
-fm_worker_refuse_primary_operation "watch session" || exit 1
+case "${1:-start}" in
+  status|--status|stop|--stop)
+    fm_watch_require_session_lock || exit 1
+    ;;
+esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-detach-lib.sh
 . "$SCRIPT_DIR/fm-detach-lib.sh"
-
-refuse_grok_primary() {
-  [ "${GROK_AGENT:-}" = "1" ] || return 0
-  [ "${FM_ALLOW_WATCH_SESSION_WITH_GROK:-}" = "1" ] && return 0
-  echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
-  return 1
-}
 
 SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}
 HASH=$(printf '%s\n%s\n' "$FM_HOME" "$STATE" | cksum | awk '{print $1}')
@@ -225,12 +234,14 @@ mode=${1:-start}
 case "$mode" in
   start|--start)
     refuse_grok_primary || exit 1
+    fm_watch_require_session_lock || exit 1
     start_runner
     ;;
-  status|--status) status_runner ;;
-  stop|--stop) stop_runner ;;
+  status|--status) fm_watch_require_session_lock || exit 1; status_runner ;;
+  stop|--stop) fm_watch_require_session_lock || exit 1; stop_runner ;;
   restart|--restart)
     refuse_grok_primary || exit 1
+    fm_watch_require_session_lock || exit 1
     stop_runner >/dev/null || exit 1
     start_runner
     ;;

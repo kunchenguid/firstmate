@@ -121,10 +121,18 @@ fm_session_lock_holder_state() {
 }
 
 fm_session_lock_owned_by_self() {
-  local state=$1 owner marker my_pid
+  local state=$1 owner marker my_pid kind owner_pid
   owner=$(cat "$state/.lock" 2>/dev/null || true)
   if marker=$(fm_codex_owner_marker "$owner"); then
-    fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ]
+    fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ] || return 1
+    kind=$(fm_codex_owner_kind "$owner" 2>/dev/null || true)
+    if [ "$kind" = harness ]; then
+      owner_pid=${owner%%|*}
+      my_pid=$(fm_verified_harness_ancestry_pid) || return 1
+      [ "$my_pid" = "$owner_pid" ]
+      return $?
+    fi
+    [ "$kind" = fallback ] || [ "$kind" = legacy ]
     return $?
   fi
   case "$owner" in ''|*[!0-9]*) return 1 ;; esac

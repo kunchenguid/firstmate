@@ -43,6 +43,8 @@
 # a call site, when a new home override is introduced.
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-process-environ-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE STATE"
 if [ "${_FM_WORKER_ISOLATION_SNAPSHOT_READY:-0}" != 1 ]; then
   _FM_WORKER_ISOLATION_SNAPSHOT_READY=1
@@ -197,31 +199,87 @@ fm_worker_primary_attestation_load() {
 }
 
 fm_worker_primary_attestation_establish() {
-  local root state file token token_file tmp root_real
+  local root state file token token_file tmp root_real lock attempts owner
   fm_worker_primary_bootstrap_proven || return 1
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
+  fm_session_lock_owned_by_self "$state" || return 1
   root_real=$(fm_worker_canonical_path "$root") || return 1
   mkdir -p "$state" || return 1
   file="$state/.primary-attestation"
+  lock="$state/.primary-attestation.acquire"
+  attempts=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    case "$owner" in
+      ''|*[!0-9]*) ;;
+      *)
+        if ! kill -0 "$owner" 2>/dev/null; then
+          rm -f "$lock/pid" 2>/dev/null || true
+          rmdir "$lock" 2>/dev/null || true
+          continue
+        fi
+        ;;
+    esac
+    [ "$attempts" -lt 300 ] || return 1
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  printf '%s\n' "${BASHPID:-$$}" > "$lock/pid" 2>/dev/null || {
+    rm -f "$lock/pid" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  }
+  release_attestation_lock() {
+    local current=${BASHPID:-$$} held
+    held=$(cat "$lock/pid" 2>/dev/null || true)
+    [ "$held" = "$current" ] || return 0
+    rm -f "$lock/pid" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+  }
   if [ -e "$file" ] || [ -L "$file" ]; then
-    fm_worker_primary_attestation_load || return 1
-    return 0
+    fm_worker_primary_attestation_load
+    token=$?
+    release_attestation_lock
+    unset -f release_attestation_lock
+    return "$token"
   else
-    token_file=$(mktemp "${TMPDIR:-/tmp}/fm-primary-attestation.XXXXXX") || return 1
-    token=${token_file##*/}
-    rm -f "$token_file"
-    tmp=$(mktemp "$state/.primary-attestation.XXXXXX") || return 1
-    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-    printf 'root=%s\ntoken=%s\n' "$root_real" "$token" > "$tmp" || {
-      rm -f "$tmp"
+    token_file=$(mktemp "${TMPDIR:-/tmp}/fm-primary-attestation.XXXXXX") || {
+      release_attestation_lock
+      unset -f release_attestation_lock
       return 1
     }
-    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+    token=${token_file##*/}
+    rm -f "$token_file"
+    tmp=$(mktemp "$state/.primary-attestation.XXXXXX") || {
+      release_attestation_lock
+      unset -f release_attestation_lock
+      return 1
+    }
+    if ! chmod 600 "$tmp"; then
+      rm -f "$tmp"
+      release_attestation_lock
+      unset -f release_attestation_lock
+      return 1
+    fi
+    printf 'root=%s\ntoken=%s\n' "$root_real" "$token" > "$tmp" || {
+      rm -f "$tmp"
+      release_attestation_lock
+      unset -f release_attestation_lock
+      return 1
+    }
+    if ! mv "$tmp" "$file"; then
+      rm -f "$tmp"
+      release_attestation_lock
+      unset -f release_attestation_lock
+      return 1
+    fi
   fi
   FM_PRIMARY_ATTESTATION=$token
   export FM_PRIMARY_ATTESTATION
   fm_worker_primary_attestation_refresh
+  release_attestation_lock
+  unset -f release_attestation_lock
 }
 
 fm_worker_primary_attestation_refresh() {
@@ -367,9 +425,11 @@ fm_worker_primary_bootstrap_proven() {
 }
 
 fm_worker_primary_origin_proven() {
-  local root root_real
+  local root state root_real
   fm_worker_primary_bootstrap_proven || return 1
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
+  fm_session_lock_owned_by_self "$state" || return 1
   root_real=$(fm_worker_canonical_path "$root") || return 1
   fm_worker_primary_attestation_matches "$root_real"
 }
@@ -440,6 +500,30 @@ fm_worker_is_task_worker() {
 fm_worker_refuse_primary_operation() {
   local operation=$1
   fm_worker_is_task_worker || return 0
+  echo "error: $operation refused: this process is task worker '${_FM_WORKER_INITIAL_AGENT_TASK:-unnamed}' launched by ${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
+  return 1
+}
+
+fm_worker_refuse_declared_task_worker() {
+  local operation=$1
+  fm_worker_declaration_present || return 0
+  if [ "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" = secondmate ] \
+    && fm_worker_identity_is_complete \
+    && fm_worker_secondmate_home_proven \
+    && fm_worker_secondmate_ancestry_proven; then
+    return 0
+  fi
+  echo "error: $operation refused: this process is task worker '${_FM_WORKER_INITIAL_AGENT_TASK:-unnamed}' launched by ${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
+  return 1
+}
+
+fm_worker_refuse_unproven_session_entry() {
+  local operation=$1
+  if fm_worker_declaration_present; then
+    fm_worker_refuse_declared_task_worker "$operation"
+    return $?
+  fi
+  fm_worker_primary_bootstrap_proven && return 0
   echo "error: $operation refused: this process is task worker '${_FM_WORKER_INITIAL_AGENT_TASK:-unnamed}' launched by ${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
   return 1
 }

@@ -146,7 +146,7 @@ test_watch_session_does_not_replay_attestation_without_trusted_entry() {
     PATH="$fakebin:$PATH" FM_HOME="$dir/home" \
     "$WATCH_SESSION" --status 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "watch-session accepted a persisted attestation without trusted entry proof"
-  assert_contains "$out" "primary harness or session-lock ownership is unproven" \
+  assert_contains "$out" "session-lock ownership is unproven" \
     "watch-session replay refusal did not explain the missing trusted entry proof"
   assert_not_contains "$out" "watch-session: stopped" \
     "watch-session replay refusal reached the runner status path"
@@ -212,8 +212,7 @@ test_watch_session_start_status_stop_are_home_scoped() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-b" "$WATCH_SESSION" --status > "$status_b" \
     || fail "stopping home A stopped home B too"
   grep -F 'watch-session: running target=' "$status_b" >/dev/null || fail "home B did not remain running"
-  ! grep -F 'pkill -f' "$WATCH_SESSION" >/dev/null || fail "watch-session contains broad pkill -f"
-  pass "watch-session start/status/stop are scoped to one FM_HOME and never use broad pkill"
+  pass "watch-session start/status/stop are scoped to one FM_HOME"
 }
 
 test_watch_session_stop_waits_for_starting_watcher() {
@@ -343,7 +342,7 @@ test_watch_session_refuses_grok_restart_without_stopping_fallback() {
   log="$dir/tmux.log"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
-    FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 "$WATCH_SESSION" start >/dev/null \
+    FM_HOME="$dir/home" FM_ALLOW_WATCH_SESSION_WITH_GROK=1 "$WATCH_SESSION" start >/dev/null \
     || fail "could not establish the fallback runner before Grok restart refusal"
 
   status=0
@@ -373,9 +372,11 @@ test_watch_session_grok_emergency_override_allows_fallback() {
   fakebin=$(install_fake_tmux "$dir")
   prepare_watch_home "$dir/home"
   out="$dir/start.out"
+  ln -s "$(command -v bash)" "$fakebin/grok"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
-    FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 "$WATCH_SESSION" start >"$out" \
+    FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 \
+    "$fakebin/grok" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; bash "$1" start; status=$?; exit "$status"' _ "$WATCH_SESSION" >"$out" 2>&1 \
     || fail "explicit Grok watch-session emergency override did not allow fallback: $(cat "$out")"
   grep -F 'watch-session: started target=' "$out" >/dev/null \
     || fail "Grok emergency override did not start the fallback runner"

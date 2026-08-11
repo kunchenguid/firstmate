@@ -151,32 +151,20 @@ exclusion_reason() {
 # path requires a new audit and proof archive.
 list_parallel_candidates() {
   cat <<'EOF'
-tests/fm-arm-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
-tests/fm-brief.test.sh
-tests/fm-captain-translation-contract.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
-tests/fm-decision-hold-lifecycle.test.sh
-tests/fm-dispatch-select.test.sh
-tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-instruction-owners.test.sh
 tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
-tests/fm-no-mistakes-ownership.test.sh
-tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
-tests/fm-review-diff.test.sh
 tests/fm-send-popup-settle.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
-tests/fm-stow-contract.test.sh
-tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
@@ -334,11 +322,22 @@ for s in "${CANDIDATES[@]}"; do
   [ -f "$s" ] || die "candidate not found: $s"
 done
 
-PROOF_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-isolation-proof.XXXXXX")
+PROOF_TMP_PARENT=${TMPDIR:-/tmp}
+ARTIFACT_BASELINE=$(mktemp "$PROOF_TMP_PARENT/fm-isolation-artifacts.XXXXXX")
+find_external_artifacts() {
+  local parent
+  for parent in "$PROOF_TMP_PARENT" /tmp; do
+    [ -d "$parent" ] || continue
+    find "$parent" -maxdepth 1 -type f \
+      -name 'fm-arm-pretool-check-claude-stderr.*' -print 2>/dev/null
+  done | LC_ALL=C sort -u
+}
+find_external_artifacts > "$ARTIFACT_BASELINE"
+PROOF_ROOT=$(mktemp -d "$PROOF_TMP_PARENT/fm-isolation-proof.XXXXXX")
 chmod 0700 "$PROOF_ROOT" || die "could not chmod 0700 proof root $PROOF_ROOT"
 RECORDS="$PROOF_ROOT/records.tsv"
 : >"$RECORDS"
-trap 'rm -rf "$PROOF_ROOT"' EXIT
+trap 'rm -f "$ARTIFACT_BASELINE"; rm -rf "$PROOF_ROOT"' EXIT
 
 GIT_BEFORE=$(global_git_snapshot)
 RUN_STARTED_ISO=$(now_iso)
@@ -470,13 +469,19 @@ if [ "$GIT_BEFORE" != "$GIT_AFTER" ]; then
   FAILED=$((FAILED + 1))
 fi
 
-# Cross-process artifact check: no candidate may leave debris outside the
-# proof-owned TMPDIR tree. Workers only receive TMPDIR under PROOF_ROOT, so any
-# residual path under PROOF_ROOT is expected and cleaned by trap. Refuse if a
-# worker wrote a fixed global path we know about from audit (none remain after
-# the arm-pretool stderr path uses TMPDIR).
-if find "$PROOF_ROOT" -type f -name 'fm-arm-pretool-check-claude-stderr.*' 2>/dev/null | grep -q .; then
-  : # allowed only under proof roots; nothing to do
+ARTIFACT_AFTER="$PROOF_ROOT/artifacts-after"
+find_external_artifacts > "$ARTIFACT_AFTER"
+NEW_ARTIFACTS=$(comm -13 "$ARTIFACT_BASELINE" "$ARTIFACT_AFTER" | while IFS= read -r path; do
+  case "$path" in
+    "$PROOF_ROOT"/*) ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+done)
+if [ -n "$NEW_ARTIFACTS" ]; then
+  log "isolation failure: candidate wrote an unexpected external artifact"
+  printf '%s\n' "$NEW_ARTIFACTS" >&2
+  AGG_RC=1
+  FAILED=$((FAILED + 1))
 fi
 
 RUN_FINISHED_ISO=$(now_iso)

@@ -28,10 +28,7 @@ LOCK="$STATE/.lock"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 if [ "${1:-}" != status ]; then
-  if fm_session_lock_owner >/dev/null 2>&1; then
-    fm_worker_primary_attestation_establish >/dev/null 2>&1 || true
-  fi
-  fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
+  fm_worker_refuse_unproven_session_entry "session lock acquisition" || exit 1
 fi
 
 if [ "${1:-}" = status ]; then
@@ -69,7 +66,9 @@ rm -f "$probe" 2>/dev/null || {
   exit 1
 }
 # shellcheck source=bin/fm-wake-lib.sh
+FM_SESSION_LOCK_BOOTSTRAP=1
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+unset FM_SESSION_LOCK_BOOTSTRAP
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
 release_claim_lock() {
@@ -129,6 +128,10 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+fm_worker_primary_attestation_establish || {
+  echo "error: could not establish primary authorization after acquiring the session lock; operate read-only until resolved" >&2
+  exit 1
+}
 release_claim_lock
 case "$owner" in
   *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;

@@ -7,6 +7,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+. "$ROOT/bin/fm-slot-owner-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-spawn-route)
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -58,9 +59,9 @@ case "${1:-}" in
         [ -f "$state" ] && count=$(cat "$state")
         printf '%s\n' "$((count + 1))" > "$state"
         if [ "$count" -eq 0 ]; then
-          printf '%s\n' "${FM_FAKE_TMUX_WINDOW_IDS_BEFORE:-}"
+          printf '%s\n' "${FM_FAKE_TMUX_WINDOW_IDS_BEFORE:-}" | tr ' ' '\n'
         else
-          printf '%s\n' "${FM_FAKE_TMUX_WINDOW_IDS_AFTER:-}"
+          printf '%s\n' "${FM_FAKE_TMUX_WINDOW_IDS_AFTER:-}" | tr ' ' '\n'
         fi
         exit 0 ;;
     esac
@@ -92,6 +93,14 @@ case "${1:-}" in
     fi
     exit 0 ;;
 esac
+if [ "${1:-}" = send-keys ]; then
+  for arg in "$@"; do
+    if [[ "$arg" == *"treehouse get --lease --lease-holder"* ]]; then
+      bash -c "$arg"
+      break
+    fi
+  done
+fi
 if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
   prev=
   for arg in "$@"; do
@@ -108,18 +117,36 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
 make_case() {
-  local label=$1 project_basename home proj wt fakebin
+  local label=$1 project_basename home proj wt fakebin runtime
   project_basename=${2:-$label-alpha}
   home="$TMP_ROOT/$label-home"
   proj="$TMP_ROOT/$label-project/$project_basename"
   wt="$TMP_ROOT/$label-wt"
+  runtime="$TMP_ROOT/$label-runtime"
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/$label-fake")
+  mkdir -p "$runtime"
+  cp -a "$ROOT/bin" "$runtime/"
   mkdir -p "$home/data" "$home/state" "$home/projects" "$home/config"
+  fm_git_init_commit "$home"
+  printf '# agents\n' > "$home/AGENTS.md"
+  git -C "$home" add AGENTS.md
+  git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm agents
+  ln -s "$runtime/bin" "$home/bin"
+  printf 'root=%s\ntoken=route-%s\n' "$home" "$label" > "$home/state/.primary-attestation"
+  chmod 600 "$home/state/.primary-attestation"
+  printf '%s|codex:spawn-route|fallback\n' "$$" > "$home/state/.lock"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' "- $(basename "$proj") [direct-PR] - alpha fixture (added 2026-06-25)" > "$home/data/projects.md"
   fm_git_init_commit "$proj"
@@ -128,20 +155,23 @@ make_case() {
 }
 
 run_spawn_case() {
-  local home=$1 id=$2 proj=$3 wt=$4 fakebin=$5
+  local home=$1 id=$2 proj=$3 wt=$4 fakebin=$5 token
   shift 5
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' "$home/state/.primary-attestation")
   : > "$home/launch.log"
   : > "$home/tmux.log"
   rm -f "$home/tmux-automatic-rename-lock"
   rm -f "$home/tmux-allow-rename-lock"
   rm -f "$home/tmux-window-ids-state"
   printf '%s\n' terminal-title > "$home/tmux-window-name"
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  ( cd "$home" && env -u NO_MISTAKES_GATE \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" CODEX_THREAD_ID=spawn-route \
+    FM_PRIMARY_ATTESTATION="$token" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_RETAINED_WINDOW_NAME="${FM_FAKE_RETAINED_WINDOW_NAME-}" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_AUTOMATIC_RENAME_LOCK="$home/tmux-automatic-rename-lock" FM_FAKE_ALLOW_RENAME_LOCK="$home/tmux-allow-rename-lock" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_TMUX_WINDOW_IDS_STATE="$home/tmux-window-ids-state" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" "$@" 2>&1
+    "$home/bin/fm-spawn.sh" "$id" "$proj" "$@" 2>&1 )
 }
 
 test_ordinary_spawn_records_route_fields() {
@@ -333,7 +363,7 @@ EOF
   mkdir -p "$home/data/$id"
   printf '%s\n' 'Reject an empty tmux window id.' > "$home/data/$id/brief.md"
 
-  out=$(FM_FAKE_NEW_WINDOW_ID='' FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@57' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  out=$(FM_FAKE_NEW_WINDOW_ID='' FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER='@1 @57' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 1 "$status" "empty tmux window id should fail"
   assert_contains "$out" "tmux did not return a window id" "empty tmux window id should explain failure"
   assert_grep "new-window" "$home/tmux.log" "empty tmux window id should create the window once"
@@ -353,7 +383,7 @@ EOF
   mkdir -p "$home/data/$id"
   printf '%s\n' 'Reject a malformed tmux window id.' > "$home/data/$id/brief.md"
 
-  out=$(FM_FAKE_NEW_WINDOW_ID=@not-a-window-id FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@58' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  out=$(FM_FAKE_NEW_WINDOW_ID=@not-a-window-id FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER='@1 @58' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 1 "$status" "malformed tmux window id should fail"
   assert_contains "$out" "tmux did not return a window id" "malformed tmux window id should explain failure"
   assert_grep "kill-window -t @58" "$home/tmux.log" "malformed tmux window id should remove the newly created window by id"
@@ -465,6 +495,32 @@ EOF
   pass "scope marker validation rejects extra bytes"
 }
 
+test_foreign_slot_stamp_stops_spawn_before_publication_or_launch() {
+  local home proj wt fakebin foreign_home id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case foreign-slot-stamp)
+EOF
+  id=foreign-slot-stamp-nn5
+  foreign_home="$TMP_ROOT/foreign-slot-home"
+  mkdir -p "$foreign_home/state"
+  fm_slot_stamp_write "$wt" foreign-task "$foreign_home" \
+    || fail "could not seed the foreign pooled-slot ownership stamp"
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'A foreign slot stamp must refuse this launch.' > "$home/data/$id/brief.md"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "a foreign pooled-slot stamp must refuse spawn"
+  assert_contains "$out" "already stamped" "foreign slot refusal did not identify the existing owner"
+  if [ -e "$home/state/$id.meta" ]; then
+    assert_grep 'spawn_state=aborted' "$home/state/$id.meta" \
+      "foreign slot refusal did not leave only an aborted recovery record"
+    assert_no_grep '^route_profile=' "$home/state/$id.meta" \
+      "foreign slot refusal published normal task metadata"
+  fi
+  [ ! -s "$home/launch.log" ] || fail "foreign slot refusal reached harness launch"
+  pass "foreign pooled-slot ownership is refused before metadata publication or launch"
+}
+
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
@@ -481,3 +537,4 @@ test_opted_in_scope_fence_cannot_disappear_before_spawn
 test_dangling_scope_marker_cannot_restore_legacy_spawn
 test_legacy_scope_fence_text_does_not_opt_in
 test_scope_marker_with_extra_bytes_fails
+test_foreign_slot_stamp_stops_spawn_before_publication_or_launch

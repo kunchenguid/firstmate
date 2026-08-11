@@ -14,6 +14,8 @@ mkdir -p "$HOOK_ROOT"
 fm_git_init_commit "$HOOK_ROOT"
 printf '# agents\n' > "$HOOK_ROOT/AGENTS.md"
 ln -s "$ROOT/bin" "$HOOK_ROOT/bin"
+mkdir -p "$HOOK_ROOT/.codex"
+cp "$ROOT/.codex/hooks.json" "$HOOK_ROOT/.codex/hooks.json"
 git -C "$HOOK_ROOT" add AGENTS.md bin
 git -C "$HOOK_ROOT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm primary
 
@@ -117,20 +119,36 @@ run_hook() {
 }
 
 test_hook_registration_preserves_jt_pretool() {
-  local command
-  jq -e '.hooks.PreToolUse[0].hooks[0].command | contains("fm-cd-pretool-check.sh")' \
-    "$ROOT/.codex/hooks.json" >/dev/null || fail "JT PreToolUse hook was not preserved"
-  jq -e '[.hooks.SessionStart[]?.hooks[] | select(.command | contains("fm-codex-session-lock-hook.sh"))] | length == 1' \
-    "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex SessionStart lock hook is not registered exactly once"
-  jq -e '.hooks.SessionEnd | length == 1' "$ROOT/.codex/hooks.json" >/dev/null \
-    || fail "Codex SessionEnd hook is not registered exactly once"
-  command=$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$ROOT/.codex/hooks.json")
-  # shellcheck disable=SC2016
-  assert_contains "$command" 'root=$(pwd -P)' "Codex SessionEnd hook is not pwd-anchored"
-  case "$command" in *jq*) fail "Codex SessionEnd hook still requires jq" ;; esac
+  local home command out status
+  jq -e '.hooks.PreToolUse | type == "array" and length > 0 and all(.[]; (.hooks | type) == "array" and all(.hooks[]; .type == "command"))' \
+    "$ROOT/.codex/hooks.json" >/dev/null || fail "JT PreToolUse hook configuration is not a command hook"
+  jq -e '[.hooks.SessionStart[]?.hooks[]? | select(.type == "command")] | length == 1' \
+    "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex SessionStart hook is not registered exactly once"
+  jq -e '[.hooks.SessionEnd[]?.hooks[]? | select(.type == "command")] | length == 1' \
+    "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex SessionEnd hook is not registered exactly once"
   jq -e '.hooks.SessionStart[0].hooks[0].timeout == 3 and .hooks.SessionEnd[0].hooks[0].timeout == 3' \
     "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex lock hooks must use the three-second bound"
-  pass "Codex lock hooks are bounded and preserve JT PreToolUse"
+
+  home=$(make_home configured-lifecycle)
+  rm -f "$home/state/.primary-attestation"
+  command=$(jq -r '[.hooks.SessionStart[]?.hooks[]? | select(.type == "command") | .command] | if length == 1 then .[0] else empty end' "$ROOT/.codex/hooks.json")
+  [ -n "$command" ] || fail "configured SessionStart command could not be normalized"
+  out=$(cd "$HOOK_ROOT" && printf '{"hook_event_name":"SessionStart","session_id":"configured-thread"}\n' \
+    | FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID=configured-thread \
+      bash -lc "$command" 2>&1) || status=$?
+  status=${status:-0}
+  [ "$status" -eq 0 ] || fail "configured SessionStart command failed: $out"
+  [ -f "$home/state/.lock" ] || fail "configured SessionStart command did not acquire the lock"
+
+  command=$(jq -r '[.hooks.SessionEnd[]?.hooks[]? | select(.type == "command") | .command] | if length == 1 then .[0] else empty end' "$ROOT/.codex/hooks.json")
+  [ -n "$command" ] || fail "configured SessionEnd command could not be normalized"
+  out=$(cd "$HOOK_ROOT" && printf '{"hook_event_name":"SessionEnd","session_id":"configured-thread"}\n' \
+    | FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID=configured-thread \
+      bash -lc "$command" 2>&1) || status=$?
+  status=${status:-0}
+  [ "$status" -eq 0 ] || fail "configured SessionEnd command failed: $out"
+  [ ! -e "$home/state/.lock" ] || fail "configured SessionEnd command did not release the lock"
+  pass "Codex lock hook configuration executes its lifecycle contract"
 }
 
 test_hooks_work_when_jq_fails() {

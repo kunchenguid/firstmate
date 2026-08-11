@@ -15,9 +15,11 @@ make_primary() {
   git -C "$PRIMARY" init -q
   git -C "$PRIMARY" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm init --allow-empty
   mkdir -p "$PRIMARY/projects/widget" "$PRIMARY/bin"
+  mkdir -p "$PRIMARY/.codex"
   printf '%s\n' '# primary fixture' > "$PRIMARY/AGENTS.md"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$PRIMARY/bin/"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$PRIMARY/bin/"
+  cp "$ROOT/.codex/hooks.json" "$PRIMARY/.codex/hooks.json"
   git -C "$PRIMARY" add AGENTS.md bin
   git -C "$PRIMARY" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm guard
   git -C "$PRIMARY" worktree add -q "$WORKTREE"
@@ -66,15 +68,26 @@ test_stdin_transport_blocks_harness_payload() {
 }
 
 test_tracked_hook_snippets_are_present() {
-  assert_present "$ROOT/.grok/hooks/fm-primary-cd-check.json" "Grok cd hook snippet is missing"
-  assert_present "$ROOT/.codex/hooks.json" "Codex hook snippet is missing"
-  jq -e '.hooks.PreToolUse | any(.[]; any(.hooks[]?; .type == "command" and (.command | contains("fm-cd-pretool-check.sh"))))' \
-    "$ROOT/.grok/hooks/fm-primary-cd-check.json" >/dev/null \
-    || fail "Grok hook has no executable cd-guard command"
-  jq -e '.hooks.PreToolUse | any(.[]; any(.hooks[]?; .type == "command" and (.command | contains("fm-cd-pretool-check.sh"))))' \
-    "$ROOT/.codex/hooks.json" >/dev/null \
-    || fail "Codex hook has no executable cd-guard command"
-  pass "parsed Grok and Codex hook contracts point at the cd guard"
+  local config command out status
+  [ -d "$PRIMARY/.git" ] || make_primary
+  for config in "$ROOT/.grok/hooks/fm-primary-cd-check.json" "$ROOT/.codex/hooks.json"; do
+    jq -e '.hooks.PreToolUse | type == "array" and any(.[]; (.hooks | type) == "array" and any(.hooks[]; .type == "command" and (.command | type == "string")))' \
+      "$config" >/dev/null || fail "hook configuration is not a normalized command contract: $config"
+    command=$(jq -r '[.hooks.PreToolUse[]?.hooks[]? | select(.type == "command") | .command] | if length == 1 then .[0] else empty end' "$config")
+    [ -n "$command" ] || fail "hook command could not be normalized: $config"
+    status=0
+    if [ "${config##*/}" = hooks.json ]; then
+      out=$(cd "$PRIMARY" && printf '{"toolInput":{"command":"cd projects/widget"}}\n' \
+        | bash -lc "$command" 2>&1) || status=$?
+    else
+      out=$(cd "$PRIMARY" && GROK_WORKSPACE_ROOT="$PRIMARY" bash -c \
+        'printf "%s\\n" "$1" | bash -lc "$2"' _ \
+        '{"toolInput":{"command":"cd projects/widget"}}' "$command" 2>&1) || status=$?
+    fi
+    [ "$status" -eq 2 ] || fail "configured hook did not deny a persistent project cd: $config (exit $status)"
+    assert_contains "$out" '"decision":"deny"' "configured hook denial did not expose the policy result: $config"
+  done
+  pass "configured Grok and Codex cd hooks execute the primary cd guard"
 }
 
 test_primary_blocks_persistent_project_cd

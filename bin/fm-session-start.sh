@@ -100,9 +100,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-if [ "$PRIMARY_HARNESS" != unknown ]; then
-  fm_worker_primary_attestation_establish >/dev/null 2>&1 || true
-fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
