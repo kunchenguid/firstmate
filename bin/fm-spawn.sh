@@ -2187,7 +2187,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     cat "$SPAWN_TREEHOUSE_ACQUIRE_ERR" >&2
     rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR"
     SPAWN_TREEHOUSE_ACQUIRE_ERR=
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get failed to acquire a worktree lease for task $ID" >&2
     exit 1
   fi
   rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR"
