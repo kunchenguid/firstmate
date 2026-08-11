@@ -1975,6 +1975,51 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_large_backlog_bypasses_single_argument_limit() {
+  local home fakebin json summary i
+  home=$(make_home large-backlog)
+  : > "$home/data/secondmates.md"
+  {
+    printf '%s\n' '## In flight' '' '## Queued'
+    i=1
+    while [ "$i" -le 1800 ]; do
+      printf -- '- [ ] queued-%04d - Queued fixture item %04d with enough padding to cross the Linux single-argument limit (repo: firstmate) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '%s\n' '' '## Done'
+  } > "$home/data/backlog.md"
+  [ "$(LC_ALL=C wc -c < "$home/data/backlog.md" | tr -d ' ')" -gt 131072 ] \
+    || fail "large-backlog fixture did not exceed 128 KiB"
+  fakebin=$(make_fakebin "$home")
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-11T00:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "canonical snapshot rejected a backlog larger than 128 KiB"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == 1800
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "canonical large-backlog snapshot was malformed"
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-11T00:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate summary rejected a backlog larger than 128 KiB"
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == true
+      and .counts.queued == 1800
+      and (.queued | length) == 20
+  ' >/dev/null || fail "large-backlog secondmate summary was malformed"
+
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "Bearings rejected a backlog larger than 128 KiB"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.gates | length) == 20
+  ' >/dev/null || fail "large-backlog Bearings projection was malformed"
+  pass "fleet and Bearings snapshots stream a backlog larger than 128 KiB into jq"
+}
+
 # The /bearings skill is the one owner of the four-section chat-response contract.
 # Assert it states exactly the four fixed sections in order, each with its explicit
 # empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
@@ -2034,6 +2079,7 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
+test_large_backlog_bypasses_single_argument_limit
 test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
