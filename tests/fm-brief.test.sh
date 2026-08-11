@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "firstmate decides when to instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -405,6 +405,40 @@ test_decision_key_grammar_is_key_before_colon() {
   pass "fm-brief.sh: ship and scout scaffolds show needs-decision/resolved with the key before the colon"
 }
 
+# Regression for a real no-mistakes review finding: the self-resolution
+# sentence must not present the keyed `resolved [key=<slug>]:` form as the
+# ONLY example, because Rule 5's bare `blocked: {why}` opens with no key -
+# a worker following only the keyed example there would write an invalid
+# resolution that never closes the decision it opened.
+test_bare_blocker_gets_a_bare_resolved_example() {
+  local home id brief
+  home="$TMP_ROOT/bare-blocker-home"
+  mkdir -p "$home/data"
+
+  id="brief-bare-blocker-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  # shellcheck disable=SC2016
+  assert_grep '`blocked: {why}`' "$brief" \
+    "ship brief lost Rule 5's bare (unkeyed) blocked: {why} opener"
+  # shellcheck disable=SC2016
+  assert_grep '`resolved: {how}`' "$brief" \
+    "ship brief does not show a bare resolved: {how} example for an unkeyed opener"
+  assert_grep "for one you opened WITHOUT a key" "$brief" \
+    "ship brief does not explain when to use the bare resolved: form"
+
+  id="brief-bare-blocker-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  # shellcheck disable=SC2016
+  assert_grep '`resolved: {how}`' "$brief" \
+    "scout brief does not show a bare resolved: {how} example for an unkeyed opener"
+
+  pass "fm-brief.sh: ship and scout scaffolds show a bare resolved: example for a bare-opened blocker"
+}
+
 # R5: ship briefs carry a standing instruction that completeness on
 # parity-style work means scanning for the whole pattern family, not stopping
 # at an enumerated site list firstmate names.
@@ -418,53 +452,54 @@ test_ship_parity_scan_wording() {
   assert_present "$brief" "ship brief was not scaffolded"
   assert_grep "# Completeness for parity-style work" "$brief" \
     "ship brief missing the parity-style completeness section"
-  assert_grep "scanning the codebase for every member of the same pattern, selector, or contract family" "$brief" \
-    "ship brief missing the scan-the-family instruction"
-  assert_grep "not stopping at only the specific site(s) named above" "$brief" \
-    "ship brief missing the not-an-enumerated-list clarification"
+  assert_grep "what pattern or language to search for" "$brief" \
+    "ship brief missing the pattern-to-search element"
+  assert_grep "what treatment to apply to each match" "$brief" \
+    "ship brief missing the treatment-to-apply element"
+  assert_grep "the exhaustive done condition" "$brief" \
+    "ship brief missing the exhaustive-done-condition element"
+  assert_grep "Any known sites named above are examples, not the scope boundary" "$brief" \
+    "ship brief missing the known-sites-are-examples clarification"
   pass "fm-brief.sh: ship briefs instruct the worker to scan the pattern family, not enumerate sites"
 }
 
-# R7: no-mistakes and direct-PR ship briefs carry a preview-first instruction
-# for UI-bearing work (evidence right after the implementation commit, under
-# the task's own data path, with validation continuing in parallel and no new
-# merge authority); local-only gets none because it already stops at a ready
-# branch almost immediately.
-test_ship_preview_first_ui_wording() {
+# Captain-gated delivery: every ship mode carries a deliverable review
+# evidence section (all applicable lenses, task-owned evidence path, no new
+# merge authority), and Rule 2's worktree-isolation line explicitly carves
+# out that evidence path so it does not contradict "stay inside this
+# worktree" the way the R7-era preview-only section once did.
+test_ship_deliverable_review_evidence_wording() {
   local home id brief
-  home="$TMP_ROOT/preview-first-home"
+  home="$TMP_ROOT/review-evidence-home"
   mkdir -p "$home/data"
 
-  id="brief-preview-nm"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "no-mistakes brief was not scaffolded"
-  assert_grep "# Preview-first for UI-bearing work" "$brief" \
-    "no-mistakes brief missing the preview-first section"
-  assert_grep "immediately after your implementation commit" "$brief" \
-    "no-mistakes brief missing the immediately-after-commit timing"
-  assert_grep "Save the evidence under \`$home/data/$id/\`" "$brief" \
-    "no-mistakes brief missing the task-owned evidence path"
-  assert_grep "report its openable \`file://\` path(s)" "$brief" \
-    "no-mistakes brief missing the openable-path surfacing instruction"
-  assert_grep "Continue your normal validation and delivery work in parallel with that review" "$brief" \
-    "no-mistakes brief missing the validation-may-continue-in-parallel instruction"
-  assert_grep "does not create a second merge authority" "$brief" \
-    "no-mistakes brief missing the single-merge-authority guardrail"
+  for id_mode in "brief-evidence-nm:no-mistakes" "brief-evidence-dp:direct-PR" "brief-evidence-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode brief was not scaffolded"
+    assert_grep "# Deliverable review evidence" "$brief" \
+      "$mode brief missing the deliverable review evidence section"
+    assert_grep "Feature or product-concept:" "$brief" \
+      "$mode brief missing the feature/product-concept lens"
+    assert_grep "Architecture:" "$brief" \
+      "$mode brief missing the architecture lens"
+    assert_grep "Bug fix:" "$brief" \
+      "$mode brief missing the bug-fix lens"
+    assert_grep "Other work:" "$brief" \
+      "$mode brief missing the other-work lens"
+    assert_grep "Save every artifact under \`$home/data/$id/\`" "$brief" \
+      "$mode brief missing the task-owned evidence path"
+    assert_grep "report its openable \`file://\` path(s)" "$brief" \
+      "$mode brief missing the openable-path surfacing instruction"
+    assert_grep "does not create a second merge authority" "$brief" \
+      "$mode brief missing the single-merge-authority guardrail"
+    assert_grep "the only files you may write outside it are the status file below and, when applicable, deliverable review evidence under" "$brief" \
+      "$mode brief's worktree-isolation rule does not carve out the evidence path"
+  done
 
-  id="brief-preview-dp"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_grep "# Preview-first for UI-bearing work" "$brief" \
-    "direct-PR brief missing the preview-first section"
-
-  id="brief-preview-lo"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_no_grep "# Preview-first for UI-bearing work" "$brief" \
-    "local-only brief should not carry the preview-first section (already fast to a ready branch)"
-
-  pass "fm-brief.sh: no-mistakes/direct-PR ship briefs require preview-first UI evidence, local-only does not"
+  pass "fm-brief.sh: every ship mode requires deliverable review evidence with an explicit worktree carve-out"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -816,8 +851,9 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_decision_key_grammar_is_key_before_colon
+test_bare_blocker_gets_a_bare_resolved_example
 test_ship_parity_scan_wording
-test_ship_preview_first_ui_wording
+test_ship_deliverable_review_evidence_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

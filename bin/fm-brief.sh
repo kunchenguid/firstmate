@@ -336,8 +336,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [key=<slug>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    The key token sits between the verb and the colon, never after it as \`needs-decision: [key=...]\`.
-   A decision or blocker you opened stays open until a \`resolved [key=<slug>]: {how}\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [key=<slug>]: {how it cleared}\` yourself (same key if you opened it with one) as you resume.
+   A decision or blocker you opened stays open until a matching \`resolved\` line lands: \`resolved [key=<slug>]: {how}\` for a decision or blocker you opened WITH a key, or bare \`resolved: {how}\` for one you opened WITHOUT a key (for example Rule 5's bare \`blocked: {why}\`, which has no key). A later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append that same matching form yourself (keyed if you opened it with a key, bare \`resolved: {how it cleared}\` if you did not) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -357,22 +357,28 @@ fi
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
-# R7 (preview-first for UI-bearing work): rendered only for no-mistakes and
-# direct-PR, whose pipeline or PR-open step can otherwise run for a while
-# before the captain sees anything. local-only already stops at a ready
-# branch almost immediately, so it gets no separate preview instruction.
-# The captain still owns the merge exactly as $RULE1/DOD already say for this
-# mode; this section only moves WHEN evidence reaches them, never who decides.
-IFS= read -r -d '' PREVIEW_SECTION <<EOF || true
+# Deliverable review evidence (captain-gated delivery workflow; load
+# `captain-gated-delivery` for the full procedure): rendered for every mode,
+# since the deliverable review loop runs before firstmate decides to invoke
+# full validation regardless of how the task eventually ships. The captain
+# still owns the merge exactly as $RULE1/DOD already say for this mode; this
+# section only moves WHEN evidence reaches them, never who decides.
+IFS= read -r -d '' REVIEW_EVIDENCE_SECTION <<EOF || true
 
-# Preview-first for UI-bearing work
-If this task changes what the product looks or behaves like to an end user, produce before/after evidence (screenshots, or a small rendered demo) immediately after your implementation commit - do not wait until the rest of the task is finished.
-Save the evidence under \`$DATA/$ID/\` and report its openable \`file://\` path(s) in a status line so firstmate can hand it to the captain for review right away.
-Continue your normal validation and delivery work in parallel with that review. This does not create a second merge authority: the configured merge authority for this task's delivery mode still owns the merge decision exactly as this brief already says.
-If this task has no user-visible UI surface, disregard this section.
+# Deliverable review evidence
+This task's result goes through a captain review loop before full validation ships it. Before you start implementing, identify which review lenses below apply and capture any before-state evidence that would be hard to recreate later (a failing repro, a screenshot or recording of the current broken behavior).
+
+Applicable lenses - use every one that fits, and skip a lens only when no meaningful human judgment can be exercised over that aspect of the result:
+- Feature or product-concept: an openable preview, screenshots, or a recording of the working experience, plus a short explanation of any new concepts, states, or rules this introduces.
+- Architecture: a before/after summary of the affected modules, ownership boundaries, data flow, and the rationale for the chosen structure.
+- Bug fix: paired before/after evidence of the same reproducible scenario - recordings by default, or the closest paired evidence (failing/passing tests, transcripts, logs) when recording is not meaningful, stating why recordings were omitted.
+- Other work: the artifact that exposes the meaningful result (rendered docs, runnable examples, measurements, or behavioral tests).
+
+Save every artifact under \`$DATA/$ID/\` and report its openable \`file://\` path(s) in a status line as soon as it exists - do not wait until the rest of the task is finished, so firstmate can build the review package right away.
+This evidence capture does not create a second merge authority: the configured merge authority for this task's delivery mode still owns the merge decision exactly as this brief already says.
 
 EOF
-PREVIEW_SECTION=${PREVIEW_SECTION%$'\n'}
+REVIEW_EVIDENCE_SECTION=${REVIEW_EVIDENCE_SECTION%$'\n'}
 
 case "$MODE" in
   direct-PR)
@@ -389,7 +395,6 @@ EOF
     ;;
   local-only)
     SETUP2=""
-    PREVIEW_SECTION=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -409,8 +414,8 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+When you believe it is complete, run only the targeted builds, regressions, and smoke tests needed to make the result safe and credible to review (not necessarily the full suite), then append \`done: {summary}\` to the status file and stop.
+This \`done:\` milestone means implementation and review evidence are ready, not that full validation has happened - firstmate decides when to instruct you to run /no-mistakes, normally after the captain accepts the deliverable unless risk requires validating sooner.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -440,9 +445,13 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 # Completeness for parity-style work
-When this task's intent is to make one thing behave like another, or otherwise complete an existing pattern (parity, fill-in, alignment completions), completeness means scanning the codebase for every member of the same pattern, selector, or contract family and bringing each one into scope, not stopping at only the specific site(s) named above.
-Search for the family by its pattern or language yourself rather than waiting for an enumerated list; the fix is done only when no family member is left behind.
-This scan is the completeness contract for such work: a reviewer finding a missed family member is an ordinary in-scope fix, not a new decision.
+When this task's intent is to make one thing behave like another, or otherwise complete an existing pattern (parity, fill, or alignment completions), completeness is defined by three things, which the Task section above should already state:
+- what pattern or language to search for;
+- what treatment to apply to each match; and
+- the exhaustive done condition (when no member of that family remains untreated).
+Any known sites named above are examples, not the scope boundary - search for every member of the family yourself rather than stopping at an enumerated list.
+Example shape: "search for every rule targeting X, apply the same treatment to Y, and finish when no member of that family remains untreated."
+A reviewer finding a missed family member is ordinary in-scope parity work, not new product scope.
 If this task is not parity-style work, disregard this section.
 
 $HERDR_SECTION
@@ -458,7 +467,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only files you may write outside it are the status file below and, when applicable, deliverable review evidence under \`$DATA/$ID/\`.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -477,8 +486,8 @@ $RULE1
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision [key=<slug>]: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    The key token sits between the verb and the colon, never after it as \`needs-decision: [key=...]\`.
-   A decision or blocker you opened stays open until a \`resolved [key=<slug>]: {how}\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [key=<slug>]: {how it cleared}\` yourself (same key if you opened it with one) as you resume.
+   A decision or blocker you opened stays open until a matching \`resolved\` line lands: \`resolved [key=<slug>]: {how}\` for a decision or blocker you opened WITH a key, or bare \`resolved: {how}\` for one you opened WITHOUT a key (for example Rule 5's bare \`blocked: {why}\`, which has no key). A later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append that same matching form yourself (keyed if you opened it with a key, bare \`resolved: {how it cleared}\` if you did not) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -489,7 +498,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-$PREVIEW_SECTION
+$REVIEW_EVIDENCE_SECTION
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
