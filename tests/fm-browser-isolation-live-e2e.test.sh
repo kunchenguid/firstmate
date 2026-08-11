@@ -37,6 +37,13 @@
 # FM_BROWSER_ISOLATION_LIVE_HARNESSES to a space-separated subset to narrow it.
 set -u
 
+# This suite does not source tests/lib.sh, so exempt its fm-spawn subprocesses
+# from the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does
+# for the rest of the suite: run from a no-mistakes gate worktree every spawn
+# would be refused, and this guard would report "no verified harness was actually
+# probed" instead of naming the real cause.
+export FM_GATE_REFUSE_BYPASS=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "${FM_BROWSER_ISOLATION_LIVE:-0}" != 1 ]; then
