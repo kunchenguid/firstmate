@@ -496,6 +496,26 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_create_task_retains_pending_record_when_workspace_id_resolution_fails() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-pending"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-pending)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"workspaces":[]}' > "$dir/responses/3.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_BACKEND_ACQUISITION_FILE="$dir/acquisition" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-pending /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the post-create workspace lookup is empty"
+  assert_contains "$out" "retaining the acquisition record" "create_task did not explain that the pending record was retained"
+  assert_present "$dir/acquisition" "create_task did not preserve the pending acquisition record"
+  assert_grep 'kind=cmux-pending' "$dir/acquisition" "pending cmux acquisition record lost its pending kind"
+  assert_grep 'label=fm-pending' "$dir/acquisition" "pending cmux acquisition record lost its task label"
+  assert_grep "workspace_title=$title" "$dir/acquisition" "pending cmux acquisition record lost its scoped title"
+  pass "fm_backend_cmux_create_task: retains an acquisition record when the new workspace id cannot be resolved"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1150,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_retains_pending_record_when_workspace_id_resolution_fails
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

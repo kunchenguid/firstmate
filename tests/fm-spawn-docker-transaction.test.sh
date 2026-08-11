@@ -36,6 +36,7 @@ case "${1:-}" in
     ;;
   display-message) printf 'firstmate\n' ;;
   new-window)
+    [ "${FM_FAKE_TMUX_CREATE_FAIL:-0}" = 1 ] && exit 1
     printf '@spawnwid\tfm-%s\n' "${FM_FAKE_TASK_ID:?}" >> "${FM_FAKE_TMUX_STATE:?}"
     printf '@spawnwid\n'
     ;;
@@ -64,6 +65,15 @@ exit 0
 TREEHOUSE
   cat > "$fakebin/mv" <<'MV'
 #!/usr/bin/env bash
+source_path="${@: -2:1}"
+dest_path="${@: -1}"
+if [ "${FM_FAKE_PUBLISH_TERM:-0}" = 1 ] \
+   && [ "$dest_path" = "${FM_FAKE_META_DEST:-}" ] \
+   && case "$source_path" in *'.meta.spawn.'*) true ;; *) false ;; esac; then
+  /bin/mv "$@"
+  kill -TERM "$PPID"
+  exit 143
+fi
 case "${FM_FAKE_ACQUISITION_WRITE_FAIL:-0}:$*" in
   1:*'.spawn-endpoint-'*) exit 1 ;;
 esac
@@ -117,7 +127,7 @@ case "$1" in
       [ "$#" -ge 2 ] || exit 2
       shift 2
     done
-    [ "${1:-}" = 'codex' ] || exit 2
+    [ -n "${1:-}" ] || exit 2
     workspace=${2:-}
     printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
     if [ "${FM_FAKE_SBX_CREATE_FAIL:-0}" = 1 ]; then
@@ -161,16 +171,16 @@ make_case() {
 }
 
 run_spawn() {
-  local case_dir=$1 id=$2 home=$3 proj=$4 wt=$5 fakebin=$6
+  local case_dir=$1 id=$2 home=$3 proj=$4 wt=$5 fakebin=$6 state_dir=${7:-$home/state} harness=${8:-codex}
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$state_dir" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" \
     FM_FAKE_EVENTS="$case_dir/events.log" \
     FM_FAKE_SBX_STATE="$case_dir/sbx.state" FM_FAKE_TMUX_STATE="$case_dir/tmux.state" \
     FM_FAKE_TASK_ID="$id" TMUX='fake,1,0' \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "$harness" \
       --backend tmux --placement docker-sandbox --mode no-mistakes --yolo off
 }
 
@@ -285,5 +295,64 @@ assert_grep 'endpoint_aux=@spawnwid' \
 assert_grep '@spawnwid' "$case_dir/tmux.state" \
   'acquisition-record failure unexpectedly removed the endpoint'
 pass 'endpoint acquisition persistence failure refuses publication and records exact cleanup'
+
+case_record=$(make_case empty-endpoint empty-endpoint-ij7)
+IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$case_record
+EOF
+export FM_FAKE_TMUX_CREATE_FAIL=1
+run_spawn "$case_dir" empty-endpoint-ij7 "$home" "$proj" "$wt" "$fakebin" > "$case_dir/output" 2>&1
+status=$?
+unset FM_FAKE_TMUX_CREATE_FAIL
+rm -rf -- "/tmp/fm-empty-endpoint-ij7"
+expect_code 1 "$status" 'endpoint creation failure should abort fresh Docker spawn'
+assert_absent "$home/state/empty-endpoint-ij7.meta" 'empty endpoint acquisition published task metadata'
+assert_absent "$home/state/.spawn-cleanup/empty-endpoint-ij7.record" \
+  'empty endpoint acquisition left a cleanup record without an acquired endpoint'
+empty_endpoint_file=$(find "$home/state" -maxdepth 1 -type f -name '.spawn-endpoint-*' -print -quit)
+[ -z "$empty_endpoint_file" ] || fail 'empty endpoint acquisition journal was not removed'
+assert_no_grep $'tmux\tkill-window' "$case_dir/events.log" \
+  'endpoint creation failure attempted cleanup for an endpoint that was never acquired'
+pass 'endpoint creation failure removes the empty acquisition journal without inventing cleanup'
+
+case_record=$(make_case publication-signal publication-signal-kl8)
+IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$case_record
+EOF
+export FM_FAKE_PUBLISH_TERM=1 FM_FAKE_META_DEST="$home/state/publication-signal-kl8.meta"
+run_spawn "$case_dir" publication-signal-kl8 "$home" "$proj" "$wt" "$fakebin" > "$case_dir/output" 2>&1
+status=$?
+unset FM_FAKE_PUBLISH_TERM FM_FAKE_META_DEST
+rm -rf -- "/tmp/fm-publication-signal-kl8"
+[ "$status" -ne 0 ] || fail 'post-publication interruption unexpectedly returned success'
+assert_present "$home/state/publication-signal-kl8.meta" \
+  'post-publication interruption removed the committed task metadata'
+assert_present "$home/state/sandbox-bridge/publication-signal-kl8" \
+  'post-publication interruption released the committed bridge'
+assert_grep $'id-fm-publication-signal-kl8\tfm-publication-signal-kl8' "$case_dir/sbx.state" \
+  'post-publication interruption released the committed provider placement'
+assert_grep '@spawnwid' "$case_dir/tmux.state" \
+  'post-publication interruption released the committed endpoint'
+assert_absent "$home/state/.spawn-cleanup/publication-signal-kl8.record" \
+  'post-publication interruption left a prepublication cleanup record'
+pass 'publication commit protects live resources from the EXIT cleanup trap'
+
+case_record=$(make_case opencode-hook opencode-hook-mn9)
+IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$case_record
+EOF
+special_state="$case_dir/state\"quote\\slash"
+mkdir -p "$special_state"
+run_spawn "$case_dir" opencode-hook-mn9 "$home" "$proj" "$wt" "$fakebin" "$special_state" opencode > "$case_dir/output" 2>&1
+status=$?
+rm -rf -- "/tmp/fm-opencode-hook-mn9"
+expect_code 0 "$status" 'Docker OpenCode spawn with a special state path should succeed'
+hook="$wt/.opencode/plugins/fm-sandbox-turnend.js"
+assert_present "$hook" 'Docker OpenCode spawn did not create its turn-end hook'
+printf '%s\n' '{"type":"module"}' > "$wt/package.json"
+node --input-type=module -e 'import(process.argv[1]).then(async ({FmSandboxTurnEnd}) => { const hook = await FmSandboxTurnEnd(); await hook.event({event: {type: "session.idle"}}); })' "$hook"
+assert_present "$special_state/sandbox-bridge/opencode-hook-mn9/turn-ended" \
+  'escaped Docker OpenCode hook path did not touch the bridge turn-end marker'
+pass 'Docker OpenCode hook JSON-escapes special bridge paths'
 
 echo 'ALL TESTS PASSED'

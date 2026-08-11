@@ -64,8 +64,16 @@ fi
 exec /bin/sleep "$@"
 SH
   chmod +x "$fakebin/sleep"
-  cat > "$fakebin/treehouse" <<'SH'
+cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  exit 0
+fi
+if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   printf '%s\n' "$*" >> "${FM_FAKE_PANE_COUNTFILE:?}.treehouse"
   [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" = 1 ] && exit 1

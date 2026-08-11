@@ -30,6 +30,27 @@ fm_workspace_placement_docker_sandbox_check() {
 
 fm_workspace_placement_docker_sandbox_inventory_array() {
   jq -e -c '
+    def field($object; $keys):
+      reduce $keys[] as $key ({found:false, value:null};
+        if .found then .
+        elif ($object | has($key)) then {found:true, value:$object[$key]}
+        else .
+        end);
+    def required_field($object; $keys):
+      (field($object; $keys)) as $field
+      | if $field.found and ($field.value | type) == "string" and ($field.value | length) > 0
+        then $field.value
+        else error("malformed Docker Sandbox inventory member")
+        end;
+    def optional_field($object; $keys):
+      (field($object; $keys)) as $field
+      | if $field.found then
+          if ($field.value | type) == "string" and ($field.value | test("^[^\\t\\r\\n]*$"))
+          then $field.value
+          else error("malformed Docker Sandbox inventory member")
+          end
+        else ""
+        end;
     if type == "array" then .
     elif type == "object" then
       [
@@ -43,6 +64,22 @@ fm_workspace_placement_docker_sandbox_inventory_array() {
         end
     else error("unsupported Docker Sandbox inventory shape")
     end
+    | map(
+        if type != "object" then error("malformed Docker Sandbox inventory member")
+        else
+          . as $member
+          | {
+              id: (required_field($member; ["id", "ID", "sandboxId", "sandbox_id"])),
+              name: (required_field($member; ["name", "Name", "sandboxName", "sandbox_name"])),
+              agent: (optional_field($member; ["agent", "Agent"])),
+              workspace: (optional_field($member; ["workspace", "workdir", "workingDir", "working_dir"]))
+            }
+        end
+        | if (.id | test("^[A-Za-z0-9._-]+$")) and (.name | test("^[A-Za-z0-9._-]+$"))
+          then .
+          else error("malformed Docker Sandbox inventory member")
+          end
+      )
   '
 }
 
@@ -127,12 +164,8 @@ fm_workspace_placement_docker_sandbox_record() {  # <name-or-id>
     return 2
   }
   records=$(printf '%s' "$inventory" | jq -r --arg selector "$selector" '
-    .[]?
-    | {id: (.id // .ID // .sandboxId // .sandbox_id // ""),
-       name: (.name // .Name // .sandboxName // .sandbox_name // ""),
-       agent: (.agent // .Agent // ""),
-       workspace: (.workspace // .workdir // .workingDir // .working_dir // "")}
-    | select(.id != "" and (.name == $selector or .id == $selector))
+    .[]
+    | select(.name == $selector or .id == $selector)
     | [.id, .name, .agent, .workspace]
     | @tsv
   ' 2>/dev/null) || {
@@ -168,9 +201,7 @@ fm_workspace_placement_docker_sandbox_snapshot_ids() {
   listing=$(sbx ls --json) || return 1
   inventory=$(printf '%s' "$listing" | fm_workspace_placement_docker_sandbox_inventory_array) || return 2
   printf '%s' "$inventory" | jq -r '
-    .[]?
-    | (.id // .ID // .sandboxId // .sandbox_id // empty)
-    | select(type == "string" and length > 0)
+    .[].id
   ' 2>/dev/null
 }
 

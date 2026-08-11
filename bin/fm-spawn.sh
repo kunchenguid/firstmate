@@ -869,6 +869,15 @@ spawn_register_worktree() {
   SPAWN_WORKTREE_PROJECT=$2
 }
 
+spawn_endpoint_acquisition_pending() {
+  local file=${SPAWN_ENDPOINT_ACQUISITION_FILE:-}
+  [ -n "$file" ] || return 1
+  [ -L "$file" ] && return 0
+  [ -e "$file" ] || return 1
+  [ -f "$file" ] || return 0
+  [ -s "$file" ]
+}
+
 spawn_endpoint_cleanup() {
   case "$SPAWN_ENDPOINT_BACKEND:$SPAWN_ENDPOINT_KIND" in
     tmux:tmux-id)
@@ -895,11 +904,7 @@ spawn_cleanup_record_refresh() {
   local pending=0 state=${STATE:-} task_id=${ID:-}
   local -a lines=()
   [ -n "$state" ] && [ -n "$task_id" ] || return 0
-  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || {
-    [ -n "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] && {
-      [ -e "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || [ -L "$SPAWN_ENDPOINT_ACQUISITION_FILE" ];
-    }
-  }; then
+  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || spawn_endpoint_acquisition_pending; then
     pending=1
     lines+=("endpoint_cleanup=$SPAWN_ENDPOINT_CLEANUP")
     lines+=("endpoint_backend=$SPAWN_ENDPOINT_BACKEND")
@@ -935,6 +940,15 @@ spawn_cleanup_record_refresh() {
   fi
 }
 
+spawn_publication_committed() {
+  [ "$SPAWN_PUBLICATION_COMPLETE" = 1 ] && return 0
+  [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] || return 1
+  [ -n "${SPAWN_META_TMP:-}" ] || return 1
+  [ ! -e "$SPAWN_META_TMP" ] && [ ! -L "$SPAWN_META_TMP" ] || return 1
+  [ -n "${STATE:-}" ] && [ -n "${ID:-}" ] || return 1
+  [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]
+}
+
 parse_orca_worktree_result() {
   local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
@@ -954,11 +968,14 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ "$SPAWN_PUBLICATION_COMPLETE" != 1 ]; then
+  if spawn_publication_committed; then
+    SPAWN_PUBLICATION_COMPLETE=1
+    [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
+      echo "warning: could not remove post-publication endpoint acquisition record for $ID" >&2
+  else
     spawn_register_endpoint_from_file || true
-  fi
-  spawn_cleanup_record_refresh || echo "warning: could not persist unpublished cleanup record for ${ID:-task}" >&2
-  if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ]; then
+    spawn_cleanup_record_refresh || echo "warning: could not persist unpublished cleanup record for ${ID:-task}" >&2
+    if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ]; then
     if [ -z "$PLACEMENT_HANDLE" ] && [ -n "${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}" ]; then
       PLACEMENT_HANDLE=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE
     fi
@@ -994,8 +1011,8 @@ spawn_abort_cleanup() {
       PLACEMENT_ABORT_CLEANUP=0
     fi
     spawn_cleanup_record_refresh || echo "warning: could not update unpublished placement cleanup record for $ID" >&2
-  fi
-  if [ "$SPAWN_WORKTREE_CLEANUP" = 1 ]; then
+    fi
+    if [ "$SPAWN_WORKTREE_CLEANUP" = 1 ]; then
     if [ -n "$SPAWN_WORKTREE_PATH" ] && [ -n "$SPAWN_WORKTREE_PROJECT" ] \
        && command -v treehouse >/dev/null 2>&1 \
        && ( CDPATH='' cd -- "$SPAWN_WORKTREE_PROJECT" \
@@ -1005,15 +1022,15 @@ spawn_abort_cleanup() {
       echo "warning: could not return unpublished worktree for $ID" >&2
     fi
     spawn_cleanup_record_refresh || echo "warning: could not update unpublished worktree cleanup record for $ID" >&2
-  fi
-  if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
+    fi
+    if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
      && [ ! -e "$SPAWN_META_TMP" ] \
      && [ ! -L "$SPAWN_META_TMP" ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
-  fi
-  if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
+    fi
+    if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
     if ! clear_relaunch_harness_wiring \
         "$RELAUNCH_REPLACEMENT_HARNESS" \
@@ -1030,26 +1047,26 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
-  fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
+    fi
+    if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
       echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
     fi
-  fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    fi
+    if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
     fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
-  fi
-  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+    fi
+    if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
-  fi
-  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    fi
+    if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
@@ -1076,8 +1093,8 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
-  fi
-  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ]; then
+    fi
+    if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ]; then
     if spawn_endpoint_cleanup; then
       SPAWN_ENDPOINT_CLEANUP=0
       [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
@@ -1086,8 +1103,17 @@ spawn_abort_cleanup() {
       echo "warning: could not remove unpublished endpoint for $ID" >&2
     fi
     spawn_cleanup_record_refresh || echo "warning: could not update unpublished endpoint cleanup record for $ID" >&2
+    fi
+    if [ "$SPAWN_ENDPOINT_CLEANUP" != 1 ] \
+       && [ -n "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] \
+       && [ -f "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] \
+       && [ ! -L "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] \
+       && [ ! -s "$SPAWN_ENDPOINT_ACQUISITION_FILE" ]; then
+      rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
+        echo "warning: could not remove empty endpoint acquisition record for $ID" >&2
+    fi
+    spawn_cleanup_record_refresh || echo "warning: could not finalize unpublished cleanup record for ${ID:-task}" >&2
   fi
-  spawn_cleanup_record_refresh || echo "warning: could not finalize unpublished cleanup record for ${ID:-task}" >&2
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1832,7 +1858,7 @@ case "$LAUNCH" in
 esac
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  printf '%s' "$1" | perl -0pe 's/\\/\\\\/g; s/"/\\"/g; s/([\x00-\x1f])/sprintf("\\u%04x", ord($1))/eg'
 }
 
 resolved_existing_dir() {
@@ -2615,7 +2641,29 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  treehouse_lease_mode=0
+  if command -v treehouse >/dev/null 2>&1 \
+     && treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'; then
+    treehouse_lease_mode=1
+    acquired_worktree=$(CDPATH='' cd -- "$PROJ_ABS" && \
+      treehouse get --lease --lease-holder "$ID") || {
+      echo "error: treehouse get --lease failed for task $ID" >&2
+      exit 1
+    }
+    case "$acquired_worktree" in
+      ''|*$'\n'*|*$'\r'*)
+        echo "error: treehouse get --lease did not report one worktree for task $ID" >&2
+        exit 1
+        ;;
+    esac
+    WT=$acquired_worktree
+    spawn_register_worktree "$WT" "$PROJ_ABS"
+    validate_spawn_worktree "treehouse get --lease" "$T"
+    acquired_worktree_real=$(real_path_or_raw "$WT")
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2642,10 +2690,19 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        spawn_register_worktree "$p" "$PROJ_ABS"
+      if [ "$treehouse_lease_mode" = 1 ]; then
+        if [ "$p_real" = "$acquired_worktree_real" ]; then
+          if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+            break
+          fi
+          candidate="$p_real"
+        else
+          candidate=""
+        fi
+      elif [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
+          spawn_register_worktree "$WT" "$PROJ_ABS"
           break
         fi
         candidate="$p_real"
@@ -2658,6 +2715,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
+    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    exit 1
+  fi
+  if [ "$treehouse_lease_mode" = 1 ] && [ "$candidate" != "$acquired_worktree_real" ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
@@ -3024,12 +3085,13 @@ EOF
       ;;
     opencode)
       mkdir -p "$WT/.opencode/plugins"
+      sandbox_turnend_json=$(json_escape "$TURNEND")
       cat > "$WT/.opencode/plugins/fm-sandbox-turnend.js" <<EOF
 import { execFile } from "node:child_process";
 export const FmSandboxTurnEnd = async () => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") {
-      await new Promise((resolve) => execFile("touch", ["$TURNEND"], () => resolve()));
+      await new Promise((resolve) => execFile("touch", ["$sandbox_turnend_json"], () => resolve()));
     }
   },
 });
@@ -3095,6 +3157,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
+  SPAWN_META_PATH=$SPAWN_META_TMP
+else
+  SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
@@ -3165,17 +3230,15 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+SPAWN_META_PUBLISH_STARTED=1
+mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+SPAWN_PUBLICATION_COMPLETE=1
+RELAUNCH_REPLACEMENT_PENDING=0
+SPAWN_META_PUBLISH_STARTED=0
+SPAWN_META_TMP=
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_PUBLISH_STARTED=1
-  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
-  SPAWN_PUBLICATION_COMPLETE=1
-  RELAUNCH_REPLACEMENT_PENDING=0
-  SPAWN_META_PUBLISH_STARTED=0
-  SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
-else
-  SPAWN_PUBLICATION_COMPLETE=1
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

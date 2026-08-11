@@ -13,6 +13,8 @@ BRIEF="$TMP_ROOT/brief.md"
 ENCODER="$TMP_ROOT/encoder.sh"
 TASK_ID='bridge-task'
 REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
+ORIGINAL_PATH=$PATH
 FAILBIN="$TMP_ROOT/failbin"
 
 mkdir -p "$STATE" "$WORKTREE" "$FAILBIN"
@@ -32,6 +34,21 @@ fi
 exec "$REAL_MV" "\$@"
 SH
 chmod 700 "$FAILBIN/mv"
+cat > "$FAILBIN/rm" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_TEST_FAIL_RM_CURSOR_ONCE:-0}" = 1 ] && [ ! -e "$TMP_ROOT/rm-cursor-failed" ]; then
+  for arg in "\$@"; do
+    case "\$arg" in
+      */sandbox-bridge-cursor/remove-task)
+        : > "$TMP_ROOT/rm-cursor-failed"
+        exit 1
+        ;;
+    esac
+  done
+fi
+exec "$REAL_RM" "\$@"
+SH
+chmod 700 "$FAILBIN/rm"
 PATH="$FAILBIN:$PATH"
 export PATH
 
@@ -229,5 +246,27 @@ expect_code 1 "$status" "mismatched bridge path rejection"
 assert_no_entry "$STATE/sandbox-bridge/not-recorded" \
   "watcher adopted or recreated an unrecorded bridge path"
 assert_present "$watch_bridge" "mismatched metadata removed the recorded bridge"
+
+REMOVE_ID='remove-task'
+status=0
+fm_sandbox_bridge_create "$STATE" "$REMOVE_ID" "$WORKTREE" "$BRIEF" "$ENCODER" || status=$?
+expect_code 0 "$status" "retryable bridge removal fixture creation"
+remove_bridge=$(fm_sandbox_bridge_expected_path "$STATE" "$REMOVE_ID") || fail "retryable bridge path resolution failed"
+remove_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$REMOVE_ID") || fail "retryable cursor path resolution failed"
+export FM_TEST_FAIL_RM_CURSOR_ONCE=1
+status=0
+fm_sandbox_bridge_remove "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" || status=$?
+expect_code 1 "$status" "bridge removal should report a cursor deletion failure"
+assert_no_entry "$remove_bridge" "bridge removal failure did not retain the partially removed state"
+assert_present "$remove_cursor" "bridge removal failure did not retain the cursor for retry"
+unset FM_TEST_FAIL_RM_CURSOR_ONCE
+status=0
+fm_sandbox_bridge_remove "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" || status=$?
+expect_code 0 "$status" "bridge removal retry"
+assert_no_entry "$remove_bridge" "bridge removal retry left the bridge behind"
+assert_no_entry "$remove_cursor" "bridge removal retry left the cursor behind"
+
+PATH="$ORIGINAL_PATH"
+export PATH
 
 pass "Docker Sandbox bridge creation, bounded sync, turn-end consumption, watcher sync, and fail-closed metadata handling"

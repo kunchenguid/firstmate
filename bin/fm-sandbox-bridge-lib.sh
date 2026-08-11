@@ -86,10 +86,10 @@ fm_sandbox_bridge_read_cursor() {  # <host-private cursor>
   ' "$1"
 }
 
-# fm_sandbox_bridge_validate: verify one bridge and its host-private cursor.
-fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
-  [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_validate <bridge> <state> <task-id> <worktree>'; return 2; }
-  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor state_real worktree_real bridge_root cursor_root
+# fm_sandbox_bridge_validate_bridge: verify one bridge without requiring its cursor.
+fm_sandbox_bridge_validate_bridge() {  # <bridge> <state> <task-id> <worktree>
+  [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_validate_bridge <bridge> <state> <task-id> <worktree>'; return 2; }
+  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor state_real worktree_real bridge_root cursor_root bridge_real
   local bound_task bound_state bound_worktree bound_bridge bound_cursor
   expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || {
     fm_sandbox_bridge_error 'sandbox bridge has an invalid state path or task identity'
@@ -108,6 +108,14 @@ fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
     fm_sandbox_bridge_error "sandbox bridge path does not match its task identity: $bridge"
     return 1
   }
+  bridge_real=$(fm_sandbox_bridge_real_dir "$bridge") || {
+    fm_sandbox_bridge_error "sandbox bridge is not a real directory: $bridge"
+    return 1
+  }
+  [ "$bridge_real" = "$expected" ] || {
+    fm_sandbox_bridge_error "sandbox bridge path is not canonical: $bridge"
+    return 1
+  }
   bridge_root=$(fm_sandbox_bridge_real_dir "$state_real/sandbox-bridge") || return 1
   cursor_root=$(fm_sandbox_bridge_real_dir "$state_real/sandbox-bridge-cursor") || return 1
   if ! {
@@ -120,19 +128,14 @@ fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
     return 1
   fi
   if ! {
-    fm_sandbox_bridge_safe_regular "$bridge/binding" &&
+      fm_sandbox_bridge_safe_regular "$bridge/binding" &&
       fm_sandbox_bridge_safe_regular "$bridge/status" &&
       fm_sandbox_bridge_safe_regular "$bridge/runtime-brief.md" &&
-      fm_sandbox_bridge_safe_regular "$bridge/fm-operational-input.sh" &&
-      fm_sandbox_bridge_private_regular "$cursor"
+      fm_sandbox_bridge_safe_regular "$bridge/fm-operational-input.sh"
   }; then
-    fm_sandbox_bridge_error "sandbox bridge inputs or host-private cursor are missing or unsafe: $bridge"
+    fm_sandbox_bridge_error "sandbox bridge inputs are missing or unsafe: $bridge"
     return 1
   fi
-  fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || {
-    fm_sandbox_bridge_error "sandbox bridge cursor is malformed or unsafe: $cursor"
-    return 1
-  }
   bound_task=$(fm_sandbox_bridge_binding_value "$bridge/binding" task_id) || return 1
   bound_state=$(fm_sandbox_bridge_binding_value "$bridge/binding" state) || return 1
   bound_worktree=$(fm_sandbox_bridge_binding_value "$bridge/binding" worktree) || return 1
@@ -151,6 +154,23 @@ fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
   # shellcheck disable=SC2034 # Public source-library out-parameter consumed by callers after sourcing.
   FM_SANDBOX_BRIDGE_PATH=$expected
   FM_SANDBOX_BRIDGE_CURSOR=$cursor
+  return 0
+}
+
+# fm_sandbox_bridge_validate: verify one bridge and its host-private cursor.
+fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
+  [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_validate <bridge> <state> <task-id> <worktree>'; return 2; }
+  local cursor
+  fm_sandbox_bridge_validate_bridge "$@" || return 1
+  cursor=$FM_SANDBOX_BRIDGE_CURSOR
+  fm_sandbox_bridge_private_regular "$cursor" || {
+    fm_sandbox_bridge_error "sandbox bridge host-private cursor is missing or unsafe: $cursor"
+    return 1
+  }
+  fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || {
+    fm_sandbox_bridge_error "sandbox bridge cursor is malformed or unsafe: $cursor"
+    return 1
+  }
   return 0
 }
 
@@ -444,6 +464,24 @@ fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
 # fm_sandbox_bridge_remove: remove only a currently verified bridge and cursor.
 fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
   [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_remove <bridge> <state> <task-id> <worktree>'; return 2; }
-  fm_sandbox_bridge_validate "$1" "$2" "$3" "$4" || return 1
-  rm -rf -- "$1" && rm -f -- "$FM_SANDBOX_BRIDGE_CURSOR"
+  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor
+  expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || return 1
+  cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
+  [ "$bridge" = "$expected" ] || return 1
+  if [ ! -e "$bridge" ] && [ ! -L "$bridge" ] && [ ! -e "$cursor" ] && [ ! -L "$cursor" ]; then
+    return 0
+  fi
+  if [ -e "$bridge" ] || [ -L "$bridge" ]; then
+    if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+      fm_sandbox_bridge_validate "$bridge" "$state" "$task_id" "$worktree" || return 1
+    else
+      fm_sandbox_bridge_validate_bridge "$bridge" "$state" "$task_id" "$worktree" || return 1
+    fi
+    rm -rf -- "$bridge" || return 1
+  fi
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    fm_sandbox_bridge_private_regular "$cursor" || return 1
+    fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || return 1
+    rm -f -- "$cursor" || return 1
+  fi
 }

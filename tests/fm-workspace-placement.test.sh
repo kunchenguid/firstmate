@@ -47,6 +47,10 @@ json_state() {
     unknown-wrapper) printf '%s\n' '{"unknown":[]}'; return 0 ;;
     null-wrapper) printf '%s\n' '{"sandboxes":null}'; return 0 ;;
     multiple-wrappers) printf '%s\n' '{"sandboxes":[],"items":[]}'; return 0 ;;
+    member-scalar) printf '%s\n' '[{"id":"id-valid","name":"valid","agent":"codex","workspace":""},"bad"]'; return 0 ;;
+    member-missing-id) printf '%s\n' '[{"name":"missing-id","agent":"codex","workspace":""}]'; return 0 ;;
+    member-invalid-id) printf '%s\n' '[{"id":42,"name":"invalid-id","agent":"codex","workspace":""}]'; return 0 ;;
+    member-invalid-agent) printf '%s\n' '[{"id":"id-invalid-agent","name":"invalid-agent","agent":null,"workspace":""}]'; return 0 ;;
   esac
   while IFS=$'\t' read -r id name agent workspace || [ -n "$id" ]; do
     [ -n "$id" ] || continue
@@ -198,6 +202,23 @@ for shape in scalar unknown-wrapper null-wrapper multiple-wrappers; do
 done
 unset SBX_JSON_SHAPE
 pass 'Docker inventory rejects scalar and unsupported wrapper shapes without treating them as absence'
+
+for shape in member-scalar member-missing-id member-invalid-id member-invalid-agent; do
+  export SBX_JSON_SHAPE=$shape
+  : > "$SBX_LOG"
+  if fm_workspace_placement_inspect docker-sandbox docker-sandbox:malformed-member:fm-malformed-member:id-fm-malformed-member; then
+    fail "malformed Docker inventory member '$shape' was treated as a valid or absent sandbox"
+  fi
+  if fm_workspace_placement_docker_sandbox_snapshot_ids >/dev/null 2>&1; then
+    fail "malformed Docker inventory member '$shape' was accepted by the identity snapshot"
+  fi
+  if fm_workspace_placement_prepare docker-sandbox direct malformed-member.task "$workspace_real" official-agent; then
+    fail "malformed Docker inventory member '$shape' allowed provider creation"
+  fi
+  assert_no_grep $'create\t' "$SBX_LOG" "malformed Docker inventory member '$shape' allowed creation"
+done
+unset SBX_JSON_SHAPE
+pass 'Docker inventory rejects malformed members without dropping live identities'
 
 : > "$SBX_STATE"
 : > "$SBX_LOG"
