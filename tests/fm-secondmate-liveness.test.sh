@@ -385,6 +385,49 @@ test_agent_state_dispatcher_and_compatibility() {
   pass "fm_backend_agent_state: gates raw-omp and routes tmux/Herdr safely"
 }
 
+test_shared_input_dispatch_preserves_unproved_backends() {
+  local backend out
+  for backend in zellij orca cmux; do
+    out=$(bash -c '
+      . "$0/bin/fm-backend.sh"
+      fm_backend_source() { return 0; }
+      fm_backend_zellij_send_key() { printf zellij; }
+      fm_backend_orca_send_key() { printf orca; }
+      fm_backend_cmux_send_key() { printf cmux; }
+      fm_backend_send_key "$1" sess:win Escape label claude
+    ' "$ROOT" "$backend")
+    [ "$out" = "$backend" ] || fail "unproved backend $backend should preserve its input path, got '$out'"
+  done
+  pass "shared input dispatch: non-tmux/Herdr backends preserve existing delivery"
+}
+
+test_tmux_submit_rechecks_endpoint_before_each_enter() {
+  local log out
+  log="$TMP_ROOT/tmux-submit-recheck.log"; : > "$log"
+  out=$(FM_TEST_LOG="$log" bash -c '
+    . "$0/bin/fm-backend.sh"
+    . "$0/bin/fm-tmux-lib.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_tmux_send_text_submit() { fm_tmux_submit_core "$@"; }
+    fm_backend_omp_endpoint_allows() { calls=$((calls + 1)); [ "$calls" -eq 1 ]; }
+    tmux() {
+      case "${1:-}" in
+        send-keys)
+          case "$*" in
+            *" -l "*) printf literal >> "$FM_TEST_LOG" ;;
+            *) printf enter >> "$FM_TEST_LOG" ;;
+          esac
+          ;;
+      esac
+    }
+    calls=0
+    verdict=$(fm_backend_send_text_submit tmux sess:win hello 1 0 0 label claude)
+    printf "%s\t%s" "$verdict" "$(cat "$FM_TEST_LOG")"
+  ' "$ROOT")
+  [ "$out" = $'unknown\tliteral' ] || fail "tmux must recheck before Enter and stop on endpoint drift, got '$out'"
+  pass "tmux submit: endpoint identity is rechecked before every Enter"
+}
+
 test_raw_marker_gates_busy_and_control() {
   local meta="$TMP_ROOT/raw-marker-meta" state="$TMP_ROOT/raw-marker-state" out
   mkdir -p "$state"
@@ -776,6 +819,8 @@ test_tmux_raw_requires_marker_on_current_foreground
 test_tmux_control_rejects_stale_canonical_omp
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
+test_shared_input_dispatch_preserves_unproved_backends
+test_tmux_submit_rechecks_endpoint_before_each_enter
 test_raw_marker_gates_busy_and_control
 test_sweep_skips_shell_without_positive_identity
 test_sweep_leaves_alive_secondmate_untouched

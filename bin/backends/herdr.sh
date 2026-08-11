@@ -2723,6 +2723,15 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
+fm_backend_herdr_send_key_checked() {  # <target> <key> [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 key=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}}
+  fm_backend_herdr_parse_target "$target" || return 1
+  fm_backend_herdr_omp_input_safe \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+    "$recorded_harness" "$raw_launch" "$raw_owner" || return 1
+  fm_backend_herdr_send_key "$target" "$key"
+}
+
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
 # is the closest herdr analogue to tmux's scrollback-bounded capture.
@@ -2780,6 +2789,25 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+}
+
+# Registration-aware variant used by raw ownership checks. Unlike the composer
+# probe, it preserves an explicit agent_not_found result so a raw endpoint can
+# be authorized from process ownership even before a harness registration lands.
+fm_backend_herdr_agent_registration_raw() {  # <session> <pane> -> <agent>\t<status>
+  local out code rc
+  if out=$(FM_BACKEND_HERDR_IDENTITY_READ=1 fm_backend_herdr_cli "$1" agent get "$2" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ "$code" = agent_not_found ]; then
+    printf 'missing\tmissing'
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s' "$out" | jq -e -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
 fm_backend_herdr_raw_omp_identity() {  # <target> [raw-owner]
@@ -2987,6 +3015,44 @@ fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-
   if [ "$recorded_harness" = omp ] && ! fm_harness_omp_attribution_allowed; then
     return 1
   fi
+  if [ "$raw_launch" = 1 ]; then
+    if [ -n "$identity_supplied" ]; then
+      identity=$6
+    else
+      identity=$(fm_backend_herdr_agent_registration_raw "$session" "$pane" 2>/dev/null) || return 2
+    fi
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent_status" in
+      missing|working|idle|done|blocked) ;;
+      *) return 2 ;;
+    esac
+    if [ -n "$raw_owner" ]; then
+      process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane" "$raw_owner")
+    else
+      process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane")
+    fi
+    case "$process_identity" in
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) ;;
+      omp) return 1 ;;
+      *) return 2 ;;
+    esac
+    case "$agent" in
+      ''|missing) ;;
+      omp) return 1 ;;
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        fm_harness_identity_matches "$agent" "$process_identity" || return 2
+        ;;
+      *) return 2 ;;
+    esac
+    case "$recorded_harness" in
+      claude*|codex*|opencode*|grok*|kimi*|muse*|pi|pi-signed)
+        fm_harness_identity_matches "$recorded_harness" "$process_identity" || return 2
+        ;;
+    esac
+    return 0
+  fi
   if [ -n "$identity_supplied" ]; then
     identity=$6
   else
@@ -3000,17 +3066,6 @@ EOF
     working|idle|done|blocked) ;;
     *) return 2 ;;
   esac
-  if [ "$raw_launch" = 1 ]; then
-    process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane" "$raw_owner")
-    case "$process_identity" in
-      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) ;;
-      omp) return 1 ;;
-      *) return 2 ;;
-    esac
-  fi
-  if [ "$agent" = omp ] && [ "$raw_launch" = 1 ]; then
-    return 1
-  fi
   if [ "$agent" = omp ] && [ "$raw_launch" != 1 ] \
     && [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
     && [ "$recorded_harness" != unknown ]; then
@@ -3223,12 +3278,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # and before the first Enter is still a pre-submission baseline.
   [ "$baseline" = idle ] || footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   while :; do
-    if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+    if ! fm_backend_herdr_send_key_checked "$target" Enter \
       "$recorded_harness" "$raw_launch" "$raw_owner"; then
       printf 'unknown'
       return 0
     fi
-    fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")

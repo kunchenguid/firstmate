@@ -201,10 +201,6 @@ fm_harness_raw_owner_state() {
     printf 'unknown'
     return 0
   }
-  fm_harness_process_owner_state "$root" "$owner" "$ps_bin" >/dev/null 2>&1 || {
-    printf 'unknown'
-    return 0
-  }
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     case "$pid" in ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;; esac

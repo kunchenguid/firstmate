@@ -3196,7 +3196,7 @@ test_herdr_raw_background_omp_is_quarantined() {
   chmod +x "$fb/omp"
   herdr_other_process_info > "$resp/1.out"
   process_state=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_FAKE_PS_ROWS=$'1 0\n4242 1\n5151 4242\n6161 5151' FM_FAKE_PS_OMP_PID=6161 \
+    FM_FAKE_PS_ROWS=$'1 0\n4242 1\n5151 4242\n6161 5151' FM_FAKE_PS_NO_OWNER_PID=4242 FM_FAKE_PS_OMP_PID=6161 \
     FM_FAKE_PS_OMP_COMM=omp FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_parse_target lab:w1:p2; fm_backend_herdr_raw_omp_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$1"' "$ROOT" "$owner" )
   [ "$process_state" = omp ] || fail "the full Herdr process tree should identify the background OMP descendant, got '$process_state'"
@@ -3692,6 +3692,20 @@ test_herdr_input_allows_wrapped_non_omp_identity() {
   [ "$out" = empty ] || fail "a positively corroborated raw wrapper must preserve non-OMP Herdr input, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello' "wrapped non-OMP identity did not reach Herdr text input"
   pass "Herdr input: raw wrapper metadata preserves current non-OMP input"
+}
+
+test_herdr_input_allows_unregistered_raw_non_omp_without_owner() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-unregistered-raw-non-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/1.out"
+  herdr_other_process_info > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key herdr lab:w1:p2 Escape label bash 1' "$ROOT" )
+  [ -z "$out" ] || fail "an unregistered raw non-OMP endpoint should accept positive current input, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''escape' \
+    "positive current raw non-OMP identity did not reach Herdr key input"
+  pass "Herdr input: unregistered raw non-OMP preserves positive current input"
 }
 
 test_herdr_input_rejects_raw_non_omp_stale_registration_over_omp() {
@@ -5324,6 +5338,7 @@ test_herdr_key_rejects_stale_omp_after_non_omp_relaunch
 test_herdr_input_allows_current_non_omp_identity
 test_send_text_submit_rejects_exit_between_text_and_enter
 test_herdr_input_allows_wrapped_non_omp_identity
+test_herdr_input_allows_unregistered_raw_non_omp_without_owner
 test_herdr_input_rejects_raw_non_omp_stale_registration_over_omp
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
 test_herdr_input_rejects_no_metadata_non_omp_over_omp_process

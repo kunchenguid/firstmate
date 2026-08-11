@@ -289,9 +289,34 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state
+fm_tmux_submit_endpoint_allows() {  # <target> [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} raw_owner=${4:-${FM_RAW_LAUNCH_OWNER:-}}
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  if [ -z "$recorded_harness" ] && [ "$raw_launch" != 1 ]; then
+    return 0
+  fi
+  declare -F fm_backend_omp_endpoint_allows >/dev/null 2>&1 || return 1
+  fm_backend_omp_endpoint_allows tmux "$target" "$recorded_harness" "$raw_launch" "$raw_owner"
+}
+
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 retries=$2 sleep_s=$3 recorded_harness=${4:-} raw_launch=${5:-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}} baseline_idle=${7:-} i=0 j state
+  # Preserve the earlier direct-helper form whose fourth argument was
+  # baseline-idle, while accepting the ownership-aware recorded-harness-first
+  # form used by the generic send dispatcher.
+  case "$4" in
+    0|1)
+      baseline_idle=$4
+      recorded_harness=${5:-}
+      raw_launch=${6:-}
+      raw_owner=${7:-${FM_RAW_LAUNCH_OWNER:-}}
+      ;;
+  esac
   while :; do
+    if ! fm_tmux_submit_endpoint_allows "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
+      printf 'unknown'
+      return 0
+    fi
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
@@ -333,8 +358,8 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 recorded_harness=${7:-} raw_launch=${8:-} raw_owner=${9:-${FM_RAW_LAUNCH_OWNER:-}} baseline_idle='' baseline_state
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
@@ -342,5 +367,5 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$recorded_harness" "$raw_launch" "$raw_owner" "$baseline_idle"
 }

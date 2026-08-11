@@ -45,7 +45,7 @@ cat > "$LAB/shim/tmux" <<SH
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$LAB/shim/tmux"
-PATH="$LAB/shim:$PATH"
+PATH="$LAB/shim:$LAB/bunroot:$LAB/bin:$PATH"
 export PATH
 
 # Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
@@ -167,10 +167,10 @@ out=unreadable
 for i in 1 2 3 4 5 6 7 8 9 10; do
   out=$(FM_HARNESS_UNVERIFIED=raw-omp bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1"' \
     "$ROOT" "$SESSION:raw-omp")
-  [ "$out" = ambiguous ] && break
+  [ "$out" = unverified ] && break
   sleep 0.1
 done
-[ "$out" = ambiguous ] \
+[ "$out" = unverified ] \
   || fail "a raw OMP process must not classify as a verified live agent, got '$out'"
 [ "$(fm_backend_agent_state tmux "$SESSION:raw-omp" raw-omp)" = unverified ] \
   || fail "recorded raw-omp metadata must stop the shared liveness dispatcher"
