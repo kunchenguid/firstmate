@@ -684,6 +684,78 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+# A run-level terminal verdict answers for the RUN and never observed the CREW,
+# which is then free to start a replacement run - and routinely is. The run-step
+# path deliberately reads no pane, so nothing measured the crew at all, and a
+# supervisor asking "is this crew working?" got the dead run's step back. The
+# reader now records the crew's own turn signal ALONGSIDE that verdict. What must
+# not move is the verdict: the run step still wins outright.
+test_run_ended_verdict_records_crew_liveness() {
+  reset_fakes
+  local d gen json
+  d=$(new_case run-ended-liveness)
+  make_repo_on_branch "$d/wt" fm/feat-liveness
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-liveness.meta" "window=fm:fm-feat-liveness" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-liveness)"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-liveness)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-liveness busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+
+  json=$(run_crew_state_json "$d" feat-liveness)
+  [ "$(cf_json_field "$json" state)" = failed ] \
+    || fail "the crew's live turn changed the run's verdict, got '$(cf_json_field "$json" state)'"
+  [ "$(cf_json_field "$json" source)" = run-step ] \
+    || fail "the crew's live turn displaced the run-step as the winning source"
+  [ "$(cf_json_field "$json" busy_signal)" = "busy claude-hook" ] \
+    || fail "a run-level terminal verdict did not record the crew's own turn signal, got '$(cf_json_field "$json" busy_signal)'"
+
+  # An idle turn record is an OBSERVATION that the crew stopped, and is reported
+  # as one - the distinction the whole change rests on.
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-liveness idle --gen "$gen" \
+    --source claude-hook --event stop
+  json=$(run_crew_state_json "$d" feat-liveness)
+  [ "$(cf_json_field "$json" busy_signal)" = "idle claude-hook" ] \
+    || fail "an idle crew after a failed run was not recorded as observed idle"
+
+  # A gone endpoint is equally an observation, and must be distinguishable from
+  # evidence the reader could not read.
+  json=$(FM_FAKE_TMUX_MISSING=1 run_crew_state_json "$d" feat-liveness)
+  [ "$(cf_json_field "$json" state)" = failed ] \
+    || fail "a gone endpoint masked the run's own verdict"
+  [ "$(cf_json_field "$json" busy_signal)" = "dead endpoint-gone" ] \
+    || fail "a gone endpoint after a failed run was not recorded as an observation"
+  pass "a run-level terminal verdict carries the crew's own liveness without changing the verdict"
+}
+
+# ... and only that class of verdict. `parked`, `blocked` and `done` DID observe
+# the crew's situation - it owes a gate answer, it needs help, or it has nothing
+# left to do - so there is no open liveness question for a second reading to
+# answer, and paying for a pane capture on every such read would be waste.
+test_non_run_ended_verdicts_measure_no_crew_liveness() {
+  reset_fakes
+  local d gen json fixture
+  d=$(new_case not-run-ended)
+  make_repo_on_branch "$d/wt" fm/feat-notended
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-notended.meta" "window=fm:fm-feat-notended" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-notended)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-notended busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+
+  for fixture in run_passed run_parked run_running; do
+    FM_FAKE_AXI_STATUS="$("$fixture" fm/feat-notended)"
+    json=$(run_crew_state_json "$d" feat-notended)
+    [ "$(cf_json_field "$json" source)" = run-step ] \
+      || fail "$fixture stopped being answered by the run step"
+    [ -z "$(cf_json_field "$json" busy_signal)" ] \
+      || fail "$fixture measured a crew turn signal it has no question for"
+  done
+  pass "only a run-level terminal verdict pays for the crew-liveness reading"
+}
+
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
@@ -1329,6 +1401,8 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_run_ended_verdict_records_crew_liveness
+test_non_run_ended_verdicts_measure_no_crew_liveness
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
