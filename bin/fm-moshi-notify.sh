@@ -4,11 +4,11 @@
 # The opt-in token is read only from the effective home's private
 # config/moshi-webhook-token file, which must be a readable regular file with no
 # group or world read bit and must not be a symlink.
-# The fixed Moshi endpoint is https://api.getmoshi.app/api/v1/events.
+# The fixed Moshi endpoint is https://api.getmoshi.app/api/webhook.
 # Missing or unsafe configuration, missing dependencies, request failures, and
 # deduplication are all silent no-ops so notifications never break operations.
-# The token is used only as the request authorization header and is never placed
-# in the JSON payload, durable marker, command output, or diagnostics.
+# The token is sent only in the webhook JSON payload and never appears in a
+# durable marker, command output, or diagnostics.
 #
 # Source mode exposes these lifecycle owners:
 #   fm_moshi_notify_pr_ready <task-id> <pr-url>
@@ -22,7 +22,7 @@
 set -u
 
 FM_MOSHI_NOTIFY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_MOSHI_WEBHOOK_ENDPOINT='https://api.getmoshi.app/api/v1/events'
+FM_MOSHI_WEBHOOK_ENDPOINT='https://api.getmoshi.app/api/webhook'
 FM_MOSHI_TOKEN=
 
 fm_moshi_usage() {
@@ -127,7 +127,7 @@ fm_moshi_mark_once() {
 
 fm_moshi_notify() {
   local event=$1 dedup_key=$2 title=$3 message=$4 state token_path token digest
-  local payload header_file
+  local payload marker_dir
   fm_moshi_event_valid "$event" || return 0
   [ -n "$dedup_key" ] && [ -n "$title" ] && [ -n "$message" ] || return 0
   token_path=$(fm_moshi_token_path)
@@ -139,25 +139,18 @@ fm_moshi_notify() {
   title=${title:0:160}
   message=${message:0:512}
   command -v jq >/dev/null 2>&1 || return 0
-  payload=$(jq -cn --arg title "$title" --arg message "$message" \
-    '{title: $title, message: $message}' 2>/dev/null) || return 0
-  case "$payload" in
-    *"$token"*) return 0 ;;
-  esac
+  payload=$(jq -cn --arg token "$token" --arg title "$title" --arg message "$message" \
+    '{token: $token, title: $title, message: $message}' 2>/dev/null) || return 0
   fm_moshi_mark_once "$state" "$digest" || return 0
-  header_file=$(mktemp "$state/.moshi-header.XXXXXX" 2>/dev/null) || return 0
-  if ! chmod 600 "$header_file" 2>/dev/null ||
-    ! printf 'Authorization: Bearer %s\n' "$token" > "$header_file"; then
-    rm -f -- "$header_file"
-    return 0
-  fi
-  curl --silent --show-error --fail --proto '=https' --tlsv1.2 \
+  marker_dir="$state/.moshi-notifications/$digest"
+  if curl --silent --show-error --fail --proto '=https' --tlsv1.2 \
     --connect-timeout 2 --max-time 5 --request POST \
     --header 'Content-Type: application/json' \
-    --header "X-Idempotency-Key: firstmate-$digest" \
-    --header "@$header_file" --data-binary "$payload" \
-    --output /dev/null "$FM_MOSHI_WEBHOOK_ENDPOINT" >/dev/null 2>&1 || true
-  rm -f -- "$header_file"
+    --data-binary "$payload" \
+    --output /dev/null "$FM_MOSHI_WEBHOOK_ENDPOINT" >/dev/null 2>&1; then
+    return 0
+  fi
+  rmdir -- "$marker_dir" 2>/dev/null || true
   return 0
 }
 

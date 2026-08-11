@@ -15,32 +15,21 @@ make_case() {
   cat > "$dir/fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 payload=
-header_file=
-key=
+endpoint=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --data-binary) payload=${2:-}; shift 2 ;;
-    --header)
-      case "${2:-}" in
-        @*) header_file=${2#@} ;;
-        Idempotency-Key:*) key=${2#Idempotency-Key: } ;;
-        X-Idempotency-Key:*) key=${2#X-Idempotency-Key: } ;;
-      esac
-      shift 2
-      ;;
+    --header) shift 2 ;;
     --output) shift 2 ;;
+    https://*) endpoint=$1; shift ;;
     *) shift ;;
   esac
 done
 if [ -n "${FM_MOSHI_TEST_PAYLOAD:-}" ]; then
   printf '%s' "$payload" > "$FM_MOSHI_TEST_PAYLOAD"
 fi
-if [ -n "${FM_MOSHI_TEST_HEADER_SEEN:-}" ] && [ -n "$header_file" ] &&
-  grep -q '^Authorization: Bearer ' "$header_file"; then
-  : > "$FM_MOSHI_TEST_HEADER_SEEN"
-fi
-if [ -n "${FM_MOSHI_TEST_KEY:-}" ] && [ -n "$key" ]; then
-  printf '%s\n' "$key" > "$FM_MOSHI_TEST_KEY"
+if [ -n "${FM_MOSHI_TEST_ENDPOINT:-}" ] && [ -n "$endpoint" ]; then
+  printf '%s\n' "$endpoint" > "$FM_MOSHI_TEST_ENDPOINT"
 fi
 if [ -n "${FM_MOSHI_TEST_CALLS:-}" ]; then
   printf 'call\n' >> "$FM_MOSHI_TEST_CALLS"
@@ -97,26 +86,24 @@ test_token_file_safety() {
   pass 'unsafe and absent token files are silent no-ops'
 }
 
-test_payload_escaping_and_authentication() {
-  local dir payload title message
+test_payload_escaping_and_endpoint() {
+  local dir payload title message endpoint
   dir=$(make_case payload)
   write_safe_token "$dir"
   title='PR "ready" \\"escaped"'
   message=$'line one\nline "two" and \\tail'
   FM_MOSHI_TEST_PAYLOAD="$dir/payload.json" \
-    FM_MOSHI_TEST_HEADER_SEEN="$dir/header-seen" \
-    FM_MOSHI_TEST_KEY="$dir/idempotency-key" \
+    FM_MOSHI_TEST_ENDPOINT="$dir/endpoint" \
     run_notify "$dir" pr-ready payload-key "$title" "$message" \
     || fail 'payload: helper returned failure'
   payload=$(cat "$dir/payload.json")
-  jq -e --arg title "$title" --arg message "$message" \
-    '.title == $title and .message == $message' "$dir/payload.json" >/dev/null \
-    || fail 'payload: title or message was not JSON-encoded exactly'
-  [ -e "$dir/header-seen" ] || fail 'payload: authorization header was not supplied'
-  [ -s "$dir/idempotency-key" ] || fail 'payload: idempotency key was not supplied'
-  ! grep -qF 'fixture-value' "$dir/payload.json" \
-    || fail 'payload: token appeared in the JSON payload'
-  pass 'payload escaping and authorization keep the token out of JSON'
+  jq -e --arg token fixture-value --arg title "$title" --arg message "$message" \
+    '.token == $token and .title == $title and .message == $message' "$dir/payload.json" >/dev/null \
+    || fail 'payload: token, title, or message was not JSON-encoded exactly'
+  endpoint=$(cat "$dir/endpoint")
+  [ "$endpoint" = 'https://api.getmoshi.app/api/webhook' ] \
+    || fail "payload: unexpected endpoint $endpoint"
+  pass 'payload escaping and Moshi webhook contract are correct'
 }
 
 test_deduplication() {
@@ -149,7 +136,7 @@ test_best_effort_failure() {
 }
 
 test_token_file_safety
-test_payload_escaping_and_authentication
+test_payload_escaping_and_endpoint
 test_deduplication
 test_best_effort_failure
 printf 'all fm-moshi-notify tests passed\n'
