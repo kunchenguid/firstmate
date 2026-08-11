@@ -195,6 +195,9 @@ Before asking Treehouse to allocate, `fm-spawn.sh` inspects the slots Treehouse 
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 Each reusable clean task worktree is placed at the project's local default-branch tip so reads and citations match the code the fleet runs, while a ship branch may be cut from a distinct contribution target such as an upstream trunk so fleet-only commits do not enter the contribution.
 [`bin/fm-task-base-lib.sh`](../bin/fm-task-base-lib.sh) owns resolution of those two references and the branch-pollution guard, and `fm-spawn.sh` records the resolved pair in task metadata.
+The same library derives a third property from that target, the forge venue whose trunk the target sits on, so a ship's pull request venue follows the task instead of a fixed per-project assumption: a task cut from the upstream trunk belongs upstream, and one cut from the fork trunk belongs at the fork.
+`fm-spawn.sh` resolves it after every base override so a retargeted task records the venue it was actually retargeted to, and `bin/fm-pr-check.sh` refuses a pull request that contradicts the record before arming anything, because raising it at the other trunk would contribute every commit the two do not share.
+Only a contradiction refuses; a task with no recorded venue is reported unchecked rather than read as agreement, and no venue is ever inferred from the pull request itself.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
