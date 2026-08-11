@@ -36,8 +36,9 @@
 #                       X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. wake-drain     - presents durable wakes and advances recovery handling
-#                       state, so it also only runs when locked.
+#   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
+#                       reconciliation before presenting durable wakes and advancing
+#                       recovery handling state, so both only run when locked.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -582,7 +583,10 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. wake-drain -------------------------------------------------------
+# --- 3. inactive outcomes + wake-drain -----------------------------------
+# The existing locked session-start path runs the same local inactive-outcome
+# reconciliation as the watcher poll before it presents the resulting durable
+# wake, without adding a daemon or external-network call.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
 # remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
@@ -601,6 +605,11 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
+  INACTIVE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_OUT=
+  if [ -n "$INACTIVE_OUT" ]; then
+    printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
+  fi
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

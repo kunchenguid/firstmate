@@ -215,7 +215,14 @@ EOF
     while IFS= read -r wt; do
       [ -n "$wt" ] || continue
       [ -d "$wt" ] || continue
-      u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
+      wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || continue
+      top=$(git -C "$wt_real" rev-parse --show-toplevel 2>/dev/null) || continue
+      top=$(cd "$top" 2>/dev/null && pwd -P) || continue
+      # git -C accepts a descendant and silently uses its ancestor repository.
+      # A recorded worktree must itself be that repository, not merely reside
+      # below firstmate's own checkout.
+      [ "$top" = "$wt_real" ] || continue
+      u=$(git -C "$wt_real" remote get-url origin 2>/dev/null) || continue
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF

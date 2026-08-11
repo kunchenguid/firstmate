@@ -12,6 +12,11 @@ set -u
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
+# Keep disposable homes outside the snapshot's fixture repo boundary even when
+# TMPDIR is inside an isolated source worktree.
+FM_ROOT_OVERRIDE="$TMP_ROOT/fixture-root"
+mkdir -p "$FM_ROOT_OVERRIDE"
+export FM_ROOT_OVERRIDE
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -691,7 +696,7 @@ EOF
 }
 
 test_nonprogressing_child_states_are_explicit() {
-  local home mate fakebin canonical
+  local home mate fakebin canonical summary
   home=$(make_home child-state-classification)
   mate="$TMP_ROOT/child-state-classification-home"
   make_valid_secondmate_home states "$mate"
@@ -754,6 +759,11 @@ EOF
   printf 'done: complete\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    [.terminal_children[] | .id + "=" + .state] == ["done=done", "failed=failed"]
+  ' >/dev/null || fail "secondmate summary dropped terminal in-flight children: $summary"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '

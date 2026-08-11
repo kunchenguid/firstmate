@@ -47,6 +47,24 @@ assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }
 
+# Mark presentation-stage inactive terminal outcomes only after the handling
+# turn has completed and before this acknowledgement consumes its queue rows.
+# The helper ignores non-presentation and legacy keys, so this is a narrow
+# receipt path rather than a second interpretation of general check wakes.
+acknowledge_inactive_outcomes() { # <sequence>
+  local cutoff=$1 epoch seq kind key payload fingerprint
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ "$kind" = check ] || continue
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    [ "$seq" -le "$cutoff" ] || continue
+    case "$key" in
+      inactive-outcome:*) fingerprint=${key#inactive-outcome:} ;;
+      *) continue ;;
+    esac
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" acknowledge "$fingerprint" || return 1
+  done < "$FM_WAKE_QUEUE"
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -129,6 +147,10 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
+  if ! acknowledge_inactive_outcomes "$ACK_THROUGH"; then
+    echo "wake drain: inactive outcome presentation receipt could not be recorded safely" >&2
+    exit 1
+  fi
   awk -F '\t' -v cutoff="$ACK_THROUGH" '
     NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff { print }
   ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
