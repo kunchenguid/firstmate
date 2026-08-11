@@ -203,10 +203,10 @@ case "$FM_TEST_OWNER_SHAPE:$pid:$field" in
   claude:200:comm=) printf '%s\n' claude ;;
   claude:200:args=) printf '%s\n' claude ;;
   claude:200:ppid=) printf '%s\n' 1 ;;
-  omp:300:comm=) printf '%s\n' omp ;;
+  omp:300:comm=) printf '%s\n' "$FM_TEST_OMP_PATH" ;;
   omp:300:args=) printf '%s\n' "$FM_TEST_OMP_PATH --resume" ;;
   omp:300:ppid=) printf '%s\n' 400 ;;
-  omp:400:comm=) printf '%s\n' omp ;;
+  omp:400:comm=) printf '%s\n' "$FM_TEST_OMP_PATH" ;;
   omp:400:args=) printf '%s\n' "$FM_TEST_OMP_PATH --resume" ;;
   omp:400:ppid=) printf '%s\n' 1 ;;
   omp:*:ppid=) printf '%s\n' 300 ;;
@@ -240,10 +240,12 @@ test_omp_identity_requires_canonical_executable_evidence() {
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "omp --resume"')
   [ "$got" = other ] || fail "a bare exec-a OMP identity was accepted as '$got'"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "$FM_TEST_OMP_PATH --resume"')
-  [ "$got" = omp ] || fail "canonical OMP argv evidence was not accepted as '$got'"
+  [ "$got" = other ] || fail "an exec-a canonical OMP path was accepted as '$got'"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity "$FM_TEST_OMP_PATH" "$FM_TEST_OMP_PATH --resume"')
   [ "$got" = omp ] || fail "canonical OMP executable evidence was not accepted as '$got'"
-  pass "session-lock: OMP identity requires canonical executable or argv path evidence"
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity bun "bun $FM_TEST_OMP_PATH --resume"')
+  [ "$got" = omp ] || fail "canonical Bun OMP script evidence was not accepted as '$got'"
+  pass "session-lock: OMP identity requires executable or Bun script evidence"
 }
 
 test_competing_version_named_session_is_seen_as_live() {

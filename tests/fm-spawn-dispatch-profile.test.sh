@@ -789,6 +789,58 @@ SH
   pass "raw OMP launches remain unverified without semantic busy wiring"
 }
 
+test_raw_omp_dispatch_policy_is_structural() {
+  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script
+  command -v node >/dev/null 2>&1 || { pass "raw OMP structural policy skipped without node"; return; }
+  omp_script="$TMP_ROOT/start-omp.sh"
+  agent_script="$TMP_ROOT/raw-policy-agent.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exec /tmp/omp --raw-flag' > "$omp_script"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" omp' > "$agent_script"
+  for command in \
+    "nice -n10 /tmp/omp --raw-flag" \
+    "time -f%E /tmp/omp --raw-flag" \
+    "$omp_script --raw-flag" \
+    "bash $omp_script" \
+    "bash < $omp_script" \
+    "env -S '/tmp/omp --raw-flag'"; do
+    result=$(node "$policy" --command "$command")
+    [ "$result" = omp ] || fail "raw OMP command '$command' was classified as '$result'"
+  done
+  for command in \
+    "echo omp" \
+    "printf '%s\\n' omp" \
+    "echo 'omp'" \
+    "xargs echo omp" \
+    "bash $agent_script"; do
+    result=$(node "$policy" --command "$command")
+    [ "$result" = other ] || fail "non-OMP command '$command' was classified as '$result'"
+  done
+  pass "raw OMP ownership policy distinguishes executed commands from mentions"
+}
+
+test_raw_launch_mentions_do_not_receive_omp_owner() {
+  local rec id out status launch raw_owner output spec command
+  rec=$(make_spawn_case raw-omp-mentions claude \
+    profile-raw-mention-echo-z8p profile-raw-mention-string-z8q profile-raw-mention-printf-z8r)
+  read_case_record "$rec"
+  for spec in \
+    "echo omp|profile-raw-mention-echo-z8p|omp" \
+    "echo 'omp'|profile-raw-mention-string-z8q|omp" \
+    "printf '%s\\n' omp|profile-raw-mention-printf-z8r|omp"; do
+    IFS='|' read -r command id _ <<< "$spec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 0 "$status" "raw mention '$command' should spawn"
+    launch=$(cat "$LAUNCH_LOG")
+    raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
+    [ -z "$raw_owner" ] || fail "raw mention '$command' received OMP ownership marker '$raw_owner'"
+    output=$(env -u FM_RAW_LAUNCH_OWNER OMPCODE=1 PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch")
+    [ "$output" = omp ] || fail "raw mention '$command' produced '$output'"
+  done
+  pass "raw launch mentions stay generic without an OMP ownership marker"
+}
+
 test_raw_launch_marker_covers_process_tree_forms() {
   local rec id out status launch raw_omp script sub probe command expected_harness raw_owner
   local direct_id wrapped_id nested_id script_id stdin_id env_id cwd_id no_node_id
@@ -1067,6 +1119,8 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_raw_launch_worker_identity_matches_its_recorded_harness
 test_raw_omp_launch_does_not_arm_unwired_semantic_busy
+test_raw_omp_dispatch_policy_is_structural
+test_raw_launch_mentions_do_not_receive_omp_owner
 test_raw_launch_marker_covers_process_tree_forms
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

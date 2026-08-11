@@ -1247,20 +1247,32 @@ case "$ARG3" in
     ;;
 esac
 
+raw_launch_uses_omp_fallback() {
+  [ "$HARNESS" = raw-omp ]
+}
+
+raw_launch_uses_omp() {
+  local launch=$1 result
+  if command -v node >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/fm-raw-launch-policy.mjs" ]; then
+    result=$(node "$SCRIPT_DIR/fm-raw-launch-policy.mjs" --command "$launch" 2>/dev/null) || return 1
+    [ "$result" = omp ]
+    return
+  fi
+  raw_launch_uses_omp_fallback
+}
+
 # Raw OMP-shaped commands need an independent process-tree ownership token so
 # their unverified endpoint cannot be confused with a verified OMP worker.
 # Generic escape-hatch commands retain their literal launch form and metadata;
 # the token is only meaningful for the OMP safety gate.
 if [ "$RAW_LAUNCH" -eq 1 ]; then
-  case " $LAUNCH " in
-    *" omp "*|*"/omp "*|*"./omp "*|*"start-omp.sh"*)
-      RAW_OWNER_REQUIRED=1
-      RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
-      RAW_LAUNCH_SANITIZE=1
-      ;;
-    *" && "*)
-      RAW_LAUNCH_SANITIZE=1
-      ;;
+  if raw_launch_uses_omp "$LAUNCH"; then
+    RAW_OWNER_REQUIRED=1
+    RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
+    RAW_LAUNCH_SANITIZE=1
+  fi
+  case "$LAUNCH" in
+    *" && "*) RAW_LAUNCH_SANITIZE=1 ;;
   esac
 fi
 

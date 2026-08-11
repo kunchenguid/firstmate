@@ -95,18 +95,15 @@ fm_harness_omp_script_matches() {  # <path>
 }
 
 fm_harness_omp_process_matches() {  # <comm> <args>
-  local comm=$1 args=${2:-} argv0 rest script
+  local comm=$1 args=${2:-} launcher rest script
   fm_harness_omp_attribution_allowed || return 1
   fm_harness_omp_script_matches "$comm" && return 0
   args=${args#"${args%%[![:space:]]*}"}
-  argv0=${args%%[[:space:]]*}
-  if [ -n "$argv0" ]; then
-    argv0=${argv0%%[[:space:]]*}
-    fm_harness_omp_script_matches "$argv0" && return 0
-  fi
   case "$(basename -- "$comm")" in
     bun)
-      rest=${args#"$argv0"}
+      launcher=${args%%[[:space:]]*}
+      [ "$launcher" != "$args" ] || return 1
+      rest=${args#"$launcher"}
       rest=${rest#"${rest%%[![:space:]]*}"}
       [ -n "$rest" ] || return 1
       script=${rest%%[[:space:]]*}
