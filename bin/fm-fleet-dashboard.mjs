@@ -22,6 +22,7 @@
 //                      or config/)
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -61,9 +62,9 @@ function usage(stream = process.stdout) {
 
 Render the fleet cockpit: decisions ranked by importance, our PRs in
 review with actionable status, and the reviews domain's PR relationships.
---width <columns>  terminal width override (default: tty width, else 80)
+--width <columns>  terminal frame width request (minimum 40; output capped at 80)
 --all              compatibility flag; the compact default already lists every item
---show <row>       print one row's full context by its rendered row number
+--show <row|id>    print one row's full context by position number or stable row id
 --watch            live redraw: local state every ${WATCH_LOCAL_SECONDS}s, GitHub state every
                    ${WATCH_GITHUB_SECONDS}s; type a row number and Enter to expand, b goes back
 --output <path>    write the self-contained HTML page to <path> instead
@@ -92,9 +93,10 @@ function parseArguments(argumentsList) {
       continue;
     }
     if (argument === "--show" && index + 1 < argumentsList.length) {
-      showRow = Number.parseInt(argumentsList[index + 1], 10);
-      if (!Number.isInteger(showRow) || showRow < 1) {
-        throw new Error("--show requires a positive row number");
+      const supplied = argumentsList[index + 1];
+      showRow = /^\d+$/.test(supplied) ? Number.parseInt(supplied, 10) : supplied;
+      if ((typeof showRow === "number" && showRow < 1) || showRow === "") {
+        throw new Error("--show requires a positive row number or stable row id");
       }
       index += 1;
       continue;
@@ -423,7 +425,9 @@ function collectReviewRelationships() {
         ? "review count unknown"
         : `review x${roundCount}`;
     let status;
-    if (current.state === "done") {
+    if (!group.number) {
+      status = `state ${current.state ?? "unknown"}; PR unknown`;
+    } else if (current.state === "done") {
       status = `waiting on author after ${roundLabel}`;
     } else if (current.hold_reason) {
       status = `${cleanProse(current.hold_reason)} · ${roundLabel}`;
@@ -440,7 +444,8 @@ function collectReviewRelationships() {
       : githubPrUrlFromProjectRemote(domain.home, current.repo, group.number);
     relationships.push({
       id: group.number ? `pr-${group.number}` : current.id,
-      name: group.number ? `PR ${group.number}` : `PR unknown · ${cleanProse(current.title) || current.id}`,
+      number: group.number,
+      name: group.number ? `PR ${group.number}` : `PR unknown: ${cleanProse(current.title) || current.id}`,
       project: current.repo ?? null,
       link: recordedLink ?? derivedLink,
       linkSource: recordedLink ? "record" : derivedLink ? "verified_project_remote" : "absent",
@@ -466,6 +471,15 @@ function githubStatus(data) {
     }
   }
   const reviewerParts = [...recordedReviews];
+  const changeRequesters = [...new Set((reviews ?? [])
+    .filter((review) => review.state === "CHANGES_REQUESTED")
+    .map((review) => review.author?.login)
+    .filter(Boolean))];
+  const requestedReviewers = Array.isArray(data.reviewRequests)
+    ? [...new Set(data.reviewRequests
+        .map((reviewer) => reviewer.login ?? reviewer.slug ?? reviewer.name)
+        .filter(Boolean))]
+    : [];
   const reviewSummary = reviews === null
     ? "reviewers unknown (not checked)"
     : reviewerParts.length === 0
@@ -511,7 +525,47 @@ function githubStatus(data) {
       : "unknown",
     terminal: data.state === "MERGED" || data.state === "CLOSED",
     reviewSummary,
+    changeRequesters,
+    requestedReviewers,
   };
+}
+
+function isFirstmatePr(url) {
+  return /^https:\/\/github\.com\/pedromuller-del\/firstmate\/pull\/\d+\/?$/i.test(url ?? "");
+}
+
+function checksLabel(ci) {
+  const labels = {
+    "CI green": "checks green",
+    "CI red": "checks red",
+    "CI running": "checks running",
+    "CI none reported": "checks none reported",
+    "CI unknown": "checks unknown",
+    "CI unknown (not checked yet)": "checks unknown - not checked",
+    "CI unknown (GitHub unavailable)": "checks unknown - GitHub unavailable",
+  };
+  return labels[ci] ?? "checks unknown";
+}
+
+function readinessLabel(githubResult) {
+  if (!githubResult) return "readiness unknown - not checked";
+  if (!githubResult.ok) {
+    return githubResult.readiness.includes("GitHub unavailable")
+      ? "readiness unknown - GitHub unavailable"
+      : githubResult.readiness;
+  }
+  if (githubResult.readiness === "changes requested" && githubResult.changeRequesters.length > 0) {
+    return `changes requested by ${githubResult.changeRequesters.join(", ")}`;
+  }
+  if (githubResult.readiness === "waiting on human review" && githubResult.requestedReviewers.length > 0) {
+    return `waiting on ${githubResult.requestedReviewers.join(", ")}`;
+  }
+  return githubResult.readiness;
+}
+
+function firstmateReadiness(githubResult) {
+  const label = readinessLabel(githubResult);
+  return label.startsWith("approved") ? "approved; local checks unknown" : label;
 }
 
 function isStuckState(state) {
@@ -535,8 +589,11 @@ function ourPrMarker(state, registeredPr, githubResult) {
   return { key: "unknown", source: "forge" };
 }
 
-function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber }) {
+function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber, firstmatePr }) {
   if (!registeredPr) {
+    if (firstmatePr) {
+      return `Register PR ${prNumber ?? "unknown"} for review status and record the exact local suite evidence.`;
+    }
     return `Register PR ${prNumber ?? "unknown"} so its CI and review readiness can be established.`;
   }
   if (!githubResult?.ok) {
@@ -581,7 +638,7 @@ function fetchGithubStatuses(urls) {
         "view",
         url,
         "--json",
-        "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews",
+        "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews,reviewRequests",
       ]);
       results.set(url, { ok: true, ...githubStatus(JSON.parse(text)) });
     } catch (fetchError) {
@@ -628,7 +685,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     }
     if (record.hold_kind === "captain" && record.hold_reason && !record.unresolved_blocker_ids?.length) {
       const holdAge = sinceAge(record.since);
-      const looksAnswered = /\b(?:captain\s+)?decided\b|\banswered\b/i.test(record.hold_reason);
+      const looksAnswered = /^(?:CAPTAIN\s+)?(?:DECIDED|ANSWERED)\b/.test(record.hold_reason);
       const aged = holdAge.seconds !== null && holdAge.seconds >= AGE_HOT_SECONDS;
       decisions.push({
         tag: looksAnswered ? "ANSWER?" : aged ? "AGED" : "HOLD",
@@ -645,6 +702,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         live: false,
         raw: record.raw,
         attentionClass: looksAnswered ? "answered" : aged ? "aged" : "now",
+        stableKey: null,
         markerKey: looksAnswered ? "unknown" : "yellow",
         markerSource: "local",
         currentState: "captain hold open",
@@ -689,6 +747,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         prose: cleanProse(decision.summary) || "decision summary absent",
         note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
         attentionClass: "now",
+        stableKey: decision.key ?? "default",
         markerKey: "yellow",
         markerSource: "local",
         blocker: cleanProse(decision.summary) || "decision summary absent",
@@ -703,6 +762,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         prose: cleanProse(blocker.summary) || "blocker summary absent",
         note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
         attentionClass: "now",
+        stableKey: blocker.key ?? "default",
         markerKey: "red",
         markerSource: "local",
         blocker: cleanProse(blocker.summary) || "blocker summary absent",
@@ -717,6 +777,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         prose: detail || "blocked, no detail reported",
         note: null,
         attentionClass: "now",
+        stableKey: "blocked",
         markerKey: "red",
         markerSource: "local",
         blocker: detail || "blocked, no detail reported",
@@ -739,15 +800,31 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       const recorded = detail || lastEvent || "no status recorded";
       const githubResult = registeredPr ? github?.results?.get(task.pr.url) ?? null : null;
       const prNumber = stageMatch?.[1] ?? task.pr.url.match(/\/pull\/(\d+)/)?.[1] ?? null;
-      const status = registeredPr
-        ? githubResult
-          ? `${githubResult.ci} · ${githubResult.readiness}`
-          : "CI unknown (not checked yet) · review readiness unknown (not checked yet)"
-        : `CI unknown · readiness unknown · URL unknown · PR ${prNumber ?? "unknown"} was never registered`;
-      const marker = ourPrMarker(state, registeredPr, githubResult);
+      const firstmatePr = base.project === "firstmate" || (registeredPr && isFirstmatePr(task.pr.url));
+      const effectiveGithubResult = firstmatePr && githubResult
+        ? {
+            ...githubResult,
+            ci: "CI unknown",
+            readiness: firstmateReadiness(githubResult),
+          }
+        : githubResult;
+      const checkStatus = firstmatePr
+          ? "local checks unknown"
+        : !registeredPr
+          ? "checks unknown (unregistered)"
+          : checksLabel(githubResult?.ci ?? "CI unknown (not checked yet)");
+      const reviewStatus = !registeredPr
+        ? "readiness unknown (unregistered)"
+        : firstmatePr
+          ? firstmateReadiness(githubResult)
+          : readinessLabel(githubResult);
+      const status = `${checkStatus} · ${reviewStatus}`;
+      const marker = ourPrMarker(state, registeredPr, effectiveGithubResult);
       ours.push({
         ...base,
         tag: "OURS",
+        prNumber,
+        listLabel: `PR ${prNumber ?? "unknown"} | ${checkStatus} | ${reviewStatus}`,
         prose: status,
         note: registeredPr ? task.pr.url : null,
         markerKey: marker.key,
@@ -759,8 +836,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         recommendation: ourPrRecommendation({
           markerKey: marker.key,
           registeredPr,
-          githubResult,
+          githubResult: effectiveGithubResult,
           prNumber,
+          firstmatePr,
         }),
         why: registeredPr
           ? "our PR recorded in task metadata and not yet landed in the backlog"
@@ -796,6 +874,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     reviewing.push({
       tag: "THEIRS",
       name: relationship.name,
+      listLabel: `${relationship.number ? relationship.name : "PR unknown"} | ${relationship.status.replaceAll(" · ", " | ")}`,
       id: relationship.id,
       project: relationship.project,
       prose: `${relationship.status} · ${forgeState}`,
@@ -882,14 +961,38 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   };
 
   let rowNumber = 0;
+  const rowEntries = [];
   for (const bucket of model.buckets) {
     for (const item of bucket.items) {
       rowNumber += 1;
-      const keyedDecision = item.note?.match(/^\[([^\]]+)\]$/)?.[1] ?? null;
-      const discriminator = keyedDecision ?? item.tag.toLowerCase();
-      item.identity = `${bucket.key}/${item.id || "unknown"}/${discriminator}`;
       item.number = rowNumber;
       item.bucketName = bucket.name;
+      const stablePart = bucket.key === "decisions"
+        ? item.stableKey && item.stableKey !== item.id ? item.stableKey : item.id
+        : bucket.key === "ours-in-review"
+          ? item.prNumber ?? item.id
+          : String(item.id).replace(/^pr-/, "");
+      const prefix = bucket.key === "decisions" ? "d" : bucket.key === "ours-in-review" ? "o" : "r";
+      const canonical = `${bucket.key}/${item.id}/${item.stableKey ?? ""}`;
+      const natural = `${prefix}:${stablePart}`;
+      const candidate = natural.length <= 20
+        ? natural
+        : `${prefix}:${createHash("sha256").update(canonical).digest("hex").slice(0, 8)}`;
+      rowEntries.push({ item, canonical, candidate });
+    }
+  }
+  const candidates = new Map();
+  for (const entry of rowEntries) {
+    const group = candidates.get(entry.candidate) ?? [];
+    group.push(entry);
+    candidates.set(entry.candidate, group);
+  }
+  for (const group of candidates.values()) {
+    group.sort((left, right) => left.canonical.localeCompare(right.canonical));
+    for (let index = 0; index < group.length; index += 1) {
+      group[index].item.identity = group.length === 1
+        ? group[index].candidate
+        : `${group[index].candidate}-${index + 1}`;
     }
   }
   model.totalRows = rowNumber;
@@ -1001,7 +1104,11 @@ function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
       const rowLabel = String(item.number).padStart(numberWidth);
       const prefix = `  ${rowLabel} `;
       const marker = paint(item.marker.color, item.marker.glyph);
-      lines.push(`${paint("dim", prefix)}${marker} ${clip(item.name, Math.max(1, width - prefix.length - 2))}`);
+      const stablePrefix = `${item.identity} `;
+      const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));
+      lines.push(
+        `${paint("dim", `${prefix}${stablePrefix}`)}${marker} ${paint(item.attentionClass === "aged" ? "dim" : null, title)}`,
+      );
     }
   }
   lines.push("");
@@ -1016,7 +1123,7 @@ function renderExpandedItem(item) {
   lines.push(`#${item.number} | ${item.bucketName} | ${item.marker.glyph} ${item.marker.label}`);
   lines.push(item.name || "(unnamed)");
   lines.push("");
-  lines.push(`identity: ${item.identity}`);
+  lines.push(`row id: ${item.identity}`);
   lines.push(`current state: ${item.currentState || "unknown"}`);
   lines.push(`age: ${item.age.label}`);
   if (item.prose) {
@@ -1086,10 +1193,11 @@ function escapeHtml(value) {
 }
 
 function htmlRow(item) {
-  return `<li class="row">
+  return `<li class="row${item.attentionClass === "aged" ? " row-aged" : ""}">
     <span class="row-number">${item.number}</span>
+    <span class="row-id">${escapeHtml(item.identity)}</span>
     <span class="marker marker-${escapeHtml(item.markerKey)}" aria-label="${escapeHtml(item.marker.label)}">${escapeHtml(item.marker.glyph)}</span>
-    <span class="row-title">${escapeHtml(item.name || "detail absent")}</span>
+    <span class="row-title">${escapeHtml(item.listLabel ?? item.name ?? "detail absent")}</span>
   </li>`;
 }
 
@@ -1149,9 +1257,11 @@ function renderHtml(model) {
     .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); }
     .section-head p { color:var(--muted); }
     .rows { display:grid; gap:2px; margin:0; padding:0; list-style:none; }
-    .row { min-width:0; display:grid; grid-template-columns:3ch 2ch minmax(0,1fr); gap:8px; align-items:baseline; padding:5px 0; }
-    .row-number { color:var(--muted); text-align:right; font-variant-numeric:tabular-nums; }
+    .row { min-width:0; display:grid; grid-template-columns:3ch max-content 2ch minmax(0,1fr); gap:8px; align-items:baseline; padding:5px 0; }
+    .row-number,.row-id { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .row-number { text-align:right; }
     .row-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .row-aged .row-title { color:var(--muted); }
     .marker { font-weight:800; }
     .marker-yellow { color:var(--yellow); }
     .marker-red { color:var(--red); }
@@ -1364,7 +1474,10 @@ try {
     const github = urls.length > 0 ? fetchGithubStatuses(urls) : null;
     const model = buildModel({ ...inputs, github });
     if (showRow !== null) {
-      process.stdout.write(expandRow(model, { number: showRow }));
+      process.stdout.write(expandRow(
+        model,
+        typeof showRow === "number" ? { number: showRow } : { identity: showRow },
+      ));
     } else if (outputPath !== null) {
       writeAtomically(outputPath, renderHtml(model));
       process.stdout.write(`${outputPath}\n`);

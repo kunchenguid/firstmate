@@ -32,7 +32,8 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 
 TRUNCATION_ARTIFACT="(truncated, 90 chars total - use show decision-task --full to see complete text)"
-OUR_PR="https://github.com/pedromuller-del/firstmate/pull/4001"
+OUR_PR="https://github.com/monalee/artemis/pull/4001"
+FIRSTMATE_PR="https://github.com/pedromuller-del/firstmate/pull/4004"
 MERGED_PR="https://github.com/pedromuller-del/firstmate/pull/3972"
 THEIR_PR="https://github.com/monalee/artemis/pull/912"
 MERGED_THEIR_PR="https://github.com/monalee/artemis/pull/999"
@@ -75,13 +76,16 @@ set -u
 url=${3:-}
 case "$url" in
   *pull/4001*)
-    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"reviewer-one"},"state":"CHANGES_REQUESTED"}]}'
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"reviewer-one"},"state":"CHANGES_REQUESTED"}],"reviewRequests":[]}'
+    ;;
+  *pull/4004*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}],"reviews":[],"reviewRequests":[{"login":"local-reviewer"}]}'
     ;;
   *pull/912*|*pull/930*|*pull/4188*)
-    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[]}'
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
     ;;
   *pull/888*|*pull/999*)
-    printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[]}'
+    printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
     ;;
   *)
     echo "no such pull request" >&2
@@ -126,12 +130,14 @@ EOF
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] decision-task - Decide the public API (repo: firstmate) (kind: ship) (since 2026-08-02)
-- [ ] review-task - Ship the review branch (repo: firstmate) (kind: ship) (since 2026-08-01)
+- [ ] review-task - Ship the review branch (repo: artemis) (kind: ship) (since 2026-08-01)
+- [ ] local-ci-pr - PR 4004: Ship the Firstmate local CI branch (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] unregistered-pr - PR 4002: Ship the unregistered review branch (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] stuck-pr - PR 4003: Ship the stuck review branch (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] deploy-window - Approve deployment window (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: Pedro must choose the deployment window.) (hold-kind: captain)
 - [ ] hold-oldest - Renew the signing certificate (repo: firstmate) (kind: captain) (since 2026-07-20) (hold: The certificate expires soon.) (hold-kind: captain)
 - [ ] hold-answered - Pick the flake-fix destination (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: CAPTAIN DECIDED 2026-08-02: use a separate test-hardening PR.) (hold-kind: captain)
+- [ ] hold-undecided - Decide whether to rotate the credential (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: This is not yet decided and still needs Pedro.) (hold-kind: captain)
 
 ## Queued
 - [ ] launch-page - Ship the launch page blocked-by: deploy-window (repo: firstmate) (kind: ship) (since 2026-08-01)
@@ -158,7 +164,7 @@ EOF
   fm_write_meta "$home/state/review-task.meta" \
     "window=firstmate:fm-review-task" \
     "worktree=$home/projects/review" \
-    "project=firstmate" \
+    "project=artemis" \
     "harness=claude" \
     "kind=ship" \
     "mode=ship" \
@@ -168,6 +174,18 @@ EOF
   review_generation=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" review-task)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" review-task idle \
     --gen "$review_generation" --source claude-hook --event stop
+
+  fm_write_meta "$home/state/local-ci-pr.meta" \
+    "window=firstmate:fm-local-ci-pr" \
+    "worktree=$home/projects/local-ci" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=$FIRSTMATE_PR"
+  mkdir -p "$home/projects/local-ci"
+  printf 'done: local suite evidence was not recorded\n' > "$home/state/local-ci-pr.status"
 
   fm_write_meta "$home/state/merged-task.meta" \
     "window=firstmate:fm-merged-task" \
@@ -230,8 +248,8 @@ test_cockpit_shows_exactly_three_sections() {
 
   out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
 
-  decisions=$(line_number_of "$out" "DECISIONS (5)")
-  ours=$(line_number_of "$out" "OUR PRS IN REVIEW (3)")
+  decisions=$(line_number_of "$out" "DECISIONS (6)")
+  ours=$(line_number_of "$out" "OUR PRS IN REVIEW (4)")
   theirs=$(line_number_of "$out" "REVIEWING (3)")
   [ -n "$decisions" ] || fail "no DECISIONS section counting all three items"
   [ -n "$ours" ] || fail "no OUR PRS IN REVIEW section"
@@ -250,18 +268,20 @@ test_cockpit_shows_exactly_three_sections() {
     || fail "a decision item is missing from the section"
   { [ "$decide" -lt "$hold_blocking" ] && [ "$hold_blocking" -lt "$hold_oldest" ]; } \
     || fail "importance order is broken: live ask, then delivery-blocking hold, then oldest"
-  assert_contains "$out" " 1 ◆ Decide the public API" "rows are not numbered and marked"
+  assert_contains "$out" " 1 d:api-shape ◆ Decide the public API" \
+    "rows do not colocate their position, stable id, marker, and title"
 
   assert_contains "$out" "PR 4002" "a current ship task in the PR stage was silently dropped"
-  assert_contains "$out" "PR 4002: Ship the unregistered review branch" \
-    "an unregistered PR row lost its backlog title"
+  assert_contains "$out" "PR 4002 | local checks unknown | readiness unknown (unregistered)" \
+    "an unregistered PR row implied established checks or readiness"
   assert_contains "$out" "github status checked just now" "github data age is not printed"
   assert_not_contains "$out" "pull/3972" "a landed PR still renders as in review"
 
-  pr_num=$(printf '%s\n' "$out" | grep -F "Ship the review branch" | tail -1 | awk '{print $1}')
+  pr_num=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1 | awk '{print $1}')
   pr_shown=$(render_terminal "$home" "$fakebin" --show "$pr_num") || fail "our PR expansion failed"
-  assert_contains "$pr_shown" "CI green" "green CI is missing from expanded status"
-  assert_contains "$pr_shown" "changes requested" "review readiness is missing from expanded status"
+  assert_contains "$pr_shown" "checks green" "green checks are missing from expanded status"
+  assert_contains "$pr_shown" "changes requested by reviewer-one" \
+    "review readiness is missing from expanded status"
   assert_contains "$pr_shown" "$OUR_PR" "expanded PR row lost its full link"
 
   assert_contains "$out" "PR 912" "review rounds were not grouped by PR"
@@ -272,7 +292,7 @@ test_cockpit_shows_exactly_three_sections() {
   assert_contains "$review_shown" "waiting on their fixes" "expanded review lost its recorded status"
   assert_contains "$review_shown" "$THEIR_PR" "expanded review lost its full link"
 
-  assert_contains "$out" "3 need Pedro - 2 now, 1 aged over 7d | 1 stuck" \
+  assert_contains "$out" "4 need Pedro - 3 now, 1 aged over 7d | 1 stuck" \
     "fresh recap did not separate current from aged captain holds"
   assert_contains "$out" "? Pick the flake-fix destination" \
     "an answered-looking open hold was not marked uncertain"
@@ -292,22 +312,28 @@ test_pr_truthfulness_regressions() {
   fakebin=$(make_fakebin "$home")
 
   out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "truthfulness render failed"
-  assert_contains "$out" "OUR PRS IN REVIEW (3)" "the PR review section contains a false or missing row"
+  assert_contains "$out" "OUR PRS IN REVIEW (4)" "the PR review section contains a false or missing row"
   assert_not_contains "$out" "PR 3999" \
     "a queued backlog record that merely names a PR was misreported as our PR in review"
   assert_not_contains "$out" "github.com/pedromuller-del/firstmate/pull/4002" \
     "the cockpit fabricated a URL for an unregistered PR"
-  registered_num=$(printf '%s\n' "$out" | grep -F "Ship the review branch" | tail -1 | awk '{print $1}')
+  registered_num=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1 | awk '{print $1}')
   registered_shown=$(render_terminal "$home" "$fakebin" --show "$registered_num") \
     || fail "registered PR expansion failed"
-  assert_contains "$registered_shown" "CI green · changes requested" \
+  assert_contains "$registered_shown" "checks green · changes requested by reviewer-one" \
     "CI and review readiness are not independent dimensions"
   assert_contains "$registered_shown" "review: reviews recorded: reviewer-one (changes requested)" \
     "expanded PR does not say who reviewed it"
+  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-one" \
+    "our PR line omits established check and review status"
+  assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
+    "Firstmate PR line treated GitHub checks as local CI evidence"
+  assert_not_contains "$out" "PR 4004 | checks red" \
+    "Firstmate PR line reported a GitHub check as a signal"
   unknown_num=$(printf '%s\n' "$out" | grep -F "PR 4002" | tail -1 | awk '{print $1}')
   unknown_shown=$(render_terminal "$home" "$fakebin" --show "$unknown_num") \
     || fail "unregistered PR expansion failed"
-  assert_contains "$unknown_shown" "CI unknown · readiness unknown" \
+  assert_contains "$unknown_shown" "local checks unknown · readiness unknown (unregistered)" \
     "missing registration was rendered as a false CI state"
   assert_contains "$unknown_shown" "was never registered" "missing registration has no visible reason"
   pass "PR rows preserve unknown registration and independent CI/readiness truth"
@@ -333,6 +359,8 @@ test_review_relationships_survive_completed_rounds() {
   pr4188_shown=$(render_terminal "$home" "$fakebin" --show "$pr4188_num") || fail "PR 4188 expansion failed"
   assert_contains "$pr4188_shown" "waiting on author after review x2" \
     "a completed round was mistaken for a completed PR relationship"
+  assert_contains "$out" "PR 912 | waiting on their fixes | review x2" \
+    "reviewing line omits the recorded round state"
   pass "reviewing is grouped by PR and retains completed rounds until terminal evidence"
 }
 
@@ -355,6 +383,24 @@ EOF
   pass "incomplete follow-up history renders an unknown round instead of a false ordinal"
 }
 
+test_numberless_review_record_never_invents_a_waiting_party() {
+  local home reviews_home fakebin out
+  home=$(make_home numberless-review)
+  write_live_fixture "$home"
+  reviews_home="$TMP_ROOT/reviews-home-$(basename "$home")"
+  cat >> "$reviews_home/data/backlog.md" <<'EOF'
+- [x] refresh-review-checklist - Refresh the review checklist (repo: artemis) (kind: scout) (reported 2026-08-02)
+EOF
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "numberless review render failed"
+  assert_contains "$out" "? PR unknown | state done; PR unknown" \
+    "numberless review record inferred that it was waiting on an author"
+  assert_not_contains "$out" "PR unknown: Refresh the review checklist | waiting on author" \
+    "numberless review record invented a waiting party"
+  pass "numberless review records state only their known workflow and PR identity"
+}
+
 test_decision_projection_labels_answered_and_aged_open_holds() {
   local home fakebin out answered_num answered_shown aged_num aged_shown
   home=$(make_home decision-truth)
@@ -362,8 +408,8 @@ test_decision_projection_labels_answered_and_aged_open_holds() {
   fakebin=$(make_fakebin "$home")
 
   out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "decision truth render failed"
-  assert_contains "$out" "DECISIONS (5)" "an open hold or blocker was silently removed"
-  assert_contains "$out" "3 need Pedro - 2 now, 1 aged over 7d | 1 stuck" \
+  assert_contains "$out" "DECISIONS (6)" "an open hold or blocker was silently removed"
+  assert_contains "$out" "4 need Pedro - 3 now, 1 aged over 7d | 1 stuck" \
     "decision recap did not separate current from aged captain holds"
   assert_contains "$out" "? Pick the flake-fix destination" \
     "explicit answer text was reported as needing a new answer"
@@ -375,11 +421,13 @@ test_decision_projection_labels_answered_and_aged_open_holds() {
   aged_num=$(printf '%s\n' "$out" | grep -F "Renew the signing certificate" | tail -1 | awk '{print $1}')
   aged_shown=$(render_terminal "$home" "$fakebin" --show "$aged_num") || fail "aged hold expansion failed"
   assert_contains "$aged_shown" "aged hold; still open" "the old open hold lost its lifecycle caveat"
+  assert_contains "$out" "◆ Decide whether to rotate the credential" \
+    "ordinary not-yet-decided prose was mistaken for an answer declaration"
   pass "decision projection keeps every hold while separating actionable, answered-looking, and aged rows"
 }
 
 test_clean_list_uses_truthful_markers_and_priority_order() {
-  local home fakebin out yellow red blue green unknown yellow_line red_line unknown_line blue_line green_line
+  local home fakebin out colored escape yellow red blue green unknown yellow_line red_line unknown_line blue_line green_line
   home=$(make_home interaction-markers)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -405,11 +453,16 @@ test_clean_list_uses_truthful_markers_and_priority_order() {
   red_line=$(line_number_of "$out" "$red PR 4003: Ship the stuck review branch")
   unknown_line=$(line_number_of "$out" "$unknown PR 4002")
   [ "$red_line" -lt "$unknown_line" ] || fail "unknown sorted ahead of stuck"
-  assert_contains "$out" "$unknown Ship the review branch" \
+  assert_contains "$out" "$unknown PR 4001 | checks green | changes requested by reviewer-one" \
     "changes requested without fresh local stuck evidence was overreported as red"
   blue_line=$(line_number_of "$out" "$blue PR 912")
   green_line=$(line_number_of "$out" "$green PR 930")
   [ "$blue_line" -lt "$green_line" ] || fail "progressing sorted ahead of waiting-elsewhere"
+  colored=$(NO_COLOR='' FORCE_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "colored marker render failed"
+  escape=$(printf '\033')
+  assert_contains "$colored" "${escape}[33m◆${escape}[0m ${escape}[2mRenew the signing certificate" \
+    "aged decision title is not dimmed while preserving its yellow marker"
   pass "clean list markers survive NO_COLOR and follow attention priority"
 }
 
@@ -422,14 +475,15 @@ test_default_rows_are_one_line_with_a_fresh_recap() {
   out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 130 --all) \
     || fail "clean-list render failed"
   assert_contains "$out" "ATTENTION NOW" "fresh recap band is absent"
-  assert_contains "$out" "3 need Pedro - 2 now, 1 aged over 7d | 1 stuck" \
+  assert_contains "$out" "4 need Pedro - 3 now, 1 aged over 7d | 1 stuck" \
     "recap did not separate current from aged captain holds"
   assert_contains "$out" "Decide the public API" "recap did not name a current need"
-  assert_contains "$out" "+2 more below" "recap truncation hid its remaining-attention count"
-  title_line=$(printf '%s\n' "$out" | grep -F "Ship the review branch" | tail -1)
+  assert_contains "$out" "+3 more below" "recap truncation hid its remaining-attention count"
+  title_line=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1)
   assert_not_contains "$title_line" "firstmate" "default row includes project detail"
   assert_not_contains "$title_line" "for " "default row includes age detail"
-  assert_not_contains "$out" "CI green" "default list leaked status prose"
+  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-one" \
+    "default PR row omits established status"
   assert_not_contains "$out" "$OUR_PR" "default list leaked a PR link"
   assert_contains "$out" "github status checked just now" "cached forge facts lost their explicit age"
   [ "${#title_line}" -le 80 ] || fail "fixed terminal measure exceeded 80 columns"
@@ -446,8 +500,8 @@ test_expansion_includes_evidence_derived_recommendation() {
     || fail "expansion list render failed"
   num=$(printf '%s\n' "$out" | grep -F "Decide the public API" | tail -1 | awk '{print $1}')
   shown=$(render_terminal "$home" "$fakebin" --show "$num") || fail "decision expansion failed"
-  assert_contains "$shown" "identity: decisions/decision-task/api-shape" \
-    "expanded row omitted its stable identity"
+  assert_contains "$shown" "row id: d:api-shape" \
+    "expanded row omitted its stable quotable id"
   assert_contains "$shown" "current state:" "expanded row omitted current state"
   assert_contains "$shown" "age:" "expanded row omitted age"
   assert_contains "$shown" "blocker/status:" "expanded row omitted concrete blocker or status"
@@ -463,7 +517,7 @@ test_expansion_includes_evidence_derived_recommendation() {
 }
 
 test_show_expands_rows_with_full_context() {
-  local home fakebin out num shown pr_num pr_shown error rc
+  local home fakebin out before num shown id_shown pr_num pr_shown error rc
   home=$(make_home show)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -478,7 +532,19 @@ test_show_expands_rows_with_full_context() {
     "expanded row does not explain its routing"
   assert_contains "$shown" "recent events" "expanded row does not show its status events"
 
-  pr_num=$(printf '%s\n' "$out" | grep -F "Ship the review branch" | head -1 | awk '{print $1}')
+  id_shown=$(render_terminal "$home" "$fakebin" --show d:api-shape) \
+    || fail "stable row id did not resolve"
+  assert_contains "$id_shown" "row id: d:api-shape" \
+    "expanded row does not preserve its quotable id"
+
+  before=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-26T00:00:00Z \
+    "$DASHBOARD" --width 80 --all) || fail "pre-aging render failed"
+  assert_contains "$before" "d:hold-oldest ◆ Renew the signing certificate" \
+    "hold id before aging is missing"
+  assert_contains "$out" "d:hold-oldest ◆ Renew the signing certificate" \
+    "hold id changed when its attention class aged"
+
+  pr_num=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | head -1 | awk '{print $1}')
   [ -n "$pr_num" ] || fail "could not read our PR row's number"
   pr_shown=$(render_terminal "$home" "$fakebin" --show "$pr_num") || fail "--show $pr_num failed"
   assert_contains "$pr_shown" "$OUR_PR" "expanded PR row lost its link"
@@ -535,10 +601,20 @@ test_html_page_renders_three_sections() {
   assert_contains "$html" 'aria-label="unknown"' "page omitted the unknown marker"
   assert_contains "$html" "Attention now" "page omitted the recap band"
   assert_contains "$html" "github status checked" "github data age missing from the page"
-  assert_not_contains "$html" "changes requested" "default HTML list leaked expanded status prose"
+  assert_contains "$html" "PR 4001 | checks green | changes requested by reviewer-one" \
+    "HTML PR row omits established status"
+  assert_contains "$html" 'class="row row-aged"' "HTML list does not distinguish aged holds"
   assert_not_contains "$html" "truncated, 90 chars" "CLI truncation artifact leaked into the page"
   assert_not_contains "$html" "https://cdn" "dashboard depends on a CDN"
   pass "HTML page renders the same three sections with gh status and its age"
+}
+
+test_help_describes_the_fixed_terminal_measure() {
+  local help
+  help=$("$DASHBOARD" --help) || fail "dashboard help failed"
+  assert_contains "$help" "terminal frame width request (minimum 40; output capped at 80)" \
+    "--width help still claims an uncapped override"
+  pass "help describes the fixed terminal measure"
 }
 
 test_watch_flag_needs_a_terminal_and_stays_exclusive() {
@@ -583,6 +659,7 @@ test_cockpit_shows_exactly_three_sections
 test_pr_truthfulness_regressions
 test_review_relationships_survive_completed_rounds
 test_followup_review_without_round_history_stays_unknown
+test_numberless_review_record_never_invents_a_waiting_party
 test_decision_projection_labels_answered_and_aged_open_holds
 test_clean_list_uses_truthful_markers_and_priority_order
 test_default_rows_are_one_line_with_a_fresh_recap
@@ -590,5 +667,6 @@ test_expansion_includes_evidence_derived_recommendation
 test_show_expands_rows_with_full_context
 test_absent_sources_and_unreachable_reviews_stay_honest
 test_html_page_renders_three_sections
+test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
 test_ignored_operational_directories_are_never_output_targets
