@@ -98,20 +98,18 @@ fm_slot_stamp_write() {
       && [ "$FM_SLOT_STAMP_HOME" = "$home" ] || return 1
     return 0
   fi
-  tmp="$path.$$"
+  tmp=$(umask 077; mktemp "$path.tmp.XXXXXX" 2>/dev/null) || return 1
   if ! { umask 077 && printf 'task=%s\nhome=%s\n' "$id" "$home" > "$tmp"; }; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
-  if ! ( set -C; : > "$path" ) 2>/dev/null; then
+  if ! ln -P "$tmp" "$path" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
-  if ! cat "$tmp" > "$path" 2>/dev/null; then
-    rm -f "$tmp" "$path" 2>/dev/null || true
+  if ! rm -f "$tmp" 2>/dev/null; then
     return 1
   fi
-  rm -f "$tmp" 2>/dev/null || true
   fm_slot_stamp_record "$wt"
 }
 
