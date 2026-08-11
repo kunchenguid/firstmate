@@ -265,10 +265,12 @@ acquire_compose_lock() {
   FM_STATE_OVERRIDE=$COMPOSE_PARENT
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  COMPOSE_LOCK="$COMPOSE_PARENT/.compose-$SET_NAME.lock"
+  # Keep the composition state active while waiting: a concurrent acquire may
+  # enter fm_lock_try_acquire's stale-owner path, which consults STATE.
+  fm_lock_acquire_wait "$COMPOSE_LOCK"
   if [ "$prior_state_set" -eq 1 ]; then STATE=$prior_state; else unset STATE; fi
   if [ "$prior_override_set" -eq 1 ]; then FM_STATE_OVERRIDE=$prior_override; else unset FM_STATE_OVERRIDE; fi
-  COMPOSE_LOCK="$COMPOSE_PARENT/.compose-$SET_NAME.lock"
-  fm_lock_acquire_wait "$COMPOSE_LOCK"
   COMPOSE_LOCK_HELD=1
   validate_managed_layout
 }
