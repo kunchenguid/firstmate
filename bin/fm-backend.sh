@@ -957,6 +957,17 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   esac
 }
 
+fm_backend_reconcile_transitions() {  # <backend> <state_dir> <session> <pane_window...>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 2
+  fm_backend_source "$backend" || return 2
+  case "$backend" in
+    herdr) fm_backend_herdr_reconcile_transitions "$@" ;;
+    *) return 2 ;;
+  esac
+}
+
 fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   local backend=$1
   shift

@@ -671,6 +671,8 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
+    fm_backend_reconcile_transitions \
+      "$first_backend" "$STATE" "$first_session" "${windows[@]}" >/dev/null 2>&1 || true
     sleep "$POLL"
     return
   fi
@@ -688,6 +690,8 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
+      fm_backend_reconcile_transitions \
+        "$first_backend" "$STATE" "$first_session" "${windows[@]}" >/dev/null 2>&1 || true
       sleep "$POLL"
       ;;
     *)

@@ -281,6 +281,7 @@ For an exact ready TraeX task only, the same stream also updates its armed seman
 
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
+That fallback folds the current native level for each bound ready TraeX worker before sleeping, so disabling push does not disable lifecycle completion.
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.

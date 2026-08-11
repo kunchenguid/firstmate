@@ -34,7 +34,8 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled \
+    "$TMP"/reconciles 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -132,12 +133,19 @@ export EVENT_CAP_FAIL_MAX=2
 fm_backend_events_capable() { return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() { printf 'WT\n' >> "$TMP/wtcalls"; return 2; }
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
+fm_backend_reconcile_transitions() { printf '%s\n' "$*" >> "$TMP/reconciles"; return 0; }
 : > "$TMP/wtcalls"
+: > "$TMP/reconciles"
 event_wait_or_sleep   # fails=1
 event_wait_or_sleep   # fails=2 -> disable
-event_wait_or_sleep   # disabled: sleeps without calling wait_transition
+event_wait_or_sleep   # disabled: reconciles and sleeps without event subscription
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
-pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+RN=$(wc -l < "$TMP/reconciles" | tr -d '[:space:]')
+[ "$RN" = 3 ] || fail "every polling fallback must reconcile native lifecycle levels (expected 3 calls, got $RN)"
+grep -q 'herdr.*default:wG:pQ' "$TMP/reconciles" \
+  || fail "polling reconciliation did not receive the bound Herdr worker window"
+pass "event_wait_or_sleep: disabled event push retains native lifecycle reconciliation in polling"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

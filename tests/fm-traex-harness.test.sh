@@ -229,6 +229,35 @@ run_traex_reconcile() {
       _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2
 }
 
+run_traex_observe() {  # <reported-status> <reported-agent>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; rec=$(fm_backend_herdr_normalize_event "$4" "" "$5" "$6"); fm_backend_herdr_traex_observe_transition "$2" "$3" "$rec"' \
+      _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2 "$1" "$2"
+}
+
+start_interruptible_traex_spawn() {
+  exec env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_BACKEND_HERDR_TRAEX_START_INTERVAL=1 FM_FAKE_AFTER_TRUST=blocked \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend herdr \
+      --model Doubao-Seed-2.1-Pro --effort high --mode no-mistakes --yolo off
+}
+
 test_marker_detection_is_scoped() {
   local out dir
   out=$(FM_TRAEX_HARNESS=traex CLAUDECODE=1 "$HARNESS")
@@ -428,12 +457,12 @@ test_secondmate_and_raw_launch_refuse() {
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$TASK_ID" "$PROJECT_DIR" \
-      "sh -c 'traex -y arbitrary'" --backend herdr \
+      "sh -c 'tra''ex -y arbitrary'" --backend herdr \
       --mode no-mistakes --yolo off 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "a shell-wrapped raw TraeX command bypassed the verified template"
-  assert_contains "$out" 'verified launch template' \
-    "shell-wrapped raw TraeX refusal did not name the verified boundary"
+  [ "$status" -ne 0 ] || fail "a shell-obfuscated raw TraeX command bypassed admission"
+  assert_contains "$out" 'raw shell-wrapper' \
+    "shell-wrapped raw TraeX refusal did not name the fail-closed admission boundary"
   [ ! -s "$CASE_DIR/herdr.log" ] || fail "a refused raw TraeX command queried or created Herdr state"
   assert_absent "$HOME_DIR/state/$TASK_ID.meta" "a refused raw TraeX command published task metadata"
   pass "traex refuses secondmate and raw-command promotion"
@@ -467,53 +496,110 @@ test_send_persists_working_before_delivery_ack() {
   pass "traex steering persists working before acknowledgement so reconnect recovers completion"
 }
 
-test_native_transition_fold_is_sparse_and_bound() {
-  local state id gen rec verdict before
-  state="$TMP_ROOT/transitions/state"
-  id=traex-events
-  mkdir -p "$state"
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id") || fail "could not arm TraeX fixture"
-  fm_write_meta "$state/$id.meta" \
-    'window=sess:w1:p2' 'endpoint_task_id=traex-events' 'worktree=/tmp/wt' 'project=/tmp/project' \
-    'harness=traex' 'kind=ship' 'backend=herdr' 'herdr_session=sess' \
-    'herdr_workspace_id=w1' 'herdr_tab_id=w1:t2' 'herdr_pane_id=w1:p2' \
-    "busy_gen=$gen" 'traex_ready=1'
+test_send_from_blocked_requires_native_working() {
+  local rec out status verdict
+  rec=$(make_spawn_case send-blocked)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for blocked steering should succeed: $out"
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "initial completion for blocked steering could not be reconciled"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf blocked > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "blocked baseline could not be persisted"
 
-  # Load through the public backend owner so metadata helpers and the Herdr
-  # adapter share the same runtime shape as the watcher.
-  # shellcheck source=/dev/null
-  . "$ROOT/bin/fm-backend.sh"
-  fm_backend_source herdr
-  rec=$(fm_transition_record w1:p2 w1 '' working traex)
-  fm_backend_herdr_traex_observe_transition "$state" sess "$rec" || fail "working transition failed"
-  verdict=$(fm_busy_classify herdr sess:w1:p2 traex "$id" "$state")
+  out=$(run_traex_send 'resume from the blocker')
+  status=$?
+  expect_code 0 "$status" "TraeX blocked-baseline steer should observe working: $out"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "blocked-baseline steer acknowledged without native working: $verdict"
+  pass "traex blocked-baseline steering acknowledges only persisted native working"
+}
+
+test_stale_idle_cannot_close_a_new_working_turn() {
+  local rec out status verdict
+  rec=$(make_spawn_case stale-idle)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for stale transition should succeed: $out"
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "old turn idle could not be reconciled"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf working > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "new turn working could not be reconciled"
+
+  run_traex_observe idle traex || fail "queued old idle could not be folded authoritatively"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "queued old idle closed the current native working turn: $verdict"
+  assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "queued old idle emitted a false completion for the new turn"
+  pass "traex transition folding revalidates native level before semantic mutation"
+}
+
+test_interrupted_spawn_clears_pending_readiness() {
+  local rec pid i ready
+  rec=$(make_spawn_case interrupted-spawn)
+  read_spawn_case "$rec"
+  start_interruptible_traex_spawn > "$CASE_DIR/spawn.out" 2>&1 &
+  pid=$!
+  ready=
+  for ((i = 0; i < 200; i++)); do
+    ready=$(grep '^traex_ready=' "$HOME_DIR/state/$TASK_ID.meta" 2>/dev/null || true)
+    [ "$ready" = 'traex_ready=pending' ] && break
+    sleep 0.02
+  done
+  if [ "$ready" != 'traex_ready=pending' ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "interrupt fixture never published pending readiness: $(cat "$CASE_DIR/spawn.out" 2>/dev/null)"
+  fi
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt the pending TraeX spawn"
+  wait "$pid" 2>/dev/null || true
+  assert_grep 'traex_ready=failed' "$HOME_DIR/state/$TASK_ID.meta" \
+    "interrupted TraeX spawn left readiness pending"
+  pass "traex spawn cleanup fails pending readiness before releasing ownership"
+}
+
+test_native_transition_fold_is_sparse_and_bound() {
+  local rec out status verdict before
+  rec=$(make_spawn_case transitions)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for transition folding should succeed: $out"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
   [ "$verdict" = 'busy herdr-traex' ] || fail "working transition classified '$verdict'"
-  before=$(cat "$state/$id.busy-state")
-  fm_backend_herdr_traex_observe_transition "$state" sess "$rec" || fail "reconciled working failed"
-  [ "$(cat "$state/$id.busy-state")" = "$before" ] \
+  before=$(cat "$HOME_DIR/state/$TASK_ID.busy-state")
+  run_traex_reconcile || fail "reconciled working failed"
+  [ "$(cat "$HOME_DIR/state/$TASK_ID.busy-state")" = "$before" ] \
     || fail "repeated working level rewrote the semantic record"
 
-  rec=$(fm_transition_record w1:p2 w1 '' idle traex)
-  fm_backend_herdr_traex_observe_transition "$state" sess "$rec" || fail "idle transition failed"
-  verdict=$(fm_busy_classify herdr sess:w1:p2 traex "$id" "$state")
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "idle transition failed"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
   [ "$verdict" = 'idle herdr-traex' ] || fail "idle transition classified '$verdict'"
-  assert_present "$state/$id.turn-ended" "busy-to-idle did not write the durable completion notification"
-  before=$(cat "$state/$id.busy-state")
-  rm -f "$state/$id.turn-ended"
-  fm_backend_herdr_traex_observe_transition "$state" sess "$rec" || fail "reconciled idle failed"
-  assert_absent "$state/$id.turn-ended" "repeated idle level duplicated the completion notification"
-  [ "$(cat "$state/$id.busy-state")" = "$before" ] \
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "busy-to-idle did not write the durable completion notification"
+  before=$(cat "$HOME_DIR/state/$TASK_ID.busy-state")
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  run_traex_reconcile || fail "reconciled idle failed"
+  assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "repeated idle level duplicated the completion notification"
+  [ "$(cat "$HOME_DIR/state/$TASK_ID.busy-state")" = "$before" ] \
     || fail "repeated idle level rewrote the semantic record"
 
-  rec=$(fm_transition_record w1:p2 w1 '' working codex)
-  if fm_backend_herdr_traex_observe_transition "$state" sess "$rec" 2>/dev/null; then
+  if run_traex_observe working codex 2>/dev/null; then
     fail "a mismatched Herdr agent identity updated the TraeX lifecycle"
   fi
   pass "traex Herdr transitions persist busy/idle and emit one bound completion notification"
 }
 
 test_pending_trust_block_is_suppressed_only_until_launch_fails() {
-  local state id gen blocked marker rc
+  local state id gen blocked marker rc lock
   state="$TMP_ROOT/pending/state"
   id=traex-pending
   mkdir -p "$state"
@@ -523,18 +609,28 @@ test_pending_trust_block_is_suppressed_only_until_launch_fails() {
     'harness=traex' 'kind=ship' 'backend=herdr' 'herdr_session=sess' \
     'herdr_workspace_id=w1' 'herdr_tab_id=w1:t2' 'herdr_pane_id=w1:p2' \
     "busy_gen=$gen" 'traex_ready=pending'
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  fm_backend_source herdr
   blocked=$(fm_transition_record w1:p2 w1 '' blocked traex)
+  STATE=$state
+  fm_backend_herdr_traex_lock_runtime
+  lock="$state/.spawn-$id.lock"
+  fm_lock_try_acquire "$lock" || fail "could not claim the active spawn-owner fixture"
+  fm_backend_herdr_traex_spawn_owner_publish "$lock" \
+    || fail "could not publish the active spawn-owner identity"
   fm_backend_herdr_apply_transition "$state" sess "$blocked" >/dev/null
   rc=$?
-  [ "$rc" = 1 ] || fail "pending launch trust should be absorbed, got $rc"
+  [ "$rc" = 1 ] || fail "actively owned pending launch trust should be absorbed, got $rc"
   marker="$state/.herdr-escalated-sess_w1_p2"
   assert_absent "$marker" "pending trust was committed as a supervisor blocker"
-  awk '{if ($0 == "traex_ready=pending") print "traex_ready=failed"; else print}' \
-    "$state/$id.meta" > "$state/$id.meta.tmp" && mv "$state/$id.meta.tmp" "$state/$id.meta"
+  fm_lock_release "$lock"
   fm_backend_herdr_apply_transition "$state" sess "$blocked" >/dev/null
   rc=$?
-  [ "$rc" = 0 ] || fail "failed launch blocker should become actionable, got $rc"
-  pass "only the exact pending TraeX launch owns startup trust suppression"
+  [ "$rc" = 0 ] || fail "orphaned pending launch blocker should become actionable, got $rc"
+  assert_grep 'traex_ready=failed' "$state/$id.meta" \
+    "orphaned pending launch did not leave suppression atomically"
+  pass "only a live TraeX spawn owner can suppress startup trust"
 }
 
 test_marker_detection_is_scoped
@@ -547,6 +643,9 @@ test_max_effort_refuses_before_endpoint
 test_unsupported_tmux_refuses_before_endpoint
 test_secondmate_and_raw_launch_refuse
 test_send_persists_working_before_delivery_ack
+test_send_from_blocked_requires_native_working
+test_stale_idle_cannot_close_a_new_working_turn
+test_interrupted_spawn_clears_pending_readiness
 test_native_transition_fold_is_sparse_and_bound
 test_pending_trust_block_is_suppressed_only_until_launch_fails
 

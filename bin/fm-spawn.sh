@@ -699,6 +699,15 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ "${HARNESS:-}" = traex ] && [ -n "${ID:-}" ] \
+     && declare -F spawn_traex_readiness_set >/dev/null 2>&1 \
+     && spawn_traex_readiness_set pending failed 2>/dev/null; then
+    if fm_backend_herdr_parse_target "${T:-}"; then
+      fm_backend_herdr_traex_reconcile_launch_failure \
+        "${STATE_REAL:-$STATE}" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -890,18 +899,38 @@ launch_template() {
 }
 
 raw_launch_references_traex() {  # <raw-command>
-  local raw=$1
-  [[ "$raw" =~ (^|[^[:alnum:]_.-])traex([^[:alnum:]_.-]|$) ]]
+  local raw=$1 canonical
+  canonical=${raw//\'/}
+  canonical=${canonical//\"/}
+  canonical=${canonical//\\/}
+  [[ "$canonical" =~ (^|[^[:alnum:]_.-])traex([^[:alnum:]_.-]|$) ]]
+}
+
+raw_launch_uses_shell_indirection() {  # <raw-command>
+  local raw=$1 canonical word base
+  case "$raw" in
+    *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*$'\n'*) return 0 ;;
+  esac
+  canonical=${raw//\'/}
+  canonical=${canonical//\"/}
+  canonical=${canonical//\\/}
+  for word in $canonical; do
+    base=${word##*/}
+    case "$base" in sh|bash|dash|zsh|ksh|eval) return 0 ;; esac
+  done
+  return 1
 }
 
 RAW_LAUNCH=0
 RAW_TRAEX=0
+RAW_SHELL_INDIRECT=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     raw_launch_references_traex "$LAUNCH" && RAW_TRAEX=1
+    raw_launch_uses_shell_indirection "$LAUNCH" && RAW_SHELL_INDIRECT=1
     for word in $LAUNCH; do
       if [ -z "$HARNESS" ]; then
         case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word") ;; esac
@@ -956,6 +985,10 @@ fi
 # trust-dialog, liveness, state-transition, and submit evidence. Refuse every
 # other role/backend before creating an endpoint rather than silently degrading
 # to a transport with no equivalent structural launch postcondition.
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$RAW_SHELL_INDIRECT" -eq 1 ]; then
+  echo "error: raw shell-wrapper or dynamically constructed launch commands are unverified and refused before endpoint creation" >&2
+  exit 1
+fi
 if [ "$RAW_LAUNCH" -eq 1 ] && [ "$RAW_TRAEX" -eq 1 ]; then
   echo "error: TraeX must use Firstmate's verified launch template; raw TraeX launch commands remain unverified" >&2
   exit 1
@@ -971,6 +1004,20 @@ if [ "$HARNESS" = traex ]; then
   fi
   if [ "$BACKEND" != herdr ]; then
     echo "error: traex workers are verified only on backend=herdr; backend=$BACKEND has no proven structural trust and launch postcondition" >&2
+    exit 1
+  fi
+  TRAEX_EXISTING_READY=$(fm_backend_meta_exact_value "$STATE/$ID.meta" traex_ready 2>/dev/null || true)
+  if [ "$TRAEX_EXISTING_READY" = pending ]; then
+    TRAEX_EXISTING_TARGET=$(fm_backend_target_of_meta "$STATE/$ID.meta" 2>/dev/null || true)
+    if ! fm_backend_herdr_parse_target "$TRAEX_EXISTING_TARGET" \
+       || ! fm_backend_herdr_traex_readiness_set \
+         "$STATE" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" pending failed; then
+      echo "error: stale TraeX launch readiness for $ID could not be reconciled safely; inspect $STATE/$ID.meta before retrying" >&2
+      exit 1
+    fi
+  fi
+  if ! fm_backend_herdr_traex_spawn_owner_publish "$SPAWN_TASK_LOCK"; then
+    echo "error: TraeX spawn ownership could not be published safely before endpoint creation" >&2
     exit 1
   fi
   if [ "$EFFORT" = max ]; then
