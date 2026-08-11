@@ -163,21 +163,9 @@ cmd_register() {
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
   done
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
-  (umask 077; mkdir -p "$REG") || die "cannot create the source registry"
-  local tmp dest
-  dest=$(source_file "$id")
-  tmp=$(umask 077; mktemp "$REG/.source.XXXXXX") || die "cannot stage the registration"
-  {
-    printf 'adapter=%s\n' "$adapter"
-    printf 'argc=%s\n' "$#"
-    printf 'argv:\n'
-    printf '%s\n' "$@"
-  } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the registration"; }
-  chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the registration"; }
-  fm_procevent_source_lock_acquire "$id" || { rm -f -- "$tmp"; die "cannot lock the source"; }
-  if ! mv -f -- "$tmp" "$dest"; then
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if ! fm_procevent_registration_publish_locked "$STATE" "$adapter" "$id" "$@"; then
     fm_procevent_source_lock_release "$id"
-    rm -f -- "$tmp"
     die "cannot publish the registration"
   fi
   fm_procevent_source_lock_release "$id"
