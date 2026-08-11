@@ -3746,8 +3746,20 @@ LOG="${FM_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "status --json") printf '%s\n' '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
   "pane get") printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"t1","workspace_id":"w1"}}}' ;;
-  "pane process-info") printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"claude","argv0":"claude"}]}}}' ;;
-  "agent get") printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' ;;
+  "pane process-info")
+    if [ -n "${FM_OWNER_PROCESS_INFO:-}" ]; then
+      printf '%s\n' "$FM_OWNER_PROCESS_INFO"
+    else
+      printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"claude","argv0":"claude"}]}}}'
+    fi
+    ;;
+  "agent get")
+    if [ -n "${FM_OWNER_AGENT_RESPONSE:-}" ]; then
+      printf '%s\n' "$FM_OWNER_AGENT_RESPONSE"
+    else
+      printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}'
+    fi
+    ;;
   "pane send-keys"|"pane send-text") : ;;
 esac
 exit 0
@@ -3849,6 +3861,32 @@ test_fm_control_propagates_and_validates_raw_owner() {
     fail "fm-control delivered a raw interrupt after owner evidence mismatched"
   fi
   pass "fm-control: raw Herdr owner metadata protects lifecycle input"
+}
+
+test_fm_send_preserves_generic_raw_herdr_input() {
+  local dir="$TMP_ROOT/fm-send-generic-raw" home id=generic-raw-send fb log out rc
+  id=generic-raw-send
+  home="$dir/home"
+  mkdir -p "$home/state" "$dir/project" "$dir/worktree"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=herdr" \
+    "herdr_session=lab" "herdr_workspace_id=w1" "herdr_tab_id=t1" \
+    "herdr_pane_id=w1:p2" "harness=raw-shell" "raw_launch=1" "kind=ship"
+  make_owner_herdr_fakebin "$dir" >/dev/null
+  fb="$dir/fakebin"
+  log="$dir/log"
+  : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HERDR_LOG="$log" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_OWNER_PROCESS_INFO='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}' \
+    FM_OWNER_AGENT_RESPONSE='{"error":{"code":"agent_not_found"}}' \
+    "$ROOT/bin/fm-send.sh" "$id" --key Escape 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-send should preserve generic raw Herdr input: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fsend-keys\x1fw1:p2\x1fescape' \
+    "fm-send did not deliver generic raw Herdr input"
+  pass "fm-send: generic raw Herdr input remains available without OMP ownership"
 }
 
 herdr_pi_process_info() {
@@ -5392,6 +5430,7 @@ test_herdr_process_identity_rejects_mixed_omp_group
 test_herdr_raw_owner_lookup
 test_fm_send_propagates_and_validates_raw_owner
 test_fm_control_propagates_and_validates_raw_owner
+test_fm_send_preserves_generic_raw_herdr_input
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_without_stop_evidence_stays_unknown
 test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent

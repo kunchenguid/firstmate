@@ -633,6 +633,24 @@ hash_file() {
   fi
 }
 
+hash_pi_file() {
+  local file checksum bytes
+  for file in "$@"; do
+    [ -f "$file" ] || return 1
+  done
+  if command -v shasum >/dev/null 2>&1 || \
+    command -v sha256sum >/dev/null 2>&1 || \
+    command -v openssl >/dev/null 2>&1; then
+    hash_file "$@"
+    return $?
+  fi
+  if ! read -r checksum bytes < <(cat -- "$@" | cksum); then
+    return 1
+  fi
+  [ -n "$checksum" ] && [ -n "$bytes" ] || return 1
+  printf 'cksum:%s:%s\n' "$checksum" "$bytes"
+}
+
 hash_manifest() {
   local manifest=$1 root=$2 line
   local -a files=("$manifest")
@@ -797,10 +815,10 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_LOCK="$STATE/.lock"
   PI_RESTART_COMMAND=$PRIMARY_HARNESS
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
-  PI_WATCH_VERSION=$(fm_pi_extension_version "$PI_EXT" || printf '')
-  PI_TURNEND_VERSION=$(fm_pi_extension_version "$PI_TURNEND_EXT" || printf '')
-  if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
-    || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
+    PI_WATCH_VERSION=$(hash_pi_file "$PI_EXT" || printf '')
+    PI_TURNEND_VERSION=$(hash_pi_file "$PI_TURNEND_EXT" || printf '')
+    if ! pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
+      || ! pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
 elif [ "$PRIMARY_HARNESS" = omp ]; then

@@ -283,7 +283,10 @@ case "\$*" in
     fi
     exit 0
     ;;
-  *"ppid="*) printf '%s\n' "$holder_pid"; exit 0 ;;
+  *"ppid="*)
+    if [ "\$pid" = "$holder_pid" ]; then printf '%s\n' 1; else printf '%s\n' "$holder_pid"; fi
+    exit 0
+    ;;
 esac
 exit 1
 SH
@@ -318,7 +321,10 @@ case "\$*" in
     fi
     exit 0
     ;;
-  *"ppid="*) printf '%s\n' "$holder_pid"; exit 0 ;;
+  *"ppid="*)
+    if [ "\$pid" = "$holder_pid" ]; then printf '%s\n' 1; else printf '%s\n' "$holder_pid"; fi
+    exit 0
+    ;;
 esac
 exit 1
 SH
@@ -724,6 +730,12 @@ hash_manifest_for_test() {
   hash_file_for_test "${files[@]}"
 }
 
+hash_file_cksum_for_test() {
+  local checksum bytes
+  read -r checksum bytes < <(cat -- "$@" | cksum)
+  printf 'cksum:%s:%s\n' "$checksum" "$bytes"
+}
+
 hash_manifest_cksum_for_test() {
   local manifest=$1 root=$2 line checksum bytes
   local -a files=("$manifest")
@@ -753,7 +765,7 @@ make_hashless_path() {
       [ -x "$tool" ] || continue
       name=${tool##*/}
       case "$name" in
-        shasum|sha256sum) continue ;;
+        shasum|sha256sum|openssl) continue ;;
       esac
       [ -e "$fakebin/$name" ] || ln -s "$tool" "$fakebin/$name" 2>/dev/null || true
     done
@@ -781,6 +793,14 @@ write_pi_watch_loaded_marker() {
 write_pi_turnend_loaded_marker() {
   local home=$1 root=$2 pid=$3 version
   version=$(hash_file_for_test "$root/.pi/extensions/fm-primary-turnend-guard.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-turnend-extension-loaded"
+}
+
+write_pi_cksum_loaded_markers() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(hash_file_cksum_for_test "$root/.pi/extensions/fm-primary-pi-watch.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-watch-extension-loaded"
+  version=$(hash_file_cksum_for_test "$root/.pi/extensions/fm-primary-turnend-guard.ts")
   printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-turnend-extension-loaded"
 }
 
@@ -2599,6 +2619,31 @@ EOF
   pass "session start rejects non-SHA OMP markers when SHA-256 tools are unavailable"
 }
 
+test_pi_diagnostic_accepts_cksum_markers_without_sha_tools() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world pi-cksum-loaded-markers)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_pi_holder "$fakebin" "$holder_pid"
+  install_pi_turnend_extension_fixture "$root"
+  install_pi_watch_extension_fixture "$root"
+  write_pi_cksum_loaded_markers "$home" "$root" "$holder_pid"
+  make_hashless_path "$fakebin"
+  out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_not_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
+    "session start rejected a cksum marker when SHA-256 tools were unavailable"
+
+  pass "session start accepts legacy Pi cksum markers without SHA-256 tools"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2743,6 +2788,7 @@ test_omp_diagnostic_rejects_shared_core_drift
 test_omp_diagnostic_rejects_transitive_dependency_drift
 test_omp_diagnostic_rejects_dependency_read_failure
 test_omp_diagnostic_rejects_cksum_markers_without_sha_tools
+test_pi_diagnostic_accepts_cksum_markers_without_sha_tools
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

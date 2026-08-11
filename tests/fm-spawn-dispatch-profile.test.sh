@@ -854,7 +854,7 @@ SH
 # strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
 # word while still looking like a launch, so the composed line is run for real.
 test_raw_launch_preserves_compound_shell_command_forms() {
-  local rec id out status launch probe sub sub_pwd
+  local rec id out status launch probe sub sub_pwd raw_owner
   id=profile-raw-shellform-z8g
   rec=$(make_spawn_case profile-raw-shellform claude "$id")
   read_case_record "$rec"
@@ -864,7 +864,7 @@ test_raw_launch_preserves_compound_shell_command_forms() {
   sub_pwd=$(cd "$sub" && pwd)
   cat > "$FAKEBIN_DIR/myagent" <<SH
 #!/usr/bin/env bash
-printf '%s %s\n' "\$PWD" "\${OMPCODE-stripped}" > "$probe"
+printf '%s %s %s\n' "\$PWD" "\${OMPCODE-stripped}" "\${FM_RAW_LAUNCH_OWNER-unset}" > "$probe"
 SH
   chmod +x "$FAKEBIN_DIR/myagent"
 
@@ -873,11 +873,13 @@ SH
   status=$?
   expect_code 0 "$status" "a raw compound-shell launch command should spawn"
 
+  raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
+  [ -z "$raw_owner" ] || fail "generic raw compound-shell launch received an OMP ownership marker: $raw_owner"
   launch=$(cat "$LAUNCH_LOG")
   env OMPCODE=1 PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
   [ -f "$probe" ] || fail "the raw compound-shell launch command never reached its agent"$'\n'"launch: $launch"
-  [ "$(cat "$probe")" = "$sub_pwd stripped" ] \
-    || fail "raw compound-shell launch produced '$(cat "$probe")', want '$sub_pwd stripped'"
+  [ "$(cat "$probe")" = "$sub_pwd stripped unset" ] \
+    || fail "raw compound-shell launch produced '$(cat "$probe")', want '$sub_pwd stripped unset'"
   pass "a raw launch keeps compound shell forms runnable while still stripping the OMP marker"
 }
 

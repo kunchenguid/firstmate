@@ -678,6 +678,7 @@ CONFIG_INHERIT_LOCK_HELD=0
 RAW_LAUNCH=0
 RAW_LAUNCH_OWNER=
 RAW_OWNER_REQUIRED=0
+RAW_LAUNCH_SANITIZE=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -1252,9 +1253,13 @@ esac
 # the token is only meaningful for the OMP safety gate.
 if [ "$RAW_LAUNCH" -eq 1 ]; then
   case " $LAUNCH " in
-    *" omp "*|*"/omp "*|*"./omp "*|*"start-omp.sh"*|*" && "*)
+    *" omp "*|*"/omp "*|*"./omp "*|*"start-omp.sh"*)
       RAW_OWNER_REQUIRED=1
       RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
+      RAW_LAUNCH_SANITIZE=1
+      ;;
+    *" && "*)
+      RAW_LAUNCH_SANITIZE=1
       ;;
   esac
 fi
@@ -3025,6 +3030,8 @@ fi
 if [ "$RAW_LAUNCH" -eq 1 ]; then
   if [ -n "$RAW_LAUNCH_OWNER" ]; then
     LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch FM_RAW_LAUNCH_OWNER='$RAW_LAUNCH_OWNER'; $LAUNCH"
+  elif [ "$RAW_LAUNCH_SANITIZE" -eq 1 ]; then
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT FM_RAW_LAUNCH_OWNER; export FM_HARNESS_UNVERIFIED=raw-launch; $LAUNCH"
   else
     :
   fi
