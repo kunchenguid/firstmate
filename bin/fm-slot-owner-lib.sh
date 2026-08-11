@@ -103,7 +103,7 @@ fm_slot_stamp_write() {
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
-  if ! ln -P "$tmp" "$path" 2>/dev/null; then
+  if ! link "$tmp" "$path" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
