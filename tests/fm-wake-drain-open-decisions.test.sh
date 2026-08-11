@@ -158,6 +158,44 @@ test_buried_decision_surfaces_on_the_empty_queue_fast_path() {
   pass "a buried open decision surfaces even when the wake queue itself is empty"
 }
 
+test_misordered_key_in_note_is_adopted_not_default() {
+  local dir state out
+  dir=$(make_case misordered-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # A worker that guesses the grammar wrong writes the key AFTER the colon,
+  # inside the note, instead of between the verb and the colon. The fold must
+  # still adopt "api-shape" as the key rather than filing this under "default".
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$state/task10.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a mis-ordered key token"
+
+  grep -F 'task10' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "a mis-ordered [key=...] in the note was not adopted as the decision key: $(cat "$out")"
+  if grep -F 'task10' "$out" | grep -F '[key=default]' >/dev/null; then
+    fail "a mis-ordered [key=...] in the note incorrectly fell back to key=default: $(cat "$out")"
+  fi
+  pass "a mis-ordered needs-decision: [key=...] note is adopted as that key, not default"
+}
+
+test_correctly_ordered_key_resolves_a_misordered_open() {
+  local dir state out
+  dir=$(make_case misordered-key-resolve)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The mis-ordered opening adopts "api-shape"; a correctly-ordered resolution
+  # naming that same key must close it.
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$state/task11.status"
+  printf 'resolved [key=api-shape]: went with REST\n' >> "$state/task11.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed resolving a mis-ordered open"
+
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a correctly-keyed resolution failed to close a mis-ordered open decision: $(cat "$out")"
+  fi
+  pass "a correctly-ordered resolved [key=X] closes a decision opened with the key mis-ordered in its note"
+}
+
 test_status_symlink_is_not_followed() {
   local dir state out
   dir=$(make_case status-symlink)
@@ -223,4 +261,6 @@ test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
+test_misordered_key_in_note_is_adopted_not_default
+test_correctly_ordered_key_resolves_a_misordered_open
 test_status_symlink_is_not_followed
