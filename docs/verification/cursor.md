@@ -19,7 +19,8 @@ Refresh command for the live signal guard:
 FM_CURSOR_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-cursor-signals-live-e2e.test.sh
 ```
 
-Portable regressions: `tests/fm-cursor-harness.test.sh`.
+Portable adapter regressions: `tests/fm-cursor-harness.test.sh`.
+Cross-cutting primary-lock, relaunch, composer/delivery, liveness, bootstrap, and teardown safeguards are pinned by `tests/fm-session-lock-ancestry.test.sh`, `tests/fm-control-relaunch.test.sh`, `tests/fm-composer-lib.test.sh`, `tests/fm-send-strict.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-bootstrap.test.sh`, and `tests/fm-teardown.test.sh`.
 
 ## Verified facts
 
@@ -62,8 +63,10 @@ Project hooks under `.cursor/hooks.json` remain visible to Git safety checks, wh
 
 Busy source name: `cursor-hook`.
 Unlike Claude, Cursor's `stop` hook fires on interrupt.
-Firstmate merges its hook entries with existing regular files, backs both files up before replacement, and restores their original contents at teardown or a failed spawn.
-Symlinked or malformed hook paths fail closed before Firstmate writes anything.
+Firstmate records the original state of both hook paths, merges its entries with existing regular files, and records the exact generated snapshots before replacement.
+On a failed spawn or teardown, an unchanged generated path returns to its original state, while a safely divergent `hooks.json` loses only Firstmate's exact entries and keeps unrelated edits.
+Symlinked paths, malformed JSON, ambiguous ownership, or unexpected hook-script divergence fail closed instead of overwriting work.
+The dirty-worktree check exempts only exact transaction-owned generated snapshots or an exact committed baseline, and teardown restores the hook transaction before returning the worktree lease.
 The transactional hook merge and divergent restore require `python3`; bootstrap reports the missing runtime when Cursor is selected by static or dispatch configuration, and spawn refuses before task setup if it is unavailable.
 
 ### Interrupt and exit
@@ -77,13 +80,15 @@ The transactional hook merge and divergent restore require `python3`; bootstrap 
 ### Composer
 
 Idle placeholder is plain text `→ Add a follow-up` (U+2192), with no dark-truecolor ghost styling observed.
-The Cursor-specific send path passes `Add a follow-up` as an idle placeholder after the `→` glyph is recognized.
+The `→` glyph is container-only evidence: a bare arrow remains `unknown`, while the Cursor-specific send path accepts the exact placeholder only inside a structurally proven composer for a recorded Cursor target.
+When the submitted message itself equals a Cursor placeholder, delivery still needs independent busy-transition evidence instead of treating the unchanged text as acknowledgement.
 
 ### Secondmate / primary boundary
 
 cursor is crewmate/scout only.
-There is no `docs/supervision-protocols/cursor.md`, so a primary detected as cursor falls through to `unknown`.
 `bin/fm-spawn.sh` and `fm_control_harness_supports_kind` refuse `--secondmate` on cursor.
+The session-lock identity layer rejects Cursor as a primary lock owner and stops its ancestry walk at Cursor, so a nested worker cannot claim an outer primary's lock.
+There is no `docs/supervision-protocols/cursor.md` because Cursor primary operation is unsupported rather than routed through the `unknown` protocol.
 
 ## Runtime backend review
 

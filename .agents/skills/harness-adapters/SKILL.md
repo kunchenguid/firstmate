@@ -474,7 +474,8 @@ Its plugin/hook engine reports `plugins are not available in this build` unless 
 ## cursor (VERIFIED 2026-08-10, cursor-agent 2026.08.04-aaa8809)
 
 Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
-`bin/fm-spawn.sh` refuses `--secondmate` on cursor, and cursor has no supervision protocol under `docs/supervision-protocols/`, so a firstmate primary detected as cursor falls back to the `unknown` protocol.
+`bin/fm-spawn.sh` refuses `--secondmate` on cursor.
+`bin/fm-session-lock-lib.sh` also rejects Cursor as a primary lock owner and treats Cursor ancestry as a barrier, so a Cursor worker cannot inherit an outer primary session; no Cursor supervision protocol exists under `docs/supervision-protocols/`.
 
 | Fact | Value |
 |---|---|
@@ -489,6 +490,7 @@ Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
 | Trust dialog | `--trust` skips the workspace trust prompt on a fresh worktree. |
 | Environment marker | None; the verified CLI does not export `CURSOR_AGENT`, and inherited values are ignored. An exact `cursor-agent` process name or executable-path component in ancestry is the guarantee (never `*cursor*`). |
 | Composer | Idle placeholder `→ Add a follow-up` (U+2192), plain text with no dark-truecolor ghost styling observed. |
+| Runtime backend | tmux only; every other Cursor/backend pair is refused as unverified. |
 | Effort | No standalone `--effort` flag; see the launch-profile table. |
 | Resume | `--resume [chatId]` / `--continue` exist on the CLI; firstmate has no verified pane-resume contract for cursor yet. |
 

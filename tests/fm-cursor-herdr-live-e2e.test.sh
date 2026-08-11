@@ -93,6 +93,21 @@ wait_for_exact_response() {
 wait_for_exact_response HERDRCURSORREADY \
   || fail "Cursor Agent did not produce the Herdr launch response"
 
+wait_for_idle_agent() {
+  local status
+  for _ in $(seq 1 50); do
+    status=$(lab agent get "$PANE" 2>/dev/null \
+      | jq -r '.result.agent.agent_status // "unknown"' 2>/dev/null \
+      || printf 'unknown')
+    [ "$status" = idle ] && return 0
+    sleep 0.1
+  done
+  printf 'last Herdr agent status: %s\n' "$status" >&2
+  return 1
+}
+wait_for_idle_agent \
+  || fail "Cursor Agent did not settle idle after the Herdr launch response"
+
 verdict=$(FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
   FM_BACKEND_HERDR_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
   fm_backend_send_text_submit herdr "$TARGET" "Reply only: HERDRCURSORSEND" \

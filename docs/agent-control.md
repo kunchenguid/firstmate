@@ -13,7 +13,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 ## What the control plane owns
 
-`bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
+`bin/fm-control-lib.sh` is the single executable owner of four capability tables, with no side effects, so it can be read as a contract:
 
 - The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
@@ -21,6 +21,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's per-adapter tables, which now point here.
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
+- **Per-harness runtime compatibility**: which backend each verified adapter may launch on.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
@@ -93,6 +94,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
   cursor is the same crewmate/scout boundary.
+- An adapter/backend pair that is not verified is likewise refused before the running agent is stopped.
+  Cursor is currently verified only on tmux, so a relaunch onto Cursor from a task recorded on any other backend leaves the existing agent untouched.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
@@ -113,7 +116,7 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
 
-Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`.
+Per-harness interrupt keys, repeat counts, composer clears, exit commands, supported task kinds, and runtime compatibility live in `bin/fm-control-lib.sh` and are exercised by `tests/fm-control.test.sh` and `tests/fm-control-relaunch.test.sh`.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
 
 ## Verification
