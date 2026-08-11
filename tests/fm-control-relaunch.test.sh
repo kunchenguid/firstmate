@@ -237,6 +237,7 @@ make_rm_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
+  [ "$arg" = -- ] && exit 97
   if [ -n "${FM_FAKE_RM_FAIL_PATH:-}" ] && [ "$arg" = "$FM_FAKE_RM_FAIL_PATH" ]; then
     exit 1
   fi
@@ -603,24 +604,49 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
 }
 
 test_docker_opencode_turnend_hook_cleanup_is_placement_scoped() {
-  local dir state wt hook busy legacy docker_paths host_paths
+  local dir state wt hook busy legacy docker_paths host_paths real_rm dash_wt dash_hook
   dir="$TMP_ROOT/docker-opencode"
   state="$dir/state"
   wt="$dir/wt"
   hook="$wt/.opencode/plugins/fm-sandbox-turnend.js"
   busy="$wt/.opencode/plugins/fm-busy-state.js"
   legacy="$wt/.opencode/plugins/fm-turn-end.js"
-  mkdir -p "$state" "${hook%/*}"
+  mkdir -p "$state" "${hook%/*}" "$dir/fakebin"
   printf '{}\n' > "$hook"
   printf '{}\n' > "$busy"
   printf '{}\n' > "$legacy"
-  fm_control_remove_sandbox_turnend_hook opencode "$wt" host
+  real_rm=$(command -v rm)
+  make_rm_failure_stub "$dir"
+  (
+    PATH="$dir/fakebin:$PATH"
+    FM_REAL_RM="$real_rm"
+    export PATH FM_REAL_RM
+    fm_control_remove_sandbox_turnend_hook opencode "$wt" host
+  )
   [ -e "$hook" ] || fail "host cleanup removed the Docker-only OpenCode hook"
-  fm_control_remove_sandbox_turnend_hook opencode "$wt" docker-sandbox \
+  (
+    PATH="$dir/fakebin:$PATH"
+    FM_REAL_RM="$real_rm"
+    export PATH FM_REAL_RM
+    fm_control_remove_sandbox_turnend_hook opencode "$wt" docker-sandbox
+  ) \
     || fail "Docker OpenCode hook cleanup refused"
   [ ! -e "$hook" ] || fail "Docker cleanup left the exact OpenCode hook"
   [ -e "$busy" ] || fail "Docker cleanup removed the busy-state wiring"
   [ -e "$legacy" ] || fail "Docker cleanup removed the legacy turn-end wiring"
+  dash_wt=-option-shaped-worktree
+  dash_hook="$dir/$dash_wt/.opencode/plugins/fm-sandbox-turnend.js"
+  mkdir -p "${dash_hook%/*}"
+  printf '{}\n' > "$dash_hook"
+  (
+    cd "$dir" || exit 1
+    PATH="$dir/fakebin:$PATH"
+    FM_REAL_RM="$real_rm"
+    export PATH FM_REAL_RM
+    fm_control_remove_sandbox_turnend_hook opencode "$dash_wt" docker-sandbox
+  ) \
+    || fail "option-shaped Docker OpenCode hook cleanup refused"
+  [ ! -e "$dash_hook" ] || fail "option-shaped Docker OpenCode hook remained"
   docker_paths=$(fm_control_harness_wiring_paths opencode "$wt" "$state" task docker-sandbox)
   case "$docker_paths" in
     *"$hook"*) : ;;

@@ -192,13 +192,14 @@ fm_control_harness_sandbox_turnend_path() {  # <harness> <worktree> <placement>
   [ "$harness" = opencode ] || return 1
   [ "$placement" = docker-sandbox ] || return 1
   [ -n "$wt" ] || return 1
+  case "$wt" in -*) wt=./$wt ;; esac
   printf '%s\n' "$wt/.opencode/plugins/fm-sandbox-turnend.js"
 }
 
 fm_control_remove_sandbox_turnend_hook() {  # <harness> <worktree> <placement>
   local path
   path=$(fm_control_harness_sandbox_turnend_path "${1-}" "${2-}" "${3:-host}") || return 0
-  rm -f -- "$path"
+  rm -f "$path"
 }
 
 # clear the previous incarnation's wiring instead of leaving a stale hook
