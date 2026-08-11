@@ -705,6 +705,11 @@ if [ -n "$BOOT_OUT" ]; then
 else
   printf '(silent - all good)\n'
 fi
+if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+  if ! SKILL_MAP_OUT=$("$SCRIPT_DIR/fm-skill-map.sh" --quiet 2>&1); then
+    printf 'SKILL_MAP: refresh failed - %s\n' "$SKILL_MAP_OUT"
+  fi
+fi
 
 # --- 3. inactive outcomes + wake-drain -----------------------------------
 # The existing locked session-start path runs the same local inactive-outcome

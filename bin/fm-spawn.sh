@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--skills <name[,name]...>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--skills <name[,name]...>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--skills <name[,name]...>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -38,6 +38,12 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --skills <name[,name]...> composes a curated skill subset for this fresh
+#   spawn through bin/fm-skill-compose.sh. It is currently supported only for
+#   Claude-backed spawns, where fm-spawn adds the helper's overlay directory via
+#   claude --add-dir so the skills load without writing into the project worktree
+#   or a firstmate home's tracked .agents/skills set. It is refused with raw
+#   launch commands and --relaunch.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -264,6 +270,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+SKILLS=()
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -271,9 +278,20 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+SKILLS_SET=0
 RELAUNCH=0
 POS=()
 want_value=
+split_spawn_skills() {
+  local raw=$1 part
+  local -a parts
+  raw=${raw//,/ }
+  read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] && SKILLS+=("$part")
+  done
+  SKILLS_SET=1
+}
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
@@ -287,6 +305,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      skills) split_spawn_skills "$a" ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -310,6 +329,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --skills) want_value=skills ;;
+    --skills=*) split_spawn_skills "${a#--skills=}" ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -321,6 +342,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$SKILLS_SET" -eq 0 ] || [ "${#SKILLS[@]}" -gt 0 ] || { echo "error: --skills requires at least one skill name" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -348,6 +370,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$SKILLS_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded launch environment; --skills applies only to fresh spawns" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -1100,7 +1123,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude __CLAUDESKILLADD__--dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1158,6 +1181,7 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    [ "$SKILLS_SET" -eq 0 ] || { echo "error: --skills is supported only with verified Claude launch templates, not raw launch commands" >&2; exit 1; }
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1414,6 +1438,11 @@ case "$LAUNCH" in
     fi
     ;;
 esac
+
+if [ "$SKILLS_SET" -eq 1 ] && [ "$HARNESS" != claude ]; then
+  echo "error: --skills currently requires a Claude-backed spawn; harness '$HARNESS' has no verified composition load point" >&2
+  exit 1
+fi
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -2646,8 +2675,26 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+CLAUDESKILLADD=
+if [ "$SKILLS_SET" -eq 1 ]; then
+  SKILL_SET_NAME="task-$ID"
+  SKILL_TARGET_HOME=$FM_HOME
+  if [ "$KIND" = secondmate ]; then
+    SKILL_SET_NAME=home
+    SKILL_TARGET_HOME=$PROJ_ABS
+  fi
+  SKILL_ADD_DIR=$("$SCRIPT_DIR/fm-skill-compose.sh" \
+    --target-home "$SKILL_TARGET_HOME" \
+    --set "$SKILL_SET_NAME" \
+    --map "$DATA/skill-map.md" \
+    --refresh-map \
+    --print-add-dir \
+    "${SKILLS[@]}") || exit 1
+  CLAUDESKILLADD="--add-dir $(shell_quote "$SKILL_ADD_DIR") "
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__CLAUDESKILLADD__/$CLAUDESKILLADD}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -2659,6 +2706,7 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 esac
+LAUNCH=${LAUNCH//__CLAUDESKILLADD__/}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

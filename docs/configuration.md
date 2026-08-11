@@ -10,9 +10,9 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-`config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
+`data/` holds durable private fleet records such as the project and secondmate registries, the generated skill map, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
+`state/` holds runtime (volatile) records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`config/` holds local gitignored operating choices and generated per-home skill-composition overlays, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -31,6 +31,14 @@ The only values it writes are `on` and `off`, each followed by one newline; an a
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+
+## Skill map and composition (data/skill-map.md / config/skill-compose/)
+
+`data/skill-map.md` is a generated, private, flat registry of discoverable skills across Firstmate's own `.agents/skills/`, registered project clones, and the Claude user skill directory.
+`bin/fm-skill-map.sh` owns the map format and scans only `SKILL.md` frontmatter.
+Locked session start refreshes it cheaply; read-only session start skips it because it is mutable private state.
+`config/skill-compose/` holds generated per-home Claude composition overlays created by `bin/fm-skill-compose.sh` and `fm-spawn.sh --skills`.
+[`docs/skill-system.md`](skill-system.md) owns the operator workflow, the Claude `--add-dir` load point, and the one-canonical-copy symlink rule.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

@@ -86,6 +86,8 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+When a secondmate needs cross-repo skills, choose a curated subset from `data/skill-map.md` and either pass `fm-spawn --skills <name[,name]...>` for a Claude-backed launch or run `bin/fm-skill-compose.sh --target-home <home> --set home <skill>...` before launch.
+[`docs/skill-system.md`](../../../docs/skill-system.md) owns the map, the Claude overlay load point, and the one-canonical-copy symlink rule.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
