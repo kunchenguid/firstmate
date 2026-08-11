@@ -666,19 +666,14 @@ if [ "$HAVE_RUN" = 1 ]; then
   # the crew.
   if crew_state_is_run_ended "$RUN_STATE" \
     && [ "$(fm_task_role "$META")" != secondmate ] && [ -n "$BACKEND_TARGET" ]; then
-    if pane_readable "$BACKEND_TARGET"; then
-      BUSY_SIGNAL=$(crew_busy_verdict "$BACKEND_TARGET")
-      AGENT_LIVENESS=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || AGENT_LIVENESS=''
-      # A probe that printed nothing measured nothing, and must not be reported as
-      # a reading that was taken.
-      [ -n "$AGENT_LIVENESS" ] || AGENT_LIVENESS=unreadable
-    else
-      # A gone endpoint is an OBSERVATION that the crew is not working, not a
-      # failure to observe, and fm_busy_classify_live names it with this exact
-      # pair; a consumer must be able to tell it from evidence it could not read.
-      # The agent is authoritatively absent along with the endpoint that held it.
+    AGENT_LIVENESS=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || AGENT_LIVENESS=''
+    [ -n "$AGENT_LIVENESS" ] || AGENT_LIVENESS=unreadable
+    if [ "$AGENT_LIVENESS" = missing ]; then
       BUSY_SIGNAL='dead endpoint-gone'
-      AGENT_LIVENESS=missing
+    elif pane_readable "$BACKEND_TARGET"; then
+      BUSY_SIGNAL=$(crew_busy_verdict "$BACKEND_TARGET")
+    else
+      BUSY_SIGNAL='unknown pane-unreadable'
     fi
   fi
 

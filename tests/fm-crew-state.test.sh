@@ -85,6 +85,7 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    [ "${FM_FAKE_TMUX_PANE_UNREADABLE:-0}" = 1 ] && exit 124
     # The agent-liveness probe reads two formats off a pane. pane_tty is answered
     # with nothing so the foreground-process-group half stays out of the way and
     # the fixture controls the verdict through the current command alone.
@@ -179,6 +180,7 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_PANE_UNREADABLE=0
   FM_FAKE_TMUX_WINDOWS=""
   FM_FAKE_TMUX_COMMAND=""
   FM_FAKE_HERDR_BUSY=0
@@ -186,6 +188,7 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_PANE_UNREADABLE
   export FM_FAKE_TMUX_WINDOWS FM_FAKE_TMUX_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
@@ -761,6 +764,48 @@ test_run_ended_verdict_records_crew_liveness() {
   [ "$(cf_json_field "$json" agent_liveness)" = missing ] \
     || fail "a gone endpoint after a failed run did not report its agent authoritatively absent"
   pass "a run-level terminal verdict carries the crew's own liveness without changing the verdict"
+}
+
+test_unreadable_pane_stays_unobserved() {
+  reset_fakes
+  local d json class
+  d=$(new_case unreadable-pane)
+  make_repo_on_branch "$d/wt" fm/feat-unreadable-pane
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unreadable-pane.meta" "window=fm:fm-unreadable-pane" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unreadable-pane)"
+  FM_FAKE_TMUX_WINDOWS=fm-unreadable-pane
+  FM_FAKE_TMUX_PANE_UNREADABLE=1
+
+  json=$(run_crew_state_json "$d" unreadable-pane)
+  [ "$(cf_json_field "$json" busy_signal)" = "unknown pane-unreadable" ] \
+    || fail "an unreadable pane was recorded as '$(cf_json_field "$json" busy_signal)'"
+  [ "$(cf_json_field "$json" agent_liveness)" = unreadable ] \
+    || fail "an unreadable agent probe was narrowed to '$(cf_json_field "$json" agent_liveness)'"
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class unreadable-pane "$d/state")
+  [ "$class" = unobserved ] || fail "an unreadable pane classified as '$class'"
+  pass "an unreadable pane is unobserved and never endpoint-gone"
+}
+
+test_unverified_backend_stays_unobserved() {
+  reset_fakes
+  local d json class
+  d=$(new_case unverified-backend)
+  make_repo_on_branch "$d/wt" fm/feat-unverified-backend
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unverified-backend.meta" "window=unsupported:target" \
+    "backend=unsupported" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unverified-backend)"
+
+  json=$(run_crew_state_json "$d" unverified-backend)
+  [ "$(cf_json_field "$json" busy_signal)" = "unknown pane-unreadable" ] \
+    || fail "an unsourceable backend was recorded as '$(cf_json_field "$json" busy_signal)'"
+  [ "$(cf_json_field "$json" agent_liveness)" = unverified ] \
+    || fail "an unverified backend was narrowed to '$(cf_json_field "$json" agent_liveness)'"
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class unverified-backend "$d/state")
+  [ "$class" = unobserved ] || fail "an unverified backend classified as '$class'"
+  pass "an unverified backend result does not map to missing"
 }
 
 # ... and only that class of verdict. `parked`, `blocked` and `done` DID observe
@@ -1438,6 +1483,8 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_run_ended_verdict_records_crew_liveness
+test_unreadable_pane_stays_unobserved
+test_unverified_backend_stays_unobserved
 test_non_run_ended_verdicts_measure_no_crew_liveness
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
