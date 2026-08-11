@@ -122,6 +122,23 @@ fm_send_count_colons() {  # <string>
   printf '%s' $(( ${#s} - ${#no_colons} ))
 }
 
+fm_send_pre_submit_settle() {  # <harness> <message>
+  local harness=$1 message=$2
+  # Codex opens completion UI for both native slash commands and its `$skill`
+  # invocations. Keep the shared command-prefix rule adjacent so the two
+  # command forms cannot drift, while preserving the existing slash behavior
+  # for other TUIs and the fast path for ordinary text everywhere.
+  if [ "$harness" = codex ]; then
+    case "$message" in
+      /*|\$*) printf '1.2'; return 0 ;;
+    esac
+  fi
+  case "$message" in
+    /*) printf '1.2' ;;
+    *) printf '0.3' ;;
+  esac
+}
+
 fm_send_resolve_target() {  # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -297,21 +314,10 @@ else
       exit 1
     fi
   fi
-  # Slash commands open a completion popup in some TUIs (verified on codex);
-  # submitting too fast selects nothing, so give the popup time to settle before
-  # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
-  # invocation, so a `$...` message to a codex target gets the same settle. That
-  # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
-  # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The target backend's
-  # verified submit retry still backs the settle up either way.
-  case "$*" in
-    /*) settle=1.2 ;;
-    \$*)
-      if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
-      ;;
-    *) settle=0.3 ;;
-  esac
+  # Give completion popups time to settle before the (retried) Enter. The
+  # harness-aware prefix classifier keeps Codex slash and `$skill` commands on
+  # the existing long-settle path without slowing ordinary text.
+  settle=$(fm_send_pre_submit_settle "$TARGET_HARNESS" "$MESSAGE")
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other

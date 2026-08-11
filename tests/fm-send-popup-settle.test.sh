@@ -7,7 +7,7 @@
 # popup settles lets it swallow the Enter, so the line never submits. fm-send
 # absorbs this by pausing `settle` seconds AFTER typing and BEFORE the (retried)
 # Enter - the first sleep fm_tmux_submit_core makes. These tests pin the
-# settle-SELECTION matrix hermetically (stubbed tmux + sleep, no real agent):
+# settle-selection matrix hermetically (stubbed tmux + sleep, no real agent):
 #
 #   /...            -> 1.2  (universal; `/` only starts a command, never plain text)
 #   $... to codex   -> 1.2  (scoped: codex opens a `$<skill>` popup)
@@ -48,7 +48,15 @@ make_stubs() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_TMUX_LOG:-}" ]; then
+      last=${!#}
+      case " $* " in
+        *' -l '*) printf 'literal:%s\n' "$last" >> "$FM_TMUX_LOG" ;;
+        *) printf 'key:%s\n' "$last" >> "$FM_TMUX_LOG" ;;
+      esac
+    fi
+    exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
@@ -136,3 +144,23 @@ first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
 # Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
 first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+
+# Process-level submit regression: each public fm-send invocation must type once
+# and emit exactly one Enter when the composer clears on the first submission.
+# Reusing the same target also proves rapid consecutive sends preserve order.
+submit_trace_dir="$TMP_ROOT/submit-trace"; mkdir -p "$submit_trace_dir/state"
+submit_trace_fb=$(make_stubs "$submit_trace_dir")
+submit_trace_log="$submit_trace_dir/tmux.log"
+fm_write_meta "$submit_trace_dir/state/tracecase.meta" "window=sess:win" 'harness=codex'
+: > "$submit_trace_log"
+for submit_message in '/slash-command' '$skill-command' 'ordinary prompt' '/second-slash' '$second-skill'; do
+  env FM_SEND_SETTLE=0 PATH="$submit_trace_fb:$PATH" \
+    FM_ROOT_OVERRIDE="$submit_trace_dir" FM_HOME="$submit_trace_dir" FM_TMUX_LOG="$submit_trace_log" \
+    "$SEND" tracecase "$submit_message" 2>/dev/null \
+    || fail "process-level Codex submit failed for '$submit_message'"
+done
+expected_trace=$'literal:/slash-command\nkey:Enter\nliteral:$skill-command\nkey:Enter\nliteral:ordinary prompt\nkey:Enter\nliteral:/second-slash\nkey:Enter\nliteral:$second-skill\nkey:Enter'
+actual_trace=$(cat "$submit_trace_log")
+[ "$actual_trace" = "$expected_trace" ] \
+  || fail "Codex commands duplicated or reordered submit operations"$'\n--- expected ---\n'"$expected_trace"$'\n--- actual ---\n'"$actual_trace"
+pass 'Codex slash/$ commands submit once, do not duplicate Enter, and preserve rapid-send ordering'
