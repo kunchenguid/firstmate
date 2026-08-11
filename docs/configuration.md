@@ -39,7 +39,7 @@ The tracked `.pi/extensions/fm-quota-statusline.ts` extension replaces Pi's stoc
 The footer shows the repository path and current git branch, the active model and effective thinking level, the live context usage against the active model's context window, and every verified Codex quota window that `quota-axi --provider codex --json` reports, each labeled with its real window label, remaining percentage, and reset countdown when supplied.
 It never invents a quota window or percentage: when quota data is unavailable the footer shows a concise `quota: n/a` marker, and a transient `quota-axi` failure retains the last known good windows marked stale with a `quota~` prefix.
 The extension refreshes quota data on Pi `session_start`, when the active model or thinking level changes, on `/statusline refresh`, and on a bounded five-minute timer that is cleared on `session_shutdown` and `/statusline off`.
-The refresh runs a bounded `quota-axi --provider codex --json` subprocess with a fifteen-second timeout and an in-flight guard, and the renderer is ANSI visible-width safe and uses continuation lines on narrow terminals so verified fields are not dropped.
+The refresh runs a bounded `quota-axi --provider codex --json` subprocess with a hard timeout and an in-flight guard, and the renderer is ANSI visible-width safe and uses continuation lines on narrow terminals so verified fields are not dropped.
 No credentials or raw `quota-axi` errors appear in the footer; only the normalized window data is shown.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)

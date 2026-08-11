@@ -36,7 +36,9 @@ import {
 import { renderFooter, type RenderInput } from "./lib/fm-quota-statusline-render.ts";
 
 const QUOTA_PROVIDER = "codex";
-const REFRESH_TIMEOUT_MS = 15_000;
+// quota-axi may need to refresh provider state before returning; keep enough
+// room for that normal path while retaining a hard upper bound.
+const REFRESH_TIMEOUT_MS = 45_000;
 const PERIODIC_REFRESH_MS = 5 * 60 * 1000;
 
 interface FooterComponent {

@@ -218,6 +218,7 @@ let notifyMessages = [];
 let statusCmd = null;
 let execResult = { stdout: freshJson, stderr: "", code: 0, killed: false };
 let execCalls = 0;
+let execOptions = null;
 const fakeCtx = () => ({
   cwd: "/Users/ediz/Developer/firstmate",
   model: { id: "gpt-5.6-terra" },
@@ -229,8 +230,9 @@ const fakeCtx = () => ({
   },
 });
 const fakePi = {
-  exec: async () => {
+  exec: async (_command, _args, options) => {
     execCalls += 1;
+    execOptions = options;
     return execResult;
   },
   getThinkingLevel: () => "high",
@@ -250,6 +252,10 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 check("enable installs a footer factory", typeof footerFactory === "function");
 check("enable notifies the captain", notifyMessages.some((n) => /enabled/i.test(n.message)));
 check("enable refreshes quota once", execCalls === 1);
+check(
+  "quota refresh has a positive bounded timeout",
+  Number.isFinite(execOptions?.timeout) && execOptions.timeout > 0 && execOptions.timeout <= 60_000,
+);
 
 const enabledFooterFactory = footerFactory;
 notifyMessages = [];
