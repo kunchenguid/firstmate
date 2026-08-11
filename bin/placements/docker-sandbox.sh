@@ -29,7 +29,7 @@ fm_workspace_placement_docker_sandbox_check() {
 }
 
 fm_workspace_placement_docker_sandbox_inventory_array() {
-  jq -e -c '
+  jq -s -e -c '
     def field($object; $keys):
       reduce $keys[] as $key ({found:false, value:null};
         if .found then .
@@ -51,7 +51,10 @@ fm_workspace_placement_docker_sandbox_inventory_array() {
           end
         else ""
         end;
-    if type == "array" then .
+    if length == 1 then .[0]
+    else error("unsupported Docker Sandbox inventory shape")
+    end
+    | if type == "array" then .
     elif type == "object" then
       [
         if has("sandboxes") then .sandboxes else empty end,

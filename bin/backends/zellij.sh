@@ -428,8 +428,13 @@ fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
   local rc
-  if printf '%s' "$tabs" | jq -e --argjson id "$tab_id" '[.[]? | select(.tab_id == $id)] | length > 0' >/dev/null 2>&1; then
-    return 1
+  if printf '%s' "$tabs" | jq -s -e --argjson id "$tab_id" '
+    if length == 1 and (.[0] | type) == "array"
+    then ([.[0][] | select(.tab_id == $id)] | length == 0)
+    else error("invalid zellij tab inventory")
+    end
+  ' >/dev/null 2>&1; then
+    return 0
   else
     rc=$?
   fi

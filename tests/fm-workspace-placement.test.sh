@@ -47,6 +47,10 @@ json_state() {
     unknown-wrapper) printf '%s\n' '{"unknown":[]}'; return 0 ;;
     null-wrapper) printf '%s\n' '{"sandboxes":null}'; return 0 ;;
     multiple-wrappers) printf '%s\n' '{"sandboxes":[],"items":[]}'; return 0 ;;
+    multiple-documents)
+      printf '%s\n%s\n' '[{"id":"id-valid","name":"valid","agent":"codex","workspace":""}]' '[]'
+      return 0
+      ;;
     member-scalar) printf '%s\n' '[{"id":"id-valid","name":"valid","agent":"codex","workspace":""},"bad"]'; return 0 ;;
     member-missing-id) printf '%s\n' '[{"name":"missing-id","agent":"codex","workspace":""}]'; return 0 ;;
     member-invalid-id) printf '%s\n' '[{"id":42,"name":"invalid-id","agent":"codex","workspace":""}]'; return 0 ;;
@@ -186,7 +190,7 @@ assert_grep $'create\t--name\tfm-kit.task\t--kit\tkit ref with spaces\t--kit\tki
   'Docker direct did not preserve repeatable kit refs when no additional workspace was supplied'
 pass 'Docker direct accepts zero or more explicit kit refs without shell splitting'
 
-for shape in scalar unknown-wrapper null-wrapper multiple-wrappers; do
+for shape in scalar unknown-wrapper null-wrapper multiple-wrappers multiple-documents; do
   export SBX_JSON_SHAPE=$shape
   : > "$SBX_LOG"
   if fm_workspace_placement_inspect docker-sandbox docker-sandbox:malformed:fm-malformed:id-fm-malformed; then

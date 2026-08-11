@@ -869,6 +869,23 @@ test_kill_tab_exact_retains_cleanup_on_empty_name() {
   pass "fm_backend_zellij_kill_tab_exact: empty matching names retain cleanup while absent IDs prove gone"
 }
 
+test_kill_tab_exact_retains_cleanup_on_multidoc_post_close() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-exact-multidoc-post-close"; mkdir -p "$dir/responses"
+  printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/1.out"
+  printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
+  printf '%s\n%s\n' '[{"tab_id":3,"name":"fm-zghost"}]' '[]' > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill_tab_exact firstmate 3 fm-zghost' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact zellij cleanup accepted a multi-document post-close inventory"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
+    "exact zellij cleanup did not close the verified tab before retaining its record"
+  pass "fm_backend_zellij_kill_tab_exact: multi-document post-close inventories retain cleanup"
+}
+
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
@@ -1378,6 +1395,7 @@ test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
 test_kill_tab_exact_retains_cleanup_on_session_inspection_failure
 test_kill_tab_exact_retains_cleanup_on_empty_name
+test_kill_tab_exact_retains_cleanup_on_multidoc_post_close
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send

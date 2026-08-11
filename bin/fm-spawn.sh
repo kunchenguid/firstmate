@@ -807,9 +807,15 @@ spawn_endpoint_result_token_valid() {
 
 spawn_register_endpoint_from_result() {
   local backend=$1 label=$2 result=$3 first second extra
-  case "$result" in
-    ''|*$'\n'*|*$'\r'*|*$'\t'*|' '*|*' '|*'  '*) return 1 ;;
-  esac
+  if [ "$backend" = herdr ]; then
+    case "$result" in
+      ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+    esac
+  else
+    case "$result" in
+      ''|*$'\n'*|*$'\r'*|*$'\t'*|' '*|*' '|*'  '*) return 1 ;;
+    esac
+  fi
   case "$backend" in
     tmux)
       spawn_endpoint_result_token_valid "$result" || return 1
@@ -851,9 +857,11 @@ $result
 EOF
       spawn_endpoint_result_token_valid "$first" || return 1
       if [ -z "$second" ] && [ -z "$extra" ]; then
+        [ "$result" = "$first" ] || return 1
         [ -n "${HERDR_SES:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] || return 1
         spawn_register_endpoint herdr "$HERDR_SES" "$HERDR_WORKSPACE_ID:$first" "$label" herdr-tab
       elif [ -n "$second" ] && [ -z "$extra" ]; then
+        [ "$result" = "$first $second" ] || return 1
         spawn_endpoint_result_token_valid "$second" || return 1
         [ -n "${HERDR_SES:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] || return 1
         spawn_register_endpoint herdr "$HERDR_SES" "$HERDR_WORKSPACE_ID:$first" "$label" herdr-tab

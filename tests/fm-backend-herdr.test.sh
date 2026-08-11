@@ -782,6 +782,55 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
 }
 
+test_spawn_registers_herdr_partial_acquisition_fallback() {
+  local dir home proj wt id fb out status
+  dir="$TMP_ROOT/spawn-herdr-partial-acquisition"
+  home="$dir/home"
+  proj="$dir/project"
+  wt="$dir/worktree"
+  id=herdr-partial-xy1
+  mkdir -p "$dir/responses" "$home/data/$id" "$home/state" "$home/projects" "$home/config"
+  fm_git_worktree "$proj" "$wt" "herdr-$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf 'off\n' > "$home/config/herdr-presentation-spaces"
+  printf '%s\n' '{"client":{"version":"0.7.1","protocol":14}}' > "$dir/responses/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$dir/responses/2.out"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$dir/responses/3.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}' > "$dir/responses/4.out"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$dir/responses/5.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' > "$dir/responses/6.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-partial.sock"}]}' > "$dir/responses/7.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-herdr-partial-xy1"}]}}' > "$dir/responses/8.out"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$dir/responses/10.out"
+  fb=$(make_herdr_fakebin "$dir")
+  cat > "$fb/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fb/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#:-}" in
+  *.spawn-endpoint-*) exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$fb/treehouse" "$fb/mv"
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend herdr --mode no-mistakes --yolo off \
+    > "$dir/output" 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should stop after the provider's partial acquisition fallback"
+  out=$(cat "$dir/output")
+  assert_contains "$out" "herdr" "partial Herdr acquisition failure did not report the backend"
+  assert_contains "$(cat "$dir/log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' \
+    "spawn did not register and clean up Herdr's exact two-token partial acquisition"
+  pass "fm-spawn: accepts Herdr's exact two-token partial acquisition fallback for cleanup"
+}
+
 # --- container_ensure / create_task: --no-focus and per-home label ----------
 
 test_container_ensure_creates_with_no_focus_flag() {
@@ -2197,6 +2246,28 @@ test_kill_tab_exact_retains_cleanup_on_empty_label() {
   assert_not_contains "$(cat "$log")" $'\x1f''tab\x1f''close' \
     "exact Herdr cleanup closed a tab whose matching record had an empty label"
   pass "fm_backend_herdr_kill_tab_exact: empty matching labels retain cleanup while absent IDs prove gone"
+}
+
+test_kill_tab_exact_retains_cleanup_on_multidoc_post_close() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/kill-exact-multidoc-post-close"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"t1","label":"fm-task"}]}}' > "$resp/1.out"
+  printf '%s\n%s\n' '{"result":{"tabs":[{"tab_id":"t1","label":"fm-task"}]}}' '{"result":{"tabs":[]}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_presentation_session_lock_path() { printf "/tmp/fm-herdr-multidoc-test-lock"; }
+      fm_lock_try_acquire() { return 0; }
+      fm_lock_release() { return 0; }
+      fm_backend_herdr_kill_tab_exact firstmate ws1 t1 fm-task
+    ' "$ROOT" 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact Herdr cleanup accepted a multi-document post-close inventory"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''t1' \
+    "exact Herdr cleanup did not close the verified tab before retaining its record"
+  pass "fm_backend_herdr_kill_tab_exact: multi-document post-close inventories retain cleanup"
 }
 
 test_projection_seeded_prune_refuses_active_tab() {
@@ -4269,6 +4340,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
+test_spawn_registers_herdr_partial_acquisition_fallback
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor
 test_presentation_default_falls_back_below_the_floor
@@ -4310,6 +4382,7 @@ test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_tab_exact_retains_cleanup_on_empty_label
+test_kill_tab_exact_retains_cleanup_on_multidoc_post_close
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
