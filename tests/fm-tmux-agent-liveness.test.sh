@@ -38,7 +38,7 @@ trap cleanup_all EXIT
 
 # A `tmux` shim on PATH so bin/backends/tmux.sh's bare `tmux` calls reach the
 # private socket and never touch the host's real sessions.
-mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/bin/claude" "$LAB/bin/decoy" "$LAB/wt"
+mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/bin/claude/versions" "$LAB/bin/decoy" "$LAB/wt"
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -187,9 +187,9 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
   printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
-  "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
+  "$CC_BIN" -o "$LAB/bin/claude/versions/2.1.220" "$LAB/spin.c" 2>/dev/null &&
   "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
-  new_window titled "$LAB/bin/claude/2.1.220"
+  new_window titled "$LAB/bin/claude/versions/2.1.220"
   wait_for_state "$SESSION:titled" alive \
     || fail "a version-named executable under Claude's native install path must classify alive"
   assert_sources_disagree "$SESSION:titled" "version-string process name"
