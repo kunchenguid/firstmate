@@ -386,8 +386,7 @@ nm_ci_checks_state() {
 # failed), or empty when the branch has no matching row within
 # FM_CREW_STATE_RUNS_LIMIT rows. An active row always outranks a terminal
 # one regardless of list order: a stale failed/completed row for this branch
-# must never shadow a live running row (see fm_nm_head_matches_worktree's
-# header for why an unresolvable head must not be read as divergence either).
+# must never shadow a live running row.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha terminal=''
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -421,19 +420,18 @@ nm_runs_status_for_branch() {  # <branch>
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 # 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
+# identity. Branch match is a precondition (caller).
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  fm_nm_head_matches_worktree_reporting "$WT" "$run_head"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+# nm_run_head_matches_worktree.
 nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+  fm_nm_head_matches_worktree_reporting "$WT" "$1"
 }
 
 HAVE_RUN=0

@@ -2183,6 +2183,25 @@ test_another_branchs_parked_run_is_never_touched() {
   pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
 }
 
+test_same_branch_unresolvable_parked_run_is_never_aborted() {
+  local case_dir rc
+  case_dir=$(make_case parked-run-unresolvable-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 deadbeefdeadbeefdeadbeefdeadbeefdeadbeef)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-unresolvable-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-unresolvable-head: teardown aborted an unverified run"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-unresolvable-head: teardown reported aborting an unverified run"
+  pass "a same-branch parked run with an unresolvable head is never aborted"
+}
+
 test_own_autonomous_run_is_left_alone() {
   local case_dir rc head
   case_dir=$(make_case autonomous-run-left-alone)
@@ -2638,6 +2657,7 @@ test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
+test_same_branch_unresolvable_parked_run_is_never_aborted
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped

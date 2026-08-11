@@ -63,19 +63,20 @@ fm_nm_field() {  # <toon-output> <key>
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
-#   - run head not resolvable as a local object: cannot prove either relation,
-#     so match rather than reject. A live pipeline-owned run legitimately
-#     advances the branch past a commit this worktree's object store has not
-#     observed yet (branch_sync.state: pipeline_owned - "the pipeline head has
-#     moved but has not been successfully pushed"); rejecting on unresolvable
-#     input previously fell through to a stale terminal run at the worktree's
-#     own sha and reported a live run as failed. A false "still working" here
-#     is harmless (supervision just keeps watching); a false "failed" is not.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   local wt=$1 run_head=$2 local_full run_full
   [ -n "$run_head" ] || return 1
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 0
+  run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+fm_nm_head_matches_worktree_reporting() {  # <worktree> <run_head>
+  local wt=$1 run_head=$2
+  fm_nm_head_matches_worktree "$wt" "$run_head" && return 0
+  [ -n "$run_head" ] || return 1
+  git -C "$wt" rev-parse HEAD >/dev/null 2>&1 || return 1
+  git -C "$wt" rev-parse --verify "${run_head}^{commit}" >/dev/null 2>&1 && return 1
+  return 0
 }
