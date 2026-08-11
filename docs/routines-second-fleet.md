@@ -84,11 +84,12 @@ This is the shape of a first job, and it is deliberately the least powerful usef
 | Cadence | Once daily |
 | Blast radius | Read-only access to the operator's own Firstmate fork and its upstream; no write anywhere, no credential, no product surface |
 | When Firstmate is down | Runs anyway, which is the point; the report waits in the captain's Claude surface |
-| Kill metric | The captain acts on a report at least once a quarter |
+| Kill metric | The operator still maintains a long-lived fork meant to track upstream, and the captain has not withdrawn that intent |
 | Removal | Delete the schedule in the Claude account; nothing else to unwind |
 
 The job reads the fork's default branch and its upstream and reports only when the fork has fallen behind, naming what landed upstream.
 It opens nothing, pushes nothing, and merges nothing, so a wrong run costs one unnecessary message.
 
+For a silent R1 job, the kill metric has to be an intent-still-holds check rather than a count of captain actions, because green is silence and a healthy run produces none.
 Its silence means only that no drift was found.
 It is not evidence that Firstmate is alive, and reading it that way would quietly substitute a report for the deadman.
