@@ -9,6 +9,13 @@ LOCK="$ROOT/bin/fm-lock.sh"
 HOOK="$ROOT/bin/fm-codex-session-lock-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-codex-session-lock-tests)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+HOOK_ROOT="$TMP_ROOT/hook-primary"
+mkdir -p "$HOOK_ROOT"
+fm_git_init_commit "$HOOK_ROOT"
+printf '# agents\n' > "$HOOK_ROOT/AGENTS.md"
+ln -s "$ROOT/bin" "$HOOK_ROOT/bin"
+git -C "$HOOK_ROOT" add AGENTS.md bin
+git -C "$HOOK_ROOT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm primary
 
 # Codex owner records exist only while no other harness marker claims the thread,
 # so a marker exported by the shell that launches this suite (a Claude, Pi, or
@@ -18,7 +25,9 @@ unset CLAUDECODE PI_CODING_AGENT GROK_AGENT CODEX_THREAD_ID
 
 make_home() {
   local home="$TMP_ROOT/$1"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data" "$home/config"
+  printf 'root=%s\ntoken=hook-%s\n' "$HOOK_ROOT" "$1" > "$home/state/.primary-attestation"
+  chmod 600 "$home/state/.primary-attestation"
   printf '%s\n' "$home"
 }
 
@@ -95,16 +104,16 @@ SH
 
 run_lock() {
   local home=$1 thread=$2 fakebin=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    FM_HOME="$home" CODEX_THREAD_ID="$thread" PATH="$fakebin:$BASE_PATH" \
-    bash "$LOCK"
+  ( cd "$HOOK_ROOT" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID="$thread" \
+      PATH="$fakebin:$BASE_PATH" bash "$LOCK" )
 }
 
 run_hook() {
   local home=$1 event=$2 session=$3
-  printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s"}\n' \
-    "$event" "$session" "$ROOT" \
-    | FM_HOME="$home" CODEX_THREAD_ID="$session" bash "$HOOK"
+  ( cd "$HOOK_ROOT" && printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s"}\n' \
+      "$event" "$session" "$HOOK_ROOT" \
+      | FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID="$session" bash "$HOOK" )
 }
 
 test_hook_registration_preserves_jt_pretool() {
@@ -129,14 +138,18 @@ test_hooks_work_when_jq_fails() {
   home=$(make_home no-jq)
   fakebin="$home/fakebin"
   mkdir -p "$fakebin"
+  rm -f "$home/state/.primary-attestation"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 127' > "$fakebin/jq"
   chmod +x "$fakebin/jq"
   ln -s "$(command -v node)" "$fakebin/node"
-  printf '{"hook_event_name":"SessionStart","session_id":"thread-no-jq"}\n' \
-    | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
+  ( cd "$HOOK_ROOT" && printf '{"hook_event_name":"SessionStart","session_id":"thread-no-jq"}\n' \
+      | FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq \
+        PATH="$fakebin:$BASE_PATH" bash "$HOOK" )
   [ -f "$home/state/.lock" ] || fail "SessionStart did not acquire without jq"
-  printf '{"hook_event_name":"SessionEnd","session_id":"thread-no-jq"}\n' \
-    | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
+  [ -f "$home/state/.primary-attestation" ] || fail "SessionStart did not establish the primary attestation"
+  ( cd "$HOOK_ROOT" && printf '{"hook_event_name":"SessionEnd","session_id":"thread-no-jq"}\n' \
+      | FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq \
+        PATH="$fakebin:$BASE_PATH" bash "$HOOK" )
   [ ! -e "$home/state/.lock" ] || fail "SessionEnd did not release without jq"
   pass "Codex lifecycle hooks do not depend on jq"
 }
@@ -171,8 +184,9 @@ test_session_start_retains_verified_harness_owner() {
   fakecodex="$home/codex"
   ln -s /bin/bash "$fakecodex"
   # shellcheck disable=SC2016
-  FM_HOOK_PATH="$HOOK" FM_HOME="$home" CODEX_THREAD_ID=thread-start \
-    "$fakecodex" -c 'printf '\''{"hook_event_name":"SessionStart","session_id":"thread-start"}\n'\'' | bash "$FM_HOOK_PATH"'
+  ( cd "$HOOK_ROOT" && FM_HOOK_PATH="$HOOK" FM_ROOT_OVERRIDE="$HOOK_ROOT" \
+    FM_HOME="$home" CODEX_THREAD_ID=thread-start \
+      "$fakecodex" -c 'printf '\''{"hook_event_name":"SessionStart","session_id":"thread-start"}\n'\'' | bash "$FM_HOOK_PATH"' )
   owner=$(cat "$home/state/.lock")
   case "$owner" in *'|codex:thread-start|harness') ;; *) fail "unexpected SessionStart owner: $owner" ;; esac
   pass "SessionStart retains a visible Codex harness PID"
@@ -236,8 +250,9 @@ test_grok_precedence_and_primary_lock_protection() {
   home=$(make_home grok-owner-format)
   grokbin="$home/grokbin"
   make_any_grok_ps "$grokbin"
-  env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 CODEX_THREAD_ID=inherited-thread \
-    FM_HOME="$home" PATH="$grokbin:$BASE_PATH" bash "$LOCK" >/dev/null
+  ( cd "$HOOK_ROOT" && env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 \
+      CODEX_THREAD_ID=inherited-thread FM_ROOT_OVERRIDE="$HOOK_ROOT" \
+      FM_HOME="$home" PATH="$grokbin:$BASE_PATH" bash "$LOCK" >/dev/null )
   owner=$(cat "$home/state/.lock")
   case "$owner" in ''|*[!0-9]*) fail "Grok owner was incorrectly structured as Codex: $owner" ;; esac
 

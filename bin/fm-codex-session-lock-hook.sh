@@ -57,6 +57,17 @@ fi
 [ "$EVENT" = SessionEnd ] || exit 0
 [ -e "$LOCK" ] || [ -L "$LOCK" ] || exit 0
 
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+[ -f "$LOCK" ] && [ ! -L "$LOCK" ] || exit 0
+OWNER=$(cat "$LOCK" 2>/dev/null) || exit 0
+MARKER=$(fm_codex_owner_marker "$OWNER" 2>/dev/null || true)
+[ -n "$(fm_codex_owner_kind "$OWNER" 2>/dev/null || true)" ] || exit 0
+[ "$MARKER" = "$SESSION_ID" ] || exit 0
+fm_worker_primary_attestation_load >/dev/null 2>&1 || exit 0
+
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"

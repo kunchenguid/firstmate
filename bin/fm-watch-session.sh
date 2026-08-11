@@ -15,17 +15,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WATCH_SESSION_DEFAULT_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}
 FM_ROOT="${FM_ROOT_OVERRIDE:-$FM_WATCH_SESSION_DEFAULT_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-FM_WATCH_SESSION_ATTEST_STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_WATCH_SESSION_DEFAULT_ROOT}/state}
-if [ -z "${FM_PRIMARY_ATTESTATION:-}" ] \
-  && [ -f "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" ] \
-  && [ ! -L "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" ]; then
-  FM_PRIMARY_ATTESTATION=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
-    "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" 2>/dev/null || true)
-  export FM_PRIMARY_ATTESTATION
-fi
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+fm_watch_primary_entry_trusted() {
+  fm_verified_harness_ancestry_pid >/dev/null 2>&1 && return 0
+  fm_session_lock_owned_by_self "$STATE"
+}
+
+fm_watch_primary_entry_trusted || {
+  echo "watch-session: FAILED - primary harness or session-lock ownership is unproven" >&2
+  exit 1
+}
+
+fm_worker_primary_attestation_load 2>/dev/null || true
 
 write_primary_attestation() {
   fm_worker_primary_attestation_establish

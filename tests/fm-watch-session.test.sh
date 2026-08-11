@@ -16,6 +16,8 @@ git -C "$PRIMARY_ROOT" add AGENTS.md bin
 git -C "$PRIMARY_ROOT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 FM_ROOT_OVERRIDE="$PRIMARY_ROOT"
 export FM_ROOT_OVERRIDE
+CODEX_THREAD_ID=watch-session-tests
+export CODEX_THREAD_ID
 cd "$PRIMARY_ROOT" || exit 1
 
 prepare_watch_home() {
@@ -24,6 +26,7 @@ prepare_watch_home() {
   token="watch-$(basename "$home")"
   printf 'root=%s\ntoken=%s\n' "$FM_ROOT_OVERRIDE" "$token" > "$home/state/.primary-attestation"
   chmod 600 "$home/state/.primary-attestation"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
 }
 
 watch_attestation_token() {
@@ -119,6 +122,8 @@ test_watch_session_bootstraps_missing_attestation() {
   prepare_watch_home "$dir/home"
   attestation="$dir/home/state/.primary-attestation"
   rm -rf "$dir/home/state"
+  mkdir -p "$dir/home/state"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$dir/home/state/.lock"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
     FM_HOME="$dir/home" "$WATCH_SESSION" start >/dev/null \
     || fail "watch-session did not bootstrap a missing primary attestation"
@@ -126,6 +131,26 @@ test_watch_session_bootstraps_missing_attestation() {
   grep -F "root=$FM_ROOT_OVERRIDE" "$attestation" >/dev/null \
     || fail "watch-session wrote an attestation for the wrong primary root"
   pass "watch-session bootstraps a missing primary attestation before its guard"
+}
+
+test_watch_session_does_not_replay_attestation_without_trusted_entry() {
+  local dir fakebin out status
+  dir=$(make_case session-primary-attestation-replay)
+  fakebin=$(install_fake_tmux "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+  prepare_watch_home "$dir/home"
+  status=0
+  out=$(env -u CODEX_THREAD_ID -u FM_PRIMARY_ATTESTATION \
+    -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    PATH="$fakebin:$PATH" FM_HOME="$dir/home" \
+    "$WATCH_SESSION" --status 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "watch-session accepted a persisted attestation without trusted entry proof"
+  assert_contains "$out" "primary harness or session-lock ownership is unproven" \
+    "watch-session replay refusal did not explain the missing trusted entry proof"
+  assert_not_contains "$out" "watch-session: stopped" \
+    "watch-session replay refusal reached the runner status path"
+  pass "watch-session does not replay a persisted attestation without trusted entry proof"
 }
 
 test_watch_session_start_status_stop_are_home_scoped() {
@@ -358,6 +383,7 @@ test_watch_session_grok_emergency_override_allows_fallback() {
 }
 
 test_watch_session_bootstraps_missing_attestation
+test_watch_session_does_not_replay_attestation_without_trusted_entry
 test_watch_session_start_status_stop_are_home_scoped
 test_watch_session_stop_waits_for_starting_watcher
 test_watch_session_stop_fails_for_unpinned_legacy_watcher

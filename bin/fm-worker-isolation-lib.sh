@@ -179,8 +179,25 @@ fm_worker_primary_attestation_matches() {
   [ "$content" = "$(printf 'root=%s\ntoken=%s' "$expected_root" "$token")" ]
 }
 
+fm_worker_primary_attestation_load() {
+  local root state file token content
+  fm_worker_primary_bootstrap_proven || return 1
+  root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
+  root=$(fm_worker_canonical_path "$root") || return 1
+  file="$state/.primary-attestation"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
+  content=$(cat "$file" 2>/dev/null) || return 1
+  token=$(printf '%s\n' "$content" | awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}')
+  [ -n "$token" ] || return 1
+  [ "$content" = "$(printf 'root=%s\ntoken=%s' "$root" "$token")" ] || return 1
+  FM_PRIMARY_ATTESTATION=$token
+  export FM_PRIMARY_ATTESTATION
+  fm_worker_primary_attestation_refresh
+}
+
 fm_worker_primary_attestation_establish() {
-  local root state file token token_file tmp root_real content
+  local root state file token token_file tmp root_real
   fm_worker_primary_bootstrap_proven || return 1
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
@@ -188,11 +205,8 @@ fm_worker_primary_attestation_establish() {
   mkdir -p "$state" || return 1
   file="$state/.primary-attestation"
   if [ -e "$file" ] || [ -L "$file" ]; then
-    [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
-    content=$(cat "$file" 2>/dev/null) || return 1
-    token=$(printf '%s\n' "$content" | awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}')
-    [ -n "$token" ] || return 1
-    [ "$content" = "$(printf 'root=%s\ntoken=%s' "$root_real" "$token")" ] || return 1
+    fm_worker_primary_attestation_load || return 1
+    return 0
   else
     token_file=$(mktemp "${TMPDIR:-/tmp}/fm-primary-attestation.XXXXXX") || return 1
     token=${token_file##*/}

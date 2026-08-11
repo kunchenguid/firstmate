@@ -19,9 +19,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-if [ "${1:-}" != status ]; then
-  fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
-fi
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -29,6 +26,13 @@ LOCK="$STATE/.lock"
 
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+if [ "${1:-}" != status ]; then
+  if fm_session_lock_owner >/dev/null 2>&1; then
+    fm_worker_primary_attestation_establish >/dev/null 2>&1 || true
+  fi
+  fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
+fi
 
 if [ "${1:-}" = status ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
