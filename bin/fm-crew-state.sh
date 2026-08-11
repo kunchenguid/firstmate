@@ -78,8 +78,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
+MODE=prose
+if [ "${1:-}" = --json ]; then
+  MODE=json
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--json] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -194,6 +199,12 @@ emit() {  # <state> <source> [detail]
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
+}
+
+# A JSON string, or bare null when this reader did not measure the field.
+json_field_or_null() {  # <text>
+  [ -n "${1:-}" ] || { printf 'null'; return; }
+  printf '"%s"' "$(json_escape "$1")"
 }
 
 # --- meta resolution --------------------------------------------------------
@@ -665,7 +676,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # a working, parked, blocked or finished run, whose verdict already accounts for
   # the crew.
   if crew_state_is_run_ended "$RUN_STATE" \
-    && [ "$(fm_task_role "$META")" != secondmate ] && [ -n "$BACKEND_TARGET" ]; then
+    && [ "$KIND" != secondmate ] && [ -n "$BACKEND_TARGET" ]; then
     AGENT_LIVENESS=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || AGENT_LIVENESS=''
     [ -n "$AGENT_LIVENESS" ] || AGENT_LIVENESS=unreadable
     if [ "$AGENT_LIVENESS" = missing ]; then

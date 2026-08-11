@@ -121,7 +121,10 @@ make_fake_crew_state() {  # <fakebin>
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+mode=prose
+if [ "${1:-}" = --json ]; then mode=json; shift; fi
 id=${1:-}
+[ -n "${FM_FAKE_CREW_STATE_LOG:-}" ] && printf '%s\n' "$id" >> "$FM_FAKE_CREW_STATE_LOG"
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}

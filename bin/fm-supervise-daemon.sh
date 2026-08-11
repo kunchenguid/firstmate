@@ -960,6 +960,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local working_reads=0 working_reads_max absorb wedge_reason
+  stale_gate_read_budget
+  working_reads_max=$STALE_GATE_READ_BUDGET
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1016,8 +1019,89 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) # The single provably-working gate, placed here rather than on the wake
+         # path because crew_absorb_class reuses bin/fm-crew-state.sh and may make
+         # a bounded no-mistakes call. A marker only reaches this point once per
+         # STALE_ESCALATE_SECS per crew, so the read is bounded by the threshold
+         # instead of by how often a static pane is re-surfaced.
+         # stale_window_is_busy above only compares PANE TEXT, which a worker
+         # waiting on a completion artifact never changes, so it cannot answer
+         # whether this pane is static because the crew is STUCK or because it is
+         # still working; the reconciled state (an attributed run step, or the
+         # backend's own busy verdict) can.
+         #
+         # Provably working REFRESHES the marker rather than removing it, so the
+         # drop is bounded and fails toward noise: silence requires this positive
+         # verdict to keep being re-earned every threshold, and the moment it
+         # stops - the crew freezes, the reader errors, the run detaches - the
+         # marker simply ages out and escalates. Nothing has to notice the freeze
+         # and re-arm anything. The cost is that detection after a freeze takes at
+         # most TWO thresholds instead of one: the guarantee that a wedge is found
+         # within a bounded time and never lost is preserved, the constant doubles.
+         # Only a POSITIVE working verdict refreshes; stopped, parked, failed and
+         # unreadable crews all escalate exactly as before.
+         #
+         # The read is bounded per crew per threshold but housekeeping runs
+         # INLINE in the main loop, so N simultaneously-due crews would otherwise
+         # cost N serial bounded reads and stall wake handling for their sum.
+         # STALE_WORKING_GATE_READS caps how many one pass may make. Past the
+         # budget the gate is SKIPPED rather than decided either way, and the
+         # marker is left aged and untouched - it is neither escalated nor
+         # refreshed - so the next pass reconsiders it with a fresh budget.
+         # That is the direction this fails: a deferred read delays an escalation
+         # and can never suppress one. How LONG it delays depends on the load.
+         # For a BURST - D markers due at once, nothing else arriving - the delay
+         # is one pass per full budget of markers ahead of it: the last waits
+         # ceil(D/B) - 1 passes, so at the defaults (B = 3, HOUSEKEEPING_TICK =
+         # 15s) ten due crews put the last escalation about 45s late. That bound
+         # relies on the due set draining, which every spent read helps do: a
+         # marker that spends budget leaves the due set, refreshed for a threshold
+         # or escalated and removed.
+         # Under SUSTAINED staleness it does not hold. Throughput is B reads per
+         # tick (12/min at the defaults) while each continuously-stale crew needs
+         # one read per STALE_ESCALATE_SECS (0.25/min at the defaults), so beyond
+         # roughly 48 simultaneously-stale crews arrivals outpace reads and the
+         # backlog - and with it the delay - grows without bound. Markers are also
+         # walked in stable glob order rather than round-robin, so that delay is
+         # not shared fairly: it lands repeatedly on the same late-sorting task
+         # ids. Nothing is dropped even then, because a deferred marker stays aged
+         # and is reconsidered every pass, but a fleet that large loses the
+         # ceil(D/B) - 1 bound and should raise STALE_WORKING_GATE_READS.
+         #
+         # The same read answers the settled-terminal question: a task can go
+         # stale while its status line is still non-terminal and only THEN
+         # settle (its run finishes, or its decision is handed up), so the
+         # marker recorded earlier outlives the reason for it. One bounded read
+         # decides both at the one point that matters. Deferring past the budget
+         # leaves such a marker aged rather than escalating it, so an absorb is
+         # delayed by a pass and never turned into a false wedge.
+         if [ "$working_reads" -ge "$working_reads_max" ]; then
+           log "stale gate deferred to next pass (read budget ${working_reads_max} spent, marker kept aged): $win"
+           continue
+         fi
+         working_reads=$(( working_reads + 1 ))
+         absorb=$(crew_absorb_class "$task" "$state")
+         if [ "$absorb" = settled ]; then
+           log "stale marker dropped (settled terminal state): $win"
+           rm -f "$marker"
+         elif [ "$absorb" = working ]; then
+           log "stale marker refreshed (provably working, wedge aging restarts): $win"
+           _now > "$marker"
+         else
+           # ${age} is time since positive evidence was last seen, NOT time since
+           # the pane first went idle: a refresh restarts it. The wording says so
+           # because this line is what a human reads for triage.
+           #
+           # `unobserved` escalates on exactly the same schedule as an observed
+           # idle crew - silence is never the answer to a wedge nobody could see -
+           # but says which of the three values it was, so the reader knows this
+           # is an unread crew rather than a measured stall.
+           wedge_reason="no progress evidence for ${age}s (possible wedge): $win"
+           [ "$absorb" = unobserved ] \
+             && wedge_reason="no progress evidence for ${age}s (possible wedge; ${FM_CLASSIFY_UNOBSERVED_NOTE}): $win"
+           escalate_add "$state" "$wedge_reason"
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 
