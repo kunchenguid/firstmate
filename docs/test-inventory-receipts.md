@@ -2,7 +2,7 @@
 
 This document owns Firstmate's literal-source test-inventory receipt contract and its merge-time enforcement model.
 Every project merged by Firstmate declares either `test-bearing` or `testless` in `.firstmate/test-inventory.json`.
-The shared merge boundary rejects a missing declaration at the exact candidate or base.
+The shared merge boundary always rejects a missing declaration at the exact candidate and normally requires the exact base to carry the prior declaration.
 
 ## One merge execution boundary
 
@@ -39,6 +39,24 @@ The unprotected rebase path rejects candidates containing originally empty commi
 These adjacent pre-mutation and post-mutation base observations bound but cannot eliminate every residual external-writer race.
 That remaining window assumes Firstmate is the single merge authority and no concurrent uncooperative writer advances the base.
 The unprotected path does not claim that GitHub enforces required status checks; it preserves the exact-candidate boundary after the delivery lifecycle has established that the candidate's checks are green.
+
+## Candidate-carried bootstrap transition
+
+When and only when `.firstmate/test-inventory.json` is absent from the exact merge-base tree, `merge-check` may use the exact reviewed candidate as the initial inventory policy.
+An unreadable, malformed, ambiguous, or non-regular base declaration is not absence and does not qualify for bootstrap.
+The candidate must carry a regular, unambiguous declaration that satisfies the existing inventory contract.
+A `test-bearing` candidate must carry its required literal-source receipt, while a `testless` candidate must carry no receipt.
+Duplicate JSON object keys are ambiguous and are rejected.
+The worktree declaration and any required receipt must equal the versions committed in the exact candidate tree, and the existing receipt verifier must match the receipt's declaration digest, baseline version, counts, and literal-declaration digest to that tree.
+Missing, malformed, ambiguous, or inconsistent candidate material fails before any merge mutation.
+
+This is a one-transition compatibility path.
+After the seed lands, the next exact merge base contains the declaration, so every later candidate returns to the existing declaration-transition verification, including baseline-version and reduction-review rules.
+The bootstrap never treats inventory as optional and never permits a test-bearing candidate to omit or bypass its receipt.
+
+Only the inventory policy's starting point changes during this transition.
+PR identity, exact head and base OIDs, candidate ancestry, local exact-head and clean-state checks, repository-eligibility checks, SHA-conditional GitHub mutation, and post-mutation exact-candidate confirmation remain owned and enforced by the shared merge boundary.
+Protected and separately sanctioned explicit-null unprotected repository paths retain their existing eligibility rules.
 
 ## Literal-source inventory
 
@@ -79,7 +97,8 @@ Testless projects declare only `schema_version` and `status` and keep no receipt
 
 ## Rollout
 
-Seed the declaration and receipt on the target branch before enabling Firstmate merge enforcement for the project.
+Prefer seeding the declaration and receipt on the target branch before enabling Firstmate merge enforcement for the project.
+If enforcement is already active while the exact base predates the declaration, use the candidate-carried bootstrap transition above exactly once.
 Commit the declaration and generated receipt together for a test-bearing project, or only the declaration for a testless project.
 For a Git project, stage changed literal Python test source, then run `$FM_ROOT/bin/fm-test-inventory.sh collect .` from the checkout root and commit the regenerated receipt.
 For an intentional non-Git input, `collect` remains available and marks its receipt `source_tree=filesystem`; that receipt cannot satisfy Git merge verification.

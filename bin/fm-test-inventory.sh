@@ -12,6 +12,7 @@
 # `source_tree=filesystem`.
 # `merge-check` additionally binds declarations and receipts to clean exact Git
 # candidate and base commits before the shared merge boundary proceeds.
+# Only an exact base with no declaration may use the candidate-carried bootstrap.
 set -eu
 
 usage() {
@@ -71,9 +72,17 @@ def git_bytes(*args, check=True):
 
 
 def load_json_bytes(raw, label):
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate object key: {key}")
+            value[key] = item
+        return value
+
     try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         fail(f"{label} is invalid: {error}")
 
 
@@ -81,22 +90,35 @@ def load_json(path, label, required=True):
     if path.is_symlink():
         fail(f"{label} must not be a symlink: {path}")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return load_json_bytes(path.read_bytes(), label)
     except FileNotFoundError:
         if not required:
             return None
         fail(f"{label} is unavailable: {path}")
-    except (OSError, json.JSONDecodeError) as error:
+    except OSError as error:
         fail(f"{label} is invalid: {error}")
 
 
 def load_json_at(revision, relative_path, label, required=True):
-    result = git("show", f"{revision}:{relative_path}", check=False)
-    if result.returncode:
+    listing = git_bytes("ls-tree", "-z", "--full-tree", revision, "--", relative_path).stdout
+    entries = [entry for entry in listing.split(b"\0") if entry]
+    if not entries:
         if not required:
             return None
         fail(f"{label} is unavailable at {revision}: {relative_path}")
-    return load_json_bytes(result.stdout.encode("utf-8"), label)
+    if len(entries) != 1:
+        fail(f"{label} is ambiguous at {revision}: {relative_path}")
+    try:
+        header, raw_path = entries[0].split(b"\t", 1)
+        file_mode, object_type, object_id = header.decode("ascii").split()
+        tree_path = raw_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as error:
+        fail(f"cannot inspect {label} at {revision}: {error}")
+    if tree_path != relative_path:
+        fail(f"{label} is ambiguous at {revision}: {relative_path}")
+    if object_type != "blob" or file_mode not in {"100644", "100755"}:
+        fail(f"{label} must be a regular file at {revision}: {relative_path}")
+    return load_json_bytes(git_bytes("cat-file", "blob", object_id).stdout, label)
 
 
 def canonical_hash(value):
@@ -332,19 +354,24 @@ source_tree = worktree_source_tree()
 
 if mode == "merge-check":
     require_clean_exact_checkout()
-    base_declaration = load_json_at(base_sha, declaration_rel, "merge-base test-inventory declaration")
+    base_declaration = load_json_at(base_sha, declaration_rel, "merge-base test-inventory declaration", required=False)
     declaration = load_json_at(candidate_sha, declaration_rel, "candidate test-inventory declaration")
-    validate_transition(base_declaration, declaration)
+    if base_declaration is None:
+        validate_declaration(declaration)
+    else:
+        validate_transition(base_declaration, declaration)
     if load_json(declaration_path, "test-inventory declaration") != declaration:
         fail("worktree test-inventory declaration does not match the exact candidate commit")
 else:
     declaration = load_json(declaration_path, "test-inventory declaration")
 policy = validate_declaration(declaration)
+bootstrap = mode == "merge-check" and base_declaration is None
 
 if policy["status"] == "testless":
     if receipt_path.exists() or (mode == "merge-check" and load_json_at(candidate_sha, receipt_rel, "candidate test-inventory receipt", required=False) is not None):
         fail("a testless declaration must not keep a test-inventory receipt")
-    print(f"test inventory: source_tree={source_tree} declared testless")
+    suffix = " bootstrap-seed" if bootstrap else ""
+    print(f"test inventory: source_tree={source_tree} declared testless{suffix}")
     raise SystemExit(0)
 
 if mode == "collect":
@@ -359,5 +386,6 @@ receipt = load_json(receipt_path, "test-inventory receipt")
 if mode == "merge-check" and receipt != load_json_at(candidate_sha, receipt_rel, "candidate test-inventory receipt"):
     fail("worktree test-inventory receipt does not match the exact candidate commit")
 verified = verify_receipt(declaration, policy, receipt, candidate_sha if mode == "merge-check" else None, source_tree)
-print(f"test inventory: source_tree={source_tree} declarations={verified['declarations']} test_files={verified['test_files']} accepted")
+suffix = " bootstrap-seed" if bootstrap else ""
+print(f"test inventory: source_tree={source_tree} declarations={verified['declarations']} test_files={verified['test_files']} accepted{suffix}")
 PY

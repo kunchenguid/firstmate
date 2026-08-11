@@ -72,6 +72,84 @@ make_secondmate_cross_clone_case() {
   printf '%s\n%s\n%s\n%s\n%s\n' "$case_dir" "$base" "$candidate" "$secondmate_project" "$state_dir"
 }
 
+make_bootstrap_case() {
+  local name=$1 variant=${2:-valid} case_dir base candidate
+  case_dir=$TMP_ROOT/$name
+  mkdir -p "$case_dir/state"
+  fm_git_worktree "$case_dir/project" "$case_dir/wt" fm/task-x1
+  git -C "$case_dir/project" branch -M main
+  base=$(git -C "$case_dir/project" rev-parse main)
+  case "$variant" in
+    absent)
+      printf 'candidate without inventory\n' > "$case_dir/wt/change.txt"
+      git -C "$case_dir/wt" add change.txt
+      ;;
+    malformed)
+      mkdir -p "$case_dir/wt/.firstmate"
+      printf '{invalid\n' > "$case_dir/wt/.firstmate/test-inventory.json"
+      git -C "$case_dir/wt" add .firstmate/test-inventory.json
+      ;;
+    testless)
+      mkdir -p "$case_dir/wt/.firstmate"
+      printf '{"schema_version":1,"status":"testless"}\n' > "$case_dir/wt/.firstmate/test-inventory.json"
+      git -C "$case_dir/wt" add .firstmate/test-inventory.json
+      ;;
+    *)
+      mkdir -p "$case_dir/wt/.firstmate" "$case_dir/wt/tests"
+      cat > "$case_dir/wt/.firstmate/test-inventory.json" <<'EOF'
+{"schema_version":1,"status":"test-bearing","baseline":{"version":1,"declarations":1,"test_files":1},"maximum_unreviewed_deletion":0}
+EOF
+      cat > "$case_dir/wt/tests/test_receipt.py" <<'EOF'
+def test_literal():
+    pass
+EOF
+      git -C "$case_dir/wt" add .firstmate/test-inventory.json tests/test_receipt.py
+      case "$variant" in
+        no-receipt) ;;
+        ambiguous)
+          "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null
+          python3 - "$case_dir/wt/.firstmate/test-inventory.json" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_text(path.read_text().replace('"status":"test-bearing"', '"status":"testless","status":"test-bearing"'))
+PY
+          ;;
+        mismatched)
+          "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null
+          cat >> "$case_dir/wt/tests/test_receipt.py" <<'EOF'
+
+def test_added_after_receipt():
+    pass
+EOF
+          ;;
+        malformed-receipt)
+          "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null
+          printf '{invalid\n' > "$case_dir/wt/.firstmate/test-inventory-receipt.json"
+          ;;
+        ambiguous-receipt)
+          "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null
+          python3 - "$case_dir/wt/.firstmate/test-inventory-receipt.json" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_text(path.read_text().replace('"schema_version": 1', '"schema_version": 1,\n  "schema_version": 1'))
+PY
+          ;;
+        valid) "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null ;;
+        *) fail "unknown inventory bootstrap fixture variant: $variant" ;;
+      esac
+      git -C "$case_dir/wt" add .firstmate tests
+      ;;
+  esac
+  git -C "$case_dir/wt" commit -qm candidate-inventory-seed
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  printf '%s\n%s\n%s\n' "$case_dir" "$base" "$candidate"
+}
+
 run_local_merge() {
   local case_dir=$1 state_dir
   state_dir=${FM_TEST_CASE_STATE:-$case_dir/state}
@@ -381,6 +459,22 @@ run_github_execute() {
     FM_TEST_GH_IDENTITY_RACE_URL="${FM_TEST_GH_IDENTITY_RACE_URL:-}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$path_prefix$case_dir/fakebin:$PATH" \
     "$MERGE_EXECUTE" github task-x1 https://github.com/example/repo/pull/9 -- "--$method"
+}
+
+assert_github_bootstrap_refusal() {
+  local name=$1 variant=$2 expected=$3 expectation=$4 values case_dir base candidate rc
+  values=$(make_bootstrap_case "$name" "$variant")
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  add_github_mocks "$case_dir"
+  set +e
+  run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "$expectation"
+  grep -Fq "$expected" "$case_dir/err" || fail "$expectation did not report its inventory defect"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "$expectation reached the merge API"
 }
 
 test_exact_literal_receipt_lands_candidate() {
@@ -993,6 +1087,103 @@ test_unprotected_github_merge_uses_verified_exact_sha() {
   pass "GitHub merge sanctions a null protection rule without weakening the exact candidate mutation"
 }
 
+test_github_merge_bootstraps_inventory_from_exact_candidate() {
+  local values case_dir base candidate out
+  values=$(make_bootstrap_case github-bootstrap)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  add_github_mocks "$case_dir"
+  out=$(run_github_merge "$case_dir" "$candidate" "$candidate" "$base") \
+    || fail "GitHub boundary refused a valid candidate-carried inventory seed"
+  grep -q 'accepted bootstrap-seed' <<<"$out" \
+    || fail "test-bearing bootstrap did not report its compatibility transition"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "candidate-carried inventory seed did not reach the SHA-conditional merge"
+  pass "GitHub merge bootstraps inventory from the verified exact candidate"
+}
+
+test_github_merge_bootstraps_testless_inventory_from_exact_candidate() {
+  local values case_dir base candidate out
+  values=$(make_bootstrap_case github-bootstrap-testless testless)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  add_github_mocks "$case_dir"
+  out=$(run_github_merge "$case_dir" "$candidate" "$candidate" "$base") \
+    || fail "GitHub boundary refused a valid testless candidate-carried inventory seed"
+  grep -q 'declared testless bootstrap-seed' <<<"$out" \
+    || fail "testless bootstrap did not report its compatibility transition"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "testless candidate-carried inventory seed did not reach the SHA-conditional merge"
+  pass "GitHub merge bootstraps a testless declaration under its existing no-receipt contract"
+}
+
+test_github_merge_bootstrap_refuses_absent_candidate_declaration() {
+  assert_github_bootstrap_refusal github-bootstrap-absent absent \
+    'candidate test-inventory declaration is unavailable' \
+    'an absent-base bootstrap without a candidate declaration'
+  pass "GitHub merge refuses an absent candidate bootstrap declaration"
+}
+
+test_github_merge_bootstrap_refuses_absent_candidate_receipt() {
+  assert_github_bootstrap_refusal github-bootstrap-no-receipt no-receipt \
+    'test-inventory receipt is unavailable' \
+    'an absent-base bootstrap without a candidate receipt'
+  pass "GitHub merge refuses an absent candidate bootstrap receipt"
+}
+
+test_github_merge_bootstrap_refuses_mismatched_candidate_receipt() {
+  assert_github_bootstrap_refusal github-bootstrap-mismatched mismatched \
+    'current literal Python declarations does not match the committed receipt' \
+    'an absent-base bootstrap with a receipt mismatched to the exact candidate tree'
+  pass "GitHub merge refuses a bootstrap receipt mismatched to the exact candidate tree"
+}
+
+test_github_merge_bootstrap_refuses_malformed_or_ambiguous_candidate_receipt() {
+  local variant
+  for variant in malformed-receipt ambiguous-receipt; do
+    assert_github_bootstrap_refusal "github-bootstrap-$variant" "$variant" \
+      'test-inventory receipt is invalid' \
+      "an absent-base bootstrap with a $variant candidate receipt"
+  done
+  pass "GitHub merge refuses malformed and ambiguous bootstrap receipts"
+}
+
+test_github_merge_bootstrap_refuses_malformed_or_ambiguous_declaration() {
+  local variant
+  for variant in malformed ambiguous; do
+    assert_github_bootstrap_refusal "github-bootstrap-$variant" "$variant" \
+      'candidate test-inventory declaration is invalid' \
+      "an absent-base bootstrap with a $variant candidate declaration"
+  done
+  pass "GitHub merge refuses malformed and ambiguous bootstrap declarations"
+}
+
+test_github_merge_existing_base_keeps_transition_verification() {
+  local values case_dir base candidate rc
+  values=$(make_case github-existing-base-transition)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  cat > "$case_dir/wt/.firstmate/test-inventory.json" <<'EOF'
+{"schema_version":1,"status":"test-bearing","baseline":{"version":1,"declarations":2,"test_files":1},"maximum_unreviewed_deletion":0}
+EOF
+  git -C "$case_dir/wt" add .firstmate/test-inventory.json
+  git -C "$case_dir/wt" commit -qm invalid-unversioned-policy-change
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an existing base declaration must keep transition verification"
+  grep -q 'a changed test-inventory baseline must advance baseline.version' "$case_dir/err" \
+    || fail "existing-base transition refusal drifted into the bootstrap path"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "invalid existing-base transition reached the merge API"
+  pass "GitHub merge keeps existing-base inventory transition verification unchanged"
+}
+
 test_github_merge_refuses_changed_remote_head() {
   local values case_dir base candidate rc
   values=$(make_case github-changed-head)
@@ -1275,6 +1466,14 @@ test_github_merge_capture_bounds_reentrant_gh
 test_merge_execute_bounds_inherited_lock_reentry
 test_merge_execute_reentry_without_lock_fails_typed
 test_unprotected_github_merge_uses_verified_exact_sha
+test_github_merge_bootstraps_inventory_from_exact_candidate
+test_github_merge_bootstraps_testless_inventory_from_exact_candidate
+test_github_merge_bootstrap_refuses_absent_candidate_declaration
+test_github_merge_bootstrap_refuses_absent_candidate_receipt
+test_github_merge_bootstrap_refuses_mismatched_candidate_receipt
+test_github_merge_bootstrap_refuses_malformed_or_ambiguous_candidate_receipt
+test_github_merge_bootstrap_refuses_malformed_or_ambiguous_declaration
+test_github_merge_existing_base_keeps_transition_verification
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base
 test_unprotected_github_merge_refuses_unattributed_mutation_base_drift
