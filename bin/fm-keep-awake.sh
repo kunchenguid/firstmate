@@ -34,6 +34,15 @@ RECORD="$STATE/.keep-awake"
 LOCK="$STATE/.keep-awake.lock"
 PLATFORM="${FM_KEEP_AWAKE_PLATFORM:-$(uname -s 2>/dev/null || printf unknown)}"
 
+# keep_awake_start_new's own polling loop is bounded at 40 * 0.05s plus a 0.2s
+# stabilization sleep (~2.2s legitimate worst case), so the lock waiter's budget
+# must exceed that with margin rather than time out on a slow-but-legitimate
+# start. The mkdir-to-identity-file window it guards is normally instantaneous
+# (no sleep between them), so a lock still "incomplete" past this age is a
+# SIGKILL-interrupted creation, not a legitimate in-flight acquire.
+KEEP_AWAKE_LOCK_MAX_ATTEMPTS=80
+KEEP_AWAKE_LOCK_INCOMPLETE_STALE_AFTER=1
+
 FM_KEEP_AWAKE_PID=
 FM_KEEP_AWAKE_IDENTITY=
 FM_KEEP_AWAKE_TOOL=
@@ -231,7 +240,7 @@ keep_awake_lock_discard_stale() {
 
 keep_awake_lock_acquire() {
   local attempt=0 state identity
-  while [ "$attempt" -lt 20 ]; do
+  while [ "$attempt" -lt "$KEEP_AWAKE_LOCK_MAX_ATTEMPTS" ]; do
     attempt=$((attempt + 1))
     if (umask 077; mkdir "$LOCK") 2>/dev/null; then
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
@@ -254,7 +263,11 @@ keep_awake_lock_acquire() {
         keep_awake_lock_discard_stale || return 1
         ;;
       2)
-        sleep 0.05
+        if [ "$(fm_path_age "$LOCK")" -ge "$KEEP_AWAKE_LOCK_INCOMPLETE_STALE_AFTER" ]; then
+          keep_awake_lock_discard_stale || return 1
+        else
+          sleep 0.05
+        fi
         ;;
       *) return 1 ;;
     esac
