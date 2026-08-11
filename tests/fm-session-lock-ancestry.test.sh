@@ -299,6 +299,20 @@ test_relative_process_names_cannot_claim_cursor() {
   pass "session-lock: relative process names cannot claim Cursor identity"
 }
 
+test_relative_cursor_primary_names_cannot_claim_identity() {
+  local dir
+  dir="$TMP_ROOT/relative-cursor-primary"
+  fm_fake_cursor_alias "$dir" agent
+  if (
+    cd "$dir" || exit 1
+    HOME="$FM_TEST_HOME" PATH="$dir:/usr/bin:/bin" bash -c \
+      ". '$ROOT/bin/fm-cursor-lib.sh'; fm_cursor_primary_path_is_cursor agent"
+  ); then
+    fail "a relative Cursor primary name claimed identity from the current directory"
+  fi
+  pass "session-lock: relative Cursor primary names cannot probe current-directory decoys"
+}
+
 test_cursor_identity_does_not_execute_pid_executable() {
   local dir proc_root executable side_effect got untrusted identity_file boundary_file task_id spoof_identity spoof_boundary
   dir="$TMP_ROOT/cursor-no-probe"
@@ -788,6 +802,7 @@ test_ordinary_paths_are_never_harness_processes
 test_mainthread_cursor_session_is_identified
 test_running_cursor_version_survives_binary_update
 test_relative_process_names_cannot_claim_cursor
+test_relative_cursor_primary_names_cannot_claim_identity
 test_cursor_identity_does_not_execute_pid_executable
 test_mainthread_cursor_argv0_with_spaces_is_identified
 test_cursor_external_primary_identity_without_launch_metadata
