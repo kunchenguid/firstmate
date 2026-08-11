@@ -218,6 +218,7 @@ process.stdout.write(result.stdout || "");
 process.stderr.write(result.stderr || "");
 process.exit(result.status === null ? 1 : result.status);
 JS
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash.
   out=$(env -u CURSOR_AGENT -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     FM_TEST_HARNESS="$HARNESS" bash -c 'exec -a "$1" "$2" "$3"' \
     _ "$dir/bin/cursor-agent" "$node" "$dir/probe.js")
@@ -474,6 +475,7 @@ test_cursor_composer_placeholder_requires_cursor_glyph() {
 
 test_cursor_spawn_refuses_existing_hook_target_collision() {
   local spec name command rec case_dir home proj wt fakebin id out status expected_hooks expected_script
+  # shellcheck disable=SC2016 # The literal $PWD alias is input to the collision probe.
   for spec in \
     'literal|.cursor/hooks/fm-busy-turnend.sh user' \
     'pwd-alias|$PWD/.cursor/hooks/fm-busy-turnend.sh user' \
