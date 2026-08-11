@@ -230,16 +230,17 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
 # explicit per-task override. Precedence: FM_BACKEND env, then config/backend
 # (a single word on its first non-empty line, mirroring config/crew-harness),
-# then runtime auto-detection (fm_backend_detect), then default tmux. A
+# then runtime auto-detection (fm_backend_detect), then compatibility-default
+# tmux for non-spawn callers. A
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
 # always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
 # notice (both are experimental); auto-detecting tmux stays silent because the
 # primary already runs inside that visible tmux surface. A spawn caller passes
-# `spawn` so the otherwise-unexplained hard fallback announces the detached
-# tmux session before task creation; non-spawn callers such as bootstrap remain
-# quiet. The cmux
+# `spawn` so an undetected, unconfigured choice refuses before task creation;
+# non-spawn callers such as bootstrap retain the compatibility tmux default.
+# The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
@@ -277,7 +278,8 @@ fm_backend_name() {
     return 0
   fi
   if [ "$context" = spawn ]; then
-    echo "NOTICE: no runtime backend setting or primary-runtime marker matched this spawn - defaulting to detached tmux session 'firstmate'. Set config/backend or pass an authorized --backend <name> before spawning; view the worker with 'tmux attach -t firstmate'." >&2
+    echo "error: no runtime backend setting or primary-runtime marker matched this spawn; refusing before endpoint creation. Set config/backend or pass an authorized --backend <name>." >&2
+    return 1
   fi
   printf 'tmux'
 }

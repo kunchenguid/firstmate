@@ -1067,15 +1067,21 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
+  cat > "$fb/herdr" <<'SH'
+#!/bin/sh
+echo "unexpected herdr path" >&2
+exit 99
+SH
+  chmod +x "$fb/herdr"
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
 
-  # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
-  # but an explicit --backend tmux flag must still win outright.
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  # HERDR_ENV=1 is the only runtime marker, and the fake herdr fails loudly, so
+  # losing explicit precedence cannot select tmux again or touch a real Herdr.
+  out=$(env -u TMUX PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
@@ -1117,7 +1123,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
-test_spawn_configured_backend_avoids_fallback_notice() {
+test_spawn_configured_backend_avoids_unresolved_refusal() {
   local proj wt data id state config out fb
   proj="$TMP_ROOT/configured-backend-project"; wt="$TMP_ROOT/configured-backend-wt"; data="$TMP_ROOT/configured-backend-data"
   id="configuredbackendz6"
@@ -1136,15 +1142,15 @@ test_spawn_configured_backend_avoids_fallback_notice() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   expect_code 0 $? "fm-spawn.sh should honor config/backend outside a multiplexer"$'\n'"$out"
   assert_not_contains "$out" "no runtime backend setting or primary-runtime marker" \
-    "config/backend must be treated as an applicable choice, not the hard fallback"
+    "config/backend must be treated as an applicable choice, not an unresolved spawn"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "config/backend=tmux must preserve the absent-backend metadata compatibility contract"
   rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: config/backend is an applicable choice outside a multiplexer and stays off the fallback path"
+  pass "fm-spawn.sh: config/backend is an applicable choice outside a multiplexer"
 }
 
-test_spawn_true_default_announces_detached_tmux() {
-  local proj wt data id state config out fb
+test_spawn_true_default_refuses_before_tmux_creation() {
+  local proj wt data id state config out fb status log
   proj="$TMP_ROOT/true-default-project"; wt="$TMP_ROOT/true-default-wt"; data="$TMP_ROOT/true-default-data"
   id="truedefaultz7"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1152,22 +1158,29 @@ test_spawn_true_default_announces_detached_tmux() {
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/true-default-state"; config="$TMP_ROOT/true-default-config"
   mkdir -p "$state" "$config"
+  log="$TMP_ROOT/true-default.log"
+  : > "$log"
 
   out=$(env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
     PATH="$fb:$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    FM_TMUX_LOG="$TMP_ROOT/true-default.log" \
+    FM_TMUX_LOG="$log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
-  expect_code 0 $? "fm-spawn.sh should preserve the hard tmux fallback outside a multiplexer"$'\n'"$out"
-  assert_contains "$out" "defaulting to detached tmux session 'firstmate'" \
-    "the public spawn path did not announce its otherwise-unexplained hard backend fallback"
-  assert_contains "$out" "tmux attach -t firstmate" \
-    "the hard fallback notice did not explain how to view the detached worker"
-  assert_no_grep 'backend=' "$state/$id.meta" \
-    "the announced hard tmux fallback must preserve absent-backend metadata compatibility"
-  rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: true default preserves detached tmux behavior and announces placement before creation"
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh must refuse an unconfigured, undetected backend"$'\n'"$out"
+  assert_contains "$out" "refusing before endpoint creation" \
+    "the unresolved spawn did not explain its fail-closed timing"
+  assert_contains "$out" "config/backend" \
+    "the unresolved spawn did not name the durable configuration remedy"
+  assert_contains "$out" "authorized --backend <name>" \
+    "the unresolved spawn did not name the per-task selection remedy"
+  assert_not_contains "$(cat "$log")" $'tmux\x1fnew-session' \
+    "the unresolved spawn created a tmux session before refusing"
+  assert_not_contains "$(cat "$log")" $'tmux\x1fnew-window' \
+    "the unresolved spawn created a tmux endpoint before refusing"
+  [ ! -e "$state/$id.meta" ] || fail "the unresolved spawn published task metadata before refusing"
+  pass "fm-spawn.sh: true default refuses before tmux endpoint creation or metadata publication"
 }
 
 test_backend_name_precedence
@@ -1197,5 +1210,5 @@ test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently
-test_spawn_configured_backend_avoids_fallback_notice
-test_spawn_true_default_announces_detached_tmux
+test_spawn_configured_backend_avoids_unresolved_refusal
+test_spawn_true_default_refuses_before_tmux_creation

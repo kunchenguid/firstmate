@@ -8,9 +8,9 @@ tmux is Firstmate's verified reference runtime backend and the fully supported b
 Install tmux with `brew install tmux` or your platform package manager.
 The universal harness and toolchain requirements are in [`configuration.md`](configuration.md#toolchain).
 
-tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
 Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
 An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
+When the primary runs outside a detected runtime, an unselected spawn refuses before creating a detached tmux session; [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns that selection contract.
 
 No provisioning is required before the first task.
 
