@@ -58,12 +58,6 @@ function shortenPath(path: string, home: string | undefined): string {
 	return path;
 }
 
-function basename(path: string): string {
-	const trimmed = path.replace(/\/+$/, "");
-	const slash = trimmed.lastIndexOf("/");
-	return slash === -1 ? trimmed : trimmed.slice(slash + 1);
-}
-
 export default function (pi: ExtensionAPI) {
 	let enabled = false;
 	let latestCtx: ExtensionContext | undefined;
@@ -136,7 +130,6 @@ export default function (pi: ExtensionAPI) {
 			ctx.thinkingLevel ?? pi.getThinkingLevel() ?? null;
 		return {
 			repoPath: shortenPath(ctx.cwd, process.env.HOME),
-			repoBasename: basename(ctx.cwd),
 			branch: footerData.getGitBranch(),
 			contextPercent: usage?.percent ?? null,
 			contextTokens: usage?.tokens ?? null,

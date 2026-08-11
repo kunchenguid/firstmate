@@ -67,6 +67,7 @@ cp "$RENDER" "$fixture/lib/fm-quota-statusline-render.ts"
 output_file="$fixture/node-output"
 ( cd "$fixture" && node --input-type=module ) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { parseQuotaJson, extractWindows, getProviderQuotaStatus } from "./lib/fm-quota-statusline-data.ts";
 import { renderFooter } from "./lib/fm-quota-statusline-render.ts";
 
@@ -121,7 +122,6 @@ const theme = { fg: (_color, text) => text };
 const now = Date.parse("2026-08-11T07:00:00.000Z");
 const freshInput = {
   repoPath: "~/Developer/firstmate",
-  repoBasename: "firstmate",
   branch: "main",
   contextPercent: 70.1,
   contextTokens: 272000,
@@ -169,18 +169,36 @@ check("stale footer preserves the last-good weekly window", staleLine2.includes(
 check("stale footer marks the data stale", staleLine2.includes("quota~"));
 
 // --- Narrow width behavior ---------------------------------------------
-// Below the two-line threshold the footer collapses to one line and never
-// overflows the terminal width.
+// Narrow layouts use continuation lines without overflowing the terminal.
 const narrowLines = renderFooter(freshInput, theme, 18);
-check("narrow footer renders a single line", narrowLines.length === 1);
-check("narrow footer stays within the width", (narrowLines[0] ?? "").length <= 18);
-check("narrow footer shows the repo basename", (narrowLines[0] ?? "").startsWith("firstmate"));
+const narrowJoined = narrowLines.join("");
+check("narrow footer uses continuation lines", narrowLines.length > 1);
+check("narrow footer stays within the width", narrowLines.every((line) => visibleWidth(line) <= 18));
+check("narrow footer preserves repo and branch", narrowJoined.includes("~/Developer/firstmate") && narrowJoined.includes("main"));
+check("narrow footer preserves context", narrowJoined.includes("70.1%") && narrowJoined.includes("272.0k"));
+check("narrow footer preserves quota", narrowJoined.includes("week: 95%") && narrowJoined.includes("6d"));
+check("narrow footer preserves model and thinking", narrowJoined.includes("gpt-5.6-terra") && narrowJoined.includes("high"));
 // Even narrower: truncation must be ANSI-safe and not throw.
 const tinyLines = renderFooter(freshInput, theme, 6);
-check("tiny width does not throw and yields one line", tinyLines.length === 1);
-check("tiny footer stays within the requested width", (tinyLines[0] ?? "").length <= 6);
+check("tiny width does not throw and yields lines", tinyLines.length > 0);
+check("tiny footer stays within the requested width", tinyLines.every((line) => visibleWidth(line) <= 6));
 const zeroLines = renderFooter(freshInput, theme, 0);
 check("zero-width footer is empty", (zeroLines[0] ?? "").length === 0);
+
+const multiWindowInput = {
+  ...freshInput,
+  windows: [
+    { id: "primary", label: "5h", percentRemaining: 73, resetsAt: "2026-08-11T12:00:00.000Z" },
+    { id: "weekly", label: "week", percentRemaining: 86, resetsAt: "2026-08-18T03:30:39.000Z" },
+    { id: "review", label: "code-review", percentRemaining: 64, resetsAt: "2026-08-13T07:00:00.000Z" },
+    { id: "model", label: "gpt-5.6", percentRemaining: 51, resetsAt: "2026-08-12T07:00:00.000Z" },
+  ],
+};
+const multiWindowLines = renderFooter(multiWindowInput, theme, 48);
+const multiWindowText = multiWindowLines.join("\n");
+check("multi-window footer stays within width", multiWindowLines.every((line) => visibleWidth(line) <= 48));
+check("multi-window footer preserves every label", ["5h: 73%", "week: 86%", "code-review: 64%", "gpt-5.6: 51%"].every((value) => multiWindowText.includes(value)));
+check("multi-window footer preserves every reset", ["(5h)", "(6d)", "(2d)", "(1d)"].every((value) => multiWindowText.includes(value)));
 
 // --- Defensive parsing --------------------------------------------------
 // A non-JSON string and a structurally empty document both resolve to null

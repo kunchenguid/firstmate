@@ -9,17 +9,16 @@
 //
 // Layout (matches the captain's compact example):
 //   line 1: <repoPath> (<branch>)
-//   line 2: <ctx%> / <tokens>   <quota windows>   <model> <thinking>
+//   following lines: <ctx%> / <tokens>   <quota windows>   <model> <thinking>
 //
 // A stale quota cache keeps its last-good windows but prefixes the segment
 // so the captain can see the data may be behind. An unavailable quota shows a
 // concise marker and never fabricates a window or percentage.
 //
-// Narrow terminals: segments are dropped by priority (reset countdowns first,
-// then quota windows, then thinking, then repo path collapses to basename)
-// before any line is truncated to the available width.
+// Narrow terminals use continuation lines so every field remains present
+// without exceeding the available width.
 
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type {
 	QuotaFetchStatus,
 	QuotaWindow,
@@ -30,8 +29,6 @@ import { formatResetCountdown } from "./fm-quota-statusline-data.ts";
 export interface RenderInput {
 	/** Repository path for the first line (already shortened, e.g. ~/dev/proj). */
 	repoPath: string;
-	/** Bare repo path with no shortening, used when width forces a basename. */
-	repoBasename: string;
 	/** Current git branch, or null for detached/no repo. */
 	branch: string | null;
 	/** Context usage percent (0-100), or null when Pi has no estimate yet. */
@@ -100,18 +97,15 @@ function renderWindowSegment(window: QuotaWindow, now: number): string {
 	return reset ? `${label}: ${pct} (${reset})` : `${label}: ${pct}`;
 }
 
-function renderQuotaSegment(input: RenderInput): string {
+function renderQuotaSegments(input: RenderInput): string[] {
 	if (input.quotaStatus === "unavailable" || input.windows.length === 0) {
-		return input.quotaStatus === "unavailable" ? "quota: n/a" : "";
+		return input.quotaStatus === "unavailable" ? ["quota: n/a"] : [];
 	}
 	const parts = input.windows
 		.map((window) => renderWindowSegment(window, input.now))
 		.filter((segment) => segment.length > 0);
-	if (parts.length === 0) {
-		return "";
-	}
 	const prefix = input.quotaStatus === "stale" ? "quota~ " : "quota ";
-	return prefix + parts.join("   ");
+	return parts.map((part) => prefix + part);
 }
 
 function renderModelSegment(input: RenderInput): string {
@@ -122,12 +116,52 @@ function renderModelSegment(input: RenderInput): string {
 	return `${model}${thinking}`;
 }
 
+function wrapToWidth(text: string, width: number): string[] {
+	const lines: string[] = [];
+	let current = "";
+	for (const character of text) {
+		if (current.length > 0 && visibleWidth(current + character) > width) {
+			lines.push(current);
+			current = "";
+		}
+		if (visibleWidth(character) <= width) {
+			current += character;
+		}
+	}
+	if (current.length > 0 || lines.length === 0) {
+		lines.push(current);
+	}
+	return lines;
+}
+
+function packSegments(segments: string[], width: number): string[] {
+	const lines: string[] = [];
+	let current = "";
+	for (const segment of segments) {
+		const combined = current.length > 0 ? current + SEP + segment : segment;
+		if (visibleWidth(combined) <= width) {
+			current = combined;
+			continue;
+		}
+		if (current.length > 0) {
+			lines.push(current);
+			current = "";
+		}
+		const wrapped = wrapToWidth(segment, width);
+		lines.push(...wrapped.slice(0, -1));
+		current = wrapped.at(-1) ?? "";
+	}
+	if (current.length > 0) {
+		lines.push(current);
+	}
+	return lines;
+}
+
 /**
  * Render the statusline footer for the given input and terminal width.
  *
- * Returns one or two lines. When width is too small for two readable lines,
- * the second line is dropped entirely; the first line is then truncated to
- * the width so the footer never overflows the terminal.
+ * Returns width-safe lines, adding continuation lines when the available
+ * width cannot contain every field.
  */
 export function renderFooter(
 	input: RenderInput,
@@ -138,42 +172,15 @@ export function renderFooter(
 	if (safeWidth === 0) {
 		return [""];
 	}
-	const repoForLine1 = safeWidth < 48 ? input.repoBasename : input.repoPath;
 	const branchSuffix = input.branch ? ` (${input.branch})` : "";
-	const line1 = theme.fg("dim", `${repoForLine1}${branchSuffix}`);
+	const repoLines = wrapToWidth(`${input.repoPath}${branchSuffix}`, safeWidth)
+		.map((line) => theme.fg("dim", line));
 
 	const context = renderContextSegment(input);
-	const quota = renderQuotaSegment(input);
 	const model = renderModelSegment(input);
-
-	let line2Parts: string[] = [];
-	if (safeWidth >= 40) {
-		line2Parts.push(context);
-	}
-	if (safeWidth >= 60 && quota.length > 0) {
-		line2Parts.push(quota);
-	}
-	if (safeWidth >= 50) {
-		line2Parts.push(model);
-	}
-	let line2 = line2Parts.length > 0 ? line2Parts.join(SEP) : "";
-	if (line2.length > 0 && visibleWidth(line2) > safeWidth) {
-		// Drop the model segment first, then quota, to keep the most
-		// decision-relevant context number visible.
-		const trimmed = [...line2Parts];
-		while (
-			trimmed.length > 1 &&
-			visibleWidth(trimmed.join(SEP)) > safeWidth
-		) {
-			trimmed.splice(trimmed.length - 1, 1);
-		}
-		line2 = trimmed.join(SEP);
-	}
-
-	if (line2.length === 0) {
-		return [truncateToWidth(line1, safeWidth)];
-	}
-	const line1Clamped = truncateToWidth(line1, safeWidth);
-	const line2Clamped = truncateToWidth(line2, safeWidth);
-	return [line1Clamped, line2Clamped];
+	const detailLines = packSegments(
+		[context, ...renderQuotaSegments(input), model],
+		safeWidth,
+	);
+	return [...repoLines, ...detailLines];
 }
