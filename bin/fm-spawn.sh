@@ -385,7 +385,7 @@ fi
 
 effort_flag_for_harness() {
   local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  [ -n "$effort" ] && [ "$effort" != default ] && [ "$effort" != - ] || return 0
   case "$harness:$effort" in
     claude:low|claude:medium|claude:high|claude:xhigh|claude:max)
       printf -- "--effort '%s' " "$effort"
