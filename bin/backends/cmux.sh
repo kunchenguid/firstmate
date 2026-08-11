@@ -341,17 +341,45 @@ fm_backend_cmux_workspace_id_valid() {
   fm_backend_cmux_provider_id_valid "$1"
 }
 
+fm_backend_cmux_workspace_inventory() {
+  local response
+  response=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$response" | jq -s -e -c '
+    def valid_id:
+      if type != "string" then false
+      elif length == 0 then false
+      else test("^[^[:cntrl:] =:]+$")
+      end;
+    def valid_title:
+      if type != "string" then false
+      else (test("[[:cntrl:]]") | not)
+      end;
+    if length != 1 then
+      error("expected one cmux workspace list response")
+    elif (.[0] | type) != "object" then
+      error("cmux workspace list response is not an object")
+    elif (.[0].workspaces | type) != "array" then
+      error("cmux workspace list response has no workspaces array")
+    else
+      .[0].workspaces as $workspaces
+      | if any($workspaces[]?;
+          (. | type) != "object"
+          or ((.id | valid_id) | not)
+          or ((.title | valid_title) | not)) then
+          error("cmux workspace list response has an invalid workspace")
+        elif ([ $workspaces[] | .id ] | unique | length) != ($workspaces | length) then
+          error("cmux workspace list response has duplicate workspace ids")
+        else
+          $workspaces
+        end
+    end
+  ' 2>/dev/null
+}
+
 fm_backend_cmux_workspace_ids_for_label() {  # <label>
-  local label=$1 wss ids id
-  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
-  printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  ids=$(printf '%s' "$wss" | jq -r --arg want "$label" '
-    [.workspaces[]? | select(.title == $want)] as $matches
-    | if any($matches[]?; ((.id | type) != "string") or (.id == ""))
-      then error("invalid workspace identity")
-      else $matches[] | .id
-      end
-  ' 2>/dev/null) || return 1
+  local label=$1 inventory ids id
+  inventory=$(fm_backend_cmux_workspace_inventory) || return 1
+  ids=$(printf '%s' "$inventory" | jq -r --arg want "$label" '.[] | select(.title == $want) | .id' 2>/dev/null) || return 1
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     fm_backend_cmux_workspace_id_valid "$id" || return 1
@@ -361,14 +389,24 @@ $ids
 EOF
 }
 
-# fm_backend_cmux_workspace_id_for_label: the live workspace id whose title
-# equals <label>, or empty. cmux enforces no title uniqueness (finding #6),
-# so this adopts the FIRST match `jq` returns, mirroring herdr's/zellij's own
-# duplicate-check posture.
+fm_backend_cmux_workspace_id_for_label_from_inventory() {  # <inventory> <label>
+  local inventory=$1 label=$2 workspace_id
+  workspace_id=$(printf '%s' "$inventory" | jq -e -r --arg want "$label" '
+    [.[] | select(.title == $want) | .id] as $matches
+    | if ($matches | length) == 1 then
+        $matches[0]
+      else
+        error("cmux workspace title is absent or ambiguous")
+      end
+  ' 2>/dev/null) || return 1
+  fm_backend_cmux_workspace_id_valid "$workspace_id" || return 1
+  printf '%s' "$workspace_id"
+}
+
 fm_backend_cmux_workspace_id_for_label() {  # <label>
-  local label=$1
-  fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
-    | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
+  local label=$1 inventory
+  inventory=$(fm_backend_cmux_workspace_inventory) || return 1
+  fm_backend_cmux_workspace_id_for_label_from_inventory "$inventory" "$label"
 }
 
 fm_backend_cmux_workspace_matches_context() {  # <workspace-id> <title>
@@ -651,7 +689,10 @@ fm_backend_cmux_parse_target() {  # <target>
   local target=$1
   FM_BACKEND_CMUX_WORKSPACE=${target%%:*}
   FM_BACKEND_CMUX_SURFACE=${target#*:}
-  [ -n "$FM_BACKEND_CMUX_WORKSPACE" ] && [ -n "$FM_BACKEND_CMUX_SURFACE" ] && [ "$FM_BACKEND_CMUX_SURFACE" != "$target" ]
+  [ -n "$FM_BACKEND_CMUX_WORKSPACE" ] && [ -n "$FM_BACKEND_CMUX_SURFACE" ] && [ "$FM_BACKEND_CMUX_SURFACE" != "$target" ] \
+    || return 1
+  fm_backend_cmux_provider_id_valid "$FM_BACKEND_CMUX_WORKSPACE" \
+    && fm_backend_cmux_provider_id_valid "$FM_BACKEND_CMUX_SURFACE"
 }
 
 # fm_backend_cmux_surface_exists: does <surface_id> currently appear as one of
@@ -683,20 +724,26 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 # header for the fresh-surface pitfall this avoids). When the caller knows
 # the owning firstmate task label, refresh stale workspace/surface ids by label.
 fm_backend_cmux_target_ready() {  # <target> [expected-label]
-  local expected_label=${2:-} expected_title title wsid sfid
+  local expected_label=${2:-} expected_title title wsid sfid inventory match_count
   fm_backend_cmux_parse_target "$1" || return 1
   if [ -n "$expected_label" ]; then
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
-    title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
-    if [ "$title" = "$expected_title" ]; then
-      fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE" && return 0
-      wsid=$FM_BACKEND_CMUX_WORKSPACE
-    elif [ -n "$title" ]; then
-      return 1
-    else
-      wsid=$(fm_backend_cmux_workspace_id_for_label "$expected_title")
-      [ -n "$wsid" ] || return 1
-    fi
+    inventory=$(fm_backend_cmux_workspace_inventory) || return 1
+    match_count=$(printf '%s' "$inventory" | jq -e -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.[] | select(.id == $id)] | length' 2>/dev/null) || return 1
+    case "$match_count" in
+      1)
+        title=$(printf '%s' "$inventory" | jq -e -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.[] | select(.id == $id) | .title] | if length == 1 then .[0] else error("cmux workspace identity is ambiguous") end' 2>/dev/null) || return 1
+        [ "$title" = "$expected_title" ] || return 1
+        fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE" && return 0
+        wsid=$FM_BACKEND_CMUX_WORKSPACE
+        ;;
+      0)
+        wsid=$(fm_backend_cmux_workspace_id_for_label_from_inventory "$inventory" "$expected_title") || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
     sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
     [ -n "$sfid" ] || return 1
     FM_BACKEND_CMUX_WORKSPACE=$wsid

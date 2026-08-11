@@ -456,6 +456,7 @@ test_spawn_split_and_inherit() {
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  printf '%s\n' '{"workerPlacement":{"adapter":"docker-sandbox","workspaceMode":"direct","kits":[]},"secondmatePlacement":{"adapter":"host","workspaceMode":"direct","kits":[]},"commandExecution":{"adapter":"local","profile":null}}' > "$w/home/config/workspace-execution.json"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -472,6 +473,8 @@ test_spawn_split_and_inherit() {
     || fail "split: home backlog-backend not inherited as manual"
   [ "$(cat "$sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "split: home backend not inherited as zellij"
+  cmp -s "$w/home/config/workspace-execution.json" "$sm/config/workspace-execution.json" \
+    || fail "split: home workspace-execution.json was not inherited byte-for-byte"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
@@ -514,7 +517,34 @@ test_spawn_bare_backward_compat() {
     || fail "bare: secondmate launched on '$(meta_harness "$meta")', expected own harness claude"
   [ -e "$sm/config/crew-dispatch.json" ] && fail "bare: an unset primary still created a home crew-dispatch.json"
   [ -e "$sm/config/crew-harness" ] && fail "bare: an unset primary still created a home crew-harness"
+  [ -e "$sm/config/workspace-execution.json" ] && fail "bare: an unset primary still created a home workspace-execution.json"
   pass "B4 spawn: no config at all -> own harness and no propagation side effects"
+}
+
+test_spawn_invalid_workspace_config_refused() {
+  local w sm fakebin err rc
+  w="$TMP_ROOT/spawn-invalid-workspace-execution"
+  sm="$w/sm"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf '{"workerPlacement":' > "$w/home/config/workspace-execution.json"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux")
+  err="$w/spawn.err"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "invalid workspace-execution config should refuse the spawn"
+  assert_contains "$(cat "$err")" "workspace-execution config:" \
+    "invalid workspace-execution config did not emit the validation diagnostic"
+  [ -e "$w/home/state/sm.meta" ] && fail "invalid workspace-execution config wrote task metadata"
+  [ -e "$sm/config/workspace-execution.json" ] \
+    && fail "invalid workspace-execution config propagated into the secondmate home"
+  pass "B4b spawn: an invalid present workspace-execution config refuses launch before inheritance"
 }
 
 # An explicit per-spawn harness arg wins over config/secondmate-harness.
@@ -2472,6 +2502,7 @@ test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
+test_spawn_invalid_workspace_config_refused
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_backend_precedence_over_inherited_config

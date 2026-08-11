@@ -735,6 +735,70 @@ test_target_ready_rejects_label_mismatch() {
   pass "fm_backend_cmux_target_ready: rejects a workspace id reused under a different title"
 }
 
+test_stale_recovery_requires_unique_valid_inventory() {
+  local case_name dir fb title out status
+  title=$(cmux_expected_scoped_title fm-label)
+  while IFS='|' read -r case_name; do
+    [ -n "$case_name" ] || continue
+    dir="$TMP_ROOT/stale-recovery-$case_name"
+    mkdir -p "$dir/responses"
+    case "$case_name" in
+      duplicate)
+        jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title},{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' > "$dir/responses/1.out"
+        ;;
+      delimiter-id)
+        jq -n --arg title "$title" '{workspaces:[{id:"bad:id",title:$title}]}' > "$dir/responses/1.out"
+        ;;
+      control-id)
+        jq -n --arg title "$title" --arg id $'bad\nid' '{workspaces:[{id:$id,title:$title}]}' > "$dir/responses/1.out"
+        ;;
+      missing-id)
+        jq -n --arg title "$title" '{workspaces:[{title:$title}]}' > "$dir/responses/1.out"
+        ;;
+      multidoc)
+        jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title}]}' > "$dir/responses/1.out"
+        jq -n --arg title "$title" '{workspaces:[{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' >> "$dir/responses/1.out"
+        ;;
+      missing-title-match)
+        jq -n '{workspaces:[]}' > "$dir/responses/1.out"
+        ;;
+      *) fail "unknown stale recovery fixture: $case_name" ;;
+    esac
+    cmux_panes_response "$dir" 2 "eeeeeeee-4444-4444-4444-444444444444"
+    fb=$(make_cmux_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT" 2>&1 ); status=$?
+    [ "$status" -ne 0 ] || fail "$case_name stale recovery should refuse an unproven target: $out"
+    assert_not_contains "$(cat "$dir/log")" $'\x1f''send-key' \
+      "$case_name stale recovery sent a key despite an unproven target"
+  done <<'CASES'
+duplicate
+delimiter-id
+control-id
+missing-id
+multidoc
+missing-title-match
+CASES
+  pass "fm_backend_cmux_target_ready: refuses duplicate, malformed, missing, and multi-document stale recovery inventories"
+}
+
+test_kill_refuses_ambiguous_stale_recovery() {
+  local dir fb title status
+  dir="$TMP_ROOT/kill-ambiguous-stale"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-label)
+  jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title},{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "best-effort kill should retain an ambiguous stale target without failing the caller"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "ambiguous stale recovery closed a workspace"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''new-workspace' \
+    "ambiguous stale recovery created a cleanup sibling"
+  pass "fm_backend_cmux_kill: retains cleanup when stale title recovery is ambiguous"
+}
+
 test_capture_trims_locally() {
   local dir fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"
@@ -804,8 +868,7 @@ test_send_key_recovers_stale_target_by_label() {
   dir="$TMP_ROOT/sendkey-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
   cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
+  cmux_panes_response "$dir" 2 "dddddddd-3333-3333-3333-333333333333"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT"
@@ -1265,14 +1328,12 @@ test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  # target_ready label recovery: 1 workspace list (title lookup, misses stale id),
-  # 2 workspace list (id-for-label -> refreshed id), 3 list-panes (surface id).
+  # target_ready label recovery: 1 strict workspace list, 2 list-panes (surface id).
   cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
-  # window_of_workspace on the REFRESHED id: 4 list-windows (not last), 5 workspace list --window.
-  cmux_windows_response "$dir" 4 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_panes_response "$dir" 2 "dddddddd-3333-3333-3333-333333333333"
+  # window_of_workspace on the REFRESHED id: 3 list-windows (not last), 4 workspace list --window.
+  cmux_windows_response "$dir" 3 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1362,6 +1423,8 @@ test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
+test_stale_recovery_requires_unique_valid_inventory
+test_kill_refuses_ambiguous_stale_recovery
 test_capture_trims_locally
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready

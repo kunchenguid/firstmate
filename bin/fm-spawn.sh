@@ -2605,9 +2605,8 @@ EOF
 esac
 fi
 if [ "$KIND" = secondmate ]; then
-  FM_INHERITABLE_CONFIG=trace-context \
-    propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
-    || echo "warning: secondmate $ID trace-context inheritance failed for $PROJ_ABS" >&2
+  propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
+    || echo "warning: secondmate $ID config inheritance failed for $PROJ_ABS" >&2
 fi
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.

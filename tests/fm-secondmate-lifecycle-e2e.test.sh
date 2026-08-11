@@ -161,7 +161,10 @@ phase_sandbox_seed() {
 phase_sandbox_spawn() {
   SANDBOX_BRIDGE="$(cd "$HOME_DIR/state" && pwd -P)/sandbox-bridge/sandbox"
   : > "$LOG"
+  mkdir -p "$HOME_DIR/parent-config"
+  printf '%s\n' '{"workerPlacement":{"adapter":"host","workspaceMode":"direct","kits":[]},"secondmatePlacement":{"adapter":"docker-sandbox","workspaceMode":"direct","kits":[]},"commandExecution":{"adapter":"local","profile":null}}' > "$HOME_DIR/parent-config/workspace-execution.json"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
+    FM_SKIP_SECONDMATE_INHERIT=1 \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     FM_FAKE_TMUX_WINDOW="firstmate:fm-sandbox" \
     FM_FAKE_SBX_STATE="$SBX_STATE" FM_FAKE_SBX_LOG="$SBX_LOG" \
@@ -188,6 +191,8 @@ phase_sandbox_spawn() {
   assert_grep 'sandbox onboarding charter' "$SANDBOX_BRIDGE/runtime-brief.md" \
     "sandbox bridge runtime brief did not carry the persistent charter"
   assert_grep "task_id=sandbox" "$SANDBOX_BRIDGE/binding" "sandbox bridge metadata lost the task identity"
+  cmp -s "$HOME_DIR/parent-config/workspace-execution.json" "$SANDBOX_SUB/config/workspace-execution.json" \
+    || fail "sandbox secondmate did not inherit the validated workspace-execution config before launch"
   assert_grep "worktree=$SANDBOX_SUB_ABS" "$SANDBOX_BRIDGE/binding" "sandbox bridge metadata lost the home binding"
   assert_grep "bridge=$SANDBOX_BRIDGE" "$SANDBOX_BRIDGE/binding" "sandbox bridge metadata lost its canonical path"
   assert_no_grep 'treehouse get' "$LOG" "sandbox secondmate spawn used the host treehouse path"
