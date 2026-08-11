@@ -446,6 +446,9 @@ fm_backend_zellij_normalize_key() {  # <key>
     Enter|enter) printf 'Enter' ;;
     Escape|escape|Esc|esc) printf 'Esc' ;;
     C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|'Ctrl c'|'ctrl c') printf 'Ctrl c' ;;
+    # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
+    # drop the prompt muse restores into the composer after Escape.
+    C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|'Ctrl u'|'ctrl u') printf 'Ctrl u' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -460,16 +463,12 @@ fm_backend_zellij_send_key() {  # <target> <key> [expected-label]
   fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action send-keys --pane-id "$FM_BACKEND_ZELLIJ_PANE" "$key" >/dev/null 2>&1
 }
 
-# fm_backend_zellij_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter` / herdr's `pane
-# run`. Used for the fixed spawn-time commands (treehouse get, the GOTMPDIR
-# export). Zellij has no single-call atomic "run and submit" action, so this
-# composes paste (literal) + send-keys Enter, exactly like send_literal +
-# send_key are composed elsewhere - the two-step form is the ONLY form for
-# this adapter, unlike tmux/herdr which have a genuinely atomic primitive.
+# fm_backend_zellij_send_text_line: send one line of TEXT then submit.
 fm_backend_zellij_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_zellij_send_literal "$1" "$2" "${3:-}" || return 1
-  fm_backend_zellij_send_key "$1" Enter "${3:-}"
+  fm_backend_zellij_send_key "$1" Enter "${3:-}" && return 0
+  fm_backend_zellij_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 1
+  return 2
 }
 
 # fm_backend_zellij_capture: bounded plain-text pane capture. Mirrors
@@ -501,8 +500,8 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # also the load-bearing defense against the
 # unconditional-exit-0 CLI quirk documented in the file header: a truly dead
 # target never shows a change, so it correctly reports pending/unknown rather
-# than a false "sent". Echoes empty|pending|unknown|send-failed, the SAME
-# vocabulary fm-send.sh already branches on for tmux and herdr.
+# than a false "sent". Echoes empty|pending|unknown|send-failed, a subset of the
+# proof-carrying submit vocabulary.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }

@@ -24,7 +24,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source cmux || { echo "skip: could not source the cmux adapter"; exit 0; }
 

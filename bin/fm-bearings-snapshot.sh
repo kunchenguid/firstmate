@@ -77,6 +77,9 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # The provider-aware URL parser (fm_scm_parse_pr_url / fm_scm_parse_remote_url) and the
 # shared wall-clock bound (fm_res_bounded) used by the --include-prs live-fetch path.

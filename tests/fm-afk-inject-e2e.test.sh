@@ -70,7 +70,7 @@ LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 
 # Supervisor pane loop: a small deterministic composer that logs each submitted
@@ -214,6 +214,7 @@ reset_state() {
          "$STATE_DIR"/.subsuper-* \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
+         "$STATE_DIR"/.watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \

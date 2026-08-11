@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
-# Canonical polls are rebuilt from validated metadata, provenance-bound polls
-# and registered custom checks remain armed, and every other task poll is
+# Pending validated merged-poll retirements finish first. Canonical polls are
+# then rebuilt from validated metadata, remaining provenance-bound polls and
+# registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
@@ -307,6 +308,10 @@ if [ "$lock_held" -ne 1 ]; then
   echo "PR_CHECK_MIGRATION: watcher exclusion could not be acquired; review state/.watch.lock before rearming polls" >&2
   exit 1
 fi
+watch_recovery_required=0
+if [ "$stopped_watcher" -eq 1 ] || [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
+  watch_recovery_required=1
+fi
 
 MIGRATION_MARKER_TMP=
 MIGRATION_SCAN_MARKER_TMP=
@@ -322,7 +327,14 @@ migration_cleanup() {
   [ -z "$MIGRATION_LOG_TMP" ] || rm -f -- "$MIGRATION_LOG_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f -- "$MIGRATION_MARKER_TMP"
   [ -z "$MIGRATION_SCAN_MARKER_TMP" ] || rm -f -- "$MIGRATION_SCAN_MARKER_TMP"
-  [ "$lock_held" -ne 1 ] || fm_lock_release "$WATCH_LOCK"
+  if [ "$lock_held" -eq 1 ]; then
+    if [ "$watch_recovery_required" -eq 1 ]; then
+      fm_recovery_transition "$STATE/.watcher-down" release-lock "$WATCH_LOCK" downtime \
+        || echo "PR_CHECK_MIGRATION: watcher recovery state could not be persisted; retaining stale lock evidence" >&2
+    else
+      fm_lock_release "$WATCH_LOCK"
+    fi
+  fi
 }
 trap migration_cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -333,6 +345,10 @@ if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
 fi
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ -n "$STATE_DEVICE" ] || exit 1
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$TEMPLATE"; then
+  echo "PR_CHECK_MIGRATION: pending PR poll retirement could not be validated:$FM_PR_POLL_RETIREMENT_REJECTED" >&2
+  exit 1
+fi
 refresh_v1_x_shim() {
   local shim="$STATE/x-watch.check.sh"
   fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" "$STATE_DEVICE" || return 0

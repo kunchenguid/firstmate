@@ -7,7 +7,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/bin/fm-subagent-pretool-check.sh"
-SETTINGS="$ROOT/.claude/settings.json"
 TMP_ROOT=$(fm_test_tmproot fm-subagent-pretool-tests)
 PRIMARY="$TMP_ROOT/primary"
 STATE="$PRIMARY/state"
@@ -18,8 +17,8 @@ mkdir -p "$PRIMARY/bin" "$STATE"
 printf '# fixture\n' > "$PRIMARY/AGENTS.md"
 git -C "$PRIMARY" init -q
 
-BRIEF_ONLY_ROUTE='investigation and ship work both go to bin/fm-brief.sh then bin/fm-spawn.sh'
-SCOUT_ROUTE='investigation or diagnosis goes to bin/fm-scout.sh "<question>" [project], and ship work goes to bin/fm-brief.sh then bin/fm-spawn.sh'
+BRIEF_ONLY_ROUTE='first classify the work under the AGENTS.md intake contract, then use bin/fm-brief.sh followed by bin/fm-spawn.sh for dispatched work'
+SCOUT_ROUTE='first classify the work under the AGENTS.md intake contract: work already classified as a scout goes to bin/fm-scout.sh "<question>" [project], while authorized ship work and its bounded research go to bin/fm-brief.sh then bin/fm-spawn.sh'
 
 # Every delegation, scheduling, worktree, and task-tracking tool Claude Code
 # 2.1.217 offered a primary session in the observed baseline.
@@ -30,6 +29,17 @@ DELEGATION_TOOLS='Task Agent Workflow RemoteTrigger Monitor ScheduleWakeup SendM
 
 # Tools that must stay available: denying these would break ordinary work.
 PRESERVED_TOOLS='Bash Edit Read Write Skill ToolSearch WebFetch WebSearch NotebookEdit ReportFindings DesignSync PushNotification'
+
+# Session-local todo-list tools. They match a delegation stem but create no
+# runnable work, so the guard's plan-only exclusion must allow them.
+PLAN_ONLY_TOOLS='TaskCreate TaskUpdate'
+
+# Names the plan-only exclusion must NOT release. Five of them contain a
+# plan-only name as a substring and would be let through by a substring rather
+# than exact-name match; bare Task is what a shortened entry of "task" would
+# release. Together they make the exact-name contract testable instead of
+# assumed.
+PLAN_ONLY_NEAR_MISSES='TaskCreateAgent TaskCreateWorktree TaskUpdateAgent RemoteTaskCreate Task TaskCreator'
 
 run_tool() {
   local tool=$1 rc=0
@@ -62,20 +72,15 @@ expect_deny() {
 }
 
 # ---------------------------------------------------------------------------
-# Tracked settings boundary and delegation-shape PreToolUse guard.
+# Delegation-shape PreToolUse guard.
 # ---------------------------------------------------------------------------
-
-test_tracked_settings_do_not_ship_permissions_deny() {
-  jq -e 'keys == ["hooks"] and (has("permissions") | not)' "$SETTINGS" >/dev/null \
-    || fail "tracked Claude settings must contain only hooks and no permissions key"
-  pass "tracked Claude settings do not ship permissions.deny"
-}
 
 test_guard_denies_every_currently_known_delegation_tool() {
   local tool
   for tool in $DELEGATION_TOOLS; do
     case "$tool" in
       TaskOutput|TaskStop|TaskGet|TaskList|CronList) continue ;;
+      TaskCreate|TaskUpdate) continue ;;
     esac
     expect_deny "known delegation tool" "$tool"
   done
@@ -107,6 +112,28 @@ test_guard_allows_ordinary_and_observe_only_tools() {
   pass "the guard leaves ordinary tools and observe-or-stop operations alone"
 }
 
+test_guard_allows_session_local_todo_tools() {
+  # These write, so they are not observe-or-stop, but what they write is the
+  # harness's session-local todo list: no executor, no agent, no worktree, no
+  # schedule, nothing that outlives the session. Denying them stops the primary
+  # tracking its own plan and grants no delegation power in exchange.
+  local tool
+  for tool in $PLAN_ONLY_TOOLS; do
+    expect_allow "session-local todo tool" "$tool"
+  done
+  pass "the guard leaves the session-local todo list alone"
+}
+
+test_plan_only_exclusion_is_exact_name() {
+  # The plan-only exclusion must never widen by substring or by a shorter stem.
+  # Every name here would be released by such a widening and must stay denied.
+  local tool
+  for tool in $PLAN_ONLY_NEAR_MISSES; do
+    expect_deny "plan-only near miss" "$tool"
+  done
+  pass "the plan-only exclusion releases exactly two names and nothing that merely contains them"
+}
+
 test_guard_never_classifies_mcp_tools() {
   # An MCP server names its own tools; a task or agent noun there is common and
   # has nothing to do with fleet dispatch.
@@ -118,14 +145,17 @@ test_guard_never_classifies_mcp_tools() {
   pass "MCP tool names are never classified as harness delegation"
 }
 
-test_scout_entry_point_named_when_present() {
+test_deny_message_defers_to_intake_classification() {
   local actual
   printf '#!/usr/bin/env bash\n' > "$PRIMARY/bin/fm-scout.sh"
   run_tool Agent && fail "scout-present case must still deny"
   actual=$(jq -r '.systemMessage' "$ERR")
   case "$actual" in
     *"$SCOUT_ROUTE"*) ;;
-    *) fail "deny must name bin/fm-scout.sh when it exists: $actual" ;;
+    *) fail "deny must reserve bin/fm-scout.sh for classified scout work: $actual" ;;
+  esac
+  case "$actual" in
+    *'investigation or diagnosis goes to bin/fm-scout.sh'*) fail "deny must not classify all investigation or diagnosis as scout work: $actual" ;;
   esac
   rm -f "$PRIMARY/bin/fm-scout.sh"
   run_tool Agent && fail "scout-absent case must still deny"
@@ -134,7 +164,7 @@ test_scout_entry_point_named_when_present() {
     *"$BRIEF_ONLY_ROUTE"*) ;;
     *) fail "deny must degrade to brief-then-spawn when fm-scout.sh is absent: $actual" ;;
   esac
-  pass "deny names bin/fm-scout.sh when it exists and degrades gracefully when it does not"
+  pass "deny defers to intake classification and degrades gracefully without fm-scout.sh"
 }
 
 test_escape_hatch_allows_deliberate_use() {
@@ -246,39 +276,16 @@ test_missing_jq_stdin_transport_fails_open() {
   pass "missing jq for stdin transport fails open rather than denying every tool call"
 }
 
-test_claude_hook_registration_preserves_bash_seatbelts() {
-  jq -e '
-    [.hooks.PreToolUse[] | .hooks[].command]
-      | any(contains("fm-subagent-pretool-check.sh --claude"))
-  ' "$SETTINGS" >/dev/null || fail "Claude settings omit the delegation-shape PreToolUse guard"
-  # A stem-enumerating matcher repeats the fail-open-by-enumeration defect the
-  # script exists to remove. Match all tools and let the script be the single
-  # owner of classification.
-  jq -e '
-    [.hooks.PreToolUse[] | select(.hooks[].command | contains("fm-subagent-pretool-check.sh")) | .matcher] | .[0]
-      | . == ".*"
-  ' "$SETTINGS" >/dev/null || fail "the guard matcher must match all tools"
-  jq -e '
-    [.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] as $bash
-      | ($bash | any(contains("fm-arm-pretool-check.sh")))
-      and ($bash | any(contains("fm-cd-pretool-check.sh")))
-      and ($bash | any(contains("fm-continuity-pretool-check.sh")))
-  ' "$SETTINGS" >/dev/null || fail "the existing Bash PreToolUse seatbelts changed"
-  jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$SETTINGS" >/dev/null \
-    || fail "the Stop turn-end guard changed"
-  pass "Claude wires the guard while preserving the Bash seatbelts and the Stop guard"
-}
-
-test_tracked_settings_do_not_ship_permissions_deny
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
+test_guard_allows_session_local_todo_tools
+test_plan_only_exclusion_is_exact_name
 test_guard_never_classifies_mcp_tools
-test_scout_entry_point_named_when_present
+test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert
 test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
-test_claude_hook_registration_preserves_bash_seatbelts

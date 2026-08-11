@@ -28,6 +28,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # monitoring" sentence this script and bin/fm-bootstrap.sh both print.
 # shellcheck source=bin/fm-nm-lib.sh
 . "$SCRIPT_DIR/fm-nm-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "error: invalid PR check request" >&2
@@ -57,6 +59,9 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+# Refuse to arm a watch whose forge CLI is absent. The poll is silent on every
+# error by design, so a missing CLI would be indistinguishable from a request
+# that is never merged. Arming is the one point where that can be reported.
 case "$PROVIDER" in
   gitlab)
     command -v glab >/dev/null 2>&1 || { echo "error: watching a GitLab merge request requires glab on PATH" >&2; exit 1; }
@@ -66,6 +71,14 @@ case "$PROVIDER" in
     fm_scm_require_jq || exit 1
     ;;
 esac
+
+# A prior exact merged result may have queued its durable wake immediately
+# before interruption.
+# Finish only its identity-bound receipt before publishing a replacement poll.
+fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || {
+  echo "error: pending PR poll retirement could not be validated" >&2
+  exit 1
+}
 
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -91,15 +104,26 @@ case "$PROVIDER" in
 esac
 
 META_TMP=
+META_LOCK=
+META_LOCK_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
+[ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
+  || { echo "error: task metadata is unavailable" >&2; exit 1; }
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
@@ -126,6 +150,8 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 
 fm_pr_poll_publish_prepared || { echo "error: could not publish PR poll" >&2; exit 1; }
 printf 'armed: state/%s.check.sh\n' "$ID"
