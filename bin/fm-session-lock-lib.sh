@@ -485,15 +485,26 @@ fm_harness_ancestry_pids() {
 # is still running. Every non-Claude harness reports a single pid, so this is its
 # innermost match unchanged.
 fm_harness_ancestry_pid() {
-  local pids pid outermost=''
+  local pids pid comm args identity first_pid='' first_identity='' claude_owner=''
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    [ -n "$pid" ] && outermost=$pid
+    [ -n "$pid" ] || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+    identity=$(fm_harness_process_identity "$comm" "$args")
+    if [ -z "$first_pid" ]; then
+      first_pid=$pid
+      first_identity=$identity
+    fi
+    [ "$identity" = claude ] && claude_owner=$pid
   done <<EOF
 $pids
 EOF
-  [ -n "$outermost" ] || return 1
-  printf '%s\n' "$outermost"
+  if [ "$first_identity" = claude ] && [ "${CLAUDECODE:-}" = 1 ] && [ -n "$claude_owner" ]; then
+    printf '%s\n' "$claude_owner"
+  else
+    printf '%s\n' "$first_pid"
+  fi
 }
 
 # True if $1 is a live process that looks like a verified harness.
