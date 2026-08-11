@@ -59,7 +59,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  # This fork stamps one tmux session per firstmate home, so the container
+  # ensure reads back the ownership stamp it just wrote.
+  list-sessions) basename "$(cd "${FM_HOME:-.}" && pwd -P)"; exit 0 ;;
+  show-options) (cd "${FM_HOME:-.}" && pwd -P); exit 0 ;;
+  has-session|new-session|new-window|kill-window|set-option) exit 0 ;;
   send-keys)
     prev=
     literal=

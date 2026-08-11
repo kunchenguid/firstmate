@@ -242,35 +242,36 @@ test_absent_config_is_silent() {
   pass "a home with no declared launch identities stays silent"
 }
 
-# THE RED LINE. Quota may drive a reminder and must never drive a switch. The
-# selector is the only place a switch could leak in, so it must neither know
-# about this file nor change its answer when a lane is declared empty.
+# THE RED LINE. Quota may drive a reminder and must never drive a switch.
+#
+# The shell selector this used to drive is gone: the 2026-08-11 upstream sync
+# removed bin/fm-dispatch-select.sh and made profile-array selection an
+# agent-owned procedure. The rule it enforced did not go with it, so the red
+# line is asserted where it now lives - the always-loaded instruction in
+# AGENTS.md section 4 and the single owner of the selection procedure - plus
+# the unchanged mechanical half: this reminder script is not on any dispatch
+# path, and no dispatch surface reads a quota source or a launch identity.
 test_quota_sources_never_reach_dispatch_selection() {
-  local home out first second
-  # Comments in the selector explain why it must not route on launch identity;
-  # its CODE must never touch either file.
-  grep -v '^[[:space:]]*#' "$ROOT/bin/fm-dispatch-select.sh" \
-    | grep -q 'harness-overrides\|fm-quota-alert' \
-    && fail "the dispatch selector must not read launch identities or their quota sources"
+  local skill=".agents/skills/quota-array-dispatch/SKILL.md" f
 
-  home=$(write_home red-line "$REAL_OVERRIDES" "$REAL_DISPATCH")
-  # A launch-carrying array resolves to its first element with no quota lookup at
-  # all: FM_DISPATCH_QUOTA_AXI points at a command that would fail loudly if the
-  # selector ever ran it.
-  out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$home" FM_DISPATCH_QUOTA_AXI=llm-quota-broken \
-    "$ROOT/bin/fm-dispatch-select.sh" \
-    '[{"harness":"claude","launch":"gateway"},{"harness":"claude","launch":"subscription"}]' 2>/dev/null)
-  first=$(printf '%s\n' "$out" | jq -r '.launch')
-  [ "$first" = gateway ] \
-    || fail "an exhausted gateway lane must still be selected when config names it first, got: $out"
+  assert_present "$ROOT/$skill" "the profile-array selection owner is missing"
+  assert_grep 'never by quota or any other runtime signal' "$ROOT/AGENTS.md" \
+    "AGENTS.md must still forbid choosing a launch identity from a runtime signal"
+  assert_grep 'resolves to its first element without consulting quota' "$ROOT/AGENTS.md" \
+    "AGENTS.md must still make a launch-carrying array skip quota entirely"
 
-  # And the same array resolves identically whether or not the home declares a
-  # quota source that reports that lane at zero.
-  second=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$TMP_ROOT/no-config" \
-    "$ROOT/bin/fm-dispatch-select.sh" \
-    '[{"harness":"claude","launch":"gateway"},{"harness":"claude","launch":"subscription"}]' 2>/dev/null)
-  [ "$out" = "$second" ] \
-    || fail "a declared quota source changed dispatch selection: '$out' vs '$second'"
+  # The mechanical half: nothing on a dispatch surface may read this script or
+  # the launch-identity file it reads. fm-spawn passes a launch variant through
+  # to the harness launcher; it must never consult a quota source to pick one.
+  for f in bin/fm-spawn.sh bin/fm-harness.sh; do
+    grep -v '^[[:space:]]*#' "$ROOT/$f" | grep -q 'fm-quota-alert' \
+      && fail "$f must not consult the quota reminder while resolving a spawn"
+  done
+  # The reminder READS config/crew-dispatch.json to know which launch identities
+  # exist, which is what lets it name the alternatives. What it must never do is
+  # run a spawn or write a dispatch decision back.
+  grep -v '^[[:space:]]*#' "$ROOT/bin/fm-quota-alert.sh" | grep -qE 'fm-spawn|fm-dispatch|> *"?\$DISPATCH' \
+    && fail "the quota reminder must not dispatch or rewrite the dispatch config"
   pass "quota readings never reach dispatch selection"
 }
 

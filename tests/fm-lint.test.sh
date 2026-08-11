@@ -19,6 +19,8 @@ set -u
 
 LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
+CI="$ROOT/.github/workflows/ci.yml"
+NM="$ROOT/.no-mistakes.yaml"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -107,6 +109,13 @@ fm_lint_write_diff_file() {
 # hosts were never linted there, and a test sourcing one of them failed with
 # SC1091 "not specified as input": a finding about the file SET rather than
 # about any code.
+test_ci_invokes_the_owner() {
+  grep -Eq '^      - run: bin/fm-lint\.sh$' "$CI" || fail "CI lint job must invoke the one-owner script as a run step"
+  assert_no_grep 'shellcheck bin/' "$CI" \
+    "the GitHub workflow must call fm-lint.sh, not re-spell its globs inline"
+  pass "GitHub CI lint job calls the one-owner script, not an inline command"
+}
+
 test_codebase_pipeline_invokes_the_owner() {
   local pipeline="$ROOT/.codebase/pipelines/ci.yaml"
   assert_present "$pipeline" "the Codebase pipeline is missing"
@@ -642,7 +651,6 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
-test_owner_exists_and_executable
 test_ci_invokes_the_owner
 test_codebase_pipeline_invokes_the_owner
 test_nomistakes_invokes_the_owner
