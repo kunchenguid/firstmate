@@ -180,7 +180,7 @@ test_pi_extension_stale_incarnation_rejected() {
 # drive_omp_ext <ext-path> <mode>: load the generated OMP extension in a plain
 # Node host and fire one lifecycle handler or one terminal event sequence.
 drive_omp_ext() {
-  EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" node --input-type=module 2>&1 <<'EOF'
+  EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" TASK_ID="${4:-}" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
@@ -191,9 +191,18 @@ const fire = async (name, event = {}) => {
   if (!handler) throw new Error("missing OMP handler " + name);
   await handler(event, {});
 };
+const busyState = () => readFileSync(
+  process.env.STATE_DIR + "/" + process.env.TASK_ID + ".busy-state", "utf8");
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
   case "agent-end": await fire("agent_end"); break;
+  case "agent-end-continuation":
+    await fire("agent_start");
+    await fire("agent_end", { willContinue: true });
+    if (!busyState().includes("state=busy")) {
+      throw new Error("willContinue agent_end settled the active run");
+    }
+    break;
   case "session-stop": await fire("session_stop"); break;
   case "session-shutdown": await fire("session_shutdown"); break;
   case "session-stop-agent-end-shutdown":
@@ -214,6 +223,17 @@ switch (process.env.MODE) {
     }
     await new Promise((resolve) => setTimeout(resolve, 2));
     await fire("session_stop", { last_assistant_message: { timestamp: Date.now() } });
+    break;
+  case "repeat-session-shutdown":
+    await fire("agent_start");
+    await fire("session_stop");
+    await fire("agent_start");
+    await fire("session_shutdown");
+    break;
+  case "ambiguous-session-shutdown":
+    await fire("agent_start");
+    await fire("agent_start");
+    await fire("session_shutdown");
     break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
@@ -285,6 +305,63 @@ test_omp_extension_rejects_late_prior_run_stop() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "the current run must settle after a late prior stop, got '$out'"
   pass "omp extension rejects a late prior-run stop before settling the replacement"
+}
+
+test_omp_session_shutdown_requires_one_active_run() {
+  local rec id=busy-omp-shutdown out state ext marker
+  rec=$(make_spawn_case omp-shutdown omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+
+  out=$(drive_omp_ext "$ext" repeat-session-shutdown "$state" "$id") \
+    || fail "repeated-run session_shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] \
+    || fail "a tokenless shutdown with one active current run must settle idle, got '$out'"
+  marker=$(cat "$state/$id.omp-session-stop")
+  [ "$marker" = pending ] \
+    || fail "the fallback shutdown must not publish terminal evidence"
+
+  out=$(drive_omp_ext "$ext" ambiguous-session-shutdown "$state" "$id") \
+    || fail "ambiguous session_shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] \
+    || fail "an ambiguous tokenless shutdown must leave the active runs busy, got '$out'"
+  marker=$(cat "$state/$id.omp-session-stop")
+  [ "$marker" = pending ] \
+    || fail "an ambiguous shutdown must not publish terminal evidence"
+  pass "omp session_shutdown settles one active current run and rejects ambiguous history"
+}
+
+test_omp_agent_end_continuation_stays_busy() {
+  local rec id=busy-omp-continuation out state ext
+  rec=$(make_spawn_case omp-continuation omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  rm -f "$state/$id.turn-ended"
+
+  out=$(drive_omp_ext "$ext" agent-end-continuation "$state" "$id") \
+    || fail "continuing agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] \
+    || fail "willContinue=true must keep semantic busy active, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "willContinue=true must not publish a turn-end notification"
+
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "terminal agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] \
+    || fail "terminal agent_end must settle semantic busy, got '$out'"
+  [ -e "$state/$id.turn-ended" ] \
+    || fail "terminal agent_end must publish the turn-end notification"
+  pass "omp agent_end ignores automatic continuation and settles only terminal turns"
 }
 
 test_omp_extension_stale_incarnation_rejected() {
@@ -472,6 +549,8 @@ test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_omp_extension_semantic_lifecycle
 test_omp_extension_rejects_late_prior_run_stop
+test_omp_session_shutdown_requires_one_active_run
+test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle

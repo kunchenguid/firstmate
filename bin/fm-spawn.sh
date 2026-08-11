@@ -2529,7 +2529,7 @@ let runToken = "";
 let runSettledToken = "";
 let runSequence = 0;
 let tempSequence = 0;
-const runRecords: Array<{ token: string; startedAt: number }> = [];
+const runRecords: Array<{ token: string; startedAt: number; active: boolean }> = [];
 const atomicWrite = (path: string, value: string) => {
   const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
   try {
@@ -2565,7 +2565,7 @@ const rotateRun = () => {
   const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
   runToken = token;
   runSettledToken = "";
-  runRecords.push({ token, startedAt });
+  runRecords.push({ token, startedAt, active: true });
   if (runRecords.length > 64) runRecords.shift();
   atomicWrite(SESSION_RUN, token + "\\n");
   atomicWrite(SESSION_STOP, "pending\\n");
@@ -2575,10 +2575,11 @@ const adoptCurrentRun = () => {
   if (runToken) return runToken;
   try {
     const current = readFileSync(SESSION_RUN, "utf8").split(/\r?\n/, 1)[0].trim();
-    if (current) {
+    const stop = readFileSync(SESSION_STOP, "utf8").trim();
+    if (current && stop === "pending") {
       runToken = current;
       runSettledToken = "";
-      runRecords.push({ token: current, startedAt: 0 });
+      runRecords.push({ token: current, startedAt: 0, active: true });
       if (runRecords.length > 64) runRecords.shift();
     }
   } catch {}
@@ -2615,6 +2616,14 @@ const eventRunToken = (event: any) => {
   }
   return matched;
 };
+const resolveSessionShutdownToken = (event: any) => {
+  const token = eventRunToken(event);
+  if (token || eventTimestamp(event) !== undefined) return token;
+  const current = adoptCurrentRun();
+  if (!current) return "";
+  const active = runRecords.filter((record) => record.active);
+  return active.length === 1 && active[0].token === current ? current : "";
+};
 const resolveRunToken = (event: any) => {
   const token = eventRunToken(event);
   if (token || runToken) return token;
@@ -2623,6 +2632,8 @@ const resolveRunToken = (event: any) => {
 const settleRun = async (token: string, event: string) => {
   if (!token || token !== runToken || runSettledToken === token) return;
   runSettledToken = token;
+  const record = runRecords.find((candidate) => candidate.token === token);
+  if (record) record.active = false;
   await busyEvent(token, "idle", event);
   if (token === runToken) await touchTurnEnd(token);
 };
@@ -2637,8 +2648,12 @@ export default function (omp: any) {
     atomicWrite(SESSION_STOP, token + "\\n");
     await settleRun(token, "session-stop");
   });
-  omp.on("agent_end", (event: any) => settleRun(resolveRunToken(event), "agent-end"));
-  omp.on("session_shutdown", (event: any) => settleRun(resolveRunToken(event), "session-shutdown"));
+  omp.on("agent_end", (event: any) => {
+    if (event?.willContinue === true) return;
+    return settleRun(resolveRunToken(event), "agent-end");
+  });
+  omp.on("session_shutdown", (event: any) =>
+    settleRun(resolveSessionShutdownToken(event), "session-shutdown"));
 }
 EOF
       ;;

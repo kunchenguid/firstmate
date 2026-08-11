@@ -327,10 +327,13 @@ SH
   PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \
     || fail "session-lock liveness rejected the exact Bun/OMP process"
-  if FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
-    fail "session-lock liveness accepted an unrelated Bun process that merely mentioned OMP"
+  if PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_process_matches /opt/homebrew/bin/bun "bun /opt/omp/tools/compiler.js --prompt omp"' "$ROOT"; then
+    fail "strict harness identity accepted an unrelated Bun process that merely mentioned OMP"
   fi
+  FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \
+    || fail "session-lock liveness rejected the deliberate bare-Bun lock fallback"
   if FM_TEST_OMP_SHAPE=bunx PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
     fail "session-lock liveness accepted bunx running the OMP script"
@@ -760,14 +763,19 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    launch_command=
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
+          launch_command=$a
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
       done
+    fi
+    if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ] && [ -n "$launch_command" ]; then
+      bash -c "$launch_command" >/dev/null 2>&1 || true
     fi
     exit 0
     ;;
@@ -865,7 +873,8 @@ test_spawn_bare_harness_no_model_effort_flag() {
 }
 
 test_spawn_omp_secondmate_contract() {
-  local w sm sm_real meta launchlog launch out status
+  local w sm sm_real meta launchlog observed observed_text out status
+  local FM_FAKE_EXECUTE_LAUNCH FM_FAKE_OMP_OBSERVED
   w="$TMP_ROOT/spawn-omp-secondmate"
   sm="$w/sm"
   launchlog="$w/launch.log"
@@ -876,10 +885,25 @@ test_spawn_omp_secondmate_contract() {
   mkdir -p "$w/tmux-sm/fakebin"
   cat > "$w/tmux-sm/fakebin/omp" <<'SH'
 #!/usr/bin/env bash
-exit 0
+set -u
+{
+  printf 'OMPCODE=%s\n' "${OMPCODE-<unset>}"
+  printf 'CLAUDECODE=%s\n' "${CLAUDECODE-<unset>}"
+  printf 'PI_CODING_AGENT=%s\n' "${PI_CODING_AGENT-<unset>}"
+  printf 'FM_PI_HARNESS=%s\n' "${FM_PI_HARNESS-<unset>}"
+  printf 'GROK_AGENT=%s\n' "${GROK_AGENT-<unset>}"
+  printf 'GROK_HOOK_EVENT=%s\n' "${GROK_HOOK_EVENT-<unset>}"
+  for arg do
+    printf 'arg=%s\n' "$arg"
+  done
+} > "${FM_FAKE_OMP_OBSERVED:?}"
 SH
   chmod +x "$w/tmux-sm/fakebin/omp"
 
+  observed="$w/omp-observed"
+  FM_FAKE_EXECUTE_LAUNCH=1
+  FM_FAKE_OMP_OBSERVED=$observed
+  export FM_FAKE_EXECUTE_LAUNCH FM_FAKE_OMP_OBSERVED
   out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
   expect_code 0 "$status" "OMP secondmate spawn should succeed"$'\n'"$out"
 
@@ -890,28 +914,41 @@ SH
     || fail "OMP secondmate meta did not preserve the selected model"
   [ "$(meta_field "$meta" effort)" = high ] \
     || fail "OMP secondmate meta did not preserve the selected effort"
-  launch=$(cat "$launchlog")
   [ -s "$w/home/state/sm.busy-gen" ] \
     || fail "OMP secondmate did not arm a semantic busy generation"
   [ -s "$w/home/state/sm.omp-ext.ts" ] \
     || fail "OMP secondmate did not generate its per-task semantic extension"
-  assert_contains "$launch" "$w/home/state/sm.omp-ext.ts" \
-    "OMP secondmate launch did not load its per-task semantic extension"
-  assert_contains "$launch" "OMPCODE=1" \
-    "OMP secondmate launch did not establish its positive identity marker"
-  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u GROK_HOOK_EVENT" \
-    "OMP secondmate launch did not remove inherited foreign harness markers"
-  assert_contains "$launch" "-e '$sm_real/.omp/extensions/fm-primary-turnend-guard.ts'" \
-    "OMP secondmate launch did not load its primary turn-end guard"
-  assert_contains "$launch" "-e '$sm_real/.omp/extensions/fm-primary-omp-watch.ts'" \
-    "OMP secondmate launch did not load its primary watcher"
-  assert_contains "$launch" "--approval-mode yolo" \
-    "OMP secondmate launch did not apply yolo approval mode"
-  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol'" \
-    "OMP secondmate launch did not apply the selected model"
-  assert_contains "$launch" "--thinking 'high'" \
-    "OMP secondmate launch did not apply the selected effort"
-  pass "OMP spawn: secondmate launch carries identity, primary extensions, autonomy, model, and effort"
+  assert_present "$observed" "OMP secondmate did not execute its fake OMP consumer"
+  observed_text=$(cat "$observed")
+  assert_contains "$observed_text" "OMPCODE=1" \
+    "OMP secondmate consumer did not receive its positive identity marker"
+  assert_contains "$observed_text" "CLAUDECODE=<unset>" \
+    "OMP secondmate consumer inherited CLAUDECODE"
+  assert_contains "$observed_text" "PI_CODING_AGENT=<unset>" \
+    "OMP secondmate consumer inherited PI_CODING_AGENT"
+  assert_contains "$observed_text" "FM_PI_HARNESS=<unset>" \
+    "OMP secondmate consumer inherited FM_PI_HARNESS"
+  assert_contains "$observed_text" "GROK_AGENT=<unset>" \
+    "OMP secondmate consumer inherited GROK_AGENT"
+  assert_contains "$observed_text" "GROK_HOOK_EVENT=<unset>" \
+    "OMP secondmate consumer inherited GROK_HOOK_EVENT"
+  assert_contains "$observed_text" "arg=$w/home/state/sm.omp-ext.ts" \
+    "OMP secondmate consumer did not receive its semantic extension"
+  assert_contains "$observed_text" "arg=$sm_real/.omp/extensions/fm-primary-turnend-guard.ts" \
+    "OMP secondmate consumer did not receive its primary turn-end guard"
+  assert_contains "$observed_text" "arg=$sm_real/.omp/extensions/fm-primary-omp-watch.ts" \
+    "OMP secondmate consumer did not receive its primary watcher"
+  assert_contains "$observed_text" "arg=--approval-mode" \
+    "OMP secondmate consumer did not receive yolo approval mode"
+  assert_contains "$observed_text" "arg=--model" \
+    "OMP secondmate consumer did not receive the selected model flag"
+  assert_contains "$observed_text" "arg=openai-codex/gpt-5.6-sol" \
+    "OMP secondmate consumer did not receive the selected model"
+  assert_contains "$observed_text" "arg=--thinking" \
+    "OMP secondmate consumer did not receive the selected effort flag"
+  assert_contains "$observed_text" "arg=high" \
+    "OMP secondmate consumer did not receive the selected effort"
+  pass "OMP spawn: secondmate executes the verified launch and observes identity, extensions, and model axes"
 }
 
 # "<harness> <model>" durably threads --model into the secondmate launch and
