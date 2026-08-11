@@ -439,8 +439,9 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
 # reflect a `cd` run directly in the surface's own top-level shell, but stays
 # FROZEN when an interactive subshell is held open in the foreground instead.
 # fm-spawn.sh's controller instead acquires the durable lease synchronously,
-# then sends only a plain top-level `cd <leased-path>`. cmux's control socket exposes no live-process cwd
-# field to fall back on if that assumption ever breaks (unlike herdr's
+# then sends only a plain top-level `cd <leased-path>`. cmux's control socket
+# exposes no live-process cwd field to fall back on if that assumption ever
+# breaks (unlike herdr's
 # `foreground_cwd`), so this probe stays in place as the already-proven
 # mechanism rather than passive polling. Active probe instead: print the
 # surface's `$PWD` with a unique marker (atomically submitted via

@@ -388,7 +388,7 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get --lease`.
+# the controller acquires a lease and sends the leased-worktree `cd`.
 #
 # Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
@@ -396,8 +396,8 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 # interactive subshell is held open in the foreground instead - verified
 # against a bare `treehouse get`, which opens exactly such a subshell. The
 # controller instead acquires the durable lease synchronously, then sends only
-# a plain top-level `cd <leased-path>`. Zellij's CLI exposes no per-pane pid and no
-# live-process cwd field to fall back on if that assumption ever breaks
+# a plain top-level `cd <leased-path>`. Zellij's CLI exposes no per-pane pid
+# and no live-process cwd field to fall back on if that assumption ever breaks
 # (unlike herdr's `foreground_cwd`), so this probe stays in place as the
 # already-proven mechanism rather than passive JSON polling. Active probe:
 # print the pane's `$PWD` with a unique marker (atomically submitted,

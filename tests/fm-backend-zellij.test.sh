@@ -697,7 +697,7 @@ test_current_path_probes_with_marker_and_ignores_prompt_paths() {
   local dir fb out
   # Verified real-zellij pitfall (docs/zellij-backend.md "Worktree-path
   # discovery: pane_cwd does not track a subshell"): pane_cwd never updates
-  # once a subshell (e.g. treehouse get) takes over, so current_path actively
+  # once a subshell takes over, so current_path actively
   # prints a marked cwd line and reads only that marker from the capture,
   # rather than reading a JSON field.
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"
