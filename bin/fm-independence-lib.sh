@@ -589,7 +589,7 @@ fm_independence_runs() {  # <member steps>
 # declared routing config, which is what makes independence underivable by hand.
 fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
-  local steps='' members='' dropped=0 dropped_why critic cvendor cmodel ccount
+  local steps='' members='' dropped=0 dropped_why read_made=0 critic cvendor cmodel ccount
   local mkey mprovider mpool ckey cprovider cpool ckey_for=''
   local run rvendor rmodel rshared rsess rreviews rstatus r_rank runs_n=0
   local r_nothing_why
@@ -605,7 +605,14 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   # WHICH RUNS ARE MEMBERS, decided before any dimension is judged. A run the
   # pipeline cancelled or marked failed never finished verifying these bytes, so
   # it is not a member and its reviewer does not decide the branch.
-  if steps=$(fm_independence_steps "$repo" "$branch") && [ -n "$steps" ]; then
+  #
+  # The read's own outcome is kept, because "we read the pipeline and it holds
+  # nothing for these bytes" and "we could not read the pipeline at all" are the
+  # same could-not-observe and DIFFERENT facts. Stating the first when the second
+  # happened claims a read nobody made, which is the reporting half of the very
+  # collapse this file refuses in its verdicts.
+  if steps=$(fm_independence_steps "$repo" "$branch"); then
+    read_made=1
     members=$(fm_independence_members "$steps")
     dropped=$(fm_independence_dropped "$steps")
     [ "${dropped:-0}" = 0 ] || evidence="$evidence excluded=$dropped"
@@ -614,9 +621,13 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   fi
 
   if [ -z "$steps" ]; then
-    # No readable invocation record for these bytes. Every dimension is
-    # could-not-observe, and none of them may read as independent.
-    process_why='the validation pipeline recorded no agent invocation for these bytes'
+    # Nothing to judge for these bytes. Every dimension is could-not-observe,
+    # and none of them may read as independent.
+    if [ "$read_made" = 1 ]; then
+      process_why='the validation pipeline was read and holds no agent invocation for these bytes'
+    else
+      process_why='the validation pipeline could not be read for these bytes; no invocation record was consulted'
+    fi
     model_why=$process_why
     vendor_why=$process_why
     pool_why=$process_why
@@ -653,12 +664,21 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
       # is could-not-observe either way - a run in flight has produced no
       # evidence yet, and that is the honest reading - but a reader deciding
       # whether to wait or to go and investigate needs the two apart.
-      case " $FM_INDEPENDENCE_INFLIGHT_RUN_STATUS " in
-        *" ${rstatus:-} "*)
-          r_nothing_why="this run is still in flight (status ${rstatus:-unknown}) and has recorded no reviewing invocation yet" ;;
-        *)
-          r_nothing_why='this run recorded no reviewing invocation at all' ;;
-      esac
+      #
+      # An UNREADABLE status is not an in-flight one. It belongs on the
+      # investigate side, never the wait side: telling a reader to wait for a run
+      # whose state nobody knows inverts the very distinction this draws. The
+      # empty case is guarded here rather than left to the pattern, which would
+      # otherwise degenerate to *" "* and match a list that contains spaces.
+      if [ -z "$rstatus" ]; then
+        r_nothing_why='this run recorded no reviewing invocation and its status could not be read; whether it has finished is not observable'
+      else
+        r_nothing_why='this run recorded no reviewing invocation at all'
+        case " $FM_INDEPENDENCE_INFLIGHT_RUN_STATUS " in
+          *" $rstatus "*)
+            r_nothing_why="this run is still in flight (status $rstatus) and has recorded no reviewing invocation yet" ;;
+        esac
+      fi
 
       # PROCESS. The recorded SESSIONS are the evidence, not the invocation: an
       # invocation row says a review ran, and says nothing about whose process

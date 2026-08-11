@@ -298,9 +298,21 @@ add_row() {  # <predicate> <result> <reason> [route]
 # removed the task-local state. Letting the record win regardless would answer a
 # question about one branch with a verdict recorded for another, while the
 # attestation predicate below honours --repo and --head in the same invocation.
-IND_SOURCE=derived
-if [ -n "$RECORDED_INDEPENDENCE" ] && { [ -z "$REPO" ] || [ -z "$BRANCH" ]; }; then
+# THREE SOURCES, BECAUSE "NOBODY ANSWERED" IS NOT A DERIVATION. The provenance is
+# itself an observation and is held to the same rule as the verdict it labels: it
+# may only name a source that was actually consulted. Two values left no room for
+# the case where neither was, so it fell through to "derived" and told a reader a
+# live pipeline read had happened when the read short-circuits before the
+# database is ever opened. A fictional provenance is worse than none on a record
+# whose whole purpose is letting a reader tell what was seen from what was not.
+IND_WHENCE=''
+if [ -n "$REPO" ] && [ -n "$BRANCH" ]; then
+  IND_SOURCE=derived
+elif [ -n "$RECORDED_INDEPENDENCE" ]; then
   IND_SOURCE=terminal-record
+else
+  IND_SOURCE=none
+  IND_WHENCE='no source could answer: these bytes were not named for a live derivation and no durable record carries a verdict for them'
 fi
 
 # The per-step identity behind the verdict, captured at invocation time. Kept
@@ -308,27 +320,34 @@ fi
 # ran each one, rather than only the run-level summary derived from them.
 #
 # Loaded in THIS shell rather than through a command substitution, so the
-# derivation below inherits the block and the pipeline is read once.
+# derivation below inherits the block and the pipeline is read once. Whether the
+# read SUCCEEDED is what decides the provenance: bytes were named, so a
+# derivation was attempted, and a pipeline that could not be read did not
+# produce one.
 STEPS=''
 if [ "$IND_SOURCE" = derived ]; then
-  fm_independence_steps_load "$REPO" "$BRANCH" || true
-  STEPS=$FM_INDEPENDENCE_STEPS_VAL
+  if fm_independence_steps_load "$REPO" "$BRANCH"; then
+    STEPS=$FM_INDEPENDENCE_STEPS_VAL
+    IND_WHENCE="derived live from the pipeline's own invocation records for these bytes"
+  else
+    IND_SOURCE=none
+    IND_WHENCE="no source could answer: the pipeline's invocation records could not be read for the bytes named${RECORDED_INDEPENDENCE:+, and the durable record for task $TASK is about other bytes}"
+  fi
 fi
 
 # INDEPENDENCE. Always applicable.
 #
 # Derived live from the pipeline's invocation records whenever the bytes are
-# named, and otherwise read back from the terminal record that derived it the
-# same way at teardown. Neither form takes a value from a caller: there is no
-# argument that carries an independence verdict into this command. Which source
-# answered rides on the reason, so a reader can tell a live derivation from a
-# record of one made earlier.
+# named and readable, and otherwise read back from the terminal record that
+# derived it the same way at teardown. Neither form takes a value from a caller:
+# there is no argument that carries an independence verdict into this command.
+# Which source answered rides on the reason, so a reader can tell a live
+# derivation from a record of one made earlier, and both from neither.
 if [ "$IND_SOURCE" = terminal-record ]; then
   IND=$(fm_independence_from_record "$RECORDED_INDEPENDENCE" "task=$TASK source=terminal-record")
   IND_WHENCE="read back from the durable terminal record for task $TASK"
 else
   IND=$(fm_independence_dimensions "$REPO" "$BRANCH" "$MAKER_HARNESS" "$MAKER_MODEL")
-  IND_WHENCE="derived live from the pipeline's own invocation records for these bytes"
 fi
 IND_RESULT=$(fm_independence_overall "$IND")
 IND_GAPS=$(fm_independence_gaps "$IND" | paste -sd, - 2>/dev/null || true)

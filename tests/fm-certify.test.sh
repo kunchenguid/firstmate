@@ -637,6 +637,72 @@ test_named_bytes_outrank_the_recorded_summary() {
   pass "explicitly named bytes are derived live and the record fills only what was not named"
 }
 
+test_the_provenance_never_names_a_source_nobody_consulted() {
+  local dir out rc
+  command -v jq >/dev/null 2>&1 || { pass "SKIP (jq unavailable): provenance names only a consulted source"; return; }
+  dir=$(make_case provenance no yes)
+
+  # A torn-down task whose teardown could not resolve a critic at all: the
+  # record carries no verdict, and nothing named the bytes for a live one. The
+  # pipeline read short-circuits before the database is even opened, so calling
+  # this a derivation would claim a read nobody made.
+  record_terminal_task "$dir" gone "$dir/repo" fm/alpha \
+    || fail "provenance: the terminal record failed"
+  out=$(certify "$dir" gone) && rc=0 || rc=$?
+  [ "$rc" = 4 ] || fail "provenance: an unconsulted certification did not report could-not-observe (rc=$rc):"$'\n'"$out"
+  case "$out" in
+    *"derived live"*)
+      fail "provenance: a live derivation was claimed where no source was consulted:"$'\n'"$out" ;;
+  esac
+  assert_contains "$out" "no source could answer" \
+    "provenance: the reason did not say that nothing was consulted"
+  printf '%s' "$(certify "$dir" gone --json || true)" | jq -e '.independence_source == "none"' >/dev/null \
+    || fail "provenance: the machine form still named a source:"$'\n'"$out"
+
+  # The positive form of the same fixture: bytes that ARE named and readable
+  # report a derivation, so the absence above proves the label moved rather
+  # than that it is never set.
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): provenance names only a consulted source"; return; }
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha --mode local-only \
+    --maker-harness claude --maker-model opus || true)
+  assert_contains "$out" "derived live" \
+    "provenance: a read that did happen was not reported as a derivation"
+  pass "the provenance names a source only when that source was actually consulted"
+}
+
+test_an_unreadable_run_status_is_not_read_as_still_running() {
+  local dir out
+  dir=$(make_case unreadable-status yes yes)
+  # One run reviewed independently; a second recorded no reviewing invocation
+  # and no readable status. Both are could-not-observe, but "wait for it" and
+  # "go and find out what happened to it" are different instructions.
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|||none||none" \
+    || { pass "SKIP (python3 unavailable): an unreadable run status"; return; }
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only || true)
+  case "$out" in
+    *"still in flight"*)
+      fail "unreadable status: a run whose state is unknown was reported as merely still going:"$'\n'"$out" ;;
+  esac
+  assert_contains "$out" "status could not be read" \
+    "unreadable status: the reason did not name the status as unreadable"
+
+  # A run that IS in flight still says so, so the case above proves the arm
+  # changed rather than that the in-flight wording was simply removed.
+  dir=$(make_case running-status yes yes)
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|||none||running" \
+    || fail "unreadable status: the running fixture failed"
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only || true)
+  assert_contains "$out" "still in flight (status running)" \
+    "unreadable status: a genuinely in-flight run stopped saying so"
+  pass "a run whose status could not be read is not reported as still running"
+}
+
 test_an_underived_route_is_never_reported_as_a_route() {
   local dir out
   command -v jq >/dev/null 2>&1 || { pass "SKIP (jq unavailable): an underived route"; return; }
@@ -698,6 +764,8 @@ test_an_absent_reviewing_identity_never_becomes_evidence
 test_a_hostile_task_id_is_refused
 test_certified_evaluates_after_teardown
 test_named_bytes_outrank_the_recorded_summary
+test_the_provenance_never_names_a_source_nobody_consulted
+test_an_unreadable_run_status_is_not_read_as_still_running
 test_an_underived_route_is_never_reported_as_a_route
 test_a_torn_down_task_names_why_its_record_could_not_be_read
 test_an_observed_attestation_failure_is_not_labelled_not_independent

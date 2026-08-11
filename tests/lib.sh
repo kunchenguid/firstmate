@@ -254,7 +254,10 @@ fm_git_worktree() {
 # <status> is the run's own status and defaults to completed. cancelled and
 # failed are the statuses that make a run a NON-MEMBER of the branch fold: it
 # never finished verifying anything, so its reviewer does not decide whether
-# these bytes were verified independently.
+# these bytes were verified independently. running and pending are in flight.
+# Pass none to write an EMPTY status, the shape a row whose state was never
+# recorded would have - which is could-not-observe and must never read as a run
+# that is merely still going.
 #
 # Returns nonzero when python3 is unavailable, which callers report as a
 # skipped case.
@@ -286,6 +289,8 @@ for n, spec in enumerate(specs):
     purpose = parts[3] if len(parts) > 3 and parts[3] else "review"
     sessions = parts[4] if len(parts) > 4 else ""
     status = parts[5] if len(parts) > 5 and parts[5] else "completed"
+    if status == "none":
+        status = ""
     run = "run%d" % n
     conn.execute("insert into runs values (?, 'r1', ?, ?)", (run, branch, status))
     # A run that recorded no agent invocation at all: it touched these bytes and
