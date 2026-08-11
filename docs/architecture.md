@@ -76,6 +76,25 @@ It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns t
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, or X-mode relay polling needs supervision and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
+### Tracked primary-integration scope
+
+Tracked project hook and extension configuration propagates into this repository's linked worktrees, but primary-session behavior must not.
+Every tracked session-start, delegation, turn-end, and watcher integration below checks the checkout that supplied the integration through the shared `bin/fm-primary-scope-lib.sh` predicate before it injects an instruction, blocks a tool or turn end, registers a watcher arm, exposes an away-mode affordance, or writes a primary marker.
+`bin/fm-primary-scope.sh` is the executable adapter boundary for integrations that cannot source the library.
+The predicate uses checkout identity plus the effective state directory as durable evidence, so inherited `FM_ROOT_OVERRIDE`, `FM_HOME`, or `FM_STATE_OVERRIDE` values cannot activate a linked task worktree.
+
+| Harness | Tracked project-local primary integration | Propagates into linked worktrees | Linked task worktree result |
+| --- | --- | --- | --- |
+| Claude | `.claude/settings.json` routes session start, delegation checks, the turn-end guard, and Stop auto-arm through scoped shell entrypoints. | Yes. | Inert. |
+| Codex | `.codex/hooks.json` routes session start and Stop through scoped shell entrypoints. | Yes. | Inert. |
+| Grok | `.grok/hooks/` routes session start and Stop through scoped shell entrypoints. | Yes. | Inert. |
+| OpenCode | Project plugins route session start and turn end through scoped shell entrypoints, while the watcher coordinator checks `bin/fm-primary-scope.sh` before installing. | Yes. | Inert. |
+| Pi and pi-signed | Both tracked primary extensions check `bin/fm-primary-scope.sh` before registering handlers, markers, or the watcher command and tool. | Yes. | Inert. |
+| Kimi | No tracked project-local primary integration exists; its global token hook is crew-only. | No. | Not applicable. |
+
+The exact primary-home predicate and marker validation are owned by [turnend-guard.md](turnend-guard.md#guard-predicates).
+The individual session-start, turn-end, delegation, and watcher contracts remain in [sessionstart-nudge.md](sessionstart-nudge.md), [turnend-guard.md](turnend-guard.md), [subagent-guard.md](subagent-guard.md), and [watcher-continuity.md](watcher-continuity.md).
+
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
 Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.

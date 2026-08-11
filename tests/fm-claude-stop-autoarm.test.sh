@@ -199,6 +199,27 @@ test_inert_in_child_worktree() {
   pass "auto-arm: inert in a linked child worktree even when in-flight"
 }
 
+test_inert_in_child_worktree_with_inherited_primary_overrides() {
+  local primary base dir out status
+  primary=$(make_primary_dir "$TMP_ROOT/inherited-primary")
+  base="$TMP_ROOT/inherited-base"
+  dir="$TMP_ROOT/inherited-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  : > "$primary/state/task.meta"
+  write_arm_fixture "$primary" actionable
+  out=$(printf '%s\n' '{"session_id":"sess-inherited","stop_hook_active":false}' \
+    | FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$primary/state" \
+      CHILD_AUTOARM="$dir/bin/fm-claude-stop-autoarm.sh" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$CHILD_AUTOARM"
+      ' 2>&1); status=$?
+  expect_code 0 "$status" "inherited primary overrides must not activate child auto-arm"
+  [ -z "$out" ] || fail "inherited primary overrides produced child auto-arm output: $out"
+  [ ! -e "$primary/state/arm-ran" ] || fail "inherited primary overrides armed the primary watcher from a child worktree"
+  [ ! -e "$primary/state/.claude-autoarm-epoch" ] || fail "inherited primary overrides wrote an auto-arm epoch from a child worktree"
+  pass "auto-arm: inherited primary overrides cannot activate a linked worktree"
+}
+
 test_inert_without_session_lock() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/no-lock")
@@ -616,6 +637,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 }
 
 test_inert_in_child_worktree
+test_inert_in_child_worktree_with_inherited_primary_overrides
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness

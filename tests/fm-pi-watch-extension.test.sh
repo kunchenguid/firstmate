@@ -12,6 +12,12 @@ EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
 
+install_primary_scope_fixture() {
+  local repo=$1
+  cp "$ROOT/bin/fm-primary-scope.sh" "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/"
+  chmod +x "$repo/bin/fm-primary-scope.sh"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p \
@@ -22,8 +28,12 @@ install_pi_watch_extension_fixture() {
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-scope.ts" "$repo/.pi/extensions/lib/fm-primary-scope.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || git init -q "$repo"
   chmod +x "$repo/bin/fm-operational-input.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
@@ -1185,6 +1195,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm() {
   cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
+  cp "$ROOT/.opencode/plugins/lib/fm-primary-scope.js" "$fixture/plugins/lib/fm-primary-scope.js"
   out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1205,6 +1216,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1255,6 +1267,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1304,6 +1317,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1355,31 +1369,36 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   home="$TMP_ROOT/opencode-coordinator-home"
   log="$TMP_ROOT/opencode-coordinator.log"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/bin" "$home/state" "$home/config"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
+  git init -q "$home"
+  git -C "$home" commit -q --allow-empty -m init
+  : > "$home/AGENTS.md"
+  install_primary_scope_fixture "$home"
   : > "$home/state/task.meta"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+  cat > "$home/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  chmod +x "$home/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({
+const hooks = await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 await new Promise((resolve) => setTimeout(resolve, 120));
-if (status !== "not-primary") {
-  console.error(`expected not-primary, got ${status}`);
+if (globalThis.__firstmateOpenCodeWatchArm) {
+  console.error("coordinator was installed in a linked worktree");
   process.exit(1);
 }
 if (existsSync(process.env.FM_ARM_LOG)) {
@@ -1404,6 +1423,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1485,6 +1505,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1565,6 +1586,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1634,6 +1656,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1711,6 +1734,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     mkdir -p "$repo/bin" "$home/state" "$home/config"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
+    install_primary_scope_fixture "$repo"
     : > "$home/state/task.meta"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1806,6 +1830,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1865,6 +1890,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1919,6 +1945,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1985,6 +2012,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2058,6 +2086,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_primary_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2124,6 +2153,58 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_extensions_are_inert_in_linked_worktree() {
+  local base worktree home watch_extension turnend_extension out status
+  base="$TMP_ROOT/pi-scope-base"
+  worktree="$TMP_ROOT/pi-scope-worktree"
+  home="$TMP_ROOT/pi-scope-primary-home"
+  fm_git_worktree "$base" "$worktree" fm/pi-scope-worktree
+  mkdir -p "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$worktree"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$worktree/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-scope.ts" "$worktree/.pi/extensions/lib/fm-primary-scope.ts"
+  watch_extension="$worktree/.pi/extensions/fm-primary-pi-watch.ts"
+  turnend_extension="$worktree/.pi/extensions/fm-primary-turnend-guard.ts"
+  out=$(WATCH_EXTENSION="$watch_extension" TURNEND_EXTENSION="$turnend_extension" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = [];
+let command = null;
+let tool = null;
+const pi = {
+  on(event) {
+    handlers.push(event);
+  },
+  registerCommand(name) {
+    command = name;
+  },
+  registerTool(candidate) {
+    tool = candidate.name;
+  },
+  sendUserMessage: async () => {},
+};
+const watch = await import(pathToFileURL(process.env.WATCH_EXTENSION).href);
+const turnend = await import(pathToFileURL(process.env.TURNEND_EXTENSION).href);
+watch.default(pi);
+turnend.default(pi);
+if (handlers.length || command || tool) {
+  throw new Error(`linked worktree registered primary behavior: ${handlers.join(",")} ${command ?? ""} ${tool ?? ""}`);
+}
+for (const marker of [".pi-watch-extension-loaded", ".pi-turnend-extension-loaded"]) {
+  if (existsSync(`${process.env.FM_HOME}/state/${marker}`)) {
+    throw new Error(`linked worktree wrote primary marker ${marker}`);
+  }
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi primary extensions must be inert in a linked worktree"
+  [ -z "$out" ] || fail "Pi linked-worktree scope test printed output: $out"
+  pass "Pi primary extensions register no watcher, guard, nudge, or arm affordance in a linked worktree"
+}
+
+test_pi_extensions_are_inert_in_linked_worktree
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

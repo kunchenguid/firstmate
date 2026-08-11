@@ -22,6 +22,7 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { fmPrimaryScopeMatches } from "./lib/fm-primary-scope.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -218,6 +219,8 @@ const cleanupOnProcessExit = () => {
 process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
+  if (!fmPrimaryScopeMatches(root, state)) return;
+
   let generation = createGeneration();
   activateGeneration(generation);
 

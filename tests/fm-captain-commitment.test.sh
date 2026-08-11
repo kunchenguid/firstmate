@@ -448,9 +448,13 @@ test_wake_drain_surfaces_the_outstanding_request() {
 make_pi_repo() {  # <name> <guard-exit> <commitment-exit>
   local repo="$TMP_ROOT/$1" guard_exit=$2 commitment_exit=$3
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$TMP_ROOT/$1-home/state"
+  git init -q "$repo"
+  printf 'synthetic primary home\n' > "$repo/AGENTS.md"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-scope.ts" "$repo/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-primary-scope.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/"
   cat > "$repo/bin/fm-turnend-guard.sh" <<SH
 #!/usr/bin/env bash
 cat >/dev/null
@@ -470,7 +474,7 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-captain-commitment.sh" \
-    "$repo/bin/fm-arm-pretool-check.sh"
+    "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-primary-scope.sh"
   printf '%s\n' "$repo"
 }
 

@@ -8,6 +8,7 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInput,
 } from "./lib/fm-operational-input.ts";
+import { fmPrimaryScopeMatches } from "./lib/fm-primary-scope.ts";
 
 let guardFollowupActive = false;
 let commitmentFollowupActive = false;
@@ -129,6 +130,8 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!fmPrimaryScopeMatches(root, state)) return;
+
   pi.on?.("session_start", (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";

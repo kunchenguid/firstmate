@@ -8,7 +8,6 @@ set -u
 unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
-NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -22,11 +21,20 @@ make_primary() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  install_nudge_scripts "$dir"
+}
+
+install_nudge_scripts() {
+  local dir=$1
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$dir/bin/"
+  chmod +x "$dir/bin/fm-sessionstart-nudge.sh"
 }
 
 run_nudge() {
   local root=$1
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$root/bin/fm-sessionstart-nudge.sh"
 }
 
 expect_silent_zero() {
@@ -53,7 +61,7 @@ test_gate_env_is_silent() {
   local root="$TMP_ROOT/gate-env"
   make_primary "$root"
   expect_silent_zero "gate env nudge" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$root/bin/fm-sessionstart-nudge.sh"
   pass "fm-sessionstart-nudge: NO_MISTAKES_GATE is silent"
 }
 
@@ -66,9 +74,10 @@ test_gate_common_dir_is_silent() {
   git --git-dir="$bare" worktree add --quiet -b gate-test "$root" HEAD
   mkdir -p "$root/bin" "$root/state"
   : > "$root/AGENTS.md"
+  install_nudge_scripts "$root"
   printf 'gate-test\n' > "$root/.fm-secondmate-home"
   expect_silent_zero "gate common-dir nudge" env FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$root/bin/fm-sessionstart-nudge.sh"
   pass "fm-sessionstart-nudge: .no-mistakes gate common-dir is silent"
 }
 
@@ -77,8 +86,22 @@ test_unmarked_linked_worktree_is_silent() {
   fm_git_worktree "$base" "$root" fm/sessionstart-linked
   mkdir -p "$root/bin" "$root/state"
   : > "$root/AGENTS.md"
+  install_nudge_scripts "$root"
   expect_silent_zero "linked worktree nudge" run_nudge "$root"
   pass "fm-sessionstart-nudge: an unmarked linked task worktree is silent"
+}
+
+test_linked_worktree_ignores_inherited_primary_overrides() {
+  local primary="$TMP_ROOT/inherited-primary" base="$TMP_ROOT/inherited-base" root="$TMP_ROOT/inherited-child"
+  make_primary "$primary"
+  fm_git_worktree "$base" "$root" fm/sessionstart-inherited
+  mkdir -p "$root/state"
+  : > "$root/AGENTS.md"
+  install_nudge_scripts "$root"
+  expect_silent_zero "linked worktree inherited primary nudge" env FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$primary/state" \
+    "$root/bin/fm-sessionstart-nudge.sh"
+  pass "fm-sessionstart-nudge: inherited primary overrides cannot activate a linked worktree"
 }
 
 test_linked_secondmate_primary_nudges() {
@@ -87,6 +110,7 @@ test_linked_secondmate_primary_nudges() {
   mkdir -p "$root/bin" "$root/state"
   : > "$root/AGENTS.md"
   printf 'sessionstart-sm\n' > "$root/.fm-secondmate-home"
+  install_nudge_scripts "$root"
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "linked secondmate nudge"
   [ "$out" = "$NUDGE_LINE" ] || fail "linked secondmate printed unexpected output: $out"
@@ -152,6 +176,7 @@ test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
 test_unmarked_linked_worktree_is_silent
+test_linked_worktree_ignores_inherited_primary_overrides
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
