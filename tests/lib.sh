@@ -189,23 +189,24 @@ SH
 
 # --- deterministic git identity and fixtures --------------------------------
 
-# fm_git_identity [name] [email]: export a fixed author/committer identity so
-# fixture commits never depend on the host git config.
+# fm_git_identity [name] [email]: export a fixed author/committer identity and
+# disable inherited signing so fixture commits never depend on host Git config.
 fm_git_identity() {
   export GIT_AUTHOR_NAME=${1:-fmtest} GIT_AUTHOR_EMAIL=${2:-fmtest@example.invalid}
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
 }
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
-# commit. Uses an inline identity so it works whether or not fm_git_identity was
-# called.
+# commit. Uses an inline identity and disables inherited signing so it works
+# whether or not fm_git_identity was called and regardless of global Git config.
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
   git -C "$dir" init -q
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
-  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' -c commit.gpgsign=false commit -qm initial
 }
 
 # fm_git_add_origin <repo> <bare>: clone <repo> bare into <bare> and register it

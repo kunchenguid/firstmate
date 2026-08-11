@@ -199,6 +199,7 @@ reset_state() {
          "$STATE_DIR"/.subsuper-* \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
+         "$STATE_DIR"/.watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \

@@ -213,7 +213,7 @@ New harnesses get verified through a supervised trial task before joining the se
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
-Pi and pi-signed crew launches explicitly pass `--tui-mode regular` so fullscreen mode cannot rewrite scrollback and bury steers.
+Pi and pi-signed launches use Pi's default interactive terminal mode; Pi 0.83 removed the former `--tui-mode` startup option, so passing that obsolete override prevents the worker from starting.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
@@ -446,7 +446,7 @@ Registration writes one private record under `state/procevent/`, and a completed
 Results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a captured result reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
 Delivery is reported at most once per captured source and sequence while any records for that key remain queued.
-A durable handled acknowledgement stops future re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain consumes it.
+A durable handled acknowledgement stops future source re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain's separate generation-bound post-handling acknowledgement consumes it.
 
 Discovery is never a timer.
 Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.

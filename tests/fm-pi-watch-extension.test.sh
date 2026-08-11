@@ -330,13 +330,18 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
-count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
   printf 'signal: synthetic actionable close\n'
   exit 0
 fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
@@ -384,9 +389,17 @@ if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor 
 if (!/predecessor=[0-9]+/.test(rows[1])) throw new Error(`successor did not receive predecessor identity: ${rows[1]}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
 const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-if (stableRows.length !== 2) throw new Error(`single-flight violation launched ${stableRows.length} arms`);
-writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+if (stableRows.length !== 2) throw new Error(`delivery was confirmed before the prompt succeeded: ${stableRows.join(" | ")}`);
 releaseDelivery();
+for (let i = 0; i < 100; i += 1) {
+  if (readFileSync(process.env.FM_ARM_LOG, "utf8").includes("confirmed generation=fixture-generation")) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const confirmedRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (confirmedRows.filter((row) => row.startsWith("confirmed ")).length !== 1) {
+  throw new Error(`successful prompt delivery was not confirmed exactly once: ${confirmedRows.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
   )
@@ -1407,13 +1420,18 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
-count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
   printf 'signal: synthetic wake\n'
   exit 0
 fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
@@ -1462,9 +1480,17 @@ if (rowsAtPrompt !== 2) throw new Error(`wake prompt began before successor esta
 if (!/predecessor=[0-9]+/.test(rows[1])) throw new Error(`successor did not receive predecessor identity: ${rows[1]}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
 const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-if (stableRows.length !== 2) throw new Error(`single-flight violation launched ${stableRows.length} arms`);
-writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+if (stableRows.length !== 2) throw new Error(`delivery was confirmed before the prompt succeeded: ${stableRows.join(" | ")}`);
 releasePrompt();
+for (let i = 0; i < 100; i += 1) {
+  if (readFileSync(process.env.FM_ARM_LOG, "utf8").includes("confirmed generation=fixture-generation")) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const confirmedRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (confirmedRows.filter((row) => row.startsWith("confirmed ")).length !== 1) {
+  throw new Error(`successful prompt delivery was not confirmed exactly once: ${confirmedRows.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
   )
   status=$?
