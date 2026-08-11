@@ -244,8 +244,8 @@ Every home is judged against its own `config/startup-memory-budget` allowance, s
 
 Act on each home by its reported `transport`:
 
-- `agent` - send the marked request with `bin/fm-send.sh fm-<id> "<request>"` so the live secondmate performs its own `/stow`, including the uncaptured knowledge that exists only in its session.
-  Ask it for the same completion receipt this skill defines, and read its reply from its status file or the document it points to, never from its chat.
+- `agent` - collect every live secondmate id, then run `bin/fm-stow-delegate.sh <id>...` once so all marked `/stow` requests are dispatched before their correlated completion receipts share one bounded foreground wait.
+  Its header owns the wait and result contract: include completed receipts, report `pending` or `send-error` as an unresolved exception, and never keep polling after the helper returns because every late reply remains durable through the normal pending-reply wake path.
 - `direct` - curate that local home's editable memory files yourself under the same retention plan, then re-run the cascade to confirm the after totals.
   `data/captain-shared.md` stays a read-only counted input there, exactly as it is in any secondmate home.
 - `deferred` - a remote home with no live agent. Its memory is accounted read-only and cannot be curated from here, because there is no generic remote write path for a home's own memory files.

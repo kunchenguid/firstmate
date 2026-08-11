@@ -10,6 +10,7 @@ set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CASCADE="$ROOT/bin/fm-stow-cascade.sh"
+DELEGATE="$ROOT/bin/fm-stow-delegate.sh"
 TMP_ROOT=$(fm_test_tmproot fm-stow-cascade)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
@@ -362,9 +363,112 @@ test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
   pass "the cascade stays silent with no secondmates and never runs from a secondmate home"
 }
 
+make_delegate_stubs() {
+  cat > "$FAKEBIN/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      printf '%s' "${1:-}" >> "$FM_SEND_LOG"
+      if [ "$FM_DELEGATE_REPLY_MODE" = reply ]; then
+        corr=$(printf '%s' "${1:-}" | grep -oE 'corr=[a-f0-9]{16}' | head -1)
+        printf 'done [%s]: secondmate stow complete\n' "$corr" >> "$FM_HOME/state/domain.status"
+      fi
+    fi
+    ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'
+    ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN/tmux"
+}
+
+run_delegate() { # <home> <reply-mode> <timeout> <id>...
+  local home=$1 reply_mode=$2 timeout=$3
+  shift 3
+  : > "$TMP_ROOT/delegate-send.log"
+  env -i \
+    PATH="$FAKEBIN:$BASE_PATH" \
+    HOME="${HOME:-/tmp}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    FM_ROOT_OVERRIDE="$home" \
+    FM_HOME="$home" \
+    FM_SEND_LOG="$TMP_ROOT/delegate-send.log" \
+    FM_DELEGATE_REPLY_MODE="$reply_mode" \
+    FM_SEND_SETTLE=0 \
+    FM_STOW_CASCADE_TIMEOUT="$timeout" \
+    "$DELEGATE" "$@" 2>/dev/null
+}
+
+test_live_agent_receipt_wait_is_bounded() {
+  local home out rc started elapsed pending
+  home=$(new_primary delegate-pending)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" 'sess:fm-domain'
+  make_delegate_stubs
+
+  started=$(date +%s)
+  set +e
+  out=$(run_delegate "$home" pending 1 domain)
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+
+  [ "$elapsed" -lt 10 ] || fail "a missing secondmate receipt blocked for $elapsed seconds"
+  expect_code 3 "$rc" "a bounded missing receipt should remain distinguishable from completion"
+  assert_contains "$out" 'secondmate=domain' "the pending result did not identify its secondmate"
+  assert_contains "$out" 'result=pending' "the missing receipt was not reported as pending"
+  assert_contains "$out" 'reply remains durable' "the timeout did not preserve late-reply expectations"
+  pending=$(find "$home/state/pending-replies" -type f ! -name '.*' | head -1)
+  [ -n "$pending" ] || fail "the bounded wait discarded the durable pending reply"
+  assert_contains "$(cat "$pending")" 'phase=awaiting_report' \
+    "the bounded wait resolved a request that never replied"
+  assert_contains "$(cat "$TMP_ROOT/delegate-send.log")" 'Run /stow for your home' \
+    "the bounded wait did not dispatch the secondmate stow"
+  pass "a live secondmate that never replies cannot hold /stow past the foreground bound"
+}
+
+test_live_agent_receipt_is_returned_when_ready() {
+  local home out rc
+  home=$(new_primary delegate-complete)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" 'sess:fm-domain'
+  make_delegate_stubs
+
+  set +e
+  out=$(run_delegate "$home" reply 5 domain)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "a correlated secondmate receipt should complete cleanly"
+  assert_contains "$out" 'secondmate=domain' "the completed result did not identify its secondmate"
+  assert_contains "$out" 'result=completed' "the correlated receipt was not reported as complete"
+  assert_contains "$out" 'receipt=done [' "the correlated receipt was not returned to /stow"
+  assert_contains "$out" 'secondmate stow complete' "the completion detail was lost"
+  pass "a correlated secondmate receipt is returned without waiting out the bound"
+}
+
 test_budget_is_enforced_per_home_and_never_summed
 test_every_registered_home_is_enumerated_exactly_once
 test_transport_routes_by_placement_and_liveness
 test_receipt_facts_are_complete_and_show_before_and_after
 test_a_slow_remote_is_bounded_and_the_rest_still_report
 test_no_cascade_without_secondmates_or_from_a_secondmate_home
+test_live_agent_receipt_wait_is_bounded
+test_live_agent_receipt_is_returned_when_ready
