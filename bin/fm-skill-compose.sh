@@ -98,7 +98,7 @@ esac
 [ -n "$TARGET_HOME" ] || { printf 'error: --target-home is required\n' >&2; exit 2; }
 [ -d "$TARGET_HOME" ] || { printf 'error: target home is not a directory: %s\n' "$TARGET_HOME" >&2; exit 1; }
 case "$SET_NAME" in
-  ''|.*|*/*|*'..'*|*[!A-Za-z0-9_.-]*) printf 'error: unsafe set name: %s\n' "$SET_NAME" >&2; exit 2 ;;
+  ''|.*|*/*|*[!A-Za-z0-9_.-]*) printf 'error: unsafe set name: %s\n' "$SET_NAME" >&2; exit 2 ;;
 esac
 
 TARGET_HOME=$(cd "$TARGET_HOME" && pwd -P)

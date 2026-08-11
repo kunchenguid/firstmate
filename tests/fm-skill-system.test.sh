@@ -136,6 +136,35 @@ EOF
   pass "skill compose creates canonical symlinks, reconciles, and un-composes without touching sources"
 }
 
+test_skill_compose_accepts_internal_double_dots_without_traversal() {
+  local home="$TMP_ROOT/double-dot-home" source="$TMP_ROOT/double-dot-source" alpha_real composed
+  mkdir -p "$home/data"
+  write_skill "$source/alpha" alpha plain
+  alpha_real=$(cd "$source/alpha" && pwd -P)
+  cat > "$home/data/skill-map.md" <<EOF
+# Skill map
+
+## fixture
+- alpha — alpha description — $alpha_real
+EOF
+
+  FM_HOME="$home" "$COMPOSE" --target-home "$home" --set task-fix..bug alpha >/dev/null \
+    || fail "internal double dots in a composed set name were rejected"
+  composed="$home/config/skill-compose/claude/task-fix..bug/.claude/skills/alpha"
+  [ -L "$composed" ] || fail "double-dot set did not compose its requested skill"
+  [ "$(readlink_real "$composed")" = "$alpha_real" ] || fail "double-dot set symlink lost its canonical target"
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set .. alpha >/dev/null 2>&1; then
+    fail "traversal set name was accepted"
+  fi
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set ../escape alpha >/dev/null 2>&1; then
+    fail "slash traversal set name was accepted"
+  fi
+  [ ! -e "$home/config/skill-compose/escape" ] || fail "traversal set escaped the Claude composition directory"
+
+  pass "skill compose accepts internal double dots while refusing traversal"
+}
+
 test_skill_compose_refuses_non_symlink_collision() {
   local home="$TMP_ROOT/collision-home" source="$TMP_ROOT/collision-source" alpha_real skills_dir
   mkdir -p "$home/data"
@@ -161,4 +190,5 @@ EOF
 
 test_skill_map_generates_flat_deduped_registry
 test_skill_compose_reconciles_symlink_set_and_removes
+test_skill_compose_accepts_internal_double_dots_without_traversal
 test_skill_compose_refuses_non_symlink_collision

@@ -42,7 +42,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -100,9 +104,11 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 endpointlog
   shift 4
+  endpointlog="$(dirname "$launchlog")/endpoint.log"
   : > "$launchlog"
+  : > "$endpointlog"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -112,7 +118,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -717,6 +723,23 @@ EOF
   pass "claude --skills composes a per-task overlay and launches with --add-dir"
 }
 
+test_claude_missing_skill_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-claude-missing-skill-z21
+  rec=$(make_spawn_case profile-claude-missing-skill claude "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/data/projects.md"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --skills absent-skill)
+  status=$?
+  expect_code 1 "$status" "claude spawn with a missing skill should fail"
+  assert_contains "$out" "skill not found" "missing skill refusal did not explain resolution failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing skill refusal published task metadata"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "missing skill refusal created a runtime endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing skill refusal sent text to a runtime endpoint"
+  pass "skill resolution failures refuse before endpoint and metadata publication"
+}
+
 test_non_claude_harness_ignores_config_dir() {
   local rec id out status launch
   id=profile-codex-nocfgdir-z19
@@ -777,6 +800,7 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_claude_skills_compose_add_dir_overlay
+test_claude_missing_skill_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
