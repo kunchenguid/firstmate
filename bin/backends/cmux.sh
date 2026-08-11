@@ -362,19 +362,45 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
     | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
 }
 
-fm_backend_cmux_created_workspace_id() {  # <label> <before-ids>
-  local label=$1 before_ids=${2:-} after_ids new_ids before_count after_count new_count
-  after_ids=$(fm_backend_cmux_workspace_ids_for_label "$label") || return 1
-  before_count=$(printf '%s\n' "$before_ids" | awk 'NF { n++ } END { print n + 0 }')
-  after_count=$(printf '%s\n' "$after_ids" | awk 'NF { n++ } END { print n + 0 }')
-  [ "$after_count" -eq $((before_count + 1)) ] || return 1
-  new_ids=$(comm -23 \
-    <(printf '%s\n' "$after_ids" | sed '/^$/d' | sort -u) \
-    <(printf '%s\n' "$before_ids" | sed '/^$/d' | sort -u)) || return 1
-  new_count=$(printf '%s\n' "$new_ids" | awk 'NF { n++ } END { print n + 0 }')
-  [ "$new_count" -eq 1 ] || return 1
-  fm_backend_cmux_workspace_id_valid "$new_ids" || return 1
-  printf '%s' "$new_ids"
+fm_backend_cmux_workspace_matches_context() {  # <workspace-id> <title>
+  local workspace_id=$1 title=$2 wss
+  fm_backend_cmux_workspace_id_valid "$workspace_id" || return 1
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wss" | jq -s -e --arg id "$workspace_id" --arg title "$title" '
+    if length != 1 or (.[0] | type) != "object" or (.[0].workspaces | type) != "array" then
+      false
+    else
+      .[0].workspaces as $workspaces
+      | ($workspaces | map(.id)) as $ids
+      | if any($workspaces[]?; ((.id | type) != "string") or (.id == "")) then
+          false
+        elif ($ids | unique | length) != ($ids | length) then
+          false
+        else
+          ([$workspaces[] | select(.id == $id)]) as $matches
+          | ($matches | length == 1)
+            and (($matches[0].title | type) == "string")
+            and ($matches[0].title == $title)
+        end
+    end
+  ' >/dev/null 2>&1
+}
+
+fm_backend_cmux_created_workspace_id() {  # <provider-output>
+  local output=$1 workspace_id
+  workspace_id=$(printf '%s' "$output" | jq -s -e -r '
+    if length != 1 then
+      error("expected one cmux workspace creation response")
+    elif (.[0] | type) != "object" then
+      error("cmux workspace creation response is not an object")
+    elif (.[0].workspace_id | type) != "string" or (.[0].workspace_id | length) == 0 then
+      error("cmux workspace creation response has no workspace_id")
+    else
+      .[0].workspace_id
+    end
+  ' 2>/dev/null) || return 1
+  fm_backend_cmux_workspace_id_valid "$workspace_id" || return 1
+  printf '%s' "$workspace_id"
 }
 
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
@@ -407,10 +433,16 @@ fm_backend_cmux_acquisition_record() {
 }
 
 fm_backend_cmux_unresolved_acquisition_record() {
-  local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 title=$2
+  local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 title=$2 workspace_candidate_id=${3:-}
   [ -n "$file" ] || return 0
-  printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nreason=workspace-identity-unresolved\n' \
-    "$label" "$title" > "$file" || return 1
+  if [ -n "$workspace_candidate_id" ]; then
+    fm_backend_cmux_workspace_id_valid "$workspace_candidate_id" || return 1
+    printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nworkspace_candidate_id=%s\nreason=workspace-identity-unresolved\n' \
+      "$label" "$title" "$workspace_candidate_id" > "$file" || return 1
+  else
+    printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nreason=workspace-identity-unresolved\n' \
+      "$label" "$title" > "$file" || return 1
+  fi
   chmod 600 "$file"
 }
 
@@ -425,12 +457,12 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
-  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
+  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids --json 2>&1) || {
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  if ! wsid=$(fm_backend_cmux_created_workspace_id "$title" "$before_ids"); then
-    if ! fm_backend_cmux_unresolved_acquisition_record "$label" "$title"; then
+  if ! wsid=$(fm_backend_cmux_created_workspace_id "$out") || ! fm_backend_cmux_workspace_matches_context "$wsid" "$title"; then
+    if ! fm_backend_cmux_unresolved_acquisition_record "$label" "$title" "$wsid"; then
       echo "error: could not prove the new cmux workspace identity or persist an unresolved acquisition record for '$title'" >&2
     else
       echo "error: could not prove the new cmux workspace identity for '$title'; retaining a non-destructive unresolved acquisition record" >&2

@@ -22,7 +22,7 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-cmux-tests)
 # that call read from $FM_CMUX_RESPONSES/<n>.out, consumed IN ORDER (call 1
 # reads 1.out, call 2 reads 2.out, ...), mirroring
 # tests/fm-backend-zellij.test.sh's make_zellij_fakebin. A missing response
-# file means "succeed with empty stdout" (new-workspace/send/send-key/
+# file means "succeed with empty stdout" (send/send-key/
 # close-* are silent on success on the real CLI). `version` and `ping` are
 # handled specially (not call-counted, not consuming the ordered response
 # queue) since fm_backend_cmux_version_check/fm_backend_cmux_ping_state are
@@ -479,8 +479,9 @@ test_create_task_creates_and_parses_ids() {
   title=$(cmux_expected_scoped_title fm-newtask)
   # 1: workspace list --json (pre-create duplicate check) -> no match
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
-  # 2: new-workspace (silent on success)
-  # 3: workspace list --json (post-create id resolution) -> match
+  # 2: new-workspace --json -> provider-returned workspace id
+  printf '{"workspace_id":"bbbbbbbb-1111-1111-1111-111111111111"}' > "$dir/responses/2.out"
+  # 3: workspace list --json (provider-id context validation) -> match
   cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
   # 4: list-panes --json --id-format uuids -> default surface id
   cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
@@ -493,7 +494,33 @@ test_create_task_creates_and_parses_ids() {
     "create_task did not call new-workspace with the right name/cwd"
   assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''false' \
     "create_task did not pass --focus false"
-  pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--json' \
+    "create_task did not request the provider workspace id"
+  pass "fm_backend_cmux_create_task: uses the provider workspace id and validates its title context"
+}
+
+test_create_task_rejects_replaced_workspace_after_provider_id() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-replaced"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-replaced)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"workspace_id":"aaaaaaaa-0000-0000-0000-000000000000"}' > "$dir/responses/2.out"
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_BACKEND_ACQUISITION_FILE="$dir/acquisition" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-replaced /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should reject a provider id that disappeared before context validation"
+  assert_contains "$out" "retaining a non-destructive unresolved acquisition record" \
+    "create_task did not retain unresolved ownership after the provider id was replaced"
+  assert_grep 'kind=cmux-unresolved' "$dir/acquisition" \
+    "replaced cmux workspace did not leave an unresolved acquisition record"
+  assert_grep 'workspace_candidate_id=aaaaaaaa-0000-0000-0000-000000000000' "$dir/acquisition" \
+    "unresolved cmux record did not retain the provider candidate id"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
+    "replaced cmux workspace proceeded to surface acquisition"
+  pass "fm_backend_cmux_create_task: rejects a disappeared provider id instead of adopting a same-title replacement"
 }
 
 test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup() {
@@ -509,6 +536,7 @@ test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup() {
   title=$(cmux_expected_scoped_title "fm-$id" "$home" "$ROOT")
 
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"workspace_id":"dddddddd-3333-3333-3333-333333333333"}' > "$dir/responses/2.out"
   printf '{"workspaces":[]}' > "$dir/responses/3.out"
   cmux_workspace_list_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333" "$title"
   cmux_workspace_list_response "$dir" 5 "dddddddd-3333-3333-3333-333333333333" "$title"
@@ -549,6 +577,7 @@ test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails() 
   dir="$TMP_ROOT/create-task-pending"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-unresolved)
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"workspace_id":"bbbbbbbb-1111-1111-1111-111111111111"}' > "$dir/responses/2.out"
   printf '{"workspaces":[]}' > "$dir/responses/3.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
@@ -1227,6 +1256,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_rejects_replaced_workspace_after_provider_id
 test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup
 test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails
 test_target_ready_fails_when_target_absent
