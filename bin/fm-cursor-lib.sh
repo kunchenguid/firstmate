@@ -362,6 +362,34 @@ fm_cursor_process_launch_identity_matches() {  # <pid> <canonical-path>
   [ "$recorded" = "$expected" ]
 }
 
+fm_cursor_primary_path_is_cursor() {  # <path>
+  case "$1" in
+    */cursor-agent/versions/*/cursor-agent|*/cursor-agent/versions/*/agent) return 0 ;;
+  esac
+  return 1
+}
+
+fm_cursor_external_primary_matches() {  # <pid> <comm> <args> <argv0>
+  local pid=$1 comm=$2 args=$3 argv0=$4 marker observed first_arg candidate
+  marker=$(fm_cursor_process_environment_value "$pid" CURSOR_AGENT 2>/dev/null || true)
+  [ "$marker" = 1 ] || return 1
+  first_arg=$(fm_cursor_process_first_script_arg "$args" 2>/dev/null || true)
+  if observed=$(fm_cursor_process_executable_path "$pid"); then
+    case "${observed##*/}" in
+      cursor-agent|agent)
+        fm_cursor_primary_path_is_cursor "$observed" && return 0
+        ;;
+      node|node-*|node[0-9]*|node[0-9].[0-9]*|python|python[0-9]*|python[0-9].[0-9]*|bun|deno)
+        fm_cursor_primary_path_is_cursor "$first_arg" && return 0
+        ;;
+    esac
+  fi
+  for candidate in "$argv0" "$first_arg" "$comm"; do
+    fm_cursor_primary_path_is_cursor "$candidate" && return 0
+  done
+  return 1
+}
+
 fm_cursor_process_has_identity() {  # <pid> <comm> <args> <argv0>
   local pid=$1 comm=${2:-} args=${3:-} argv0=${4:-}
   local expected expected_canonical observed observed_base first_arg first_canonical marker boundary_file process_token record
@@ -399,6 +427,8 @@ fm_cursor_process_has_identity() {  # <pid> <comm> <args> <argv0>
       return
       ;;
   esac
+
+  fm_cursor_external_primary_matches "$pid" "$comm" "$args" "$argv0" && return 0
 
   marker=$(fm_cursor_process_environment_value "$pid" CURSOR_AGENT 2>/dev/null || true)
   [ "$marker" = 1 ] || return 1
@@ -572,7 +602,8 @@ EOF
 # (bin/fm-session-lock-lib.sh), harness detection (bin/fm-harness.sh), pane
 # liveness (bin/backends/tmux.sh), and worker-server discovery (bin/fm-spawn.sh).
 #
-# Accepted: a process carrying Cursor's verified launch identity metadata.
+# Accepted: an external primary carrying Cursor's marker and install-path
+# identity, or a spawned process carrying Cursor's verified launch metadata.
 #
 # Rejected: a bare MainThread with no Cursor evidence; any executable whose
 # basename merely happens to be `agent`; any path with an `agent/` directory

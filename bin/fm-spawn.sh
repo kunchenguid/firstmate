@@ -700,6 +700,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 CURSOR_WORKER_RECORDER_PID=
 CURSOR_WORKER_LAUNCH_DELIVERED=0
+CURSOR_WORKER_LAUNCH_OWNERSHIP_PUBLISHED=0
 CURSOR_IDENTITY_FILE=
 CURSOR_IDENTITY_FILE_TMP=
 
@@ -726,7 +727,8 @@ spawn_abort_cleanup() {
     wait "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
     CURSOR_WORKER_RECORDER_PID=
   fi
-  if [ "$HARNESS" = cursor ] && [ "$CURSOR_WORKER_LAUNCH_DELIVERED" -eq 0 ]; then
+  if [ "$HARNESS" = cursor ] && [ "$CURSOR_WORKER_LAUNCH_DELIVERED" -eq 0 ] \
+     && [ "$CURSOR_WORKER_LAUNCH_OWNERSHIP_PUBLISHED" -eq 1 ]; then
     rm -f "$STATE/$ID.cursor-launch-token" 2>/dev/null || true
     [ -z "$CURSOR_IDENTITY_FILE" ] || rm -f "$CURSOR_IDENTITY_FILE" 2>/dev/null || true
   fi
@@ -1369,17 +1371,21 @@ if [ "$HARNESS" = cursor ]; then
       exit 1
       ;;
   esac
-  if [ -e "$STATE/$ID.cursor-launch-token" ] || [ -L "$STATE/$ID.cursor-launch-token" ]; then
+  if { [ -e "$STATE/$ID.cursor-launch-token" ] || [ -L "$STATE/$ID.cursor-launch-token" ]; } \
+     && [ "$RELAUNCH" -eq 0 ]; then
     echo "error: cursor launch ownership is still pending for $ID; teardown must complete before relaunch" >&2
     exit 1
   fi
   CURSOR_WORKER_LAUNCH_OWNERSHIP="$STATE/$ID.cursor-launch-token"
   CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP="$CURSOR_WORKER_LAUNCH_OWNERSHIP.tmp.$$"
-  if ! printf '%s\n' "$CURSOR_WORKER_LAUNCH_TOKEN" > "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" \
-     || ! mv -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" "$CURSOR_WORKER_LAUNCH_OWNERSHIP"; then
-    rm -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" 2>/dev/null || true
-    echo "error: cursor worker-server launch ownership could not be persisted" >&2
-    exit 1
+  if ! { [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; }; then
+    if ! printf '%s\n' "$CURSOR_WORKER_LAUNCH_TOKEN" > "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" \
+       || ! mv -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" "$CURSOR_WORKER_LAUNCH_OWNERSHIP"; then
+      rm -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" 2>/dev/null || true
+      echo "error: cursor worker-server launch ownership could not be persisted" >&2
+      exit 1
+    fi
+    CURSOR_WORKER_LAUNCH_OWNERSHIP_PUBLISHED=1
   fi
   export CURSOR_WORKER_LAUNCH_TOKEN
 fi
@@ -3425,6 +3431,17 @@ fi
 sleep 0.3
 if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
   cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" 1 || exit 1
+  if [ "$HARNESS" = cursor ]; then
+    if ! printf '%s\n' "$CURSOR_WORKER_LAUNCH_TOKEN" > "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" \
+       || ! mv -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" "$CURSOR_WORKER_LAUNCH_OWNERSHIP"; then
+      rm -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" 2>/dev/null || true
+      echo "error: cursor worker-server launch ownership could not be persisted" >&2
+      exit 1
+    fi
+    CURSOR_WORKER_LAUNCH_OWNERSHIP_PUBLISHED=1
+  else
+    rm -f "$STATE/$ID.cursor-launch-token"
+  fi
 fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
   if [ "$RELAUNCH" -eq 1 ]; then
@@ -3462,7 +3479,6 @@ if [ "$HARNESS" = cursor ]; then
     exit 1
   fi
   CURSOR_WORKER_RECORDER_PID=
-  rm -f "$STATE/$ID.cursor-launch-token"
 else
   if ! spawn_send_key "$T" Enter; then
     if [ "$RELAUNCH" -eq 1 ]; then

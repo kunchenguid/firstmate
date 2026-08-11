@@ -134,6 +134,382 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_mainthread_cursor_session_is_identified() {
+  local dir fakebin proc_root got trusted_dir trusted_cursor identity_file boundary_file task_id
+  dir="$TMP_ROOT/mainthread-cursor"
+  fakebin=$(fm_fakebin "$dir")
+  proc_root="$dir/proc"
+  trusted_dir="$FM_TEST_HOME/.local/share/cursor-agent/versions/current"
+  trusted_cursor="$trusted_dir/cursor-agent"
+  task_id=mainthread-cursor
+  identity_file="$dir/state/.$task_id.cursor-identity.abc123"
+  boundary_file="$dir/state/.$task_id.cursor-boundary.abc123.proof.launch"
+  fm_fake_cursor_alias "$trusted_dir" cursor-agent
+  mkdir -p "$FM_TEST_HOME/.local/bin"
+  ln -sf "$trusted_cursor" "$FM_TEST_HOME/.local/bin/cursor-agent"
+  mkdir -p "$dir/state" "$proc_root/710"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+  case "$pid:$field" in
+  710:comm=) printf '%s\n' "${FM_TEST_CURSOR_COMM:-MainThread}" ;;
+  710:args=) printf '%s\n' "${FM_TEST_CURSOR_ARGS:?}" ;;
+  710:ppid=) printf '%s\n' 1 ;;
+  710:lstart=) printf '%s\n' 'Mon Jan  1 00:00:00 2001' ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=) printf '%s\n' 710 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '710\n' > "$dir/state/.lock"
+  printf 'abc123\n' > "$dir/state/$task_id.cursor-launch-token"
+  : > "$dir/state/$task_id.meta"
+  printf '710\tlstart=Mon Jan  1 00:00:00 2001\t\n' > "$boundary_file"
+  printf 'abc123\t%s\n' "$trusted_cursor" >> "$boundary_file"
+  printf 'abc123\t%s\n' "$trusted_cursor" > "$identity_file"
+  printf 'FM_CURSOR_EXECUTABLE=%s\0FM_CURSOR_IDENTITY_FILE=%s\0FM_CURSOR_LAUNCH_TOKEN=abc123\0FM_CURSOR_BOUNDARY_LAUNCH_FILE=%s\0' \
+    "$trusted_cursor" "$identity_file" "$boundary_file" > "$proc_root/710/environ"
+  # Accepted: Cursor's own install path behind MainThread, under either
+  # installed name. The legacy alias identifies through the cursor-agent
+  # install tree it lives in, never through its own generic name.
+  local accepted=(
+    "MainThread|$FM_TEST_HOME/.local/share/cursor-agent/versions/current/cursor-agent --force"
+    "cursor-agent|$FM_TEST_HOME/.local/share/cursor-agent/versions/current/cursor-agent --force"
+  )
+  # Rejected: an unrelated executable named agent, an unrelated install tree
+  # whose directory merely happens to be named agent, another program running
+  # from a path with an agent/ component, a later argv token shaped like
+  # .../cursor-agent (must never classify via args after argv0), and a bare
+  # MainThread with no Cursor evidence at all. Any of these owning the lock
+  # would let an unrelated process claim this home's session.
+  local rejected=(
+    'agent|/opt/agent --serve'
+    'MainThread|/opt/agent/versions/current/agent --force'
+    'MainThread|/usr/bin/node /srv/cursor-agent/app.js'
+    'MainThread|/usr/bin/node /tmp/cursor-agent --foo'
+    'MainThread|/usr/bin/node /tmp/claude --foo'
+    'MainThread|/usr/bin/node /tmp/codex --foo'
+    'node|/usr/bin/node /tmp/cursor-agent --foo'
+    'MainThread|/usr/bin/node /srv/agent/app.js'
+    'MainThread|MainThread'
+  )
+  local entry comm args
+  for entry in "${accepted[@]}"; do
+    comm=${entry%%|*}; args=${entry#*|}
+    printf '%s\0' "${args%% *}" > "$proc_root/710/cmdline"
+    got=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "Cursor session '$args' was not found in ancestry"
+    [ "$got" = 710 ] || fail "Cursor ancestry for '$args' resolved '$got', expected 710"
+    FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "Cursor session '$args' did not own its lock"
+  done
+  for entry in "${rejected[@]}"; do
+    comm=${entry%%|*}; args=${entry#*|}
+    rm -f "$proc_root/710/environ"
+    printf '%s\0' "${args%% *}" > "$proc_root/710/cmdline"
+    if FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
+      fail "a non-Cursor process '$args' was identified as a harness ancestor"
+    fi
+    if FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "a non-Cursor process '$args' claimed the home's session lock"
+    fi
+  done
+  pass "session-lock: Cursor ancestry accepts proven Cursor identity and rejects unrelated agents"
+}
+
+test_running_cursor_version_survives_binary_update() {
+  local dir fakebin proc_root got old_dir new_dir old_cursor new_cursor identity_file boundary_file task_id
+  dir="$TMP_ROOT/mainthread-cursor-update"
+  fakebin=$(fm_fakebin "$dir")
+  proc_root="$dir/proc"
+  old_dir="$FM_TEST_HOME/.local/share/cursor-agent/versions/v1"
+  new_dir="$FM_TEST_HOME/.local/share/cursor-agent/versions/v2"
+  old_cursor="$old_dir/cursor-agent"
+  new_cursor="$new_dir/cursor-agent"
+  task_id=mainthread-cursor-update
+  identity_file="$dir/state/.$task_id.cursor-identity.abc123"
+  boundary_file="$dir/state/.$task_id.cursor-boundary.abc123.proof.launch"
+  fm_fake_cursor_alias "$old_dir" cursor-agent
+  fm_fake_cursor_alias "$new_dir" cursor-agent
+  mkdir -p "$FM_TEST_HOME/.local/bin" "$dir/state" "$proc_root/720"
+  ln -sf "$new_cursor" "$FM_TEST_HOME/.local/bin/cursor-agent"
+  ln -sf "$new_cursor" "$fakebin/cursor-agent"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  720:comm=) printf '%s\n' MainThread ;;
+  720:args=) printf '%s\n' "$FM_TEST_CURSOR_ARGS" ;;
+  720:ppid=) printf '%s\n' 1 ;;
+  720:lstart=) printf '%s\n' 'Mon Jan  1 00:00:00 2001' ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=) printf '%s\n' 720 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '720\n' > "$dir/state/.lock"
+  printf 'abc123\n' > "$dir/state/$task_id.cursor-launch-token"
+  : > "$dir/state/$task_id.meta"
+  printf '720\tlstart=Mon Jan  1 00:00:00 2001\t\n' > "$boundary_file"
+  printf 'abc123\t%s\n' "$old_cursor" >> "$boundary_file"
+  printf '%s\0--force\0' "$old_cursor" > "$proc_root/720/cmdline"
+  printf 'abc123\t%s\n' "$old_cursor" > "$identity_file"
+  printf 'FM_CURSOR_EXECUTABLE=%s\0FM_CURSOR_IDENTITY_FILE=%s\0FM_CURSOR_LAUNCH_TOKEN=abc123\0FM_CURSOR_BOUNDARY_LAUNCH_FILE=%s\0' \
+    "$old_cursor" "$identity_file" "$boundary_file" > "$proc_root/720/environ"
+  got=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CURSOR_ARGS="$old_cursor --force" \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a running pre-update Cursor version was not found in ancestry"
+  [ "$got" = 720 ] || fail "pre-update Cursor ancestry resolved '$got', expected 720"
+  pass "session-lock: a running Cursor version remains valid after alias update"
+}
+
+test_relative_process_names_cannot_claim_cursor() {
+  local dir
+  dir="$TMP_ROOT/relative-cursor-name"
+  fm_fake_cursor_alias "$dir" node
+  if (
+    cd "$dir" || exit 1
+    HOME="$FM_TEST_HOME" PATH="$dir:/usr/bin:/bin" bash -c \
+      ". '$ROOT/bin/fm-cursor-lib.sh'; fm_cursor_process_matches node 'node --force' node"
+  ); then
+    fail "a relative node process name claimed Cursor identity"
+  fi
+  pass "session-lock: relative process names cannot claim Cursor identity"
+}
+
+test_cursor_identity_does_not_execute_pid_executable() {
+  local dir proc_root executable side_effect got untrusted identity_file boundary_file task_id spoof_identity spoof_boundary
+  dir="$TMP_ROOT/cursor-no-probe"
+  proc_root="$dir/proc"
+  executable="$FM_TEST_HOME/.local/share/cursor-agent/versions/no-probe/cursor-agent"
+  side_effect="$dir/executed"
+  task_id=cursor-no-probe
+  identity_file="$dir/state/.$task_id.cursor-identity.abc123"
+  boundary_file="$dir/state/.$task_id.cursor-boundary.abc123.proof.launch"
+  mkdir -p "$proc_root/730" "$(dirname "$executable")" "$dir/state"
+  cat > "$dir/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  730:ppid=) printf '%s\n' 1 ;;
+  730:lstart=) printf '%s\n' 'Mon Jan  1 00:00:00 2001' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  printf 'abc123\n' > "$dir/state/$task_id.cursor-launch-token"
+  : > "$dir/state/$task_id.meta"
+  cat > "$executable" <<SH
+#!/usr/bin/env bash
+: > "$side_effect"
+printf 'Start the Cursor Agent\n'
+SH
+  chmod +x "$executable"
+  ln -s "$executable" "$proc_root/730/exe"
+  printf '730\tlstart=Mon Jan  1 00:00:00 2001\t\n' > "$boundary_file"
+  printf 'abc123\t%s\n' "$executable" >> "$boundary_file"
+  printf 'abc123\t%s\n' "$executable" > "$identity_file"
+  printf 'FM_CURSOR_EXECUTABLE=%s\0FM_CURSOR_IDENTITY_FILE=%s\0FM_CURSOR_LAUNCH_TOKEN=abc123\0FM_CURSOR_BOUNDARY_LAUNCH_FILE=%s\0' \
+    "$executable" "$identity_file" "$boundary_file" > "$proc_root/730/environ"
+  got=$(HOME="$FM_TEST_HOME" PATH="$dir:$PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c ". '$ROOT/bin/fm-cursor-lib.sh'; fm_cursor_process_matches node 'node $executable --help' /usr/bin/node 730 && printf yes")
+  [ "$got" = yes ] || fail "trusted Cursor launch metadata did not identify process"
+  [ ! -e "$side_effect" ] || fail "process identity executed unrelated PID executable"
+  untrusted="$dir/untrusted-cursor-agent"
+  cp "$executable" "$untrusted"
+  chmod +x "$untrusted"
+  mkdir -p "$proc_root/731"
+  ln -s "$untrusted" "$proc_root/731/exe"
+  spoof_identity="$dir/state/.cursor-self-declared.cursor-identity.abc123"
+  spoof_boundary="$dir/state/.cursor-self-declared.cursor-boundary.abc123.proof.launch"
+  printf 'abc123\t%s\n' "$untrusted" > "$spoof_identity"
+  printf '731\tlstart=Mon Jan  1 00:00:00 2001\t\n' > "$spoof_boundary"
+  printf 'abc123\t%s\n' "$untrusted" >> "$spoof_boundary"
+  printf 'FM_CURSOR_EXECUTABLE=%s\0FM_CURSOR_IDENTITY_FILE=%s\0FM_CURSOR_LAUNCH_TOKEN=abc123\0FM_CURSOR_BOUNDARY_LAUNCH_FILE=%s\0' \
+    "$untrusted" "$spoof_identity" "$spoof_boundary" > "$proc_root/731/environ"
+  if HOME="$FM_TEST_HOME" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c ". '$ROOT/bin/fm-cursor-lib.sh'; fm_cursor_process_matches node 'node $untrusted --help' /usr/bin/node 731"; then
+    fail "self-declared non-Cursor executable claimed Cursor identity"
+  fi
+  pass "session-lock: Cursor identity does not execute PID executables"
+}
+
+test_mainthread_cursor_argv0_with_spaces_is_identified() {
+  local dir fakebin proc_root got trusted_dir trusted_cursor identity_file boundary_file task_id
+  dir="$TMP_ROOT/mainthread-cursor-spaces"
+  fakebin=$(fm_fakebin "$dir")
+  proc_root="$dir/proc"
+  trusted_dir="$FM_TEST_HOME/.local/share/cursor-agent/versions/current release"
+  trusted_cursor="$trusted_dir/cursor-agent"
+  task_id=mainthread-cursor-spaces
+  identity_file="$dir/state/.$task_id.cursor-identity.abc123"
+  boundary_file="$dir/state/.$task_id.cursor-boundary.abc123.proof.launch"
+  fm_fake_cursor_alias "$trusted_dir" cursor-agent
+  mkdir -p "$FM_TEST_HOME/.local/bin"
+  ln -sf "$trusted_cursor" "$FM_TEST_HOME/.local/bin/cursor-agent"
+  mkdir -p "$dir/state" "$proc_root/710"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  710:comm=) printf '%s\n' MainThread ;;
+  710:args=) printf '%s\n' "$FM_TEST_HOME/.local/share/cursor-agent/versions/current release/cursor-agent --force" ;;
+  710:ppid=) printf '%s\n' 1 ;;
+  710:lstart=) printf '%s\n' 'Mon Jan  1 00:00:00 2001' ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=) printf '%s\n' 710 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf 'abc123\n' > "$dir/state/$task_id.cursor-launch-token"
+  : > "$dir/state/$task_id.meta"
+  printf '710\tlstart=Mon Jan  1 00:00:00 2001\t\n' > "$boundary_file"
+  printf 'abc123\t%s\n' "$trusted_cursor" >> "$boundary_file"
+  printf '%s\0--force\0' "$FM_TEST_HOME/.local/share/cursor-agent/versions/current release/cursor-agent" > "$proc_root/710/cmdline"
+  printf 'abc123\t%s\n' "$trusted_cursor" > "$identity_file"
+  printf 'FM_CURSOR_EXECUTABLE=%s\0FM_CURSOR_IDENTITY_FILE=%s\0FM_CURSOR_LAUNCH_TOKEN=abc123\0FM_CURSOR_BOUNDARY_LAUNCH_FILE=%s\0' \
+    "$trusted_cursor" "$identity_file" "$boundary_file" > "$proc_root/710/environ"
+  printf '710\n' > "$dir/state/.lock"
+  got=$(FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "Cursor argv0 with spaces was not found in ancestry"
+  [ "$got" = 710 ] || fail "Cursor argv0 with spaces resolved '$got', expected 710"
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "Cursor argv0 with spaces did not own its lock"
+  pass "session-lock: Cursor argv0 with spaces survives structured process parsing"
+}
+
+test_cursor_external_primary_identity_without_launch_metadata() {
+  local dir fakebin got trusted_dir trusted_cursor
+  dir="$TMP_ROOT/cursor-no-proc"
+  fakebin=$(fm_fakebin "$dir")
+  trusted_dir="$FM_TEST_HOME/.local/share/cursor-agent/versions/current"
+  trusted_cursor="$trusted_dir/cursor-agent"
+  fm_fake_cursor_alias "$trusted_dir" cursor-agent
+  mkdir -p "$FM_TEST_HOME/.local/bin"
+  ln -sf "$trusted_cursor" "$FM_TEST_HOME/.local/bin/cursor-agent"
+  ln -sf "$trusted_cursor" "$fakebin/cursor-agent"
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+  case "$pid:$field:${FM_TEST_CURSOR_CASE:-valid}" in
+  710:comm=:valid|710:comm=:invalid|710:comm=:spoof) printf '%s\n' node ;;
+  710:args=:valid) printf '%s\n' "$FM_TEST_HOME/.local/share/cursor-agent/versions/current/cursor-agent --force" ;;
+  710:args=:invalid) printf '%s\n' '/usr/bin/node /tmp/cursor-agent --force' ;;
+  710:args=:spoof) printf '%s\n' "$dir/decoy/cursor-agent --force" ;;
+  710:command=:valid|710:command=:invalid|710:command=:spoof) printf '%s\n' 'node cursor-agent CURSOR_AGENT=1' ;;
+  710:ppid=*) printf '%s\n' 1 ;;
+  *:comm=*) printf '%s\n' bash ;;
+  *:args=*) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=*) printf '%s\n' 710 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '710\n' > "$dir/state/.lock"
+
+  got=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_CURSOR_CASE=valid \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "external Cursor primary with CURSOR_AGENT=1 was rejected without launch metadata"
+  [ "$got" = 710 ] || fail "external Cursor primary resolved '$got', expected 710"
+  if FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_CURSOR_CASE=invalid \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
+    fail "a later cursor-agent argument was treated as Cursor identity"
+  fi
+  if FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_CURSOR_CASE=spoof \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
+    fail "a decoy Cursor install version was treated as native Cursor identity"
+  fi
+  pass "session-lock: external Cursor primary identity accepts its verified marker without launch metadata"
+}
+
+test_claude_node_worker_keeps_contiguous_ancestry() {
+  local dir fakebin got
+  dir="$TMP_ROOT/claude-node-worker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  110:comm=) printf '%s\n' node ;;
+  110:args=) printf '%s\n' '/usr/bin/node /opt/claude/versions/2.1.220/worker.js' ;;
+  110:ppid=) printf '%s\n' 120 ;;
+  120:comm=) printf '%s\n' claude ;;
+  120:args=) printf '%s\n' claude ;;
+  120:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /opt/claude/hooks/stop.sh' ;;
+  *:ppid=) printf '%s\n' 110 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '120\n' > "$dir/state/.lock"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "Claude Node worker ancestry did not reach outer session"
+  [ "$got" = 120 ] \
+    || fail "Claude Node worker ancestry resolved '$got', expected outer session pid 120"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "Claude Node worker ancestry did not recognize outer session lock owner"
+  pass "session-lock: Claude Node worker ancestry remains contiguous through outer session"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -358,6 +734,13 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_mainthread_cursor_session_is_identified
+test_running_cursor_version_survives_binary_update
+test_relative_process_names_cannot_claim_cursor
+test_cursor_identity_does_not_execute_pid_executable
+test_mainthread_cursor_argv0_with_spaces_is_identified
+test_cursor_external_primary_identity_without_launch_metadata
+test_claude_node_worker_keeps_contiguous_ancestry
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
