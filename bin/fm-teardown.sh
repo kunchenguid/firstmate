@@ -152,8 +152,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
-# shellcheck source=bin/fm-treehouse-lock-lib.sh
-. "$SCRIPT_DIR/fm-treehouse-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -997,9 +995,28 @@ TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
 
-# The index.lock failure-signature match (treehouse_return_is_index_lock_error)
-# and lock-path resolution (worktree_git_lock_path) are owned by
-# bin/fm-treehouse-lock-lib.sh, sourced above.
+# True when treehouse/git stderr shows the transient index.lock "File exists" race.
+# Other return failures must not enter the retry path.
+treehouse_return_is_index_lock_error() {
+  local text=$1
+  printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
+}
+
+# Absolute path to the git index lock for a worktree/repo dir, or empty when it
+# cannot be resolved (dir missing or not a git worktree at all).
+worktree_git_lock_path() {
+  local dir=$1 lock abs_dir
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  lock=$(git -C "$dir" rev-parse --git-path index.lock 2>/dev/null) || return 1
+  [ -n "$lock" ] || return 1
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs_dir=$(canonical_existing_dir "$dir") || return 1
+      printf '%s/%s\n' "$abs_dir" "$lock"
+      ;;
+  esac
+}
 
 # The lock-staleness proof (lsof holder check, mtime age, fail-safe defaults)
 # is owned by bin/fm-lock-lib.sh's fm_lock_is_provably_stale, sourced above.

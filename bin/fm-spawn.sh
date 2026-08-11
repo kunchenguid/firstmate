@@ -239,8 +239,6 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-# shellcheck source=bin/fm-treehouse-lock-lib.sh
-. "$SCRIPT_DIR/fm-treehouse-lock-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -681,16 +679,20 @@ parse_orca_worktree_result() {
   fi
 }
 
-# Same transient-lock retry teardown_treehouse_return (bin/fm-teardown.sh) applies
-# to an ordinary return, scoped to the one signature that self-heals: a killed
-# crew process's index.lock. Any other failure returns immediately.
+# Match teardown's established transient index.lock signature without moving or
+# changing teardown's own helpers. Any other return failure exits immediately.
+spawn_treehouse_return_is_index_lock_error() {
+  local text=$1
+  printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
+}
+
 spawn_return_durable_treehouse_lease() {
   local wt=$1 out max_retries retry_wait attempt=0
   if out=$( ( cd "$PROJ_ABS" && treehouse return --force "$wt" ) 2>&1 ); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     return 0
   fi
-  if ! treehouse_return_is_index_lock_error "$out"; then
+  if ! spawn_treehouse_return_is_index_lock_error "$out"; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     return 1
   fi
@@ -707,7 +709,7 @@ spawn_return_durable_treehouse_lease() {
       echo "warning: durable lease return for '$wt' succeeded on retry after an aborted spawn of $ID" >&2
       return 0
     fi
-    if ! treehouse_return_is_index_lock_error "$out"; then
+    if ! spawn_treehouse_return_is_index_lock_error "$out"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 1
     fi
