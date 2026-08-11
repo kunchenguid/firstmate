@@ -119,6 +119,30 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# --- concurrent arms publish exactly one complete registration ---------------
+H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
+(
+  when "$H" arm race --stable 1 --condition true --action "$ACT" "$TMP_ROOT/race-a" \
+    >"$TMP_ROOT/race-a.out" 2>"$TMP_ROOT/race-a.err"
+  printf '%s\n' "$?" > "$TMP_ROOT/race-a.rc"
+) &
+pid_a=$!
+(
+  when "$H" arm race --stable 1 --condition true --action "$ACT" "$TMP_ROOT/race-b" \
+    >"$TMP_ROOT/race-b.out" 2>"$TMP_ROOT/race-b.err"
+  printf '%s\n' "$?" > "$TMP_ROOT/race-b.rc"
+) &
+pid_b=$!
+wait "$pid_a" "$pid_b"
+rc_a=$(cat "$TMP_ROOT/race-a.rc")
+rc_b=$(cat "$TMP_ROOT/race-b.rc")
+[ $((rc_a + rc_b)) -eq 1 ] || fail "exactly one concurrent arm must succeed"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-race || fail "the winning concurrent arm did not produce an outcome"
+assert_contains "$(( $(count_lines "$TMP_ROOT/race-a") + $(count_lines "$TMP_ROOT/race-b") ))" 1 \
+  "only the winning concurrent registration fires"
+pass "concurrent arms publish exactly one complete watch"
+
 # --- the happy path: stable true fires the action exactly once ---------------
 H="$TMP_ROOT/h-fire"; new_home "$H"
 TRIG="$TMP_ROOT/fire-trigger"
@@ -230,6 +254,77 @@ RESULT=$(first_result "$H" when-deadline)
 assert_grep 'status: never-true' "$RESULT" "the outcome records the expired deadline"
 assert_absent "$DEADLOG" "the action never ran"
 pass "an expired deadline wakes with never-true"
+
+# --- a poll completing true after its deadline cannot fire -------------------
+H="$TMP_ROOT/h-late-true"; new_home "$H"
+LATELOG="$TMP_ROOT/late-true-act"
+LATE="$TMP_ROOT/late-true.sh"
+cat > "$LATE" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+exit 0
+SH
+chmod +x "$LATE"
+when "$H" arm late-true --stable 1 --deadline 1 --condition-timeout 3 \
+  --condition "$LATE" --action "$ACT" "$LATELOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-late-true || fail "no outcome was captured for a condition completing after deadline"
+RESULT=$(first_result "$H" when-late-true)
+assert_grep 'status: never-true' "$RESULT" "a late true is rejected after the deadline"
+assert_absent "$LATELOG" "a condition completing true after deadline never fires"
+pass "a late true poll cannot fire after its deadline"
+
+# --- a timed-out action cannot leave descendants running ---------------------
+H="$TMP_ROOT/h-timeout"; new_home "$H"
+DESCENDANT_EFFECT="$TMP_ROOT/descendant-effect"
+SPAWNER="$TMP_ROOT/spawner.sh"
+cat > "$SPAWNER" <<'SH'
+#!/usr/bin/env bash
+(
+  trap '' TERM
+  sleep 2
+  printf 'late effect\n' > "$1"
+) &
+wait
+SH
+chmod +x "$SPAWNER"
+when "$H" arm timeout --stable 1 --action-timeout 1 \
+  --condition true --action "$SPAWNER" "$DESCENDANT_EFFECT" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-timeout || fail "no outcome was captured for the timed-out action"
+RESULT=$(first_result "$H" when-timeout)
+assert_grep 'status: action-failed' "$RESULT" "the action timeout is captured as a failure"
+assert_grep 'action_exit: 124' "$RESULT" "the action timeout uses the shared timeout status"
+sleep 2
+assert_absent "$DESCENDANT_EFFECT" "a timed-out action leaves no descendant effect"
+pass "action timeouts terminate the complete process group"
+
+# --- command output staging remains bounded while the command runs -----------
+H="$TMP_ROOT/h-bounded-output"; new_home "$H"
+NOISY_READY="$TMP_ROOT/noisy-ready"
+NOISY="$TMP_ROOT/noisy.sh"
+cat > "$NOISY" <<'SH'
+#!/usr/bin/env bash
+printf 'ready\n' > "$1"
+i=0
+while [ "$i" -lt 20000 ]; do
+  printf '0123456789012345678901234567890123456789\n'
+  i=$((i + 1))
+done
+sleep 1
+SH
+chmod +x "$NOISY"
+FM_WHEN_OUTPUT_TAIL_BYTES=128 when "$H" arm bounded-output --stable 1 \
+  --condition true --action "$NOISY" "$NOISY_READY" >/dev/null
+FM_WHEN_OUTPUT_TAIL_BYTES=128 pe "$H" reconcile >/dev/null
+wait_for_file "$NOISY_READY" || fail "the noisy action did not start"
+for staged in "$H/state/when"/.run-out.*; do
+  [ -e "$staged" ] || continue
+  staged_size=$(wc -c < "$staged" | tr -d ' ')
+  [ "$staged_size" -le 128 ] || fail "command output staging exceeded its configured bound"
+done
+wait_for_result "$H" when-bounded-output || fail "no outcome was captured for the noisy action"
+pass "command output staging stays within its byte bound"
 
 # --- a restart after a claimed fire never runs the action twice ---------------
 H="$TMP_ROOT/h-crash"; new_home "$H"

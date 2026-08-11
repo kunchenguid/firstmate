@@ -83,6 +83,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 WHEN_DIR="$STATE/when"
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
@@ -152,6 +154,8 @@ cmd_arm() {
   done
 
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
+  fm_procevent_source_lock_acquire "$sid" || die "cannot lock the watch source"
+  trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover
   for leftover in "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" \
     "$(fm_procevent_registry_dir "$STATE")/$sid.source"; do
@@ -196,11 +200,13 @@ cmd_arm() {
     die "published spec failed validation"
   fi
 
-  if ! "$SCRIPT_DIR/fm-procevent.sh" register when "$sid" -- \
+  if ! fm_procevent_registration_publish_locked "$STATE" when "$sid" \
     "$SCRIPT_DIR/fm-procevent-when.sh" run "$sid"; then
     rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
     die "cannot register the watch source"
   fi
+  fm_procevent_source_lock_release "$sid"
+  trap - EXIT
   printf 'armed: %s\n' "$sid"
   printf 'starts on the watcher'"'"'s next cycle; or run: bin/fm-procevent.sh reconcile\n'
   printf 'reminder: deterministic, safe, reversible actions only; judgment and destructive actions stay on the wake-and-decide path\n'
@@ -286,16 +292,11 @@ spec_load() {
 # Run argv directly with combined output captured, bounded by the timeout.
 # Returns the command's exit status, or 124 on timeout.
 bounded_run() {
-  local secs=$1 out=$2
+  local secs=$1 out=$2 rc
   shift 2
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@" > "$out" 2>&1
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@" > "$out" 2>&1
-  else
-    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    perl -e 'my $t = shift; my $pid = fork; exit 125 unless defined $pid; if (!$pid) { exec @ARGV; exit 127 } my $stop = sub { kill "TERM", $pid; select undef, undef, undef, 0.2; kill "KILL", $pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 124 : ($? >> 8));' "$secs" "$@" > "$out" 2>&1
-  fi
+  fm_run_timed "$secs" "$@" 2>&1 | tail -c "$OUTPUT_TAIL_BYTES" > "$out"
+  rc=${PIPESTATUS[0]}
+  return "$rc"
 }
 
 # emit_doc <source-id> <status> <detail> <polls> <action-exit-or-empty> <output-file-or-empty>
@@ -317,6 +318,11 @@ cmd_run() {
   local sid=${1-} fired out rc polls=0 consecutive_true=0 consecutive_err=0 now
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
   fired=$(fired_file "$sid")
+
+  if ! positive_int "$OUTPUT_TAIL_BYTES"; then
+    emit_doc "$sid" rejected "FM_WHEN_OUTPUT_TAIL_BYTES must be a positive integer; nothing was executed" 0 '' ''
+    exit 0
+  fi
 
   if ! spec_load "$sid"; then
     emit_doc "$sid" rejected "refused without executing anything: $SPEC_ERROR" 0 '' ''
@@ -348,6 +354,12 @@ cmd_run() {
     bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"
     rc=$?
     polls=$((polls + 1))
+    now=$(date +%s)
+    if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
+      emit_doc "$sid" never-true \
+        "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' "$out"
+      exit 0
+    fi
     case "$rc" in
       0)
         consecutive_true=$((consecutive_true + 1))
@@ -370,6 +382,13 @@ cmd_run() {
     esac
     sleep "$SPEC_INTERVAL"
   done
+
+  now=$(date +%s)
+  if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
+    emit_doc "$sid" never-true \
+      "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' "$out"
+    exit 0
+  fi
 
   # Claim the fire durably and exclusively BEFORE the action, so no restart or
   # concurrent runner can ever run the action a second time.
