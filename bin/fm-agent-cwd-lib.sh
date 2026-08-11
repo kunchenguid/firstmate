@@ -464,6 +464,7 @@ EOF
   done <<EOF
 $matches
 EOF
+  [ "$root_count" -gt 1 ] && return 2
   [ "$root_count" -eq 1 ] || return 1
   printf '%s' "$root"
 }
@@ -586,12 +587,30 @@ fm_agent_harness_pid_below() {
 # A caller looping over many tasks passes one fm_agent_task_pid_index so the
 # declared-agent lookup costs a single /proc walk for the whole loop.
 fm_agent_cwd_verdict() {
-  local id=${1:-} backend=${2:-} target=${3:-} pid='' cwd shell_pid expected_home=${5:-}
+  local id=${1:-} backend=${2:-} target=${3:-} pid='' cwd shell_pid expected_home=${5:-} pid_status
   if [ -n "$id" ]; then
     if [ "$#" -ge 4 ]; then
-      pid=$(fm_agent_pid_for_task "$id" "$4" "$expected_home") || pid=
+      if pid=$(fm_agent_pid_for_task "$id" "$4" "$expected_home"); then
+        :
+      else
+        pid_status=$?
+        [ "$pid_status" -eq 2 ] && {
+          printf 'unverified\t\t'
+          return 0
+        }
+        pid=
+      fi
     else
-      pid=$(fm_agent_pid_for_task "$id") || pid=
+      if pid=$(fm_agent_pid_for_task "$id"); then
+        :
+      else
+        pid_status=$?
+        [ "$pid_status" -eq 2 ] && {
+          printf 'unverified\t\t'
+          return 0
+        }
+        pid=
+      fi
     fi
   fi
   if [ -n "$pid" ]; then

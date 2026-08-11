@@ -702,10 +702,16 @@ teardown_tmux_dead_endpoint_identity_proven() {
 teardown_child_endpoint_identity_proven() {
   local child_id=$1 child_meta=$2 child_kind=$3 parent_home=$4 child_wt=$5
   local backend=$6 target=$7 state expected_home pid start current env env_again raw_state index
-  local session workspace tab pane label info stable stable_again missing_path
+  local session workspace tab pane label info stable stable_again missing_path occupancy_path
   TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=0
   TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET=
   backend=$(fm_backend_of_meta "$child_meta")
+  if [ "$child_kind" = secondmate ]; then
+    occupancy_path=$(meta_value "$child_meta" home)
+    [ -n "$occupancy_path" ] || occupancy_path=$child_wt
+  else
+    occupancy_path=$child_wt
+  fi
   if [ "$backend" = herdr ]; then
     fm_backend_source herdr || return 1
     fm_backend_herdr_parse_target "$target" || return 1
@@ -713,8 +719,7 @@ teardown_child_endpoint_identity_proven() {
     pane=$FM_BACKEND_HERDR_PANE
     raw_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
     if [ "$raw_state" = no-agent ]; then
-      index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
-      teardown_task_pid_index_empty "$child_id" "$index" || return 1
+      teardown_endpoint_process_census_empty "$occupancy_path" || return 1
       teardown_herdr_endpoint_focus_safe "$target" || return 1
       TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=1
       return 0
