@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Condition->action adapter for the generic process-to-event runner: register a
 # deterministic condition and a deterministic action once, let the runner's
-# blocking child poll the condition tokenlessly, fire the action exactly once on
-# a stable true, and wake firstmate exactly once with the captured outcome.
+# blocking child poll the condition tokenlessly, fire the action at most once on
+# a stable true, and publish one terminal outcome for durable delivery.
 #
 # Usage:
 #   fm-procevent-when.sh arm <name> [options] --condition <argv>... --action <argv>...

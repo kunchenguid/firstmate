@@ -41,7 +41,7 @@ For a "do X as soon as Y is true" request whose condition AND action are both ge
 bin/fm-procevent-when.sh arm <name> --condition <argv>... --action <argv>...
 ```
 
-The runner polls the condition tokenlessly, fires the action at most once on a stable true, and wakes firstmate exactly once with the captured outcome; the adapter's header and `--help` own the flags, cadence, trust binding, and outcome document.
+[`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the watch's operating contract, while the adapter's header and `--help` own the flags, cadence, trust binding, and outcome document.
 Eligibility is a firstmate judgment made BEFORE arming, because the scripts cannot classify an argv: the action must be safe, reversible, and exact (for example `no-mistakes update --beta`, whose own guard refuses while a validation run is active).
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
@@ -90,8 +90,9 @@ Supported by tests:
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
 - ownership moves only once a whole generation is gone, so a crashed runner leader whose owned process group is still running never reads as stale: that surviving group is stopped before any replacement starts, and the claim is kept for retry when it cannot be;
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;
-- oversized output is bounded rather than published whole or silently dropped;
-- the `when` adapter fires its bound action at most once per watch (a durable exclusive claim precedes the action, so a restart or re-poll reports ambiguity instead of double-firing), refuses a spec that no longer matches its trust binding without executing anything, and turns every failure path into a terminal captured outcome instead of a silent retry.
+- oversized output is bounded rather than published whole or silently dropped.
+
+The `when` adapter's guarantees are part of the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent).
 
 **Not true, and never to be claimed:** at-least-once, no-loss, or lossless delivery, and no generic exactly-once effect either - the handled acknowledgement only stops re-announcement, it says nothing about whether a paired external effect performed before the acknowledgement call actually completed, so a crash between that effect and the call can still repeat the effect on the next replay.
 
