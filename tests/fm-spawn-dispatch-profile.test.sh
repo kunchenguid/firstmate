@@ -568,7 +568,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   for harness in pi pi-signed; do
     for version in 0.82.0 0.84.0; do
       id="profile-${harness}-tui-${version//./}-z8d"
-      rec=$(make_spawn_case "profile-${harness}-tui-${version//./}" "$harness" "$id")
+      rec=$(make_spawn_case "profile-__MODELFLAG__-${harness}-tui-${version//./}" "$harness" "$id")
       read_case_record "$rec"
 
       out=$(FM_TEST_PI_VERSION="$version" \
