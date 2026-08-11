@@ -56,14 +56,15 @@ When the correct choice is ambiguous, stop and escalate rather than creating a p
 
 Every live BITS mutation uses exactly one of these two pre-write paths and then follows all shared rules below.
 
-- Creation path: for a new Dev Task or a release-train operation that auto-creates an MR, first read the live landscape, confirm the exact official prepare snapshot, and pin and verify the repository, source branch, exact committed head, and integration target before authorizing submission.
+- Creation path: when the Dev Task does not yet exist, first read the live landscape, confirm the exact official prepare snapshot, and pin and verify the repository, source branch, exact committed head, and integration target before authorizing submission.
+  If an MR already exists, read it live and verify its identity, repository, source, exact head, and target before submission; if the release-train path will auto-create the MR, defer only that MR evidence until independent post-submit readback.
   When the official owner is genuinely unavailable and the lower-level fallback has been explicitly approved, its exact dry-run payload is the confirmed prepare snapshot for this path.
-- Existing-object path: for every other existing-task mutation and every ordinary flow with a pre-existing MR, re-read the full current Dev Task changes content, projects, Change Cards, `versionCode`, and MR identity immediately before the write, so the write is built on live state.
+- Existing-object path: when the Dev Task already exists, re-read the full current Dev Task changes content, projects, Change Cards, `versionCode`, and MR identity immediately before the write, so the write is built on live state.
 
 1. Full-snapshot preservation: attach, detach, and Change Card writes rewrite a whole snapshot, so preserve `changes`, `projects`, `versionCode`, and every unknown field; never overwrite or drop a field you did not intend to change.
 2. Exact dry-run review: inspect the owner's exact prepare or dry-run payload before submission, confirming repository, source, target, project type, control plane, and any existing MR identity are precisely what you intend.
 3. Explicit authority for each live write: obtain the authority each live write requires under `AGENTS.md` section 7 before adding `--yes`; one approval authorizes one exact target, not a later changed one.
-4. Independent post-write readback: for the creation path, independently read back the resulting Dev Task and any auto-created MR and verify task identity plus MR identity, repository, source, exact head, and target before binding or continuing; for the existing-object path, re-read the Dev Task, projects, Change Cards, MR bindings, and pipeline or job state from BITS and confirm the immutable fields match what you intended.
+4. Independent post-write readback: for the creation path, independently read back the resulting Dev Task and its pre-existing or auto-created MR and verify task identity plus MR identity, repository, source, exact head, and target before binding or continuing; for the existing-object path, re-read the Dev Task, projects, Change Cards, MR bindings, and pipeline or job state from BITS and confirm the immutable fields match what you intended.
    API acceptance is not success until the applicable independent read confirms it.
 5. Timeout is outcome-unknown: treat a timeout or lost connection after transmitting a write as outcome-unknown, never as failure and never as success; reconcile by readback of the exact target before any retry, and never blindly re-issue a create.
 
@@ -90,7 +91,7 @@ Run each operation through its owner with the write discipline above; the notes 
 
 These boundaries hold regardless of yolo posture; only a current, explicit, concrete captain instruction of the exact action can relax one, per the captain-instruction precedence rule, and destructive, irreversible, and security-sensitive actions still require the captain to name that exact action.
 
-- Never remove a project or Change Card, or overwrite an unknown snapshot field, to make a write succeed.
+- Never remove a project or Change Card, and never overwrite an unknown snapshot field.
 - Never create a duplicate Dev Task after an uncertain submit; reconcile the uncertain outcome by readback first.
 - Never retarget, create, or close a merge request merely to satisfy BITS; reconcile the real MR identity instead.
 - Never pass a stage, force-skip a job, continue a release, deploy to production, merge, or roll back without the exact authority that existing Firstmate rules require for that action.
