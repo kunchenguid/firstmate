@@ -293,8 +293,17 @@ OUT2="$CASE/out2"
 watch_once "$OUT2"; pid=$!
 if ! wait_live "$pid" 60; then
   reap "$pid"
-  fail "(1c) the SAME stale hash woke firstmate a second time - this is the every-poll re-surface loop:"$'\n'"$(cat "$OUT2")"
+  # A fresh watcher may legitimately exit on a NON-stale wake: since upstream's
+  # re-arm resurface, durable supervision work still open at arm time is
+  # republished as `check: rearm-resurface`. What must never happen is this
+  # frozen pane's already-surfaced hash waking firstmate again, which the
+  # stale-free assertion below is what actually pins.
+  case "$(cat "$OUT2")" in
+    *stale:*)
+      fail "(1c) the SAME stale hash woke firstmate a second time - this is the every-poll re-surface loop:"$'\n'"$(cat "$OUT2")" ;;
+  esac
+else
+  reap "$pid"
 fi
-reap "$pid"
 assert_no_grep 'stale:' "$OUT2" "(1c) an already-surfaced stale hash must not re-surface"
 pass "(1c) the same stale hash never wakes firstmate twice (the ~40s re-surface loop is closed)"
