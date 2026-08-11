@@ -254,6 +254,52 @@ SH
   pass "stalled state reads are bounded without starving later children"
 }
 
+test_full_scan_budget_includes_wake_lock_wait() {
+  local holder started elapsed i
+  make_world wake-lock; write_child "$MAIN" child 'done: green'
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    : > "$2"
+    sleep 30
+  ' _ "$ROOT" "$WORLD/lock-ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -e "$WORLD/lock-ready" ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$WORLD/lock-ready" ] || fail "wake lock holder did not start"
+
+  started=$(date +%s)
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  elapsed=$(( $(date +%s) - started ))
+  reap "$holder"
+  [ "$elapsed" -le 3 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
+  pass "aggregate scan budget includes durable wake operations"
+}
+
+test_notice_recovery_does_not_duplicate_wake() {
+  local record err seq generation
+  make_world notice-recovery; bind_secondmate remote
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  write_child "$MATE" child 'failed: terminal'
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] || fail "parent-report failure did not queue one notice"
+
+  record=$(find "$MATE/state/terminal-outcomes" -type f -name '*.pending' | head -1)
+  awk '{ sub(/^notice_emitted=1$/, "notice_emitted=0"); print }' "$record" > "$record.tmp"
+  mv "$record.tmp" "$record"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] || fail "recovery duplicated an already queued notice"
+
+  err="$WORLD/drain.err"
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" "$DRAIN" >/dev/null 2> "$err"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 0 ] || fail "acknowledged notice was emitted again"
+  pass "notice recovery remains idempotent across queue acknowledgement"
+}
+
 # Forge command shims fail loudly. A successful scan proves this path never uses
 # them while reconciling a local terminal outcome.
 test_reconciliation_never_calls_forge() {
@@ -271,6 +317,8 @@ test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses
+test_full_scan_budget_includes_wake_lock_wait
+test_notice_recovery_does_not_duplicate_wake
 test_reconciliation_never_calls_forge
 
 echo "all inactive reconciliation tests passed"

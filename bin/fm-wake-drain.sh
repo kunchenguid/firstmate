@@ -20,6 +20,7 @@ RECOVERY_ACK_REQUIRED=false
 ACK_THROUGH=
 ACK_GENERATION=
 ACK_FINGERPRINTS=
+ACK_NOTICE_FINGERPRINTS=
 
 case "${1:-}" in
   '') ;;
@@ -52,23 +53,23 @@ assert_watcher_liveness() {
 # turn has completed and before this acknowledgement consumes its queue rows.
 # The helper ignores non-presentation and legacy keys, so this is a narrow
 # receipt path rather than a second interpretation of general check wakes.
-inactive_outcome_fingerprints() { # <sequence>
-  local cutoff=$1 epoch seq kind key payload
+inactive_outcome_fingerprints() { # <sequence> <key-prefix>
+  local cutoff=$1 prefix=$2 epoch seq kind key payload
   while IFS=$(printf '\t') read -r epoch seq kind key payload; do
     [ "$kind" = check ] || continue
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     [ "$seq" -le "$cutoff" ] || continue
     case "$key" in
-      inactive-outcome:*) printf '%s\n' "${key#inactive-outcome:}" ;;
+      "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
   done < "$FM_WAKE_QUEUE"
 }
 
-acknowledge_inactive_outcomes() { # <newline-separated-fingerprints>
-  local fingerprints=$1 fingerprint
+acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
+  local mode=$1 fingerprints=$2 fingerprint
   while IFS= read -r fingerprint; do
     [ -n "$fingerprint" ] || continue
-    "$SCRIPT_DIR/fm-inactive-reconcile.sh" acknowledge "$fingerprint" || return 1
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" "$mode" "$fingerprint" || return 1
   done <<< "$fingerprints"
 }
 
@@ -152,11 +153,13 @@ if [ -n "$ACK_THROUGH" ]; then
     echo "wake drain: recovery generation is stale or could not be acknowledged safely" >&2
     exit 1
   fi
-  ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH") || exit 1
+  ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
+  ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  if ! acknowledge_inactive_outcomes "$ACK_FINGERPRINTS"; then
-    echo "wake drain: inactive outcome presentation receipt could not be recorded safely" >&2
+  if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
+    || ! acknowledge_inactive_outcomes acknowledge-notice "$ACK_NOTICE_FINGERPRINTS"; then
+    echo "wake drain: inactive outcome receipt could not be recorded safely" >&2
     exit 1
   fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"

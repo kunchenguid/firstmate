@@ -189,6 +189,10 @@ queue_notice_once() { # <record> <key> <payload>
   local record=$1 key=$2 payload=$3 notified
   notified=$(record_value "$record" notice_emitted)
   [ "$notified" = 1 ] && return 1
+  if queue_key_exists "$key"; then
+    record_field_set "$record" notice_emitted 1 || return 2
+    return 1
+  fi
   fm_wake_append check "$key" "$payload" || return 2
   record_field_set "$record" notice_emitted 1 || return 2
   printf 'actionable: %s\n' "$payload"
@@ -393,6 +397,15 @@ acknowledge() { # <fingerprint>
   mv -f "$pending" "$presented"
 }
 
+acknowledge_notice() { # <fingerprint>
+  local fingerprint=$1 pending
+  case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
+  pending=$(record_path "$fingerprint" pending)
+  [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
+  record_field_set "$pending" notice_emitted 1
+}
+
 mode=${1:-scan}
 case "$mode" in
   scan)
@@ -402,15 +415,29 @@ case "$mode" in
       --startup) startup=1 ;;
       *) printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2; exit 2 ;;
     esac
+    if fm_run_timed "$FM_INACTIVE_RECONCILE_BUDGET_SECS" "$0" _scan-locked "$startup"; then
+      :
+    elif [ "$?" -ne 124 ]; then
+      exit 1
+    fi
+    ;;
+  _scan-locked)
+    [ "$#" -eq 2 ] || exit 2
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
-    scan "$startup"
+    scan "$2"
     ;;
   acknowledge)
     [ "$#" -eq 2 ] || { printf 'usage: fm-inactive-reconcile.sh acknowledge <fingerprint>\n' >&2; exit 2; }
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     acknowledge "$2"
+    ;;
+  acknowledge-notice)
+    [ "$#" -eq 2 ] || exit 2
+    fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
+    trap 'fm_lock_release "$SCAN_LOCK"' EXIT
+    acknowledge_notice "$2"
     ;;
   -h|--help)
     sed -n '2,40{s/^# \{0,1\}//;p;}' "$0"
