@@ -577,26 +577,30 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary.
+Reverified 2026-08-10 on Herdr 0.8.0 protocol 19, macOS aarch64, after the stale-registration fix recorded in the next section extended the guard with the two corroboration cases; measured 2026-08-08 on Herdr 0.8.0 and first on 2026-08-02 on Herdr 0.7.5, both with identical results for the five cases that existed then:
 
 ```sh
-tests/fm-control-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output on that 2026-08-08 run:
+Observed output on the 2026-08-10 run, exit status 0:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: a registration left behind over a bare shell reads dead, so exit still reconciles the task
+ok - real herdr: a registered agent occupying the pane's terminal still reads alive
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
 ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-That output predates the stale-registration fix recorded in the next section and no longer names the guard's current cases: the guard now also pins that a registration left over a bare idle shell reads `dead` rather than `alive`, and that a registration whose process genuinely occupies the pane's terminal still reads `alive`.
-Re-run the command to refresh this block; it is the guard that maintains this record, and it must be run after every Herdr upgrade and after any change to the agent-state classifier rather than trusting the version above.
+The guarded teardown's fleet-state tripwire verified the live default session unchanged and removed its record, so the run left no lab residue.
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent, and occupying or not occupying the pane's terminal, exercise exactly the gate every lifecycle verb depends on, with no real agent launched.
+The occupant is a SIGINT-ignoring shell loop rather than a harness, which is what lets the same pane pin both the interrupt-survival postcondition and the corroborated `alive` verdict.
+That command is the guard that maintains this record; run it after every Herdr upgrade and after any change to the agent-state classifier rather than trusting the version above.
 
 ### Agent status semantics and stale registrations
 

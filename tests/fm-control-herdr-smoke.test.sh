@@ -124,8 +124,8 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # task permanently, because relaunch and exit both refuse while an agent is
 # believed to be there and cleanup independently refuses unlanded work.
 
-herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
-  --state idle --session "$SESSION" >/dev/null 2>&1 \
+fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" \
+  --source fm-control-smoke --agent fm-control-smoke-agent --state idle >/dev/null 2>&1 \
   || fail "could not register an agent on the task pane"
 
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
@@ -147,8 +147,8 @@ pass "real herdr: a registration left behind over a bare shell reads dead, so ex
 # so no lifecycle verb can act as though the endpoint were free. The occupant
 # ignores SIGINT, exactly like a real agent surviving its interrupt key.
 
-herdr pane run "$PANE_ID" "sh -c 'trap \"\" INT; while :; do sleep 1; done'" \
-  --session "$SESSION" >/dev/null 2>&1 \
+fm_herdr_lab_cli "$SESSION" pane run "$PANE_ID" \
+  "sh -c 'trap \"\" INT; while :; do sleep 1; done'" >/dev/null 2>&1 \
   || fail "could not start the pane occupant"
 
 STATE=
@@ -168,7 +168,7 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
 
-herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+fm_herdr_lab_cli "$SESSION" pane get "$PANE_ID" >/dev/null 2>&1 \
   || fail "the control plane must never remove the endpoint it was operating on"
 [ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
