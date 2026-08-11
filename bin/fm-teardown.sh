@@ -834,11 +834,11 @@ legacy_detached_exact_landed_proof() {
     return 1
   fi
 
-  base_identity=$(github_repository_identity "https://github.com/$base_repository.git") \
-    && head_identity=$(github_repository_identity "https://github.com/$head_repository.git") || {
-      echo "REFUSED: recorded PR repository identity for detached task $ID is invalid; preserving task state." >&2
-      return 1
-    }
+  if ! base_identity=$(github_repository_identity "https://github.com/$base_repository.git") \
+     || ! head_identity=$(github_repository_identity "https://github.com/$head_repository.git"); then
+    echo "REFUSED: recorded PR repository identity for detached task $ID is invalid; preserving task state." >&2
+    return 1
+  fi
   origin_urls=$(git -C "$WT" config --local --get-all remote.origin.url 2>/dev/null || true)
   origin_count=$(git -C "$WT" config --local --get-all remote.origin.url 2>/dev/null \
     | awk 'END { print NR + 0 }')
@@ -883,6 +883,7 @@ legacy_detached_exact_landed_proof() {
 
   base_owner=${base_repository%%/*}
   base_name=${base_repository#*/}
+  # shellcheck disable=SC2016 # GitHub interprets these GraphQL variable literals.
   repository_view=$(cd "$WT" && gh api graphql \
     -f owner="$base_owner" -f name="$base_name" \
     -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner defaultBranchRef{name target{oid}}}}' \
@@ -1050,11 +1051,14 @@ legacy_detached_retirement_note_load() {
 
 legacy_detached_retirement_prepare() {
   local existing note tmp scratch_source scratch_archive
-  if [ -e "$STATE/retired" ] && [ ! -d "$STATE/retired" -o -L "$STATE/retired" ]; then
+  if [ -e "$STATE/retired" ] \
+     && { [ ! -d "$STATE/retired" ] || [ -L "$STATE/retired" ]; }; then
     echo "REFUSED: detached task $ID audit directory is unsafe; preserving task state." >&2
     return 1
   fi
-  mkdir -p -m 700 "$STATE/retired" || return 1
+  if [ ! -d "$STATE/retired" ]; then
+    mkdir -m 700 "$STATE/retired" || return 1
+  fi
   [ -d "$STATE/retired" ] && [ ! -L "$STATE/retired" ] || return 1
   existing=$(legacy_detached_retirement_note_find) || {
     echo "REFUSED: detached task $ID has ambiguous retirement records; preserving task state." >&2

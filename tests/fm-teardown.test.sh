@@ -865,7 +865,7 @@ test_legacy_detached_squash_equivalent_retirement_preserves_ref_and_archives_scr
   git -C "$case_dir/project" config branch.fm/task-x1.merge refs/heads/fm/task-x1
   add_treehouse_returning_worktree "$case_dir"
 
-  default_tree=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main^{tree})
+  default_tree=$(git -C "$case_dir/project" rev-parse "refs/remotes/origin/main^{tree}")
   merge_tree=$(git -C "$case_dir/wt" merge-tree --write-tree refs/remotes/origin/main HEAD 2>/dev/null || true)
   [ "$merge_tree" != "$default_tree" ] \
     || fail "legacy-detached-squash-equivalent: fixture did not reproduce the historical whole-tree masking condition"
