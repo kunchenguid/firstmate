@@ -77,6 +77,62 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+test_daemon_singleton_serializes_concurrent_cycles() {
+  (
+    local dir state fakebin first_pid second_status i
+    dir=$(make_supercase daemon-singleton-concurrent)
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    mkdir -p "$dir/config" "$dir/data"
+    printf '# Backlog\n' > "$dir/data/backlog.md"
+    date '+%s' > "$state/.afk"
+    printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/pane.txt"
+
+    first_pid=
+    # shellcheck disable=SC2329  # Invoked indirectly by the EXIT trap below.
+    cleanup_concurrent_daemon() {
+      [ -z "$first_pid" ] || ! kill -0 "$first_pid" 2>/dev/null \
+        || { kill "$first_pid" 2>/dev/null || true; wait "$first_pid" 2>/dev/null || true; }
+    }
+    trap cleanup_concurrent_daemon EXIT
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$DAEMON" > "$dir/first.out" 2> "$dir/first.err" &
+    first_pid=$!
+
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$state/.supervise-daemon.pid" ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    [ -s "$state/.supervise-daemon.pid" ] \
+      || fail "first concurrent daemon did not establish its singleton record: $(cat "$dir/first.err")"
+    kill -0 "$first_pid" 2>/dev/null \
+      || fail "first concurrent daemon exited before the competing cycle"
+
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+      "$DAEMON" > "$dir/second.out" 2> "$dir/second.err"
+    second_status=$?
+
+    [ "$second_status" -ne 0 ] \
+      || fail "a second concurrent daemon entered the same home"
+    assert_contains "$(cat "$dir/second.err")" "another fm-supervise-daemon is already running" \
+      "a second concurrent daemon did not report singleton ownership"
+    kill -0 "$first_pid" 2>/dev/null \
+      || fail "the rejected concurrent cycle disrupted the owning daemon"
+
+    kill "$first_pid" 2>/dev/null || true
+    wait "$first_pid" 2>/dev/null || true
+    first_pid=
+    trap - EXIT
+  ) || fail "concurrent supervise-daemon singleton case failed"
+  pass "concurrent supervise-daemon cycles keep one per-home owner"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -679,6 +735,117 @@ test_heartbeat_refill_evidence_routes_through_away_escalation() {
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "an evidence-free away heartbeat stopped self-handling"
   pass "away heartbeat refill evidence escalates while a bare heartbeat self-handles"
+}
+
+test_heartbeat_refill_escalation_dedupe() {
+  local dir state other payload unchanged changed empty future now fp_a fp_b fp_c
+  dir=$(make_supercase heartbeat-refill-dedupe)
+  state="$dir/state"
+  other="$dir/other-state"
+  mkdir -p "$other"
+  fp_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  fp_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  fp_c=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  payload="heartbeat refill: ready=2 live=0 ids=beta,alpha fingerprint=$fp_a"
+  unchanged="heartbeat refill: ready=2 live=0 ids=alpha,beta fingerprint=$fp_a"
+  changed="heartbeat refill: ready=2 live=0 ids=alpha,gamma fingerprint=$fp_b"
+  empty="heartbeat refill: ready=0 live=0 ids= fingerprint=$fp_c"
+
+  # This is the public away-heartbeat path that previously appended one refill
+  # digest on every housekeeping wake. Source it in a fresh process for each
+  # observation so the durable record, not primary-session memory, is the
+  # restart boundary under test.
+  FM_TEST_DAEMON_SOURCED=1 FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    bash -c '. "$1"; handle_wake heartbeat "$2" "$3"' _ "$DAEMON" "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "new refill evidence did not escalate exactly once"
+  refill_dedupe_read "$state" || fail "new refill evidence did not persist dedupe state"
+  [ "$REFILL_DEDUPE_FINGERPRINT" = "sha256=$fp_a" ] \
+    || fail "producer fingerprint was not persisted intact: $REFILL_DEDUPE_FINGERPRINT"
+
+  # Simulate successful delivery, then a fresh daemon process observes the same
+  # durable heartbeat payload in a different id order.
+  : > "$state/.subsuper-escalations"
+  FM_TEST_DAEMON_SOURCED=1 FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    bash -c '. "$1"; handle_wake heartbeat "$2" "$3"' _ "$DAEMON" "$state" "$unchanged"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "unchanged refill evidence consumed another away-supervisor turn"
+
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$changed"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "a changed ready-id set was suppressed"
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat FM_REFILL_MIN_LIVE=2 handle_wake heartbeat "$state" \
+    "heartbeat refill: ready=2 live=1 ids=alpha,gamma fingerprint=$fp_c"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "a changed live-worker count was suppressed"
+
+  # The state is home-scoped, so an independent FM_HOME cannot inherit another
+  # fleet's suppression marker.
+  FM_STATE_OVERRIDE="$other" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$other" "$payload"
+  [ -s "$other/.subsuper-escalations" ] \
+    || fail "a refill marker crossed state-home boundaries"
+
+  # A non-actionable empty observation closes the current episode. Returning to
+  # the same nonempty set must surface immediately, not wait an hour.
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$empty"
+  [ ! -e "$state/.subsuper-refill-escalation" ] \
+    || fail "empty refill evidence did not end the prior refill episode"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "empty-to-nonempty refill transition was suppressed"
+
+  # Malformed and stale records fail open, while a future timestamp also avoids
+  # an unbounded suppression window after a backward wall-clock move.
+  : > "$state/.subsuper-escalations"
+  printf 'broken\n' > "$state/.subsuper-refill-escalation"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] || fail "malformed refill dedupe state suppressed evidence"
+  : > "$state/.subsuper-escalations"
+  now=$(date +%s)
+  printf 'v2\nsha256=%s\n%s\n' "$fp_a" $((now - 3601)) > "$state/.subsuper-refill-escalation"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] || fail "stale refill dedupe state did not re-surface evidence"
+  : > "$state/.subsuper-escalations"
+  future=$((now + 3601))
+  printf 'v2\nsha256=%s\n%s\n' "$fp_a" "$future" > "$state/.subsuper-refill-escalation"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] || fail "backward clock movement suppressed refill evidence indefinitely"
+
+  # Suppressing a refill must not drop another captain-relevant buffered event.
+  : > "$state/.subsuper-escalations"
+  refill_dedupe_record "$state" "sha256=$fp_a"
+  escalate_add "$state" "typed failure: retain this event"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "refill suppression changed a neighboring captain-relevant batch"
+  grep -F "typed failure: retain this event" "$state/.subsuper-escalations" >/dev/null \
+    || fail "refill suppression dropped a typed failure"
+
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-escalations.since"
+  mkdir "$state/.subsuper-escalations.since"
+  escalate_add "$state" "typed failure: sidecar must not hide this event" \
+    || fail "a failed escalation-age sidecar rejected a durable buffer append"
+  grep -F "typed failure: sidecar must not hide this event" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a failed escalation-age sidecar lost captain-relevant evidence"
+  rmdir "$state/.subsuper-escalations.since"
+
+  rm -f "$state/.subsuper-refill-escalation"
+  rm -f "$state/.subsuper-escalations" "$state/.subsuper-escalations.since"
+  mkdir "$state/.subsuper-escalations"
+  if FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    handle_wake heartbeat "$state" "$payload" 2>/dev/null; then
+    fail "a failed escalation append still reported successful refill handling"
+  fi
+  [ ! -e "$state/.subsuper-refill-escalation" ] \
+    || fail "a failed escalation append persisted suppressing dedupe state"
+  rmdir "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "refill evidence was not retried after an escalation append failure"
+  pass "away refill escalation dedupes stable state, re-surfaces safely, and preserves other events"
 }
 
 test_inject_skip_forces_self() {
@@ -1853,6 +2020,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_daemon_singleton_serializes_concurrent_cycles
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
@@ -1883,6 +2051,7 @@ test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_heartbeat_refill_evidence_routes_through_away_escalation
+test_heartbeat_refill_escalation_dedupe
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker

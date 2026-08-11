@@ -2,13 +2,14 @@
 # fm-refill.sh - refill evidence for the watcher's heartbeat wake.
 #
 # Prints exactly one line on success and nothing otherwise:
-#   refill: ready=<n> live=<m> ids=<id,id,...>
+#   refill: ready=<n> live=<m> ids=<id,id,...> fingerprint=<sha256>
 # <n> is how many queued backlog items the configured backlog backend reports as
 # dispatchable right now (unblocked and unheld - `tasks-axi ready`), <m> is how
 # many ship and scout tasks still have a live recorded endpoint, and <ids> lists
 # up to FM_REFILL_IDS_MAX of those ready ids in the backend's own order. <ids> is
 # empty when nothing is ready, and <n> stays authoritative for how much work
-# exists beyond the listed ids.
+# exists beyond the listed ids. <sha256> identifies the live count plus the
+# complete canonically sorted ready-id set, including ids omitted from display.
 #
 # Why it exists: a bare `heartbeat` wake carries no evidence about fleet
 # capacity, so refilling a fleet that drained while nobody was watching depends
@@ -35,7 +36,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 refill_line_is_actionable() {
-  local line=$1 min=${FM_REFILL_MIN_LIVE:-1} rest ready live ids
+  local line=$1 min=${FM_REFILL_MIN_LIVE:-1} rest ready live ids fingerprint
   case "$min" in ''|*[!0-9]*) min=1 ;; esac
   case "$line" in
     'refill: ready='*' live='*' ids='*) ;;
@@ -46,6 +47,14 @@ refill_line_is_actionable() {
   rest=${rest#* live=}
   live=${rest%% ids=*}
   ids=${rest#* ids=}
+  case "$ids" in
+    *' fingerprint='*)
+      fingerprint=${ids#* fingerprint=}
+      ids=${ids%% fingerprint=*}
+      [ "${#fingerprint}" -eq 64 ] || return 1
+      case "$fingerprint" in *[!0-9a-f]*) return 1 ;; esac
+      ;;
+  esac
   case "$ready" in ''|*[!0-9]*) return 1 ;; esac
   case "$live" in ''|*[!0-9]*) return 1 ;; esac
   case "$ids" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
@@ -70,7 +79,7 @@ case "$IDS_MAX" in ''|*[!0-9]*) IDS_MAX=8 ;; esac
 # --- parent: bound the probe, then own the printed format -------------------
 #
 # The computation runs as a child under a hard time bound, and reports raw
-# fields ("<ready>\t<live>\t<ids>") rather than the finished line. The parent
+# fields ("<ready>\t<live>\t<ids>\t<fingerprint>") rather than the finished line. The parent
 # validates every field before formatting, so neither a truncated child (killed
 # at the bound mid-write) nor a hostile backlog id can shape what the caller
 # appends to a wake payload.
@@ -97,11 +106,15 @@ if [ "${FM_REFILL_CHILD:-0}" != 1 ]; then
   REST=${RAW#*"$TAB"}
   LIVE=${REST%%"$TAB"*}
   IDS=${REST#*"$TAB"}
-  case "$IDS" in *"$TAB"*) exit 0 ;; esac
+  FINGERPRINT=${IDS#*"$TAB"}
+  IDS=${IDS%%"$TAB"*}
+  case "$FINGERPRINT" in *"$TAB"*) exit 0 ;; esac
   case "$READY" in ''|*[!0-9]*) exit 0 ;; esac
   case "$LIVE" in ''|*[!0-9]*) exit 0 ;; esac
   case "$IDS" in *[!A-Za-z0-9._,-]*) exit 0 ;; esac
-  printf 'refill: ready=%s live=%s ids=%s\n' "$READY" "$LIVE" "$IDS"
+  [ "${#FINGERPRINT}" -eq 64 ] || exit 0
+  case "$FINGERPRINT" in *[!0-9a-f]*) exit 0 ;; esac
+  printf 'refill: ready=%s live=%s ids=%s fingerprint=%s\n' "$READY" "$LIVE" "$IDS" "$FINGERPRINT"
   exit 0
 fi
 
@@ -155,7 +168,9 @@ READY_FIELDS=$(printf '%s\n' "$READY_OUT" | awk -v max="$IDS_MAX" '
       invalid = 1
       next
     }
+    if (seen[item]++) invalid = 1
     items++
+    all_ids = (items == 1) ? item : all_ids "," item
     if (listed < max) {
       ids = (listed == 0) ? item : ids "," item
       listed++
@@ -168,13 +183,15 @@ READY_FIELDS=$(printf '%s\n' "$READY_OUT" | awk -v max="$IDS_MAX" '
         ready_headers + empty_headers != 1 || reported != count ||
         (count == 0 && empty_headers != 1) ||
         (count > 0 && (ready_headers != 1 || items != count))) exit 1
-    printf "%s\t%s\n", count, ids
+    printf "%s\t%s\t%s\n", count, ids, all_ids
   }
 ') || exit 0
 
 CHILD_TAB=$(printf '\t')
 READY_COUNT=${READY_FIELDS%%"$CHILD_TAB"*}
-READY_IDS=${READY_FIELDS#*"$CHILD_TAB"}
+READY_REST=${READY_FIELDS#*"$CHILD_TAB"}
+READY_IDS=${READY_REST%%"$CHILD_TAB"*}
+READY_ALL_IDS=${READY_REST#*"$CHILD_TAB"}
 case "$READY_COUNT" in ''|*[!0-9]*) exit 0 ;; esac
 
 # Live capacity uses the same cheap endpoint read as the session-start fleet
@@ -195,5 +212,27 @@ for meta in "$STATE_DIR"/*.meta; do
   LIVE=$((LIVE + 1))
 done
 
-printf '%s\t%s\t%s\n' "$READY_COUNT" "$LIVE" "$READY_IDS"
+if [ -n "$READY_ALL_IDS" ]; then
+  READY_CANONICAL=$(printf '%s\n' "$READY_ALL_IDS" | tr ',' '\n' | LC_ALL=C sort | paste -sd, -) || exit 0
+else
+  READY_CANONICAL=
+fi
+
+refill_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+FINGERPRINT=$(printf 'live=%s\nids=%s\n' "$LIVE" "$READY_CANONICAL" | refill_sha256) || exit 0
+[ "${#FINGERPRINT}" -eq 64 ] || exit 0
+case "$FINGERPRINT" in *[!0-9a-f]*) exit 0 ;; esac
+
+printf '%s\t%s\t%s\t%s\n' "$READY_COUNT" "$LIVE" "$READY_IDS" "$FINGERPRINT"
 exit 0

@@ -108,6 +108,14 @@ probe() {  # <home> [VAR=VALUE...]
   PATH="$home/fakebin:$PATH" env "$@" "$REFILL" "$home/state" "$home/config" "$home/data/backlog.md"
 }
 
+assert_refill_line() {  # <line> <display-prefix>
+  local line=$1 prefix=$2 fingerprint
+  case "$line" in "$prefix fingerprint="*) ;; *) fail "refill line had the wrong display fields: got '$line'" ;; esac
+  fingerprint=${line##* fingerprint=}
+  [ "${#fingerprint}" -eq 64 ] || fail "refill fingerprint was not SHA-256: got '$line'"
+  case "$fingerprint" in *[!0-9a-f]*) fail "refill fingerprint was not lowercase hex: got '$line'" ;; esac
+}
+
 require_tasks_axi() {  # <case-name>
   [ "$HAVE_TASKS_AXI" -eq 1 ] && return 0
   printf 'ok - skip: tasks-axi not found (required by %s)\n' "$1"
@@ -135,8 +143,7 @@ test_reports_dispatchable_work_and_live_capacity() {
   write_meta "$home" mate-live secondmate "sess:4"
   write_meta "$home" no-window ship ""
   out=$(probe "$home" FM_FAKE_ALIVE_WINDOWS="sess:1 sess:2 sess:4")
-  [ "$out" = "refill: ready=2 live=2 ids=a,d" ] \
-    || fail "refill line did not report dispatchable work and live capacity: got '$out'"
+  assert_refill_line "$out" "refill: ready=2 live=2 ids=a,d"
   pass "the refill line reports dispatchable ready work, its ids, and live ship/scout capacity"
 }
 
@@ -149,8 +156,7 @@ test_reports_an_empty_queue_rather_than_going_silent() {
   out=$(probe "$home")
   # A silent probe means "cannot answer"; nothing-to-dispatch must still answer,
   # or the supervisor cannot tell the two apart.
-  [ "$out" = "refill: ready=0 live=0 ids=" ] \
-    || fail "a captain-held-only backlog did not report an empty ready queue: got '$out'"
+  assert_refill_line "$out" "refill: ready=0 live=0 ids="
   pass "captain-gated work is not dispatchable and an empty ready queue is still reported"
 }
 
@@ -169,6 +175,7 @@ test_ids_are_capped_while_the_count_stays_whole() {
     *) fail "capped refill line lost the whole ready count: got '$out'" ;;
   esac
   ids=${out#*ids=}
+  ids=${ids%% fingerprint=*}
   [ "$(printf '%s' "$ids" | tr ',' '\n' | grep -c .)" -eq 3 ] \
     || fail "refill line did not cap the listed ids: got '$out'"
   pass "the id list is capped while the ready count still reports the whole queue"
@@ -249,8 +256,7 @@ test_the_bound_holds_without_a_timeout_binary() {
   fake_tasks_axi "$home" 0.2.5 ok
   out=$(PATH="$home/fakebin:/usr/bin:/bin" env "$REFILL" \
     "$home/state" "$home/config" "$home/data/backlog.md")
-  [ "$out" = "refill: ready=1 live=0 ids=fake-one" ] \
-    || fail "the probe did not answer without a timeout binary on PATH: got '$out'"
+  assert_refill_line "$out" "refill: ready=1 live=0 ids=fake-one"
   fake_tasks_axi "$home" 0.2.5 ignore-term
   started=$(date +%s)
   out=$(PATH="$home/fakebin:/usr/bin:/bin" env FM_REFILL_TIMEOUT=2 "$REFILL" \
@@ -308,7 +314,7 @@ test_heartbeat_wake_carries_refill_evidence() {
   payload=$(grep "$(printf '\theartbeat\t')" "$drain_out" | head -1)
   [ -n "$payload" ] || fail "the heartbeat wake was not queued: $(cat "$drain_out")"
   case "$payload" in
-    *"refill: ready=1 live=1 ids=refill-me") ;;
+    *"refill: ready=1 live=1 ids=refill-me fingerprint="*) ;;
     *) fail "the drained heartbeat did not carry intact refill evidence: got '$payload'" ;;
   esac
   pass "an emitted heartbeat carries its refill evidence intact through the durable queue"
@@ -328,7 +334,7 @@ test_refill_evidence_alone_fires_a_normal_heartbeat() {
     || fail "draining the refill-only heartbeat failed"
   payload=$(grep "$(printf '\theartbeat\t')" "$drain_out" | head -1)
   case "$payload" in
-    *"refill: ready=1 live=0 ids=fake-one") ;;
+    *"refill: ready=1 live=0 ids=fake-one fingerprint="*) ;;
     *) fail "the refill-only heartbeat lost its evidence: got '$payload'" ;;
   esac
   pass "refillable work alone fires a normal-mode heartbeat on the existing cadence"

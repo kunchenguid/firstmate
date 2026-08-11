@@ -28,7 +28,16 @@ An emitted heartbeat additionally carries the bounded refill evidence from `bin/
 That turns refilling a drained fleet into part of ordinary wake handling instead of a judgment call, and the numbers are a wake-time observation like every other wake payload rather than current state.
 The probe fails open and never delays, suppresses, or breaks a heartbeat: a `manual` backlog backend, an absent or incompatible `tasks-axi`, or any probe error simply omits the line, and the printed reason line stays exactly `heartbeat` for the arm and checkpoint layers that match it.
 `bin/fm-refill.sh` owns the probe, its bound, and the exact line format.
-In away mode, the sub-supervisor reads but does not consume the latest durable heartbeat payload, routes the same actionable refill condition through its existing escalation digest even though evidence-free heartbeats remain force-self-handled, and leaves all away-mode authority boundaries unchanged.
+In away mode, every heartbeat also enters a home-local observation journal that ordinary queue drains do not consume; the sub-supervisor processes that journal in sequence order, routes the same actionable refill condition through its existing escalation digest even though evidence-free heartbeats remain force-self-handled, and leaves all away-mode authority boundaries unchanged.
+The producer hashes the complete canonically sorted ready-id set plus live-worker count before capping the display ids, and the daemon persists that identity home-scoped for refill escalation dedupe.
+It immediately surfaces a new actionable identity, suppresses an unchanged identity, and re-surfaces unchanged evidence after `FM_REFILL_RESURFACE_SECS` (default 3600 seconds).
+A valid but non-actionable heartbeat ends that refill episode, so empty-to-nonempty and capacity-recovery-to-drained transitions surface promptly even when they return to an earlier identity.
+The daemon atomically records each acknowledged sequence together with its refill fingerprint and timestamp under `state/.subsuper-heartbeat-state`, then compacts acknowledged observations while the queue lock excludes concurrent appends.
+If that owned destination has become a non-regular path, the daemon moves it into a home-local quarantine, buffers a typed recovery failure before marking that diagnostic reported, resets acknowledgement to an unsuppressed state, and continues replaying every queued transition in order.
+The daemon's existing per-home singleton lock serializes concurrent cycles.
+Refill dedupe state advances only with the durable heartbeat acknowledgement after its escalation buffer append succeeds, so a failed append remains eligible for retry.
+Delivery across the append-to-ack crash window is deliberately at least once: a crash may re-deliver an identical refill digest, consumers must tolerate that duplicate, and the observation is never suppressed without its durable acknowledgement.
+Malformed, stale, or future-dated state fails open, and refill suppression never affects typed failures or other buffered captain-relevant events.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.

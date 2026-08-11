@@ -6,6 +6,25 @@ This record supports current session-start, turn-end, watcher-continuity, and we
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
+## Away refill escalation dedupe
+
+The away-mode refill route was verified on 2026-08-10 with the installed task and supervision test harness.
+Initiating trigger: every actionable refill heartbeat enters the away-supervisor escalation route.
+Masking condition: `FM_INJECT_SKIP=heartbeat` keeps evidence-free heartbeats quiet but intentionally preserves actionable refill evidence.
+Visible symptom before this regression: unchanged evidence appended an identical refill digest on every housekeeping cycle.
+The route now uses the same durable-state pattern as the existing signal, stale, and catch-all escalation dedupe rather than session memory.
+The public boundary regression executes `fm-watch.sh`, `fm-refill.sh`, and `fm-supervise-daemon.sh`, then observes the injected captain-visible digest across unchanged cycles and a daemon restart.
+It also drains an empty observation through primary-session catch-up while the daemon is down, corrupts the shared sequence sidecar, and queues the prior actionable state, proving the heartbeat journal retains the drained transition and assigns the returning observation a monotonic identity before restart replay.
+The focused state matrix additionally covered producer-side canonical ready-id ordering, count changes and same-count replacements beyond capped display ids, live-worker changes, restart-persistent home scope, fully malformed state, quarantine and typed recovery for invalid state destination types, delivery of later changed observations behind corrupt state, backward clock movement, failed escalation-buffer appends, escalation-age sidecar failure, at-least-once replay across an append-to-ack crash, and preservation of a typed failure batched beside suppressed refill evidence.
+The existing per-home daemon singleton test coverage remains the concurrency boundary for the read-check-write transition.
+
+```sh
+bin/fm-test-run.sh tests/fm-refill.test.sh tests/fm-daemon.test.sh \
+  tests/fm-wake-queue.test.sh tests/fm-wake-daemon-lifecycle-e2e.test.sh
+```
+
+Observed result: every selected suite exited 0, including `heartbeat state validates fully and quarantines malformed destinations`, `lifecycle: real away daemon replays pre-ack crashes and quarantined-state transitions`, and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
+
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.

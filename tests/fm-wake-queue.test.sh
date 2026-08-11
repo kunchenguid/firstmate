@@ -212,6 +212,67 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_heartbeat_journal_and_sequence_are_durable() {
+  local dir state out previous next
+  dir=$(make_case heartbeat-durability)
+  state="$dir/state"
+  out="$dir/drain.out"
+  append_wake "$state" heartbeat heartbeat "heartbeat refill: ready=0 live=0 ids= fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    || fail "first durable heartbeat append failed"
+  previous=$(cat "$state/.wake-queue.seq")
+  printf 'v1\n%s\nnone\n0\n' "$previous" > "$state/.subsuper-heartbeat-state"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "heartbeat fixture drain failed"
+  [ -s "$state/.subsuper-heartbeat-observations" ] \
+    || fail "normal drain consumed the unacknowledged heartbeat journal"
+  printf 'broken\n' > "$state/.wake-queue.seq"
+  append_wake "$state" heartbeat heartbeat "heartbeat refill: ready=1 live=0 ids=next fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+    || fail "heartbeat append after malformed sequence failed"
+  next=$(cat "$state/.wake-queue.seq")
+  [ "$next" -gt "$previous" ] || fail "heartbeat sequence regressed behind its durable acknowledgement"
+  [ "$(awk -F '\t' 'NF >= 5 { count++ } END { print count + 0 }' "$state/.subsuper-heartbeat-observations")" -eq 2 ] \
+    || fail "heartbeat journal lost an observation across drain and sequence recovery"
+  pass "heartbeat journal survives drains and reconciles malformed sequence state"
+}
+
+test_heartbeat_state_validation_fails_open() {
+  local dir state observed quarantine
+  dir=$(make_case heartbeat-state-validation)
+  state="$dir/state"
+  printf 'v1\n999\nbroken\n0\n' > "$state/.subsuper-heartbeat-state"
+  observed=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_heartbeat_state_read_locked
+    printf "%s %s %s\n" "$FM_HEARTBEAT_ACK_SEQ" "$FM_HEARTBEAT_FINGERPRINT" "$FM_HEARTBEAT_TIMESTAMP"
+  ' _ "$ROOT/bin/fm-wake-lib.sh")
+  [ "$observed" = "0 none 0" ] \
+    || fail "malformed heartbeat state published a suppressing acknowledgement: $observed"
+  rm -f "$state/.subsuper-heartbeat-state"
+  mkdir "$state/.subsuper-heartbeat-state"
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_heartbeat_state_commit_locked 7 none 0
+  ' _ "$ROOT/bin/fm-wake-lib.sh"; then
+    fail "heartbeat acknowledgement commit accepted a directory destination"
+  fi
+  [ -z "$(find "$state/.subsuper-heartbeat-state" -mindepth 1 -print -quit)" ] \
+    || fail "heartbeat acknowledgement commit moved state inside a malformed directory"
+  quarantine=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_heartbeat_state_quarantine_locked
+    printf "%s\n" "$FM_HEARTBEAT_STATE_QUARANTINE"
+  ' _ "$ROOT/bin/fm-wake-lib.sh")
+  [ -d "$quarantine/state" ] \
+    || fail "malformed heartbeat acknowledgement state was not quarantined"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_heartbeat_state_commit_locked 7 none 0
+  ' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "heartbeat acknowledgement did not recover after quarantine"
+  [ "$(sed -n '2p' "$state/.subsuper-heartbeat-state")" = 7 ] \
+    || fail "recovered heartbeat acknowledgement was not committed at its exact destination"
+  pass "heartbeat state validates fully and quarantines malformed destinations"
+}
+
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
 # plain drain-and-handle turn that runs no other supervision script. It must warn
@@ -444,6 +505,8 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_heartbeat_journal_and_sequence_are_durable
+test_heartbeat_state_validation_fails_open
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures

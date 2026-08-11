@@ -8,6 +8,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
+FM_HEARTBEAT_OBSERVATIONS="${FM_HEARTBEAT_OBSERVATIONS:-$STATE/.subsuper-heartbeat-observations}"
+FM_HEARTBEAT_STATE="${FM_HEARTBEAT_STATE:-$STATE/.subsuper-heartbeat-state}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
@@ -443,8 +445,112 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+fm_heartbeat_state_quarantine_locked() {
+  local quarantine
+  # shellcheck disable=SC2034 # Output consumed by callers after sourcing this library.
+  FM_HEARTBEAT_STATE_QUARANTINE=
+  if [ ! -e "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ]; then
+    return 0
+  fi
+  if [ -f "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ]; then
+    return 0
+  fi
+  quarantine=$(mktemp -d "$STATE/.subsuper-heartbeat-state.corrupt.XXXXXX") || return 1
+  if ! mv "$FM_HEARTBEAT_STATE" "$quarantine/state"; then
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Output consumed by callers after sourcing this library.
+  FM_HEARTBEAT_STATE_QUARANTINE=$quarantine
+}
+
+fm_heartbeat_state_read_locked() {
+  local file=${1:-$FM_HEARTBEAT_STATE} version seq fingerprint timestamp stored_hash
+  FM_HEARTBEAT_ACK_SEQ=0
+  FM_HEARTBEAT_FINGERPRINT=none
+  FM_HEARTBEAT_TIMESTAMP=0
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 0
+  {
+    IFS= read -r version || return 0
+    IFS= read -r seq || return 0
+    IFS= read -r fingerprint || return 0
+    IFS= read -r timestamp || return 0
+    IFS= read -r && return 0
+  } < "$file"
+  [ "$version" = v1 ] || return 0
+  case "$seq" in ''|*[!0-9]*) return 0 ;; esac
+  case "$fingerprint" in
+    none) [ "$timestamp" = 0 ] || return 0 ;;
+    sha256=*) stored_hash=${fingerprint#sha256=} ;;
+    *) return 0 ;;
+  esac
+  if [ "$fingerprint" != none ]; then
+    [ "${#stored_hash}" -eq 64 ] || return 0
+    case "$stored_hash" in *[!0-9a-f]*) return 0 ;; esac
+    case "$timestamp" in ''|*[!0-9]*) return 0 ;; esac
+  fi
+  FM_HEARTBEAT_ACK_SEQ=$seq
+  FM_HEARTBEAT_FINGERPRINT=$fingerprint
+  FM_HEARTBEAT_TIMESTAMP=$timestamp
+}
+
+fm_heartbeat_state_commit_locked() {
+  local seq=$1 fingerprint=$2 timestamp=$3 tmp old_umask stored_hash
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$fingerprint" in
+    none) timestamp=0 ;;
+    sha256=*)
+      stored_hash=${fingerprint#sha256=}
+      [ "${#stored_hash}" -eq 64 ] || return 1
+      case "$stored_hash" in *[!0-9a-f]*) return 1 ;; esac
+      case "$timestamp" in ''|*[!0-9]*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -e "$FM_HEARTBEAT_STATE" ] || [ -L "$FM_HEARTBEAT_STATE" ]; then
+    [ -f "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ] || return 1
+  fi
+  old_umask=$(umask)
+  umask 077
+  tmp=$(mktemp "$STATE/.subsuper-heartbeat-state.tmp.XXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  if ! { printf 'v1\n%s\n%s\n%s\n' "$seq" "$fingerprint" "$timestamp" > "$tmp" \
+    && mv -f "$tmp" "$FM_HEARTBEAT_STATE"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [ -f "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ] || return 1
+  fm_heartbeat_state_read_locked
+  [ "$FM_HEARTBEAT_ACK_SEQ" = "$seq" ] \
+    && [ "$FM_HEARTBEAT_FINGERPRINT" = "$fingerprint" ] \
+    && [ "$FM_HEARTBEAT_TIMESTAMP" = "$timestamp" ]
+}
+
+fm_heartbeat_compact_locked() {
+  local seq=$1 tmp
+  [ -e "$FM_HEARTBEAT_OBSERVATIONS" ] || return 0
+  tmp="$STATE/.subsuper-heartbeat-observations.tmp.$(fm_current_pid)"
+  if ! awk -F '\t' -v ack="$seq" 'NF < 5 || $2 !~ /^[0-9]+$/ || $2 > ack { print }' \
+    "$FM_HEARTBEAT_OBSERVATIONS" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$FM_HEARTBEAT_OBSERVATIONS"
+}
+
+fm_wake_max_sequence_locked() {
+  awk -F '\t' '
+    FILENAME ~ /wake-queue[.]seq$/ && FNR == 1 && $1 ~ /^[0-9]+$/ { if ($1 > max) max = $1 }
+    FILENAME ~ /subsuper-heartbeat-state$/ && FNR == 2 && $1 ~ /^[0-9]+$/ { if ($1 > max) max = $1 }
+    FILENAME !~ /wake-queue[.]seq$/ && FILENAME !~ /subsuper-heartbeat-state$/ \
+      && NF >= 2 && $2 ~ /^[0-9]+$/ { if ($2 > max) max = $2 }
+    END { print max + 0 }
+  ' "$STATE/.wake-queue.seq" "$FM_WAKE_QUEUE" "$FM_HEARTBEAT_OBSERVATIONS" "$FM_HEARTBEAT_STATE" \
+    2>/dev/null
+}
+
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file seq_tmp row status old_umask
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -457,14 +563,24 @@ fm_wake_append() {
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  seq=$(cat "$seq_file" 2>/dev/null || echo 0)
-  case "$seq" in
-    ''|*[!0-9]*) seq=0 ;;
-  esac
+  seq=$(fm_wake_max_sequence_locked)
   seq=$((seq + 1))
-  printf '%s\n' "$seq" > "$seq_file" || status=$?
+  old_umask=$(umask)
+  umask 077
+  seq_tmp=$(mktemp "$STATE/.wake-queue.seq.tmp.XXXXXX") || status=$?
+  umask "$old_umask"
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+    if ! { printf '%s\n' "$seq" > "$seq_tmp" && mv -f "$seq_tmp" "$seq_file"; }; then
+      rm -f "$seq_tmp"
+      status=1
+    fi
+  fi
+  row=$(printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload")
+  if [ "$status" -eq 0 ] && [ "$kind" = heartbeat ]; then
+    printf '%s\n' "$row" >> "$FM_HEARTBEAT_OBSERVATIONS" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    printf '%s\n' "$row" >> "$FM_WAKE_QUEUE" || status=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
