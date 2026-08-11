@@ -1777,6 +1777,7 @@ case "$BACKEND" in
       echo "error: tmux did not return a window id for $T" >&2
       exit 1
     fi
+    SPAWN_ENDPOINT_CREATED=1
     if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
       cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to disable automatic window renaming for $T" >&2
