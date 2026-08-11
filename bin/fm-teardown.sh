@@ -589,6 +589,16 @@ teardown_file_digest() {
   fi
 }
 
+teardown_remove_owned_file() {
+  local path=$1 expected_inode=$2 expected_digest=$3 actual_inode actual_digest
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  actual_inode=$(teardown_file_inode "$path") || return 1
+  [ "$actual_inode" = "$expected_inode" ] || return 1
+  actual_digest=$(teardown_file_digest "$path") || return 1
+  [ "$actual_digest" = "$expected_digest" ] || return 1
+  rm -f -- "$path"
+}
+
 teardown_grok_real_directory() {
   local path=$1 parent
   case "$path" in
@@ -602,9 +612,31 @@ teardown_grok_real_directory() {
   teardown_grok_real_directory "$parent"
 }
 
+teardown_grok_registry_expected_dir() {
+  local state_dir=$1 id=$2 meta expected root
+  meta="$state_dir/$id.meta"
+  expected=$(grep '^grok_registry_dir=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -n "$expected" ]; then
+    case "$expected" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    case "$expected" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    printf '%s' "$expected"
+    return 0
+  fi
+  root="${GROK_HOME:-$HOME/.grok}"
+  case "$root" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$root" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s/hooks/fm-turn-end.d' "$root"
+}
+
 teardown_grok_registry_read() {
   local state_dir=$1 id=$2 file line token= dir= inode= digest= count=0
-  local state_real auth_file actual_inode actual_digest
+  local state_real auth_file actual_inode actual_digest expected_dir expected_token legacy=0
   file="$state_dir/$id.grok-turnend-token"
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -614,10 +646,14 @@ teardown_grok_registry_read() {
       dir=*) [ -z "$dir" ] || return 1; dir=${line#dir=} ;;
       inode=*) [ -z "$inode" ] || return 1; inode=${line#inode=} ;;
       digest=*) [ -z "$digest" ] || return 1; digest=${line#digest=} ;;
-      *) return 1 ;;
+      *) [ "$count" = 1 ] && [ -z "$token" ] || return 1; token=$line ;;
     esac
   done < "$file" || return 1
-  [ "$count" = 4 ] || return 1
+  if [ "$count" = 1 ] && [ -n "$token" ]; then
+    legacy=1
+  else
+    [ "$count" = 4 ] || return 1
+  fi
   case "$token" in
     fm.????????????) ;;
     *) return 1 ;;
@@ -625,24 +661,38 @@ teardown_grok_registry_read() {
   case "$token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   case "$dir" in
     /*) ;;
-    *) return 1 ;;
+    *) [ "$legacy" = 1 ] || return 1 ;;
   esac
   case "$dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  case "$inode" in ''|*[!0-9]*) return 1 ;; esac
-  [ "${#digest}" = 64 ] || return 1
-  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  expected_dir=$(teardown_grok_registry_expected_dir "$state_dir" "$id") || return 1
+  teardown_grok_real_directory "$expected_dir" || return 1
+  expected_dir=$(cd "$expected_dir" && pwd -P) || return 1
+  if [ "$legacy" = 1 ]; then
+    dir=$expected_dir
+  else
+    [ "$dir" = "$expected_dir" ] || return 1
+    expected_token=$(grep '^grok_registry_token=' "$state_dir/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -z "$expected_token" ] || [ "$token" = "$expected_token" ] || return 1
+    case "$inode" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#digest}" = 64 ] || return 1
+    case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  fi
   teardown_grok_real_directory "$dir" || return 1
   auth_file="$dir/$token"
   [ -f "$auth_file" ] && [ ! -L "$auth_file" ] || return 1
   actual_inode=$(teardown_file_inode "$auth_file") || return 1
-  [ "$actual_inode" = "$inode" ] || return 1
+  [ "$legacy" = 1 ] || [ "$actual_inode" = "$inode" ] || return 1
   actual_digest=$(teardown_file_digest "$auth_file") || return 1
-  [ "$actual_digest" = "$digest" ] || return 1
+  [ "$legacy" = 1 ] || [ "$actual_digest" = "$digest" ] || return 1
   state_real=$(cd "$state_dir" && pwd -P) || return 1
   printf '%s\n' "$state_real/$id.turn-ended" | cmp -s - "$auth_file" || return 1
   GROK_REGISTRY_TOKEN=$token
   GROK_REGISTRY_AUTH_DIR=$dir
   GROK_REGISTRY_AUTH_FILE=$auth_file
+  GROK_REGISTRY_AUTH_INODE=$actual_inode
+  GROK_REGISTRY_AUTH_DIGEST=$actual_digest
+  GROK_REGISTRY_TOKEN_FILE_INODE=$(teardown_file_inode "$file") || return 1
+  GROK_REGISTRY_TOKEN_FILE_DIGEST=$(teardown_file_digest "$file") || return 1
 }
 
 teardown_grok_pointer_valid() {
@@ -656,14 +706,30 @@ teardown_grok_pointer_valid() {
   printf 'token=%s\n' "$GROK_REGISTRY_TOKEN" | cmp -s - "$pointer"
 }
 
-remove_grok_turnend_auth() {
+teardown_grok_pointer_remove() {
+  local worktree=$1 state_dir=$2 id=$3 pointer inode digest
+  pointer="$worktree/.fm-grok-turnend"
+  if [ ! -e "$pointer" ] && [ ! -L "$pointer" ]; then
+    return 0
+  fi
+  teardown_grok_pointer_valid "$worktree" "$state_dir" "$id" || return 1
+  inode=$(teardown_file_inode "$pointer") || return 1
+  digest=$(teardown_file_digest "$pointer") || return 1
+  teardown_grok_pointer_valid "$worktree" "$state_dir" "$id" || return 1
+  teardown_remove_owned_file "$pointer" "$inode" "$digest"
+}
+
+remove_grok_turnend_artifacts() {
   local state_dir=$1 id=$2 file
   file="$state_dir/$id.grok-turnend-token"
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     return 0
   fi
   teardown_grok_registry_read "$state_dir" "$id" || return 1
-  rm -f -- "$GROK_REGISTRY_AUTH_FILE"
+  teardown_remove_owned_file "$GROK_REGISTRY_AUTH_FILE" \
+    "$GROK_REGISTRY_AUTH_INODE" "$GROK_REGISTRY_AUTH_DIGEST" || return 1
+  teardown_remove_owned_file "$file" \
+    "$GROK_REGISTRY_TOKEN_FILE_INODE" "$GROK_REGISTRY_TOKEN_FILE_DIGEST"
 }
 
 validate_pr_poll_cleanup() {
@@ -1326,12 +1392,16 @@ teardown_remove_child_home_locked() {
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
-  local child_slot_returned child_slot_returning child_slot_lock_path child_slot_path
+  local child_slot_returned child_slot_returning child_slot_lock_path child_slot_path child_task_lock_path
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_task_lock_path="$sub_state/.spawn-$child_id.lock"
+    if ! (
+      fm_lock_acquire_wait "$child_task_lock_path" || exit 1
+      trap 'fm_lock_release "$child_task_lock_path" || true' EXIT
     child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_t=$(meta_value "$child_meta" window)
     child_wt=$(meta_value "$child_meta" worktree)
@@ -1430,7 +1500,11 @@ cleanup_firstmate_home_children() {
           fm_slot_lock_release "$child_slot_lock_path" || true
         else
           rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
-          [ ! -e "$child_wt/.fm-grok-turnend" ] || rm -f -- "$child_wt/.fm-grok-turnend"
+          teardown_grok_pointer_remove "$child_wt" "$sub_state" "$child_id" || {
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "REFUSED: could not prove child $child_id Grok pointer ownership; preserving child state" >&2
+            return 1
+          }
           teardown_meta_mark_slot_returning "$child_meta" || {
             fm_slot_lock_release "$child_slot_lock_path" || true
             echo "error: could not record pending return for child worktree $child_wt; preserving child state" >&2
@@ -1459,10 +1533,12 @@ cleanup_firstmate_home_children() {
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
-    remove_grok_turnend_auth "$sub_state" "$child_id" || {
-      echo "REFUSED: could not prove child $child_id Grok registry ownership; preserving child state" >&2
-      return 1
-    }
+    if [ -z "$child_slot_retain_verdict" ]; then
+      remove_grok_turnend_artifacts "$sub_state" "$child_id" || {
+        echo "REFUSED: could not prove child $child_id Grok registry ownership; preserving child state" >&2
+        return 1
+      }
+    fi
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     if [ -n "$child_slot_retain_verdict" ]; then
       teardown_meta_backup_create "$child_meta" || {
@@ -1470,9 +1546,14 @@ cleanup_firstmate_home_children() {
         return 1
       }
     fi
-    if ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token"; then
+    if [ -n "$child_slot_retain_verdict" ]; then
+      if ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+        "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"; then
+        teardown_meta_backup_restore "$child_meta" || true
+        return 1
+      fi
+    elif ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"; then
       if [ -n "$child_slot_retain_verdict" ]; then
         teardown_meta_backup_restore "$child_meta" || true
       fi
@@ -1496,6 +1577,10 @@ cleanup_firstmate_home_children() {
         return 1
       fi
       teardown_meta_backup_discard || true
+    fi
+    ); then
+      echo "REFUSED: concurrent lifecycle activity blocked child $child_id cleanup; preserving child state" >&2
+      return 1
     fi
   done
 }
@@ -1646,6 +1731,7 @@ fi
 teardown_slot_endpoint_state() {
   local backend=$1 target=$2 state
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  TEARDOWN_RAW_ENDPOINT_STATE=$state
   case "$state" in
     dead|missing|no-agent) printf 'closed' ;;
     alive) printf 'live' ;;
@@ -1656,6 +1742,9 @@ teardown_slot_endpoint_state() {
 TOP_SLOT_RELEASE_AUTHORIZED=0
 TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
+TOP_ENDPOINT_CLOSED=0
+TOP_GROK_ARTIFACTS_RETAINED=0
+TEARDOWN_RAW_ENDPOINT_STATE=
 TOP_SLOT_LOCK_HELD=0
 TOP_SLOT_LOCK_PATH=
 HERDR_PRESENTATION_LOCK_HELD=0
@@ -1707,6 +1796,14 @@ if [ "$KIND" != secondmate ]; then
     # verdict below; assuming an unknown endpoint for it would only make such a
     # task permanently untearable.
     TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+    if [ "$TEARDOWN_RAW_ENDPOINT_STATE" = dead ] \
+      && [ "$BACKEND" != herdr ] && [ "$BACKEND" != orca ]; then
+      teardown_backend_endpoint "$BACKEND" "$T" || {
+        echo "REFUSED: could not close the exited task endpoint for $ID; preserving task state and worktree" >&2
+        exit 1
+      }
+      TOP_ENDPOINT_CLOSED=1
+    fi
     if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
       "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
       "$FM_HOME" crewmate; then
@@ -1738,7 +1835,8 @@ if [ "$BACKEND" = herdr ]; then
   elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
     echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
   fi
-elif [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" != orca ]; then
+elif [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" != orca ] \
+  && [ "$TOP_ENDPOINT_CLOSED" != 1 ]; then
   if ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
     echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
     exit 1
@@ -1752,6 +1850,12 @@ if [ "$KIND" != secondmate ] \
     "worktree" retire closed "" "" "$FM_HOME" crewmate; then
     TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
     TOP_SLOT_RELEASE_AUTHORIZED=0
+  fi
+fi
+
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ] || [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+  if [ -e "$STATE/$ID.grok-turnend-token" ] || [ -L "$STATE/$ID.grok-turnend-token" ]; then
+    TOP_GROK_ARTIFACTS_RETAINED=1
   fi
 fi
 
@@ -1779,7 +1883,10 @@ if [ "$KIND" != secondmate ] \
     TOP_TASK_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js"
-    [ ! -e "$WT/.fm-grok-turnend" ] || rm -f -- "$WT/.fm-grok-turnend"
+    teardown_grok_pointer_remove "$WT" "$STATE" "$ID" || {
+      echo "REFUSED: could not prove task $ID Grok pointer ownership; preserving task state and worktree" >&2
+      exit 1
+    }
     teardown_meta_mark_slot_returning "$META" || {
       echo "error: could not record pending return for worktree $WT; preserving task state" >&2
       exit 1
@@ -1818,10 +1925,12 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID" || {
-  echo "REFUSED: could not prove task $ID Grok registry ownership; preserving task state" >&2
-  exit 1
-}
+if [ "$TOP_GROK_ARTIFACTS_RETAINED" != 1 ]; then
+  remove_grok_turnend_artifacts "$STATE" "$ID" || {
+    echo "REFUSED: could not prove task $ID Grok registry ownership; preserving task state" >&2
+    exit 1
+  }
+fi
 # Remove the per-task temp root recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
@@ -1845,8 +1954,15 @@ teardown_meta_identity_matches || {
   echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
   exit 1
 }
-if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+  if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+    "$STATE/$ID.pi-ext.ts" "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then
+    teardown_meta_backup_restore "$META" || true
+    echo "error: could not remove task records for $ID; ownership evidence was preserved" >&2
+    exit 1
+  fi
+elif ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  "$STATE/$ID.pi-ext.ts" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then
   if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
     teardown_meta_backup_restore "$META" || true

@@ -420,20 +420,34 @@ spawn_artifact_digest() {
   fi
 }
 
+spawn_artifact_proof_available() {
+  local dir=$1
+  spawn_artifact_inode "$dir" >/dev/null || return 1
+  command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1
+}
+
 spawn_create_new_artifact() {
-  local path=$1 inode_var=$2 digest_var=$3 created_var=${4:-} dir inode digest
+  local path=$1 inode_var=$2 digest_var=$3 created_var=${4:-} dir tmp inode digest
   spawn_require_new_artifact "$path" || return 1
   dir=$(dirname -- "$path") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  if ! ( set -C; cat > "$path" ); then
-    echo "error: spawn artifact path was occupied during exclusive creation: $path" >&2
+  spawn_artifact_proof_available "$dir" || return 1
+  tmp=$(mktemp "$dir/.fm-artifact.XXXXXXXXXXXX") || return 1
+  if ! cat > "$tmp"; then
+    rm -f -- "$tmp"
     return 1
   fi
-  inode=$(spawn_artifact_inode "$path") || {
+  inode=$(spawn_artifact_inode "$tmp") || {
+    rm -f -- "$tmp"
     return 1
   }
-  if ! digest=$(spawn_artifact_digest "$path"); then
-    spawn_remove_unproven_artifact "$path" "$inode" || true
+  if ! digest=$(spawn_artifact_digest "$tmp"); then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! ln "$tmp" "$path" 2>/dev/null; then
+    rm -f -- "$tmp"
+    echo "error: spawn artifact path was occupied during exclusive creation: $path" >&2
     return 1
   fi
   printf -v "$inode_var" '%s' "$inode"
@@ -441,7 +455,11 @@ spawn_create_new_artifact() {
   if [ -n "$created_var" ]; then
     printf -v "$created_var" '%s' 1
   fi
-  return 0
+  if ! [ -f "$path" ] || [ -L "$path" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
 }
 
 spawn_create_or_reuse_artifact() {
@@ -449,6 +467,7 @@ spawn_create_or_reuse_artifact() {
   local dir tmp status inode digest
   dir=$(dirname -- "$path") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  spawn_artifact_proof_available "$dir" || return 1
   tmp=$(mktemp "$dir/.fm-artifact.XXXXXXXXXXXX") || return 1
   if ! cat > "$tmp"; then
     rm -f -- "$tmp"
@@ -466,7 +485,15 @@ spawn_create_or_reuse_artifact() {
     fi
     return "$status"
   fi
-  if ! ( set -C; cat "$tmp" > "$path" ); then
+  inode=$(spawn_artifact_inode "$tmp") || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! digest=$(spawn_artifact_digest "$tmp"); then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! ln "$tmp" "$path" 2>/dev/null; then
     if [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$tmp" "$path"; then
       rm -f -- "$tmp"
       if [ -n "$created_var" ]; then
@@ -475,12 +502,6 @@ spawn_create_or_reuse_artifact() {
       return 0
     fi
     rm -f -- "$tmp"
-    return 1
-  fi
-  rm -f -- "$tmp"
-  inode=$(spawn_artifact_inode "$path") || return 1
-  if ! digest=$(spawn_artifact_digest "$path"); then
-    spawn_remove_unproven_artifact "$path" "$inode" || true
     return 1
   fi
   if [ -n "$created_var" ]; then
@@ -492,7 +513,11 @@ spawn_create_or_reuse_artifact() {
   if [ -n "$digest_var" ]; then
     printf -v "$digest_var" '%s' "$digest"
   fi
-  return 0
+  if ! [ -f "$path" ] || [ -L "$path" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
 }
 
 spawn_preflight_real_directory_path() {
@@ -608,6 +633,14 @@ spawn_abort_artifacts_cleanup() {
   fi
   if [ "${SPAWN_GROK_AUTH_PROVISIONAL:-0}" = 1 ] && [ -n "${SPAWN_GROK_AUTH_FILE:-}" ]; then
     spawn_remove_unproven_artifact "$SPAWN_GROK_AUTH_FILE" "${SPAWN_GROK_AUTH_INODE:-}" || rc=1
+  fi
+  if [ -n "${SPAWN_GROK_AUTH_TMP:-}" ]; then
+    if [ -n "${SPAWN_GROK_AUTH_INODE:-}" ] && [ -n "${SPAWN_GROK_AUTH_DIGEST:-}" ]; then
+      spawn_remove_owned_artifact "$SPAWN_GROK_AUTH_TMP" \
+        "$SPAWN_GROK_AUTH_INODE" "$SPAWN_GROK_AUTH_DIGEST" || rc=1
+    else
+      rc=1
+    fi
   fi
   if [ "${SPAWN_GROK_HOOK_CREATED:-0}" = 1 ]; then
     spawn_remove_owned_artifact "$SPAWN_GROK_HOOK_FILE" \
@@ -2021,6 +2054,16 @@ EOF
       spawn_preflight_real_directory_path "$GROK_HOME_DIR" || exit 1
       spawn_preflight_real_directory_path "$GROK_HOOKS_DIR" || exit 1
       spawn_preflight_real_directory_path "$GROK_AUTH_DIR" || exit 1
+      spawn_ensure_real_directory_path "$GROK_HOME_DIR" || exit 1
+      spawn_ensure_real_directory_path "$GROK_HOOKS_DIR" || exit 1
+      spawn_ensure_real_directory_path "$GROK_AUTH_DIR" || exit 1
+      GROK_HOME_DIR=$(cd "$GROK_HOME_DIR" && pwd -P) || exit 1
+      GROK_HOOKS_DIR=$(cd "$GROK_HOOKS_DIR" && pwd -P) || exit 1
+      GROK_AUTH_DIR=$(cd "$GROK_AUTH_DIR" && pwd -P) || exit 1
+      GROK_HOOK_SCRIPT="$GROK_HOOKS_DIR/fm-turn-end.sh"
+      GROK_HOOK_CONFIG="$GROK_HOOKS_DIR/fm-turn-end.json"
+      SPAWN_GROK_HOOK_FILE=$GROK_HOOK_SCRIPT
+      SPAWN_GROK_CONFIG_FILE=$GROK_HOOK_CONFIG
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       GROK_HOOK_BODY="$TASK_TMP/grok-turn-end.sh"
       GROK_CONFIG_BODY="$TASK_TMP/grok-turn-end.json"
@@ -2049,19 +2092,27 @@ EOF
 EOF
       spawn_artifact_matches_or_absent "$GROK_HOOK_SCRIPT" "$GROK_HOOK_BODY" || exit 1
       spawn_artifact_matches_or_absent "$GROK_HOOK_CONFIG" "$GROK_CONFIG_BODY" || exit 1
-      spawn_ensure_real_directory_path "$GROK_HOME_DIR" || exit 1
-      spawn_ensure_real_directory_path "$GROK_HOOKS_DIR" || exit 1
-      spawn_ensure_real_directory_path "$GROK_AUTH_DIR" || exit 1
+      spawn_artifact_proof_available "$GROK_AUTH_DIR" || exit 1
       old_umask=$(umask)
       umask 077
-      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+      auth_tmp=$(mktemp "$GROK_AUTH_DIR/.fm-artifact.XXXXXXXXXXXX") || exit 1
+      auth_suffix=${auth_tmp##*.}
+      auth_file="$GROK_AUTH_DIR/fm.$auth_suffix"
+      SPAWN_GROK_AUTH_TMP=$auth_tmp
       SPAWN_GROK_AUTH_FILE=$auth_file
       SPAWN_GROK_AUTH_PROVISIONAL=1
       umask "$old_umask"
-      SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_file") || exit 1
-      printf '%s\n' "$TURNEND" > "$auth_file"
-      SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_file") || exit 1
+      printf '%s\n' "$TURNEND" > "$auth_tmp" || { rm -f -- "$auth_tmp"; exit 1; }
+      SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_tmp") || { rm -f -- "$auth_tmp"; exit 1; }
+      SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_tmp") || { rm -f -- "$auth_tmp"; exit 1; }
+      if ! ln "$auth_tmp" "$auth_file" 2>/dev/null; then
+        rm -f -- "$auth_tmp"
+        exit 1
+      fi
       SPAWN_GROK_AUTH_CREATED=1
+      [ -f "$auth_file" ] && [ ! -L "$auth_file" ] || { rm -f -- "$auth_tmp"; exit 1; }
+      rm -f -- "$auth_tmp" || exit 1
+      SPAWN_GROK_AUTH_TMP=
       SPAWN_GROK_AUTH_PROVISIONAL=0
       spawn_create_new_artifact "$STATE/$ID.grok-turnend-token" SPAWN_GROK_TOKEN_INODE SPAWN_GROK_TOKEN_DIGEST SPAWN_GROK_TOKEN_CREATED <<EOF || exit 1
 token=${auth_file##*/}
@@ -2158,6 +2209,8 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   # Missing backend= is the compatibility spelling for tmux. Record only
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
+  [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
   if [ "$BACKEND" = herdr ]; then
     echo "display_label=$DISPLAY_LABEL"
     echo "task_key=$TASK_KEY"

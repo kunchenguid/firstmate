@@ -252,7 +252,7 @@ fm_slot_same_path() {
 # ids in every discoverable home whose metadata names the same slot, newline
 # separated.
 fm_slot_meta_referencing_tasks() {
-  local state=$1 self=$2 wt=$3 current_home home home_real meta id other
+  local state=$1 self=$2 wt=$3 current_home home home_real meta id other slot_returned slot_returning
   local meta_state registry registry_homes line candidate worktrees found=1 i current_registry_found=0
   local -a homes=()
   local -A seen=()
@@ -286,6 +286,9 @@ fm_slot_meta_referencing_tasks() {
       [ -r "$meta" ] || return 2
       id=$(basename "$meta" .meta)
       [ "$home_real" = "$current_home" ] && [ "$id" = "$self" ] && continue
+      slot_returned=$(grep '^slot_returned=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      slot_returning=$(grep '^slot_returning=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ "$slot_returned" = 1 ] && [ -z "$slot_returning" ] && continue
       other=$(fm_slot_meta_worktree "$meta")
       [ -n "$other" ] || continue
       fm_slot_same_path "$other" "$wt" || continue
