@@ -231,6 +231,7 @@ doctor() {
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
+    FM_TEST_REMOTE_JOB_ZOMBIE_PID="${FM_TEST_REMOTE_JOB_ZOMBIE_PID-}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
@@ -575,7 +576,18 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 assert_present "$CASE_HOME/.firstmate/remote-job/worker.ready" "the stale-identity fixture worker did not start"
+STALE_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
 printf 'stale-worker-identity\n' > "$CASE_HOME/.firstmate/remote-job/worker.identity"
+# A terminated worker can remain a zombie until its supervisor reaps it, so
+# kill -0 still succeeds after the worker has released its lock. Model that
+# kernel-visible state deterministically while driving doctor as an executable.
+kill() {
+  if [ "${1:-}" = -0 ] && [ "${2:-}" = "${FM_TEST_REMOTE_JOB_ZOMBIE_PID:-}" ]; then return 0; fi
+  builtin kill "$@"
+}
+FM_TEST_REMOTE_JOB_ZOMBIE_PID=$STALE_WORKER_PID
+export FM_TEST_REMOTE_JOB_ZOMBIE_PID
+export -f kill
 doctor
 expect_code 1 "$DOCTOR_RC" "doctor accepted a live worker with stale code identity"
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable: the running remote job worker does not match the current Firstmate code' \
@@ -588,6 +600,8 @@ assert_contains "$DOCTOR_OUT" 'fix remote-job-worker=applied:' "--fix did not re
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worker was not confirmed ready"
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
   "doctor did not probe tools through the refreshed worker"
+assert_not_contains "$DOCTOR_OUT" 'No such file or directory' \
+  "doctor leaked the expected ownership-release race into its operator output"
 DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
 kill -TERM "$DOCTOR_WORKER_PID"
 for _ in $(seq 1 100); do
@@ -598,7 +612,10 @@ if kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null; then
   kill -KILL "$DOCTOR_WORKER_PID" 2>/dev/null || true
 fi
 DOCTOR_WORKER_PID=
-pass "doctor refreshes stale worker identity before probing tools"
+unset FM_TEST_REMOTE_JOB_ZOMBIE_PID
+export -nf kill
+unset -f kill
+pass "doctor refreshes stale worker identity despite a terminated worker PID remaining visible"
 
 # --- the entrypoint symlink is recreated when it is missing ------------------
 
