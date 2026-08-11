@@ -2,7 +2,7 @@
 # Condition->action adapter for the generic process-to-event runner: register a
 # deterministic condition and a deterministic action once, let the runner's
 # blocking child poll the condition tokenlessly, fire the action at most once on
-# a stable true, and publish one terminal outcome for durable delivery.
+# a stable true, and publish one terminal outcome, re-announced until handled.
 #
 # Usage:
 #   fm-procevent-when.sh arm <name> [options] --condition <argv>... --action <argv>...
