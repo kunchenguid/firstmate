@@ -14,6 +14,7 @@ ENCODER="$TMP_ROOT/encoder.sh"
 TASK_ID='bridge-task'
 REAL_MV=$(command -v mv)
 REAL_RM=$(command -v rm)
+REAL_CP=$(command -v cp)
 ORIGINAL_PATH=$PATH
 FAILBIN="$TMP_ROOT/failbin"
 
@@ -49,6 +50,21 @@ fi
 exec "$REAL_RM" "\$@"
 SH
 chmod 700 "$FAILBIN/rm"
+cat > "$FAILBIN/cp" <<SH
+#!/usr/bin/env bash
+brief_seen=0
+for arg in "\$@"; do
+  [ "\$arg" = "$BRIEF" ] && brief_seen=1
+done
+if [ "\${FM_TEST_FAIL_BRIEF_CP_ONCE:-0}" = 1 ] \
+   && [ "\$brief_seen" = 1 ] \
+   && [ ! -e "$TMP_ROOT/brief-cp-failed" ]; then
+  : > "$TMP_ROOT/brief-cp-failed"
+  exit 1
+fi
+exec "$REAL_CP" "\$@"
+SH
+chmod 700 "$FAILBIN/cp"
 PATH="$FAILBIN:$PATH"
 export PATH
 
@@ -100,6 +116,17 @@ expect_mode "$bridge/runtime-brief.md" 0600
 expect_mode "$bridge/fm-operational-input.sh" 0700
 expect_mode "$cursor" 0600
 [ "$(fm_sandbox_bridge_read_cursor "$cursor")" = 0 ] || fail "new bridge cursor was not zero"
+
+COPY_FAIL_ID='brief-copy-fail'
+export FM_TEST_FAIL_BRIEF_CP_ONCE=1
+status=0
+fm_sandbox_bridge_create "$STATE" "$COPY_FAIL_ID" "$WORKTREE" "$BRIEF" "$ENCODER" || status=$?
+unset FM_TEST_FAIL_BRIEF_CP_ONCE
+expect_code 1 "$status" "bridge creation should fail when the canonical brief cannot be copied"
+copy_fail_bridge=$(fm_sandbox_bridge_expected_path "$STATE" "$COPY_FAIL_ID") || fail "brief-copy failure bridge path resolution failed"
+copy_fail_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$COPY_FAIL_ID") || fail "brief-copy failure cursor path resolution failed"
+assert_no_entry "$copy_fail_bridge" "brief-copy failure published a partial bridge"
+assert_no_entry "$copy_fail_cursor" "brief-copy failure left its host-private cursor"
 
 printf 'working: first delta\n' >> "$bridge/status"
 export FM_TEST_FAIL_MV_ONCE=1

@@ -48,7 +48,7 @@ if [ "${1:-}" = --version ]; then
 fi
 if [ "${1:-}" = list-sessions ]; then
   printf '%s\n' "${FM_ZELLIJ_SESSION_LIST:-}"
-  exit 0
+  exit "${FM_ZELLIJ_SESSION_LIST_EXIT:-0}"
 fi
 if [ "${1:-}" = attach ]; then
   exit "${FM_ZELLIJ_ATTACH_EXIT:-0}"
@@ -831,6 +831,22 @@ test_kill_is_noop_when_session_absent() {
   pass "fm_backend_zellij_kill: never fails when the target session no longer exists"
 }
 
+test_kill_tab_exact_retains_cleanup_on_session_inspection_failure() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-exact-session-inspection-failure"; mkdir -p "$dir/responses"
+  printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_ZELLIJ_SESSION_LIST_EXIT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill_tab_exact firstmate 3 fm-zghost' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact zellij cleanup should retain its record when session inspection fails"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "exact zellij cleanup closed a tab after an unknown session inspection"
+  pass "fm_backend_zellij_kill_tab_exact: retains cleanup on session inspection failure"
+}
+
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
@@ -1338,6 +1354,7 @@ test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
+test_kill_tab_exact_retains_cleanup_on_session_inspection_failure
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send

@@ -654,6 +654,51 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
     "$target" "$retries" "$sleep_s" "$expected_label"
 }
 
+fm_backend_cmux_workspace_exact_location() {  # <workspace_id>
+  local wsid=$1 wins wid wss count match_count title
+  FM_BACKEND_CMUX_EXACT_WINDOW=
+  FM_BACKEND_CMUX_EXACT_COUNT=
+  FM_BACKEND_CMUX_EXACT_TITLE=
+  fm_backend_cmux_workspace_id_valid "$wsid" || return 1
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wins" | jq -e '
+    type == "array" and
+    all(.[]?; (.id | type) == "string" and .id != "")
+  ' >/dev/null 2>&1 || return 1
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    fm_backend_cmux_workspace_id_valid "$wid" || return 1
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || return 1
+    printf '%s' "$wss" | jq -e '
+      (.workspaces | type) == "array" and
+      all(.workspaces[]?; (.id | type) == "string" and .id != "")
+    ' >/dev/null 2>&1 || return 1
+    count=$(printf '%s' "$wss" | jq -er '.workspaces | length' 2>/dev/null) || return 1
+    match_count=$(printf '%s' "$wss" | jq -er --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length' 2>/dev/null) || return 1
+    case "$match_count" in
+      0) continue ;;
+      1)
+        title=$(printf '%s' "$wss" | jq -er --arg id "$wsid" '
+          [.workspaces[]? | select(.id == $id)] as $matches
+          | if (($matches[0].title | type) == "string")
+            then $matches[0].title
+            else error("invalid workspace title")
+            end
+        ' 2>/dev/null) || return 1
+        case "$title" in
+          *$'\n'*|*$'\r'*) return 1 ;;
+        esac
+        FM_BACKEND_CMUX_EXACT_WINDOW=$wid
+        FM_BACKEND_CMUX_EXACT_COUNT=$count
+        FM_BACKEND_CMUX_EXACT_TITLE=$title
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
+  return 2
+}
+
 # fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for
 # the window that contains <workspace_id>, or nothing if it is not found live.
 # `workspace list --json` with no `--window` is scoped to the CURRENT window
@@ -661,19 +706,10 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # window from `list-windows --json` and asking each for its own scoped list.
 # The count comes from the same scoped workspace list that confirms membership.
 fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count>"
-  local wsid=$1 wins wid wss count
-  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 0
-  while IFS= read -r wid; do
-    [ -n "$wid" ] || continue
-    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || continue
-    count=$(printf '%s' "$wss" | jq -er --arg id "$wsid" '
-      (.workspaces // []) as $workspaces
-      | select(any($workspaces[]?; .id == $id))
-      | ($workspaces | length)
-    ' 2>/dev/null) || continue
-    printf '%s %s' "$wid" "$count"
-    return 0
-  done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
+  if fm_backend_cmux_workspace_exact_location "$1"; then
+    printf '%s %s' "$FM_BACKEND_CMUX_EXACT_WINDOW" "$FM_BACKEND_CMUX_EXACT_COUNT"
+  fi
+  return 0
 }
 
 # fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
@@ -710,34 +746,29 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
 }
 
 fm_backend_cmux_kill_workspace_exact() {  # <workspace-id> <expected-label>
-  local wsid=$1 expected_label=$2 expected_title title wss wininfo win count
+  local wsid=$1 expected_label=$2 expected_title title win count location_rc
   expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
-  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
-  printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  title=$(printf '%s' "$wss" | jq -r --arg id "$wsid" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null) || return 1
-  case "$title" in
-    '') return 0 ;;
-    *$'\n'*) return 1 ;;
-  esac
+  if fm_backend_cmux_workspace_exact_location "$wsid"; then
+    title=$FM_BACKEND_CMUX_EXACT_TITLE
+    win=$FM_BACKEND_CMUX_EXACT_WINDOW
+    count=$FM_BACKEND_CMUX_EXACT_COUNT
+  else
+    location_rc=$?
+    [ "$location_rc" -eq 2 ] && return 0
+    return 1
+  fi
   [ "$title" = "$expected_title" ] || return 1
-  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid") || return 1
-  [ -n "$wininfo" ] || return 1
-  win=${wininfo%% *}
-  count=${wininfo##* }
   case "$count" in ''|*[!0-9]*) return 1 ;; esac
   if [ -n "$win" ] && [ "$count" = 1 ]; then
     fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
   fi
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || return 1
-  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
-  printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  local rc
-  if printf '%s' "$wss" | jq -e --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
+  if fm_backend_cmux_workspace_exact_location "$wsid"; then
     return 1
   else
-    rc=$?
+    location_rc=$?
   fi
-  [ "$rc" -eq 1 ]
+  [ "$location_rc" -eq 2 ]
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace

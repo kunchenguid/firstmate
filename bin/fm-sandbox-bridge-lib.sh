@@ -205,7 +205,7 @@ fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
 
 # fm_sandbox_bridge_create: create a bridge and a separate host-private cursor.
 fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <encoder>
-  local state=$1 task_id=$2 worktree=$3 brief=$4 encoder=$5 expected cursor state_real worktree_real old_umask
+  local state=$1 task_id=$2 worktree=$3 brief=$4 encoder=$5 expected cursor state_real worktree_real old_umask runtime_brief_tmp
   [ "$#" -eq 5 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_create <state> <task-id> <worktree> <canonical-brief> <encoder>'; return 2; }
   FM_SANDBOX_BRIDGE_ACQUIRED_PATH=
   FM_SANDBOX_BRIDGE_ACQUIRED_ID=
@@ -277,11 +277,22 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
     printf 'cursor=%s\n' "$cursor"
   } > "$expected/binding"
   : > "$expected/status"
-  cat "$brief" > "$expected/runtime-brief.md"
+  runtime_brief_tmp=$(mktemp "$expected/.runtime-brief.md.tmp.XXXXXX") || {
+    umask "$old_umask"
+    fm_sandbox_bridge_remove_acquired \
+      "$expected" "$state_real" "$task_id" "$worktree_real" \
+      "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID" || true
+    fm_sandbox_bridge_error "could not prepare sandbox bridge runtime inputs: $expected"
+    return 1
+  }
   if ! {
-    cp "$encoder" "$expected/fm-operational-input.sh" &&
+    cp -- "$brief" "$runtime_brief_tmp" &&
+      chmod 600 "$runtime_brief_tmp" &&
+      mv -f -- "$runtime_brief_tmp" "$expected/runtime-brief.md" &&
+      cp -- "$encoder" "$expected/fm-operational-input.sh" &&
       chmod 700 "$expected/fm-operational-input.sh"
   }; then
+    rm -f -- "$runtime_brief_tmp"
     umask "$old_umask"
     fm_sandbox_bridge_remove_acquired \
       "$expected" "$state_real" "$task_id" "$worktree_real" \

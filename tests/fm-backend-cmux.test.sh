@@ -1106,6 +1106,35 @@ test_kill_is_best_effort_when_close_workspace_fails() {
   pass "fm_backend_cmux_kill: never fails even when close-workspace fails"
 }
 
+test_kill_workspace_exact_searches_all_windows() {
+  local dir fb title status
+  dir="$TMP_ROOT/kill-workspace-exact-all-windows"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-exact)
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 2 \
+    "e2222222-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "ffffffff-0000-0000-0000-000000000000" other
+  cmux_workspace_list_response "$dir" 3 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "bbbbbbbb-0000-0000-0000-000000000000" other
+  cmux_windows_response "$dir" 5 \
+    "e1111111-0000-0000-0000-000000000000" 2 \
+    "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 6 \
+    "ffffffff-0000-0000-0000-000000000000" other
+  cmux_workspace_list_response "$dir" 7 \
+    "bbbbbbbb-0000-0000-0000-000000000000" other
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill_workspace_exact "aaaaaaaa-0000-0000-0000-000000000000" fm-exact' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "exact cmux cleanup should find a workspace outside the current window"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
+    "exact cmux cleanup did not close the workspace found in the second window"
+  pass "fm_backend_cmux_kill_workspace_exact: searches every window before exact cleanup"
+}
+
 test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
@@ -1231,6 +1260,7 @@ test_window_of_workspace_empty_when_not_found
 test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
+test_kill_workspace_exact_searches_all_windows
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend

@@ -221,7 +221,19 @@ fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
 # orphan whatever the caller actually meant to reach). Every op below calls
 # this first and fails rather than guessing.
 fm_backend_zellij_session_exists() {  # <session>
-  zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
+  local state
+  if fm_backend_zellij_session_state "$1"; then
+    state=0
+  else
+    state=$?
+  fi
+  [ "$state" -eq 0 ]
+}
+
+fm_backend_zellij_session_state() {  # <session>
+  local session=$1 sessions
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) || return 2
+  printf '%s\n' "$sessions" | grep -qxF "$session"
 }
 
 # fm_backend_zellij_server_ensure: create the named session in the background,
@@ -381,8 +393,14 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
 }
 
 fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
-  local session=$1 tab_id=$2 expected_label=$3 tabs name
-  fm_backend_zellij_session_exists "$session" || return 0
+  local session=$1 tab_id=$2 expected_label=$3 tabs name session_state
+  if fm_backend_zellij_session_state "$session"; then
+    session_state=0
+  else
+    session_state=$?
+    [ "$session_state" -eq 1 ] && return 0
+    return 1
+  fi
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
   name=$(printf '%s' "$tabs" | jq -r --argjson id "$tab_id" '.[]? | select(.tab_id == $id) | .name' 2>/dev/null) || return 1

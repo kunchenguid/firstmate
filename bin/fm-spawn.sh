@@ -728,6 +728,13 @@ spawn_register_endpoint() {
   SPAWN_ENDPOINT_KIND=${5:-target}
 }
 
+spawn_register_bridge_acquisition() {
+  PLACEMENT_BRIDGE=$1
+  PLACEMENT_BRIDGE_ID=$2
+  PLACEMENT_BRIDGE_CURSOR_ID=$3
+  SPAWN_BRIDGE_CLEANUP=1
+}
+
 spawn_prepare_endpoint_acquisition() {
   local file
   file="$STATE/.spawn-endpoint-$ID.${BASHPID:-$$}"
@@ -1028,6 +1035,13 @@ spawn_abort_cleanup() {
     [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
       echo "warning: could not remove post-publication endpoint acquisition record for $ID" >&2
   else
+    if [ "$SPAWN_BRIDGE_CLEANUP" != 1 ] \
+       && [ -n "${FM_SANDBOX_BRIDGE_ACQUIRED_PATH:-}" ]; then
+      spawn_register_bridge_acquisition \
+        "$FM_SANDBOX_BRIDGE_ACQUIRED_PATH" \
+        "${FM_SANDBOX_BRIDGE_ACQUIRED_ID:-}" \
+        "${FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID:-}"
+    fi
     if [ "$SPAWN_ENDPOINT_CLEANUP" != 1 ]; then
       spawn_register_endpoint_from_file || true
     fi
@@ -2829,17 +2843,17 @@ if [ "$PLACEMENT" = docker-sandbox ]; then
     PLACEMENT_ABORT_CLEANUP=1
     if ! fm_sandbox_bridge_create "$STATE_REAL" "$ID" "$WT" "$BRIEF" "$FM_ROOT/bin/fm-operational-input.sh"; then
       if [ -n "${FM_SANDBOX_BRIDGE_ACQUIRED_PATH:-}" ]; then
-        PLACEMENT_BRIDGE=$FM_SANDBOX_BRIDGE_ACQUIRED_PATH
-        PLACEMENT_BRIDGE_ID=${FM_SANDBOX_BRIDGE_ACQUIRED_ID:-}
-        PLACEMENT_BRIDGE_CURSOR_ID=${FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID:-}
-        SPAWN_BRIDGE_CLEANUP=1
+        spawn_register_bridge_acquisition \
+          "$FM_SANDBOX_BRIDGE_ACQUIRED_PATH" \
+          "${FM_SANDBOX_BRIDGE_ACQUIRED_ID:-}" \
+          "${FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID:-}"
       fi
       exit 1
     fi
-    PLACEMENT_BRIDGE=$FM_SANDBOX_BRIDGE_PATH
-    PLACEMENT_BRIDGE_ID=$FM_SANDBOX_BRIDGE_ACQUIRED_ID
-    PLACEMENT_BRIDGE_CURSOR_ID=$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID
-    SPAWN_BRIDGE_CLEANUP=1
+    spawn_register_bridge_acquisition \
+      "$FM_SANDBOX_BRIDGE_PATH" \
+      "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" \
+      "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID"
     if [ "${PLACEMENT_KITS[0]+set}" = set ]; then
       if ! fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" "${PLACEMENT_KITS[@]}"; then
         PLACEMENT_HANDLE=${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}
