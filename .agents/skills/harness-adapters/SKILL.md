@@ -498,6 +498,7 @@ agy is Google Antigravity's CLI (Cloud Code Assist), a CREWMATE and SCOUT adapte
 agy loads workspace hook files ONLY when the workspace was already trusted at launch: a session that receives trust through the dialog runs hookless until relaunch, which would leave an armed busy record with no writer.
 `bin/fm-spawn.sh` therefore adds the exact worktree path to `trustedWorkspaces` in agy's own `settings.json` through a surgical jq edit before launch, proves the entry landed, and REFUSES the spawn when jq is missing, the settings file is a symlink or malformed JSON, or the project tracks `.agent/hooks.json`.
 Pre-trusting a worktree firstmate itself populated from the captain's registered project is the same standing autonomy decision as launching with `--dangerously-skip-permissions`.
+The trust entry does not outlive the task: `bin/fm-teardown.sh` retires the exact worktree path through the same guarded jq edit (owned in `bin/fm-control-lib.sh`'s trust-store path table), proves the entry is gone, and fails the teardown loudly for a rerun when it cannot, so a recycled worktree path is never silently trusted by a later agy session.
 The hook file lives in the singular `.agent/` discovery root so a project's own `.agents/hooks.json` is never touched; agy merges hooks from both roots plus `~/.gemini/config/`, which firstmate leaves alone.
 
 ### Hook payload facts worth pinning

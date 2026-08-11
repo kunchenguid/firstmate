@@ -1153,7 +1153,7 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u ANTIGRAVITY_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # agy (Google Antigravity CLI): -i runs the initial prompt interactively
     # and keeps the session open, so the brief rides the launch command.
     # --dangerously-skip-permissions auto-approves every tool permission
@@ -1348,7 +1348,7 @@ resolve_agy_binary() {
 # populated from the captain's registered project is the same standing
 # autonomy decision as launching with --dangerously-skip-permissions.
 agy_settings_path() {
-  printf '%s/.gemini/antigravity-cli/settings.json' "${HOME:-}"
+  fm_control_harness_trust_store_path agy
 }
 
 agy_pretrust_workspace() {  # <worktree>

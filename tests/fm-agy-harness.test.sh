@@ -14,6 +14,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 HARNESS="$ROOT/bin/fm-harness.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
 AGY_RUNTIME_TASK_TMPS=()
 JQ_BIN=$(command -v jq) || fail "test needs jq"
@@ -412,6 +413,34 @@ test_agy_refuses_tracked_hook_path() {
   pass "fm-spawn: agy refuses rather than overwrite a project-tracked .agent/hooks.json"
 }
 
+test_agy_teardown_retires_trust_entry() {
+  local id rec out rc settings
+  id="agy-teardown-z7-$$"
+  rec=$(make_spawn_case teardown "$id")
+  read_spawn_record "$rec"
+  settings="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$settings")"
+  printf '{"trustedWorkspaces":["/existing/workspace"],"userSettings":{"keep":"me"}}\n' > "$settings"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --mode no-mistakes --yolo off)
+  rc=$?
+  expect_code 0 "$rc" "agy spawn should succeed before teardown: $out"
+  jq -e --arg wt "$WT_DIR" '(.trustedWorkspaces // []) | index($wt) != null' \
+    "$settings" >/dev/null || fail "pre-teardown trust entry is missing"
+
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "agy teardown failed"
+  jq -e --arg wt "$WT_DIR" '
+    ((.trustedWorkspaces // []) | index($wt) == null)
+    and ((.trustedWorkspaces // []) | index("/existing/workspace") != null)
+    and (.userSettings.keep == "me")' "$settings" >/dev/null \
+    || fail "teardown did not surgically retire the task trust entry: $(cat "$settings")"
+  pass "fm-teardown: agy trust entry is retired surgically, preserving foreign settings"
+}
+
 test_agy_secondmate_is_refused() {
   local case_dir home fakebin id out status
   case_dir="$TMP_ROOT/secondmate"
@@ -447,4 +476,5 @@ test_agy_effort_ceiling_is_high
 test_agy_pretrust_preserves_existing_settings
 test_agy_pretrust_refuses_malformed_settings
 test_agy_refuses_tracked_hook_path
+test_agy_teardown_retires_trust_entry
 test_agy_secondmate_is_refused

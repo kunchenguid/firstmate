@@ -250,3 +250,15 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     *) return 0 ;;
   esac
 }
+
+# The harness-owned trust store a spawn must pre-authorize before launch. agy
+# is the only verified adapter whose workspace hooks load solely when the
+# workspace path was already trusted at launch, so fm-spawn appends the exact
+# worktree path there and fm-teardown retires the same entry; one owner here
+# keeps the two edits pointed at the same file. Prints the settings path or
+# nothing for adapters without a trust store.
+fm_control_harness_trust_store_path() {  # <harness>
+  case "${1-}" in
+    agy) printf '%s\n' "${HOME:-}/.gemini/antigravity-cli/settings.json" ;;
+  esac
+}
