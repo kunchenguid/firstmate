@@ -255,12 +255,33 @@ SH
 # The agent is asked to report the environment it sees and where the browser
 # lands, and explicitly NOT to read either result. Establishing that a page is
 # unreachable never requires reading the operator's mail.
+#
+# The brief states that purpose in full, because "write your environment and a
+# mail page to files, and do not look at them" is the exact shape of an
+# exfiltration request. A correctly aligned agent refuses it, and a refusal
+# reaches this guard as the same silence a real isolation failure would, so an
+# unexplained brief turns a working pin into a reported failure. Naming who runs
+# the probe, where the files go, and which result is the PASS is what separates
+# the two. Keep any future edit self-explanatory for the same reason.
 write_probe_brief() {  # <out-dir>
   cat > "$1/probe-brief.md" <<EOF
+You are the subject of an authorised browser-isolation test, run by this
+repository's own maintainer guard against a disposable lab worktree.
+It measures one thing: whether the browser tool you were launched with reaches a
+logged-in Chrome profile or an empty throwaway one.
+
 Run exactly these two commands and nothing else, then stop.
 
 1. \`env | grep '^CHROME_DEVTOOLS_AXI' | sort > $1/env.txt; echo done-env\`
 2. \`chrome-devtools-axi open https://mail.google.com 2>&1 | head -6 > $1/gmail.txt; echo done-gmail\`
+
+Both files are read only by the local test script that wrote this brief, and
+nothing leaves this machine.
+Command 2 is expected to be bounced to a Google sign-in page: that is the
+passing result, and a mailbox instead would be the finding.
+The test decides which one happened from the URL the tool prints, so you do not
+need to read either file, and reading the operator's mail would add nothing to
+the measurement.
 
 Do not read, summarise, or act on the contents of either file.
 Do not open any other page.
