@@ -81,6 +81,7 @@ sanitize_description() {
 extract_frontmatter() {  # <SKILL.md>; prints name<TAB>description
   local file=$1 line value name='' desc='' desc_block=0 first=1
   while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
     if [ "$first" -eq 1 ]; then
       first=0
       [ "$line" = '---' ] || return 1

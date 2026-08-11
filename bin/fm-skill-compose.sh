@@ -43,6 +43,7 @@ MAP_EXPLICIT=0
 REFRESH_MAP=0
 MODE=compose
 PRINT_ADD_DIR=0
+MAX_COMPONENT_LENGTH=200
 SKILLS=()
 
 usage() { sed -n '2,/^set -eu$/p' "$0" | sed 's/^# \{0,1\}//; $d'; }
@@ -101,6 +102,8 @@ esac
 case "$SET_NAME" in
   ''|.*|*/*|*[!A-Za-z0-9_.-]*) printf 'error: unsafe set name: %s\n' "$SET_NAME" >&2; exit 2 ;;
 esac
+[ "${#SET_NAME}" -le "$MAX_COMPONENT_LENGTH" ] \
+  || { printf 'error: set name exceeds %s characters: %s\n' "$MAX_COMPONENT_LENGTH" "$SET_NAME" >&2; exit 2; }
 
 TARGET_HOME=$(cd "$TARGET_HOME" && pwd -P)
 COMPOSE_PARENT="$TARGET_HOME/config/skill-compose/claude"
@@ -191,6 +194,8 @@ skill_requested() {  # <name>
 validate_skill_args() {
   local name
   for name in "${SKILLS[@]}"; do
+    [ "${#name}" -le "$MAX_COMPONENT_LENGTH" ] \
+      || { printf 'error: skill name exceeds %s characters: %s\n' "$MAX_COMPONENT_LENGTH" "$name" >&2; return 2; }
     safe_skill_name "$name" || { printf 'error: unsafe skill name: %s\n' "$name" >&2; return 2; }
   done
 }

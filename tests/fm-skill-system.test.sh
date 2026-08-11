@@ -47,6 +47,14 @@ metadata:
 body must not be read by the map
 EOF
       ;;
+    crlf)
+      printf '%s\r\n' \
+        '---' \
+        "name: $name" \
+        "description: $name description" \
+        '---' \
+        'body must not be read by the map' > "$dir/SKILL.md"
+      ;;
     *)
       cat > "$dir/SKILL.md" <<EOF
 ---
@@ -64,6 +72,7 @@ test_skill_map_generates_flat_deduped_registry() {
   mkdir -p "$home/data" "$home/projects/alpha/.claude/skills" "$home/projects/alpha/.agents/skills" "$user_home/.claude/skills"
   printf '%s\n' '- alpha [no-mistakes] - fixture project' > "$home/data/projects.md"
   write_skill "$home/projects/alpha/.claude/skills/project-skill" project-skill folded
+  write_skill "$home/projects/alpha/.claude/skills/crlf-skill" crlf-skill crlf
   ln -s ../../.claude/skills/project-skill "$home/projects/alpha/.agents/skills/project-skill-link"
   [ -d "$home/projects/alpha/.agents/skills/project-skill-link" ] \
     || fail "canonical-path de-duplication fixture symlink does not resolve"
@@ -85,6 +94,7 @@ test_skill_map_generates_flat_deduped_registry() {
   assert_file_contains "$home/data/skill-map.md" 'firstmate-coding-guidelines' "firstmate internal skill missing"
   assert_file_contains "$home/data/skill-map.md" '## projects/alpha' "project skill group missing"
   assert_file_contains "$home/data/skill-map.md" '- project-skill — folded description — ' "folded description was not collapsed"
+  assert_file_contains "$home/data/skill-map.md" '- crlf-skill — crlf-skill description — ' "CRLF frontmatter skill was not mapped"
   assert_file_contains "$home/data/skill-map.md" '## user' "user skill group missing"
   assert_file_contains "$home/data/skill-map.md" '- user-skill — user-skill description — ' "user skill missing"
 
@@ -194,18 +204,20 @@ EOF
 }
 
 test_skill_compose_prevalidates_before_reconciliation() {
-  local home="$TMP_ROOT/prevalidation-home" source="$TMP_ROOT/prevalidation-source" alpha_real beta_real mode skills_dir
+  local home="$TMP_ROOT/prevalidation-home" source="$TMP_ROOT/prevalidation-source" alpha_real beta_real mode skills_dir overlong
   mkdir -p "$home/data"
   write_skill "$source/alpha" alpha plain
   write_skill "$source/beta" beta plain
   alpha_real=$(cd "$source/alpha" && pwd -P)
   beta_real=$(cd "$source/beta" && pwd -P)
+  overlong=$(printf 'x%.0s' {1..201})
   cat > "$home/data/skill-map.md" <<EOF
 # Skill map
 
 ## fixture
 - alpha — alpha description — $alpha_real
 - beta — beta description — $beta_real
+- $overlong — overlong description — $alpha_real
 EOF
 
   if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set invalid alpha bad..name >/dev/null 2>&1; then
@@ -213,6 +225,22 @@ EOF
   fi
   [ ! -e "$home/config/skill-compose/claude/invalid" ] \
     || fail "invalid compose arguments created a partial managed set"
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set "$overlong" alpha >/dev/null 2>&1; then
+    fail "compose accepted an overlong set name"
+  fi
+  [ ! -e "$home/config/skill-compose/claude/$overlong" ] \
+    || fail "overlong set name created managed state"
+
+  FM_HOME="$home" "$COMPOSE" --target-home "$home" --set long-skill alpha >/dev/null \
+    || fail "failed to prepare overlong skill-name fixture"
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set long-skill beta "$overlong" >/dev/null 2>&1; then
+    fail "compose accepted an overlong skill name"
+  fi
+  [ -L "$home/config/skill-compose/claude/long-skill/.claude/skills/alpha" ] \
+    || fail "overlong skill name reconciled the managed set"
+  [ ! -e "$home/config/skill-compose/claude/long-skill/.claude/skills/beta" ] \
+    || fail "overlong skill name partially added another requested skill"
 
   for mode in compose remove clear; do
     FM_HOME="$home" "$COMPOSE" --target-home "$home" --set "$mode" alpha beta >/dev/null \
