@@ -16,6 +16,10 @@ make_case() {  # <name>
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
+  # Teardown probes the installed chrome-devtools-axi and closes the task's own
+  # browser session, so without this the cases that complete would reach whatever
+  # real one the runner has.
+  fm_fake_browser_tool "$TMP_ROOT/$dir/fakebin"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf 'tmux' >> "${FM_RUNTIME_LOG:?}"

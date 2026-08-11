@@ -30,6 +30,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-zellij-tests)
 make_zellij_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
+  # Both fm-spawn and fm-teardown probe the installed chrome-devtools-axi, so
+  # without this every case here would reach whatever real one the runner has.
+  fm_fake_browser_tool "$fb"
   cat > "$fb/zellij" <<'SH'
 #!/usr/bin/env bash
 set -u

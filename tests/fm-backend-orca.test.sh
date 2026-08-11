@@ -11,6 +11,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  # Both fm-spawn and fm-teardown probe the installed chrome-devtools-axi, so
+  # without this every case here would reach whatever real one the runner has.
+  fm_fake_browser_tool "$fb"
   cat > "$fb/orca" <<'SH'
 #!/usr/bin/env bash
 set -u

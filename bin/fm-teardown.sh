@@ -1426,13 +1426,21 @@ reap_task_backend_process_group() {  # <label>
 # Gated on the SAME capability probe fm-spawn refuses on, because the session
 # name is only a target on a tool that has named sessions. One that does not
 # resolves any CHROME_DEVTOOLS_AXI_SESSION to the shared session named `default`,
-# so the stop would terminate the OPERATOR's own bridge, MCP server, and Chrome -
-# strictly worse than the leak this exists to close, and on a tool that old
-# fm-spawn refused the agent a bridge in the first place, so there is by
-# definition no per-task bridge here to close. Skipping is therefore the whole
-# correct action, not a lesser one. The probe is owned by fm-pr-lib.sh, which
-# both scripts source, so spawn and teardown agree by construction rather than by
-# two copies staying in step.
+# which is the OPERATOR's own bridge, MCP server, and Chrome. The probe is owned
+# by fm-pr-lib.sh, which both scripts source, so the two sides of a task's
+# browser lifecycle ask one question rather than keep two copies in step.
+#
+# That verdict is re-derived here rather than carried over from the spawn that
+# pinned the session, so it can disagree with the spawn-time one: a downgraded
+# tool, or a probe that merely hit its bound on a loaded machine, both read as
+# not-capable for a task that really does own a private bridge. Skipping is still
+# right under that ambiguity, because the two mistakes are not symmetric. A stop
+# issued on an unconfirmed verdict can end the operator's own live browsing,
+# while skipping leaves at most one headless Chrome, and the cwd-matched reap
+# below still collects it whenever the agent browsed from its own worktree. The
+# honest residual is narrow and real: a task capable at spawn, which browsed from
+# somewhere other than its worktree, and whose teardown probe came back
+# unconfirmed, keeps its browser past teardown.
 #
 # The verdict is a property of the installed tool, not of a task, so it is
 # resolved once per teardown even when forced secondmate cleanup closes a session

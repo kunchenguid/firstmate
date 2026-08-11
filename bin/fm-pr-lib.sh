@@ -144,7 +144,19 @@ fm_task_browser_session() {
 # executable is not a trusted caller: a build that blocks on stdin or hangs would
 # otherwise wedge every spawn and every teardown with no diagnosis, where the
 # unconfirmed outcome is already the right answer for it.
+#
+# A non-positive bound is not a bound: `timeout 0` and the perl fallback's
+# `alarm 0` both disable the deadline, so an unvalidated override would restore
+# exactly the unbounded hang this bound exists to remove, and a non-numeric one
+# would fail the runner itself and silently degrade every spawn to the refusal
+# shim. bin/fm-timeout-lib.sh's header makes rejecting both the caller's job.
+# This is a sourced library rather than an entry point, so it falls back to the
+# default the way bin/fm-vendor-auth-probe.sh does instead of exiting the way
+# bin/fm-stow-cascade.sh does.
 FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=${FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS:-10}
+case "$FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS" in
+  ''|*[!0-9]*|0*) FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=10 ;;
+esac
 
 # Whether the installed chrome-devtools-axi can give a task its own bridge, which
 # is what makes fm_task_browser_session above a real isolation boundary rather

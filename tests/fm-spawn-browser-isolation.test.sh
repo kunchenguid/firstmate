@@ -459,6 +459,27 @@ test_browser_tool_that_reads_stdin_still_resolves() {
   pass "the capability probe closes stdin, so a tool that drains it still resolves instead of wedging the spawn"
 }
 
+test_probe_bound_rejects_values_that_are_not_bounds() {
+  local bound value
+  # `timeout 0` and the perl fallback's `alarm 0` both DISABLE the deadline, so an
+  # override of 0 would silently restore the unbounded hang the bound above exists
+  # to remove, on every spawn and every teardown. A non-numeric one fails the
+  # runner itself, which reads as unconfirmed and degrades every spawn to the
+  # refusal shim with no diagnosis. Asserting on the resolved value keeps this
+  # fast and exact rather than waiting out a fallback bound against a hung tool.
+  for value in 0 00 -1 '' abc 1.5 ' '; do
+    bound=$(FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS="$value" bash -c \
+      '. "$1"; printf "%s" "$FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS"' _ "$ROOT/bin/fm-pr-lib.sh") \
+      || fail "sourcing fm-pr-lib.sh failed with FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS='$value'"
+    [ "$bound" = 10 ] \
+      || fail "FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS='$value' resolved to '$bound' instead of the default bound; a value that is not a positive integer must never reach fm_run_timed"
+  done
+  bound=$(FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=3 bash -c \
+    '. "$1"; printf "%s" "$FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS"' _ "$ROOT/bin/fm-pr-lib.sh")
+  [ "$bound" = 3 ] || fail "a legitimate override was discarded (got '$bound' for 3)"
+  pass "a probe bound that is not a positive integer falls back to the default instead of disabling the deadline"
+}
+
 test_browser_tool_help_that_never_returns_is_refused() {
   local rec id launch shim realdir
   # A hung help is the same diagnosis as an unreadable one - unconfirmed, never
@@ -515,6 +536,7 @@ test_capable_browser_tool_leaves_the_launch_untouched
 test_browser_tool_without_named_sessions_is_refused
 test_unreadable_browser_tool_help_resolves_toward_refusal
 test_browser_tool_that_reads_stdin_still_resolves
+test_probe_bound_rejects_values_that_are_not_bounds
 test_browser_tool_help_that_never_returns_is_refused
 test_absent_browser_tool_is_left_alone
 

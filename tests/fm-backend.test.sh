@@ -772,6 +772,7 @@ test_peek_conformance_old_vs_new() {
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
   local dir=$1 wt=$2 fb="$1/fakebin"
   mkdir -p "$fb"
+  fm_fake_browser_tool "$fb"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -833,6 +834,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
   local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
   mkdir -p "$fb"
+  fm_fake_browser_tool "$fb"
   : > "$counter"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
@@ -907,6 +909,9 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
 make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
+  # fm-spawn and fm-teardown both probe the installed chrome-devtools-axi, and
+  # teardown goes on to close the task session; neither may reach the real one.
+  fm_fake_browser_tool "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
