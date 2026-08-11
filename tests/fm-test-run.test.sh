@@ -90,7 +90,7 @@ test_changed_file_selection_is_conservative() {
 
 init_changed_fixture_repo() {
   local repo=$1 script
-  mkdir -p "$repo/bin/placements" "$repo/bin/executors" "$repo/tests"
+  mkdir -p "$repo/bin/backends" "$repo/bin/placements" "$repo/bin/executors" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -107,6 +107,7 @@ init_changed_fixture_repo() {
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
+    fm-transactional-writers.test.sh \
     fm-secondmate-lifecycle-e2e.test.sh \
     fm-pr-merge.test.sh \
     fm-pi-watch-extension.test.sh \
@@ -139,6 +140,9 @@ init_changed_fixture_repo() {
   : >"$repo/bin/placements/docker-sandbox.sh"
   : >"$repo/bin/executors/local.sh"
   : >"$repo/bin/executors/crabbox.sh"
+  for backend in tmux zellij cmux herdr; do
+    : >"$repo/bin/backends/$backend.sh"
+  done
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -238,6 +242,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
     bin/executors/crabbox.sh \
     "Crabbox executor selects command execution coverage" \
     tests/fm-command-execution.test.sh
+  for backend in tmux zellij cmux herdr; do
+    changed_source_selects \
+      "bin/backends/$backend.sh" \
+      "$backend backend selects transactional writer coverage" \
+      tests/fm-transactional-writers.test.sh
+  done
   changed_source_selects \
     bin/fm-sandbox-bridge-lib.sh \
     "sandbox bridge selects pure and secondmate coverage" \
