@@ -94,7 +94,9 @@ Run each operation through its owner with the write discipline above; the notes 
 
 ## Safety boundaries
 
-These boundaries hold regardless of yolo posture; only a current, explicit, concrete captain instruction of the exact action can relax one, per the captain-instruction precedence rule, and destructive, irreversible, and security-sensitive actions still require the captain to name that exact action.
+These boundaries hold regardless of yolo posture.
+The project, Change Card, and unknown-field prohibition below is an invariant of this BITS development workflow, so a concrete captain request for one of those operations must leave this skill and use the operation's separate authoritative owner rather than relaxing it here.
+Stage progression, deployment, merge, and rollback remain governed by the exact-action authority required by existing Firstmate rules and the captain-instruction precedence rule.
 
 - Never remove a project or Change Card, and never overwrite an unknown snapshot field.
 - Never create a duplicate Dev Task after an uncertain submit; reconcile the uncertain outcome by readback first.
