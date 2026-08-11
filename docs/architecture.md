@@ -41,6 +41,7 @@ In that status-log fallback, a declared external wait reports the distinct `paus
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
+Bulk snapshot and Bearings JSON flow between `jq` projections on standard input rather than as process arguments, so fleet growth cannot exhaust the kernel argument list; small scalar options and the emitted schemas remain unchanged.
 The script header owns the exact JSON schema.
 
 ### Registered secondmate current state
