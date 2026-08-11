@@ -16,6 +16,15 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
+ack_presented_wakes() {
+  local state=$1 drain_err=$2 context=$3 sequence generation
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "$context omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "$context could not be acknowledged"
+}
+
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
@@ -660,18 +669,19 @@ test_interruption_before_and_after_raw_commit() {
 }
 
 test_calm_batches_drain_presentation_without_dropping_actionable_context() {
-  local dir state config out malformed_out
+  local dir state config out drain_err malformed_out malformed_err
   dir=$(make_case calm-batch)
   state="$dir/state"
   config="$dir/config"
   out="$dir/drain.out"
+  drain_err="$dir/drain.err"
   mkdir -p "$config"
   printf 'on\n' > "$config/calm"
   printf 'needs-decision: select the release target\n' > "$state/task.status"
   append_wake "$state" signal task.status "signal: $state/task.status" || fail "calm signal append failed"
   append_wake "$state" check task.check.sh "check: CI failed on linux" || fail "calm check append failed"
 
-  CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$drain_err" \
     || fail "calm drain failed"
 
   assert_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST (2):" "calm drain did not batch its authoritative wake rows"
@@ -684,62 +694,74 @@ test_calm_batches_drain_presentation_without_dropping_actionable_context() {
   if awk -F '\t' 'NF == 5 { found=1 } END { exit !found }' "$out"; then
     fail "calm drain leaked raw tabular wake rows"
   fi
-  [ ! -s "$state/.wake-queue" ] || fail "calm presentation changed queue consumption"
+  [ -s "$state/.wake-queue" ] || fail "calm presentation consumed wakes before handling acknowledgement"
+  ack_presented_wakes "$state" "$drain_err" "calm drain"
+  [ ! -s "$state/.wake-queue" ] || fail "calm acknowledgement left handled wakes queued"
 
   malformed_out="$dir/malformed.out"
+  malformed_err="$dir/malformed.err"
   printf 'on\noff\n' > "$config/calm"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "malformed-preference heartbeat append failed"
-  CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$malformed_out" \
+  CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$malformed_out" 2> "$malformed_err" \
     || fail "drain with malformed Calm preference failed"
   assert_not_contains "$(cat "$malformed_out")" "FIRSTMATE WAKE DIGEST" "a malformed Calm preference enabled compact presentation"
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$malformed_out" >/dev/null \
     || fail "a malformed Calm preference did not retain ordinary drain output"
+  [ -s "$state/.wake-queue" ] || fail "ordinary presentation consumed wakes before handling acknowledgement"
+  ack_presented_wakes "$state" "$malformed_err" "malformed-preference drain"
   pass "calm wake drain batches rows, annotations, and open decisions without dropping actionable detail"
 }
 
 test_calm_preference_uses_effective_config_and_defaults_off() {
-  local dir state home config out
+  local dir state home config out drain_err
   dir=$(make_case calm-preference)
   state="$dir/state"
   home="$dir/home"
   config="$dir/effective-config"
   out="$dir/drain.out"
+  drain_err="$dir/drain.err"
   mkdir -p "$home/config" "$config"
   printf 'on\n' > "$home/config/calm"
   printf 'off\n' > "$config/calm"
 
   append_wake "$state" heartbeat heartbeat heartbeat || fail "off-preference heartbeat append failed"
-  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$drain_err" \
     || fail "drain with off Calm preference failed"
   assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "FM_CONFIG_OVERRIDE did not win over an enabled FM_HOME preference"
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null \
     || fail "an off Calm preference did not retain ordinary drain output"
+  ack_presented_wakes "$state" "$drain_err" "off-preference drain"
 
   rm "$config/calm"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "missing-preference heartbeat append failed"
-  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$drain_err" \
     || fail "drain with missing Calm preference failed"
   assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "a missing effective Calm preference fell back to another config directory"
+  ack_presented_wakes "$state" "$drain_err" "missing-preference drain"
 
   printf 'enabled\n' > "$config/calm"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "unrecognized-preference heartbeat append failed"
-  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$drain_err" \
     || fail "drain with unrecognized Calm preference failed"
   assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "an unrecognized Calm preference enabled compact presentation"
+  ack_presented_wakes "$state" "$drain_err" "unrecognized-preference drain"
 
   printf 'on\n' > "$config/calm"
   chmod 000 "$config/calm"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "unreadable-preference heartbeat append failed"
-  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$drain_err" \
     || fail "drain with unreadable Calm preference failed"
   chmod 600 "$config/calm"
   assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "an unreadable Calm preference enabled compact presentation"
+  ack_presented_wakes "$state" "$drain_err" "unreadable-preference drain"
 
   append_wake "$state" heartbeat heartbeat heartbeat || fail "on-preference heartbeat append failed"
-  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$drain_err" \
     || fail "drain with enabled Calm preference failed"
   assert_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST (1):" "an exact on preference did not enable compact presentation"
-  [ ! -s "$state/.wake-queue" ] || fail "Calm preference handling changed queue consumption"
+  [ -s "$state/.wake-queue" ] || fail "Calm preference handling consumed wakes before acknowledgement"
+  ack_presented_wakes "$state" "$drain_err" "enabled-preference drain"
+  [ ! -s "$state/.wake-queue" ] || fail "Calm preference acknowledgement left handled wakes queued"
   pass "Calm preference honors effective config and defaults off on invalid reads"
 }
 
