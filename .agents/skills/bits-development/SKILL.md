@@ -26,13 +26,13 @@ Every mechanical fact lives with its existing owner; this skill only sequences a
 - BITS Dev Task creation is owned by the official `bits-devops-dev-task` skill, routed through the bytedcli BITS `references/dev-task.md`; use its `prepare -> confirm -> submit` flow when it is available and installed.
 - Merge, delivery-mode, yolo, and captain-instruction authority are owned by `AGENTS.md` sections 1 and 7 and the captain-instruction precedence rule; this skill adds no authority and relaxes none.
 - Long-poll monitoring without blocking a conversational turn is owned by `process-event-sources` and the `AGENTS.md` section 8 supervision contract.
-- Project identity, registry, and delivery posture are owned by `project-management`.
-- Producing and validating the code change itself is owned by the no-mistakes lifecycle in `AGENTS.md` section 7; ordinary BITS integration begins only after its green PR exists.
+- Task-level project resolution is owned by `AGENTS.md` section 7; `project-management` owns the project registry and standing delivery posture.
+- Producing and validating the code change is owned by the selected delivery path in `AGENTS.md` section 7, including the no-mistakes lifecycle when selected; ordinary BITS integration begins only after that path has produced its finalized committed head and required merge request, with green checks when the path requires them.
   The narrow release-train auto-created-MR exception begins only after the exact repository, source branch, committed head, and release ticket integration branch have been verified from live sources.
 
 ## Intake and project identity
 
-Resolve which project each completed change belongs to before touching BITS, using the `project-management` identity rules, not a BITS project name guess.
+Resolve which project each completed change belongs to before touching BITS, using `AGENTS.md` section 7's task-level resolution rules and the registry managed by `project-management`, not a BITS project name guess.
 Confirm the change is genuinely complete: it has a committed head, a settled target branch, and either an opened merge request or a release-train path that will auto-create one.
 Before taking the release-train exception, pin and verify the exact repository identity, source branch, committed head, release ticket, and integration branch from live sources.
 BITS integration is delivery of finished work, so do not start it for an in-flight branch whose head or target is still moving.
@@ -90,7 +90,8 @@ Run each operation through its owner with the write discipline above; the notes 
   After BITS auto-creates the MR, independently read it back, verify its identity, repository, source, head, and target against the pinned evidence, and only then bind its real identity or continue.
 - Pipeline and project discovery: discover the current stage, tasks, projects, pipelines, and runs through the read-only surfaces before acting; treat an incomplete or unproven discovery result as a stop, not an assumption.
 - PPE, E2E, self-test, and quick-run: trigger a deployment or test run only when the captain has explicitly authorized that run, because these are live operations; dry-run first where the command supports it, confirm the exact project, type, control plane, and target, and never let one authorization cover a later changed target.
-- Monitoring and recovery: watch a running pipeline, deploy, or run through the `process-event-sources` long-poll supervision path instead of blocking a conversational turn, and recover after any interruption by reading BITS state back rather than inferring an outcome from a process exit or a single event.
+- Monitoring and recovery: watch a running pipeline, deploy, or run through a source-specific adapter accepted by `process-event-sources` instead of blocking a conversational turn, and recover after any interruption by reading BITS state back rather than inferring an outcome from a process exit or a single event.
+  If no installed adapter supports the exact BITS wait, stop and report that monitoring cannot be armed rather than blocking the conversational turn.
 
 ## Safety boundaries
 
