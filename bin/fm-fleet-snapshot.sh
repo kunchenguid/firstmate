@@ -1239,7 +1239,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           validation_fields_json=$(printf '%s\0' "$home" "$SNAPSHOT_NOW" | jq -Rs '
             split("\u0000") as $fields
             | {home:$fields[0],generated:$fields[1]}')
-          if ! json_documents "$summary" "$validation_fields_json" | jq -e --argjson remote "$remote" '
+          if ! json_documents "$summary" "$validation_fields_json" | jq -se --argjson remote "$remote" '
             .[0] as $summary
             | .[1] as $fields
             | $summary.schema == "fm-secondmate-home-summary.v1" and $summary.home == $fields.home
