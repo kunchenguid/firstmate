@@ -37,7 +37,8 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 # them once so the suite resolves the tmux reference backend unless a case says
 # otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
-  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
+  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
+  PASEO_AGENT_ID PASEO_AGENT_CWD 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.

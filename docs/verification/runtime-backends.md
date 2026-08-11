@@ -139,6 +139,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
+Paseo uses native agent status queries (`paseo ls` / `paseo get`) for recovery-grade classification and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
@@ -155,13 +156,14 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-paseo.test.sh
 ```
 
 Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and Paseo records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -169,7 +171,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, and Paseo before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
@@ -732,3 +734,19 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Paseo
+
+The Paseo session-provider adapter integration was verified via `tests/fm-backend-paseo.test.sh`.
+
+```sh
+tests/fm-backend-paseo.test.sh
+```
+
+Observed guarantees:
+- Task creation via `paseo run --background --cwd <wt>` records `backend=paseo` and `paseo_agent_id=`.
+- Auto-detection activates when `PASEO_AGENT_ID` or `PASEO_AGENT_CWD` is present in the environment.
+- Capture via `paseo logs <id> --tail <n>`, submit via `paseo send <id> --no-wait <text>`, interrupt via `paseo stop <id>`, and cleanup via `paseo stop` then `paseo archive`.
+- Busy state mapping converts `running`/`initializing` to `busy`, `idle` to `idle`, and closed/failed/archived/stopped states to `dead`.
+- Agent liveness state provides recovery-grade `alive`, `dead`, `missing`, and `unreadable` classification.
+

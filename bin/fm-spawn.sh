@@ -2055,17 +2055,34 @@ EOF
     ;;
   paseo)
     fm_backend_paseo_container_ensure || exit 1
-    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$PROJ_ABS" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND") || exit 1
-    read -r PASEO_AGENT_ID WT <<EOF
+    if [ "$KIND" = secondmate ] || [ -f "$PROJ_ABS/.fm-secondmate-home" ]; then
+      WT="$PROJ_ABS"
+    else
+      WT=$(cd "$PROJ_ABS" && treehouse get --lease 2>/dev/null) || {
+        echo "error: treehouse get --lease failed for $PROJ_ABS" >&2
+        exit 1
+      }
+      WT=$(printf '%s\n' "$WT" | tail -1 | tr -d '\r\n')
+    fi
+    [ -d "$WT" ] || {
+      echo "error: allocated worktree path '$WT' does not exist" >&2
+      exit 1
+    }
+    [ "$KIND" = secondmate ] || validate_spawn_worktree "treehouse get --lease" "$W"
+    if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+      freshen_spawn_worktree_base "$WT" || exit 1
+    fi
+    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$WT" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND") || exit 1
+    read -r PASEO_AGENT_ID WT_OUT <<EOF
 $PASEO_SPAWN_OUT
 EOF
-    if [ -z "$PASEO_AGENT_ID" ] || [ -z "$WT" ]; then
+    if [ -z "$PASEO_AGENT_ID" ] || [ -z "$WT_OUT" ]; then
       echo "error: paseo did not return an agent id / worktree for $W" >&2
       exit 1
     fi
+    WT="$WT_OUT"
     T="$PASEO_AGENT_ID"
     WT_TARGET="$T"
-    [ "$KIND" = secondmate ] || validate_spawn_worktree "treehouse get --lease" "$W"
     ;;
 esac
 fi
@@ -2244,7 +2261,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != pase
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != paseo ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -2717,6 +2734,7 @@ spawn_record_traceparent() {
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
+     || [ -n "$(find "$meta" -maxdepth 0 ! -perm /222 2>/dev/null)" ] \
      || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
      || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
      || ! mv -f "$SPAWN_META_TMP" "$meta"; then

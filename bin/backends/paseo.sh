@@ -85,14 +85,14 @@ fm_backend_paseo_parent_id() {
 # (paseo run --background --cwd <wt> ...), passes brief, GOTMPDIR, trace context, and
 # operational instructions.
 fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [traceparent] [kind]
-  local label=$1 proj_dir=$2 brief_path=${3:-} task_tmp=${4:-} traceparent=${5:-} kind=${6:-}
+  local label=$1 target_dir=$2 brief_path=${3:-} task_tmp=${4:-} traceparent=${5:-} kind=${6:-}
   local wt prompt out agent_id
 
-  if [ "$kind" = "secondmate" ] || [ -f "$proj_dir/.fm-secondmate-home" ]; then
-    wt="$proj_dir"
+  if [ "$kind" = "secondmate" ] || [ -f "$target_dir/.fm-secondmate-home" ] || [ -f "$target_dir/.git" ]; then
+    wt="$target_dir"
   else
-    wt=$(cd "$proj_dir" && treehouse get --lease 2>/dev/null) || {
-      echo "error: treehouse get --lease failed for $proj_dir" >&2
+    wt=$(cd "$target_dir" && treehouse get --lease 2>/dev/null) || {
+      echo "error: treehouse get --lease failed for $target_dir" >&2
       return 1
     }
     # Strip banners and trim trailing whitespace to ensure clean path
@@ -121,7 +121,7 @@ fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [
   if [ -n "$traceparent" ]; then
     args+=(--env "TRACEPARENT=$traceparent")
   fi
-  args+=(--json "$prompt")
+  args+=(--json -- "$prompt")
 
   out=$(paseo "${args[@]}" 2>/dev/null) || {
     echo "error: paseo run failed for $label" >&2
@@ -148,7 +148,7 @@ fm_backend_paseo_capture() {  # <target> <lines> [expected-label]
 # 4. fm_backend_paseo_send_text_submit: Submits prompt to Paseo agent.
 fm_backend_paseo_send_text_submit() {  # <target> <text> [retries] [enter-sleep] [settle] [expected-label]
   local target=$1 text=$2
-  if paseo send "$target" --no-wait "$text" >/dev/null 2>&1; then
+  if paseo send "$target" --no-wait -- "$text" >/dev/null 2>&1; then
     printf ''
     return 0
   else
@@ -173,7 +173,7 @@ fm_backend_paseo_send_key() {  # <target> <key> [expected-label]
       paseo stop "$target" >/dev/null 2>&1
       ;;
     *)
-      paseo send "$target" --no-wait "" >/dev/null 2>&1
+      paseo send "$target" --no-wait -- "" >/dev/null 2>&1
       ;;
   esac
 }

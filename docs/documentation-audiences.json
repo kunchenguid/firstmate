@@ -100,6 +100,10 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/paseo-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },

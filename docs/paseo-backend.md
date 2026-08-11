@@ -39,3 +39,12 @@ Prompts are submitted via `paseo send <id> --no-wait <text>`.
 Interrupts (`Escape`, `Ctrl-C`) issue `paseo stop <id>`.
 Task cleanup (`fm_backend_paseo_kill`) stops and archives the Paseo agent (`paseo stop` then `paseo archive`) so completed tasks leave the active Subagents view while preserving conversation history in Paseo.
 Agent busy state maps `running` and `initializing` to `busy`, `idle` to `idle`, and `closed`, `error`, `failed`, `archived`, or `stopped` to `dead`.
+
+## Regression entry points
+
+```sh
+tests/fm-backend-paseo.test.sh
+```
+
+[`verification/runtime-backends.md`](verification/runtime-backends.md#paseo) records active adapter and lifecycle evidence.
+
