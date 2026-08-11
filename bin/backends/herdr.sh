@@ -2898,6 +2898,40 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+fm_backend_herdr_traex_identity_probe() {  # <session> <pane>
+  local session=$1 pane=$2 out code agent status observed_pane presence
+  FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=unknown
+  FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT=
+  FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS=
+  if out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>&1); then
+    :
+  else
+    :
+  fi
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || code=
+  if [ "$code" = agent_not_found ]; then
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+    if [ "$presence" = dead ]; then
+      FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=dead
+    else
+      FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=no-agent
+    fi
+    return 0
+  fi
+  agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null) || agent=
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || status=
+  observed_pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || observed_pane=
+  case "$status" in working|idle|done|blocked) ;; *) status= ;; esac
+  if [ -n "$agent" ] && [ -n "$status" ] && [ "$observed_pane" = "$pane" ]; then
+    FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=live
+    FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT=$agent
+    FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS=$status
+    return 0
+  fi
+  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+  [ "$presence" != dead ] || FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=dead
+}
+
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
@@ -3870,55 +3904,9 @@ fm_backend_herdr_traex_completion_intent_reconcile() {  # <state-dir> <id> <gen>
 }
 
 fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pane>
-  local state=$1 session=$2 pane=$3 identity agent status record current presence new_state source event
-  local id gen initial_id rc=0
-  fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane" || return 1
-  initial_id=$FM_BACKEND_HERDR_TRAEX_ID
-  record=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
-  if fm_backend_herdr_traex_observe_transition "$state" "$session" "$record"; then
-    return 0
-  fi
-  identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
-  agent=$(printf '%s' "$identity" | cut -f1)
-  status=$(printf '%s' "$identity" | cut -f2)
-  fm_backend_herdr_traex_transition_lock_acquire "$state" "$initial_id" || return 1
-  if ! fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane" \
-     || [ "$FM_BACKEND_HERDR_TRAEX_ID" != "$initial_id" ]; then
-    fm_backend_herdr_traex_transition_lock_release "$state" "$initial_id" || true
-    return 1
-  fi
-  id=$FM_BACKEND_HERDR_TRAEX_ID
-  gen=$FM_BACKEND_HERDR_TRAEX_GEN
-  current=$(fm_busy_record_read "$state" "$id" 2>/dev/null || true)
-  new_state=
-  if [ -n "$agent" ] || [ -n "$status" ]; then
-    new_state=unknown
-    source=fm-recovery
-    event=launch-failed-identity
-  else
-    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
-    if [ "$presence" = dead ]; then
-      new_state=idle
-      source=fm-recovery
-      event=launch-failed-dead
-    else
-      case "$current" in
-        'busy herdr-traex '*) ;;
-        *)
-          new_state=unknown
-          source=fm-recovery
-          event=launch-failed-unknown
-          ;;
-      esac
-    fi
-  fi
-  if [ -n "$new_state" ]; then
-    "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
-      "$state" "$id" "$new_state" \
-      --gen "$gen" --source "$source" --event "$event" || rc=1
-  fi
-  fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-  return "$rc"
+  local record
+  record=$(fm_backend_herdr_normalize_event "$3" "" "" "")
+  fm_backend_herdr_traex_observe_transition "$1" "$2" "$record"
 }
 
 # Persist TraeX's native Herdr transitions through the existing semantic-state
@@ -3929,8 +3917,8 @@ fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pa
 # between bounded subscriptions still closes exactly once.
 fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> [mode]
   local state=$1 session=$2 record=$3 observation_mode=${4:-current}
-  local pane to reported_to agent identity native_agent current current_gen
-  local current_state current_rest current_source event id initial_id gen rc=0 intent
+  local pane to= reported_to agent native_agent= current current_gen identity_state= absence=
+  local current_state current_rest current_source event event_override= id initial_id gen rc=0 intent
   local strict=0 recovery=0 recovered=0
   case "$observation_mode" in
     current|stream|stream-baseline) ;;
@@ -4047,35 +4035,99 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       to=$reported_to
       ;;
     current|submit-baseline|stream-baseline)
-      identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
-      native_agent=$(printf '%s' "$identity" | cut -f1)
-      to=$(printf '%s' "$identity" | cut -f2)
+      fm_backend_herdr_traex_identity_probe "$session" "$pane"
+      identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
+      case "$identity_state" in
+        live)
+          native_agent=$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT
+          to=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS
+          ;;
+        no-agent|dead) absence=$identity_state ;;
+      esac
       ;;
     stream)
-      identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
-      native_agent=$(printf '%s' "$identity" | cut -f1)
-      to=$(printf '%s' "$identity" | cut -f2)
-      if [ "$native_agent" = traex ] && [ -n "$to" ]; then
-        :
-      elif [ -n "$native_agent" ] || [ -n "$to" ]; then
-        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-        echo "warning: Herdr transition identity changed for TraeX task $id" >&2
-        return 1
-      elif [ "$agent" = traex ]; then
-        case "$reported_to" in
-          idle|done)
-            native_agent=$agent
-            to=$reported_to
-            ;;
-          *)
-            FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
+      fm_backend_herdr_traex_identity_probe "$session" "$pane"
+      identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
+      case "$identity_state" in
+        live)
+          native_agent=$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT
+          to=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS
+          if [ "$native_agent" != traex ]; then
             fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-            return 0
-            ;;
-        esac
-      fi
+            echo "warning: Herdr transition identity changed for TraeX task $id" >&2
+            return 1
+          fi
+          ;;
+        no-agent|dead)
+          case "$agent:$reported_to" in
+            traex:idle|traex:done)
+              native_agent=$agent
+              to=$reported_to
+              absence=$identity_state
+              ;;
+            *)
+              FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
+              fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+              return 0
+              ;;
+          esac
+          ;;
+        *)
+          FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
+          fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+          case "$agent:$reported_to" in
+            traex:idle|traex:done)
+              echo "warning: Herdr could not validate the buffered TraeX transition for task $id" >&2
+              return 1
+              ;;
+            *) return 0 ;;
+          esac
+          ;;
+      esac
       ;;
   esac
+  if [ -n "$absence" ] && [ "$observation_mode" != stream ]; then
+    case "$current_state $current_source" in
+      'busy herdr-traex')
+        native_agent=traex
+        to=done
+        if [ "$recovery" -eq 1 ]; then
+          event_override="launch-failed-$absence"
+        else
+          event_override="agent-$absence"
+        fi
+        ;;
+      'idle herdr-traex')
+        FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
+        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+        return 0
+        ;;
+      'busy fm-spawn')
+        if [ "$recovery" -ne 1 ]; then
+          fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+          return 1
+        fi
+        if [ "$absence" = dead ]; then
+          to=idle
+        else
+          to=unknown
+        fi
+        "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+          "$state" "$id" "$to" \
+          --gen "$gen" --source fm-recovery --event "launch-failed-$absence" || rc=1
+        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+        return "$rc"
+        ;;
+      'idle fm-recovery'|'unknown fm-recovery')
+        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+        return 0
+        ;;
+      *)
+        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+        return 1
+        ;;
+    esac
+  fi
   if [ "$native_agent" != traex ] || [ -z "$to" ]; then
     FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
     fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
@@ -4100,7 +4152,9 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       ;;
   esac
   FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "$to" "$native_agent")
-  if [ "$recovery" -eq 1 ]; then
+  if [ -n "$event_override" ]; then
+    event=$event_override
+  elif [ "$recovery" -eq 1 ]; then
     event="launch-failed-$to"
   else
     event="agent-$to"

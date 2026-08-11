@@ -84,8 +84,12 @@ case "$cmd $sub" in
     ;;
   "pane get")
     pane=${3:-}
-    cwd=$(cat "${FM_FAKE_CWD_FILE:?}" 2>/dev/null || printf '%s' "$project")
-    printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1","cwd":"%s","foreground_cwd":"%s"}}}\n' "$pane" "$project" "$cwd"
+    if [ "$phase" = dead ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+    else
+      cwd=$(cat "${FM_FAKE_CWD_FILE:?}" 2>/dev/null || printf '%s' "$project")
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1","cwd":"%s","foreground_cwd":"%s"}}}\n' "$pane" "$project" "$cwd"
+    fi
     ;;
   "pane send-text")
     text=${4:-}
@@ -139,14 +143,18 @@ EOF
           reads=$(cat "$phase_file.working-reads" 2>/dev/null || printf 0)
           printf '%s\n' "$((reads + 1))" > "$phase_file.working-reads"
           if [ "$reads" -ge 1 ]; then
-            printf '%s\n' '{"error":{"code":"agent_not_found"}}'
-            exit 0
+            printf '%s\n' '{"error":{"code":"transport_unavailable"}}'
+            exit 1
           fi
         fi
         # Herdr preserves the pane's creation cwd at the source project while
         # foreground_cwd follows treehouse into the isolated task copy.
         printf '{"result":{"agent":{"agent":"traex","agent_status":"%s","cwd":"%s","foreground_cwd":"%s","pane_id":"w1:p2"}}}\n' \
           "$phase" "${FM_FAKE_AGENT_CWD:-$project}" "$worktree"
+        ;;
+      unreadable)
+        printf '%s\n' '{"error":{"code":"transport_unavailable"}}'
+        exit 1
         ;;
       *)
         printf '%s\n' '{"error":{"code":"agent_not_found"}}'
@@ -783,6 +791,97 @@ test_killed_pre_registration_launch_reconciles_no_agent() {
   pass "traex publishes pending ownership atomically and reconciles killed no-agent launches"
 }
 
+test_unreadable_identity_cannot_complete_active_turn() {
+  local rec out status verdict
+  rec=$(make_spawn_case unreadable-identity)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for unreadable identity should succeed: $out"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf unreadable > "$CASE_DIR/phase"
+  if run_traex_reconcile >/dev/null 2>&1; then
+    fail "an unreadable native identity was accepted as task disappearance"
+  fi
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "an unreadable native identity completed the active turn: $verdict"
+  assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "an unreadable native identity emitted a false completion notification"
+  pass "traex refuses unreadable native identity as completion evidence"
+}
+
+test_confirmed_disappearance_completes_once() {
+  local rec out status verdict
+  rec=$(make_spawn_case confirmed-disappearance)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for disappearance recovery should succeed: $out"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf shell > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "confirmed TraeX disappearance did not reconcile"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "confirmed TraeX disappearance left the turn active: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "confirmed TraeX disappearance emitted no durable completion notification"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  run_traex_reconcile || fail "repeated disappearance reconciliation failed"
+  assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "repeated TraeX disappearance duplicated the completion notification"
+  pass "confirmed TraeX disappearance completes one durable turn"
+}
+
+test_failed_launch_dead_pane_uses_bound_completion_owner() {
+  local rec out status verdict
+  rec=$(make_spawn_case failed-launch-dead)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for failed-launch recovery should succeed: $out"
+  set_traex_readiness 1 failed || fail "could not install failed launch readiness"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf dead > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "failed launch dead pane did not reconcile through its owner"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "failed launch dead pane lost its observed working completion: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "failed launch dead pane emitted no durable completion notification"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  run_traex_reconcile || fail "failed launch dead pane deduplication failed"
+  assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "failed launch dead pane duplicated its completion notification"
+  pass "failed launch pane death completes through the bound transition owner"
+}
+
+test_live_guard_teardown_failure_is_fatal() {
+  local helper out status log
+  helper="$TMP_ROOT/live-lab-helper"
+  log="$TMP_ROOT/live-lab-helper.log"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_LAB_LOG:?}"
+exit "${FM_FAKE_LAB_RC:-0}"
+SH
+  chmod +x "$helper"
+  out=$(FM_FAKE_LAB_LOG="$log" FM_FAKE_LAB_RC=1 HERDR_LAB_HELPER="$helper" \
+    "$ROOT/tests/fm-traex-harness-live-e2e.test.sh" --verify-lab-teardown fm-lab-traex-test 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "live TraeX guard ignored guarded teardown failure"
+  assert_contains "$out" 'guarded TraeX lab teardown failed' \
+    "live TraeX teardown failure was not reported"
+  : > "$log"
+  out=$(FM_FAKE_LAB_LOG="$log" FM_FAKE_LAB_RC=0 HERDR_LAB_HELPER="$helper" \
+    "$ROOT/tests/fm-traex-harness-live-e2e.test.sh" --verify-lab-teardown fm-lab-traex-test 2>&1)
+  status=$?
+  expect_code 0 "$status" "live TraeX guard rejected successful guarded teardown: $out"
+  [ "$(cat "$log")" = 'teardown fm-lab-traex-test' ] \
+    || fail "live TraeX guard did not use the exact guarded teardown: $(cat "$log")"
+  pass "live TraeX evidence fails unless guarded teardown succeeds"
+}
+
 test_terminal_notification_intent_recovers_after_publication_failure() {
   local rec out status verdict pending notification
   rec=$(make_spawn_case completion-intent)
@@ -924,6 +1023,10 @@ test_stale_idle_cannot_close_a_new_working_turn
 test_failed_and_orphaned_pending_launches_reconcile_terminal_level
 test_interrupted_spawn_clears_pending_readiness
 test_killed_pre_registration_launch_reconciles_no_agent
+test_unreadable_identity_cannot_complete_active_turn
+test_confirmed_disappearance_completes_once
+test_failed_launch_dead_pane_uses_bound_completion_owner
+test_live_guard_teardown_failure_is_fatal
 test_terminal_notification_intent_recovers_after_publication_failure
 test_buffered_terminal_event_survives_native_deregistration
 test_native_transition_fold_is_sparse_and_bound

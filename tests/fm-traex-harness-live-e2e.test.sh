@@ -3,7 +3,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 REAL_HERDR=$(command -v herdr 2>/dev/null || true)
 LAB=
 PROBE=
@@ -11,11 +11,16 @@ REPO=
 WT=
 CLEAN_PATH=$PATH
 
+teardown_lab_checked() {
+  [ -z "$LAB" ] && return 0
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" || return 1
+  LAB=
+}
+
 cleanup() {
   local dirty=0 pool
-  if [ -n "$LAB" ]; then
-    PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" >/dev/null 2>&1 \
-      || printf 'warning: guarded TraeX lab teardown failed for %s\n' "$LAB" >&2
+  if ! teardown_lab_checked >/dev/null 2>&1; then
+    printf 'warning: guarded TraeX lab teardown failed for %s\n' "$LAB" >&2
   fi
   if [ -n "$WT" ] && [ -d "$WT" ] && [ -n "$REPO" ] && [ -d "$REPO/.git" ]; then
     if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
@@ -54,6 +59,13 @@ fail() {
 pass() {
   printf 'ok - %s\n' "$1"
 }
+
+if [ "${1:-}" = --verify-lab-teardown ]; then
+  [ "$#" -eq 2 ] || fail "--verify-lab-teardown requires one lab name"
+  LAB=$2
+  teardown_lab_checked || fail "guarded TraeX lab teardown failed for $LAB"
+  exit 0
+fi
 
 if [ "${FM_TRAEX_HERDR_LIVE:-0}" != 1 ]; then
   echo "skip: set FM_TRAEX_HERDR_LIVE=1 to run the real TraeX/Herdr drift guard"
@@ -233,4 +245,6 @@ pass "real TraeX interrupt cleared restored input and the same task resumed"
   || fail "the real TraeX drift guard dirtied its isolated task copy"
 printf 'traex=%s\n' "$(traex --version 2>&1 | head -1)"
 printf 'herdr=%s\n' "$(PATH="$CLEAN_PATH" "$REAL_HERDR" --version 2>&1 | head -1)"
+teardown_lab_checked || fail "guarded TraeX lab teardown failed or the default fleet session changed"
+pass "real TraeX lab teardown preserved the default Herdr session"
 pass "TraeX/Herdr live drift guard completed"
