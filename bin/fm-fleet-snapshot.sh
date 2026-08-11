@@ -607,9 +607,13 @@ task_json_lines() {
 # Meta inventory remains the sole source of live workers; this object only
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
 main_inventory_json() {  # <backlog-json> <tasks-json>
-  printf '%s\n%s\n' "$1" "$2" | jq -s '
-    .[0] as $backlog
-    | .[1] as $tasks
+  if [ "${FM_SNAPSHOT_TEST_ARGV_REFERENCE:-0}" = 1 ]; then
+    jq -n --argjson backlog "$1" --argjson tasks "$2" '{backlog:$backlog,tasks:$tasks}'
+  else
+    printf '%s\n%s\n' "$1" "$2" | jq -s '{backlog:.[0],tasks:.[1]}'
+  fi | jq '
+    .backlog as $backlog
+    | .tasks as $tasks
     |
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
@@ -636,7 +640,11 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
-  printf '%s\n%s\n' "$1" "$2" | jq -s \
+  if [ "${FM_SNAPSHOT_TEST_ARGV_REFERENCE:-0}" = 1 ]; then
+    jq -n --argjson backlog "$1" --argjson tasks "$2" '{backlog:$backlog,tasks:$tasks}'
+  else
+    printf '%s\n%s\n' "$1" "$2" | jq -s '{backlog:.[0],tasks:.[1]}'
+  fi | jq \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
     --argjson child_n "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
@@ -646,8 +654,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
-    .[0] as $backlog
-    | .[1] as $tasks
+    .backlog as $backlog
+    | .tasks as $tasks
     | ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight

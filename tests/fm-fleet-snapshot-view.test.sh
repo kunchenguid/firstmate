@@ -270,7 +270,7 @@ EOF
 # a particular fleet count, so a different host cannot turn this into a vacuous
 # small-fleet test.
 test_large_inventory_does_not_use_argv_transport() {
-  local home fakebin arg_max target_bytes row_bytes rows padding i out summary bearings count
+  local home fakebin arg_max target_bytes row_bytes rows padding i out summary bearings count reference_out
   home=$(make_home argv-scale)
   arg_max=$(getconf ARG_MAX 2>/dev/null) || fail "getconf ARG_MAX is required for argv-scale regression"
   case "$arg_max" in ''|*[!0-9]*|0) fail "getconf ARG_MAX returned an invalid value: $arg_max" ;; esac
@@ -299,6 +299,11 @@ test_large_inventory_does_not_use_argv_transport() {
     "mode=ship"
   printf 'working: synthetic task inventory is present\n' > "$home/state/argv-scale-live.status"
   fakebin=$(make_fakebin "$home")
+  reference_out="$home/argv-reference.out"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 \
+    "$SNAPSHOT" --json > "$reference_out" 2>&1; then
+    fail "ARG_MAX-derived firing input did not make the pre-fix argv owner fail"
+  fi
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
     || fail "snapshot failed above ARG_MAX=$arg_max; bulk inventory still reached argv: $out"
   count=$(printf '%s' "$out" | jq '[.backlog.records[] | select(.state == "queued")] | length')
@@ -322,7 +327,38 @@ test_large_inventory_does_not_use_argv_transport() {
       and (.in_flight | map(.id)) == ["argv-scale-live"]
       and (.gates | length) == $rows
   ' >/dev/null || fail "bearings projection lost the oversized inventory: $bearings"
-  pass "platform-derived oversized backlog and task inventory bypasses argv"
+  pass "ARG_MAX-derived input is RED on argv reference and GREEN on streamed snapshot owners"
+}
+
+# The test-only argv reference exercises the two former transport owners at a
+# deliberately small size where argv is still valid.  Both paths feed the same
+# projection, so byte equality proves that changing the transport did not change
+# either owner's serialized contract.
+test_streamed_owner_outputs_match_argv_reference_byte_for_byte() {
+  local home fakebin streamed_main argv_main streamed_summary argv_summary
+  home=$(make_home transport-equivalence)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  streamed_main="$home/main.streamed.json"
+  argv_main="$home/main.argv.json"
+  streamed_summary="$home/summary.streamed.json"
+  argv_summary="$home/summary.argv.json"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    "$SNAPSHOT" --json | jq '.main_inventory' > "$streamed_main"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$SNAPSHOT" --json | jq '.main_inventory' > "$argv_main"
+  cmp -s "$streamed_main" "$argv_main" \
+    || fail "streamed main-inventory output differs byte-for-byte from argv reference"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    "$SNAPSHOT" --secondmate-home-summary > "$streamed_summary"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$SNAPSHOT" --secondmate-home-summary > "$argv_summary"
+  cmp -s "$streamed_summary" "$argv_summary" \
+    || fail "streamed secondmate-home summary differs byte-for-byte from argv reference"
+
+  pass "streamed shared-owner outputs are byte-for-byte identical to argv reference"
 }
 
 test_normalized_roles_and_plural_blocker_readiness() {
@@ -846,6 +882,7 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_large_inventory_does_not_use_argv_transport
+test_streamed_owner_outputs_match_argv_reference_byte_for_byte
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
