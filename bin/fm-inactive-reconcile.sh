@@ -9,7 +9,9 @@
 # not a watcher, daemon, PR poll, or forge client of its own.
 # `scan` evaluates at most once per FM_INACTIVE_RECONCILE_SECS (default 900,
 # valid 60..1800) per home, except that --startup performs the same cheap scan
-# immediately during a locked session start.
+# immediately during a locked session start. Each scan has an aggregate
+# FM_INACTIVE_RECONCILE_BUDGET_SECS bound (default 10, valid 1..30) and resumes
+# after its last visited child on the next scan.
 #
 # It considers only a direct ordinary crewmate whose durable activity is older
 # than that interval and whose last status is not captain-held.
@@ -31,6 +33,7 @@
 # state *.check.sh.
 # It reads only durable local state and fm-crew-state.sh.
 set -u
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
@@ -46,6 +49,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -56,6 +61,17 @@ case "$FM_INACTIVE_RECONCILE_SECS" in
 esac
 if [ "$FM_INACTIVE_RECONCILE_SECS" -lt 60 ] || [ "$FM_INACTIVE_RECONCILE_SECS" -gt 1800 ]; then
   printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_SECS must be a whole number from 60 to 1800\n' >&2
+  exit 2
+fi
+FM_INACTIVE_RECONCILE_BUDGET_SECS=${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}
+case "$FM_INACTIVE_RECONCILE_BUDGET_SECS" in
+  ''|*[!0-9]*|0)
+    printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_BUDGET_SECS must be a whole number from 1 to 30\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
+  printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_BUDGET_SECS must be a whole number from 1 to 30\n' >&2
   exit 2
 fi
 
@@ -212,6 +228,22 @@ scan_marker_age() {
   if [ "$now" -lt "$m" ]; then printf '0\n'; else printf '%s\n' $((now - m)); fi
 }
 
+scan_marker_cursor() {
+  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 0
+  grep '^cursor=' "$SCAN_MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+write_scan_marker() { # <cursor>
+  local cursor=$1 marker_tmp
+  marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
+  {
+    printf 'epoch=%s\n' "$(reconcile_now)"
+    printf 'cursor=%s\n' "$cursor"
+  } > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
+  chmod 600 "$marker_tmp" 2>/dev/null || true
+  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
+}
+
 meta_field() {
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
@@ -262,15 +294,17 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
   append_once "$destination" "$line"
 }
 
-reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty>
-  local id=$1 meta=$2 self=${3:-} status turn last age state_line state pr fingerprint outcome_key payload
+reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr fingerprint outcome_key payload state_rc=0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
   status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
-  state_line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$CREW_STATE_BIN" "$id" 2>/dev/null || true)
+  state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
+  [ "$state_rc" -ne 124 ] || return 3
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
@@ -300,26 +334,51 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty>
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
+scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
+  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id kind remaining rc
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    valid_id "$id" || continue
+    case "$range" in
+      after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
+      through) [ -n "$cursor" ] && [[ "$id" > "$cursor" ]] && continue ;;
+    esac
+    [ "$(date +%s)" -lt "$deadline" ] || return 3
+    write_scan_marker "$id" || return 1
+    kind=$(meta_field "$meta" kind)
+    [ "$kind" = secondmate ] && continue
+    remaining=$((deadline - $(date +%s)))
+    [ "$remaining" -gt 0 ] || return 3
+    reconcile_direct_child "$id" "$meta" "$self" "$remaining" || {
+      rc=$?
+      [ "$rc" -eq 3 ] && return 3
+      return "$rc"
+    }
+  done
+}
+
 scan() {
-  local startup=${1:-0} self='' meta id kind marker_tmp
+  local startup=${1:-0} self='' cursor deadline rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi
-  marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
-  printf '%s\n' "$(reconcile_now)" > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
-  chmod 600 "$marker_tmp" 2>/dev/null || true
-  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
+  cursor=$(scan_marker_cursor)
+  valid_id "$cursor" || cursor=''
+  write_scan_marker "$cursor" || return 1
   self=$(home_secondmate_id || true)
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    valid_id "$id" || continue
-    kind=$(meta_field "$meta" kind)
-    [ "$kind" = secondmate ] && continue
-    reconcile_direct_child "$id" "$meta" "$self"
-  done
+  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  scan_pass "$cursor" after "$deadline" "$self" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
+    scan_pass "$cursor" through "$deadline" "$self" || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    write_scan_marker '' || return 1
+  elif [ "$rc" -ne 3 ]; then
+    return "$rc"
+  fi
 }
 
 acknowledge() { # <fingerprint>

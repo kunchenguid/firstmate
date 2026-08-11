@@ -226,6 +226,34 @@ test_watcher_hook_and_idle_secondmate_exemption() {
   pass "watcher hook wakes for terminal loss and preserves idle secondmate exemption"
 }
 
+# A stalled authoritative state read consumes only the aggregate scan budget.
+# The durable scan position lets the next invocation reach the following child.
+test_stalled_state_read_is_bounded_and_scan_progresses() {
+  local started elapsed
+  make_world bounded
+  write_child "$MAIN" a 'working: state read will stall'
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = a ]; then
+  sleep 30
+else
+  printf 'state: done · source: fake\n'
+fi
+SH
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh"
+
+  started=$(date +%s)
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 3 ] || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
+
+  write_child "$MAIN" b 'done: green'
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
+    || fail "next bounded scan did not resume with the following child"
+  pass "stalled state reads are bounded without starving later children"
+}
+
 # Forge command shims fail loudly. A successful scan proves this path never uses
 # them while reconciling a local terminal outcome.
 test_reconciliation_never_calls_forge() {
@@ -242,6 +270,7 @@ test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
+test_stalled_state_read_is_bounded_and_scan_progresses
 test_reconciliation_never_calls_forge
 
 echo "all inactive reconciliation tests passed"
