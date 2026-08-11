@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Shared no-mistakes axi run attribution primitives.
 #
-# ONE owner for the branch+code-identity matching rule that decides whether a
-# no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
-# (read-only current-state reporting) and fm-teardown.sh (pre-teardown run
-# abort, see its "Fix 1" header comment). Getting this wrong in either
-# direction is unsafe: a false negative hides a genuinely parked run, and a
-# false positive lets teardown act on a run it does not own.
+# Owns the branch-and-code-identity policies that decide whether a no-mistakes
+# run belongs to a worktree. `fm_nm_head_matches_worktree` is the strict policy
+# required before teardown can abort a parked run. Read-only reporting uses the
+# reporting variant: it accepts a nonempty run head that is unavailable in the
+# local object store, so a live pipeline-owned run is not reported as diverged.
+# A locally resolvable head must still pass the strict policy. Never use the
+# reporting variant for a destructive action.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -55,8 +56,7 @@ fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
-# 0 if run head $2 matches worktree $1's code identity, per the same rule
-# everywhere this attribution is needed:
+# 0 if run head $2 strictly matches worktree $1's code identity:
 #   - missing/empty head: cannot bind; reject
 #   - equal commits (short or full SHA): match
 #   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
@@ -72,6 +72,10 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
 
+# 0 for read-only reporting when the strict rule matches or when a nonempty
+# run head cannot be resolved locally. An unresolvable head may be a pipeline
+# commit not yet fetched into this worktree, so it must not be treated as a
+# proven divergence. This must never authorize teardown or another mutation.
 fm_nm_head_matches_worktree_reporting() {  # <worktree> <run_head>
   local wt=$1 run_head=$2
   fm_nm_head_matches_worktree "$wt" "$run_head" && return 0

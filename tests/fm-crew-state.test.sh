@@ -25,11 +25,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
-#   (l) a live pipeline-owned run whose head has not been fetched into this
-#       worktree's object store yet is never read as diverged/failed, at
-#       either head-matching call site, and an active row for a branch always
-#       outranks a stale terminal row for that branch. Regression coverage
-#       for the 2026-08 false-failed incident.
+#   (l) a run whose nonempty head is unavailable locally remains reportable at
+#       both attribution call sites, and an active row outranks a stale terminal
+#       row for the same branch.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1413,12 +1411,7 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
-# Regression coverage for the false "failed" incident (2026-08): a live,
-# pipeline-owned run whose head has advanced past this worktree's own HEAD but
-# has not yet been fetched/pushed into this worktree's object store (the
-# `branch_sync.state: pipeline_owned` case - "the pipeline head has moved but
-# has not been successfully pushed") must never be read as diverged. Call
-# site 1: `axi status` answers for THIS branch directly.
+# An unresolvable nonempty head remains reportable through `axi status`.
 test_pipeline_owned_run_unresolvable_head_remains_current() {
   reset_fakes
   local d out
@@ -1426,9 +1419,7 @@ test_pipeline_owned_run_unresolvable_head_remains_current() {
   make_repo_on_branch "$d/wt" fm/feat-unresolved
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/unresolved.meta" "window=fm:fm-unresolved" "worktree=$d/wt" "kind=ship"
-  # A head this worktree's object store has never observed - not a real
-  # commit anywhere in the throwaway repo, standing in for a pipeline fix
-  # commit made elsewhere and not yet fetched/pushed back here.
+  # This synthetic head is unavailable in the throwaway worktree's object store.
   FM_FAKE_RUN_HEAD="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-unresolved)"
   out=$(run_crew_state "$d" unresolved)
@@ -1438,11 +1429,7 @@ test_pipeline_owned_run_unresolvable_head_remains_current() {
   pass "pipeline-owned run with a not-yet-fetched head remains attributed as current (call site 1)"
 }
 
-# Same incident, call site 2: `axi status` answers for a DIFFERENT branch (a
-# concurrent crew), forcing the coarse `no-mistakes runs` fallback, where the
-# exact reported shape reproduces: the live running row's head has not been
-# fetched locally, and an older failed row for the same branch happens to sit
-# at this worktree's own current sha - the row that used to win by accident.
+# The coarse runs fallback also retains an active row with an unresolvable head.
 test_coarse_fallback_prefers_live_pipeline_run_over_stale_failed_row() {
   reset_fakes
   local d wt_head out
@@ -1465,9 +1452,7 @@ EOF
   pass "coarse fallback resolves the live pipeline run instead of an older stale failed row (call site 2)"
 }
 
-# An active row for a branch must outrank a terminal row for that branch
-# regardless of which one the (newest-first, but not contract-guaranteed-
-# strict) runs list happens to surface first.
+# An active row for a branch must outrank a terminal row regardless of list order.
 test_coarse_fallback_active_row_outranks_terminal_regardless_of_order() {
   reset_fakes
   local d wt_head fix_head base_head out

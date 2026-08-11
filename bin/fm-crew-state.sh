@@ -8,9 +8,9 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
-# against it.
+# no-mistakes run-step attributed to this crew's branch under the reporting
+# policy in fm-nm-run-lib.sh, else the pane busy-signature) and reconciles the
+# possibly-stale log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -27,14 +27,12 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
-#   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#   2. Reportable no-mistakes run for this crew's branch, active or terminal
+#      (from `axi status`, or the coarse `no-mistakes runs` fallback)? A missing
+#      head or locally resolvable rewritten/diverged head is not attributed.
+#      A nonempty head unavailable in the local object store remains reportable
+#      because it may be a live pipeline commit not yet fetched here. The shared
+#      library owns the exact reporting and strict teardown matching policies.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -217,10 +215,10 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
-# --- no-mistakes run lookup (authoritative when a run matches this branch) --
+# --- no-mistakes run lookup (authoritative when reporting attributes a run) -
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
-# branch+head attribution rule below are thin wrappers over the ONE owner in
-# bin/fm-nm-run-lib.sh, shared with fm-teardown.sh's pre-teardown run abort.
+# reporting attribution rule below are thin wrappers over the owner in
+# bin/fm-nm-run-lib.sh. Teardown uses that library's stricter policy.
 
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
@@ -353,40 +351,11 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
-# Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
-# reports the active-or-most-recent run for the CURRENT branch when one
-# exists, else falls back to some other branch's run purely as informational
-# display (verified empirically: querying a worktree with its own active run
-# reliably returns that run, even under concurrent load from several other
-# validating crews on the same underlying repo). A crew whose branch genuinely
-# has no run yet therefore sees another branch's answer here.
-#
-# This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
-# expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
-# matched id via `axi status --run <id>`. Verified against the real installed
-# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
-# there is no runs-listing subcommand under `axi` at all, so that table never
-# appears and the lookup was silently dead code; whenever the bare `axi
-# status` answer was not this crew's own branch, attribution always failed and
-# the caller fell straight through to the pane/log fallback below. (The
-# PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
-#
-# The real run-listing command is the top-level `no-mistakes runs` (verified:
-# `no-mistakes --help` lists it separately from `axi`). It is plain, human-
-# oriented text - no run id, no JSON/TOON, newest-first, columns
-# "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
-# spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the branch's active
-# (running) matching row's status word when one exists, else the first
-# (most recent) terminal matching row's status word (completed/cancelled/
-# failed), or empty when the branch has no matching row within
-# FM_CREW_STATE_RUNS_LIMIT rows. An active row always outranks a terminal
-# one regardless of list order: a stale failed/completed row for this branch
-# must never shadow a live running row.
+# `axi status` can describe another branch's run, so the fallback scans the
+# top-level `no-mistakes runs` rows for this branch. Its plain rows provide only
+# a status, branch, and short SHA. Return a reportably matching running row in
+# preference to any terminal row, regardless of list order, so stale terminal
+# output cannot hide live validation.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha terminal=''
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -402,8 +371,8 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     [ "$br" = "$branch" ] || continue
-    # Same code-identity rule as axi status: skip a same-branch row whose
-    # short-sha does not match this worktree (rewritten or advanced tip).
+    # A missing or locally incompatible head cannot be attributed; the shared
+    # reporting rule accepts only heads unavailable in the local object store.
     nm_coarse_head_matches_worktree "$sha" || continue
     if [ "$st" = running ]; then
       printf '%s' "$st"
@@ -419,8 +388,8 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller).
+# 0 if the active axi-status run's head is reportable for this worktree.
+# Branch match is a precondition (caller).
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
@@ -428,7 +397,7 @@ nm_run_head_matches_worktree() {
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
+# SHA for this branch row is reportable under the same rules as
 # nm_run_head_matches_worktree.
 nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree_reporting "$WT" "$1"
@@ -450,9 +419,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
+      # The reported run belongs to another branch or is not reportable here.
+      # The CLI answered, so try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
