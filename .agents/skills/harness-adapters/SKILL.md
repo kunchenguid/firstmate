@@ -551,14 +551,14 @@ Firstmate supports its persistent interactive TUI and does not use the one-shot 
 |---|---|
 | Launch | Bare interactive `agy --dangerously-skip-permissions`, followed by readiness-gated absolute brief-pointer delivery. |
 | Models | Discover with `agy models`; the verified 1.1.8 listing included Gemini 3.6 Flash, Gemini 3.5 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6, Claude Opus 4.6 Thinking, and GPT OSS 120B profiles. |
-| Busy-pane signature | ASCII footer `esc to cancel`; transient status text such as `Generating...`, `Loading...`, or `Running...` is not needed for classification. |
+| Busy-pane signature | ASCII footer `esc to cancel`, read only from the live bottom nonblank row so transcript or command-output copies of the phrase never read as busy; transient status text such as `Generating...`, `Loading...`, or `Running...` is not needed for classification. |
 | Exit command | `/exit`, which prints `agy --conversation=<uuid>` for exact resume. |
 | Interrupt | Single Escape returns the TUI to idle and prints `Interrupted · What should Antigravity CLI do instead?`; an already-started shell child may continue until it exits. |
 | Resume | `agy --continue` resumes the most recent conversation for the workspace, and `agy --conversation=<uuid>` resumes the exact id printed by `/exit`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; slash autocomplete can consume the first Enter, so submission verification retries Enter without retyping. |
 | Autonomy | `--dangerously-skip-permissions`; verified by an unattended shell tool call. |
 | Trust dialog | Fresh workspaces show `Do you trust the contents of this project?` with `Yes, I trust this folder` selected; Firstmate accepts only that exact surface with Enter. |
-| Environment marker | `ANTIGRAVITY_AGENT=1` in tool child processes; the parent TUI is detected by `agy` ancestry. |
+| Environment marker | `ANTIGRAVITY_AGENT=1` in tool child processes; the parent TUI is detected by `agy` ancestry. Verified non-Agy workers spawned under an Agy primary launch with `env -u ANTIGRAVITY_AGENT` so the inherited marker cannot misclassify them; raw unverified launch commands pass through untouched (`bin/fm-spawn.sh`). |
 | Composer | A bare `>` row between two long horizontal separators, followed by `? for shortcuts` when idle or `esc to cancel` when busy. |
 | Effort | `--effort low`, `medium`, or `high`; 1.1.8 rejects `xhigh` and `max`. |
 

@@ -1438,6 +1438,9 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
 # without weakening the fleet-wide rule that an unstructured `>` is a shell.
 # An optional zero-based cursor row makes tmux require the cursor inside the
 # current container.
+# Any nonblank row below the matched footer rejects the whole proof: the
+# footer must be the live bottom of activity, so on cursorless captures a
+# finished composer scrolled above a returned shell prompt is never claimed.
 # Returns one of empty|pending|unknown with status zero when Agy structure was
 # found, or status one with no output when the capture is not an Agy composer.
 fm_composer_separated_state() {  # <capture> [cursor-row]
