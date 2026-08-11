@@ -25,8 +25,9 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
-# Legacy Herdr ship records whose already-closed endpoint is represented by exactly one window_detached_20260810 incident marker may enter the ordinary landed-work proof only after their task binding, backend identity, canonical project and worktree paths, registered worktree, exact fm/<task-id> branch, and branch head all agree.
-# The detached endpoint is never contacted, and the compatibility path rejects --force because detached metadata never relaxes landed-work proof.
+# Legacy Herdr ship records whose already-closed endpoint is represented by exactly one window_detached_20260810 incident marker may retire only after their task binding, backend identity, canonical project and worktree paths, registered worktree, exact fm/<task-id> branch, and branch head all agree.
+# When such a branch is no longer reachable after a squash merge, a separate proof compares its complete unreached candidate patch byte-for-byte with the canonical recorded PR's merged commit, verifies that merge is still on the PR's default target, and records the proof before retiring metadata.
+# The detached endpoint is never contacted, the compatibility path rejects --force, and it never deletes the preserved branch ref or commits.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -780,6 +781,137 @@ work_is_landed() {
   content_in_default
 }
 
+# Detached endpoint records have no live process left to reconcile and were created
+# before the normal endpoint lifecycle was durable.  Their only non-reachability
+# exception is therefore deliberately narrower than work_is_landed: a canonical
+# recorded GitHub PR must identify one merged squash commit on the current default
+# target, and the complete unreached candidate patch must be exactly that commit's
+# patch.  This does not rely on task status prose, branch names, or a whole-tree
+# merge against a default branch that may have changed since the squash.
+LEGACY_LANDED_PROOF_PR=
+LEGACY_LANDED_PROOF_MERGE=
+LEGACY_LANDED_PROOF_CANDIDATE=
+legacy_detached_exact_landed_proof() {
+  local view state merge target url extra default default_ref parent_line parent_count
+  local merge_parent candidate_commits candidate_first candidate_base candidate_head
+
+  if ! fm_pr_metadata_identity_parse "$META" || [ "$FM_PR_META_PROVIDER" != github ]; then
+    echo "REFUSED: detached task $ID lacks one canonical GitHub PR identity; preserving task state." >&2
+    return 1
+  fi
+
+  view=$(cd "$WT" && gh pr view "$FM_PR_META_URL" --json state,mergeCommit,baseRefName,url \
+    -q '.state + "\t" + (.mergeCommit.oid // "") + "\t" + .baseRefName + "\t" + .url' 2>/dev/null) || {
+    echo "REFUSED: cannot read the recorded PR identity for detached task $ID; preserving task state." >&2
+    return 1
+  }
+  IFS=$'\t' read -r state merge target url extra <<< "$view"
+  if [ -n "${extra:-}" ] || [ "$state" != MERGED ] || ! fm_pr_head_valid "$merge" \
+     || [ "$url" != "$FM_PR_META_URL" ]; then
+    echo "REFUSED: recorded PR identity for detached task $ID is absent, mismatched, or not merged; preserving task state." >&2
+    return 1
+  fi
+
+  default=$(default_branch) || {
+    echo "REFUSED: cannot determine the recorded PR target for detached task $ID; preserving task state." >&2
+    return 1
+  }
+  if [ "$target" != "$default" ]; then
+    echo "REFUSED: recorded PR target $target drifted from current default $default for detached task $ID; preserving task state." >&2
+    return 1
+  fi
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 \
+    && git -C "$WT" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default" >/dev/null 2>&1 || {
+    echo "REFUSED: cannot refresh the recorded PR target for detached task $ID; preserving task state." >&2
+    return 1
+  }
+  default_ref="refs/remotes/origin/$default"
+  git -C "$WT" cat-file -e "$merge^{commit}" 2>/dev/null \
+    || git -C "$WT" fetch --quiet origin "$merge" >/dev/null 2>&1 \
+    || {
+      echo "REFUSED: cannot inspect recorded PR merge $merge for detached task $ID; preserving task state." >&2
+      return 1
+    }
+  git -C "$WT" cat-file -e "$merge^{commit}" 2>/dev/null || {
+    echo "REFUSED: recorded PR merge $merge is unavailable for detached task $ID; preserving task state." >&2
+    return 1
+  }
+  git -C "$WT" merge-base --is-ancestor "$merge" "$default_ref" 2>/dev/null || {
+    echo "REFUSED: recorded PR merge $merge is no longer on target $default for detached task $ID; preserving task state." >&2
+    return 1
+  }
+  parent_line=$(git -C "$WT" rev-list --parents -n 1 "$merge" 2>/dev/null) || return 1
+  parent_count=$(printf '%s\n' "$parent_line" | awk '{ print NF - 1 }')
+  if [ "$parent_count" != 1 ]; then
+    echo "REFUSED: recorded PR merge $merge is not one exact squash commit for detached task $ID; preserving task state." >&2
+    return 1
+  fi
+  merge_parent=${parent_line#* }
+
+  candidate_commits=$(git -C "$WT" rev-list --reverse HEAD --not --remotes -- 2>/dev/null) || return 1
+  candidate_first=$(printf '%s\n' "$candidate_commits" | head -1)
+  [ -n "$candidate_first" ] || {
+    echo "REFUSED: detached task $ID has no exact unreached candidate commits to prove; preserving task state." >&2
+    return 1
+  }
+  candidate_base=$(git -C "$WT" rev-parse "$candidate_first^" 2>/dev/null) || return 1
+  candidate_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  if git -C "$WT" diff --quiet --no-ext-diff --no-renames "$candidate_base" "$candidate_head"; then
+    echo "REFUSED: detached task $ID has no candidate content to compare; preserving task state." >&2
+    return 1
+  fi
+  if ! cmp -s \
+    <(git -C "$WT" diff --binary --full-index --no-ext-diff --no-renames "$candidate_base" "$candidate_head") \
+    <(git -C "$WT" diff --binary --full-index --no-ext-diff --no-renames "$merge_parent" "$merge"); then
+    echo "REFUSED: detached task $ID candidate content is not exactly the recorded squash merge; preserving task state." >&2
+    return 1
+  fi
+
+  LEGACY_LANDED_PROOF_PR=$FM_PR_META_URL
+  LEGACY_LANDED_PROOF_MERGE=$merge
+  LEGACY_LANDED_PROOF_CANDIDATE=$candidate_head
+}
+
+LEGACY_DETACHED_SCRATCH_ARCHIVE=
+legacy_detached_scratch_archive_preflight() {
+  [ -z "$TASK_TMP" ] && return 0
+  [ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] && return 0
+  if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ]; then
+    echo "REFUSED: detached task $ID scratch path is not one regular directory; preserving task state." >&2
+    return 1
+  fi
+  if [ -e "$STATE/retired" ] && [ ! -d "$STATE/retired" -o -L "$STATE/retired" ]; then
+    echo "REFUSED: detached task $ID audit directory is unsafe; preserving task state." >&2
+    return 1
+  fi
+  LEGACY_DETACHED_SCRATCH_ARCHIVE="$STATE/retired/$ID.scratch"
+  if [ -e "$LEGACY_DETACHED_SCRATCH_ARCHIVE" ] || [ -L "$LEGACY_DETACHED_SCRATCH_ARCHIVE" ]; then
+    echo "REFUSED: detached task $ID already has archived scratch; preserving task state." >&2
+    return 1
+  fi
+}
+
+legacy_detached_archive_scratch() {
+  [ -n "$LEGACY_DETACHED_SCRATCH_ARCHIVE" ] || return 0
+  mkdir -p -m 700 "$STATE/retired" || return 1
+  [ -d "$STATE/retired" ] && [ ! -L "$STATE/retired" ] || return 1
+  mv "$TASK_TMP" "$LEGACY_DETACHED_SCRATCH_ARCHIVE"
+}
+
+legacy_detached_write_audit_note() {
+  local note
+  mkdir -p -m 700 "$STATE/retired" || return 1
+  note="$STATE/retired/$ID.$LEGACY_LANDED_PROOF_CANDIDATE.teardown"
+  [ -d "$STATE/retired" ] && [ ! -L "$STATE/retired" ] || return 1
+  [ ! -e "$note" ] && [ ! -L "$note" ] || return 1
+  (
+    umask 077
+    printf 'task=%s\npr=%s\nmerge_commit=%s\ncandidate_head=%s\nscratch_archive=%s\n' \
+      "$ID" "$LEGACY_LANDED_PROOF_PR" "$LEGACY_LANDED_PROOF_MERGE" \
+      "$LEGACY_LANDED_PROOF_CANDIDATE" "${LEGACY_DETACHED_SCRATCH_ARCHIVE:-absent}"
+  ) > "$note"
+}
+
 backlog_refresh_reminder() {
   local pr done_cmd report_path
   [ "$KIND" = secondmate ] && return 0
@@ -1061,7 +1193,7 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    if [ -n "$dirty" ] || { [ -n "$unmerged" ] && { [ "$LEGACY_DETACHED_ENDPOINT" != 1 ] || ! legacy_detached_exact_landed_proof; }; }; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
@@ -1079,7 +1211,8 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch"; then
+    if { [ "$LEGACY_DETACHED_ENDPOINT" = 1 ] && ! legacy_detached_exact_landed_proof; } \
+       || { [ "$LEGACY_DETACHED_ENDPOINT" != 1 ] && ! work_is_landed "$branch"; }; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
@@ -1817,7 +1950,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
+if validate_worktree_teardown_safety; then
     :
   else
     safety_rc=$?
@@ -1828,6 +1961,18 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+if [ "$LEGACY_DETACHED_ENDPOINT" = 1 ]; then
+  if [ -z "$LEGACY_LANDED_PROOF_CANDIDATE" ]; then
+    LEGACY_LANDED_PROOF_CANDIDATE=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
+      echo "REFUSED: cannot record the verified detached task head for $ID; preserving task state." >&2
+      exit 1
+    }
+    LEGACY_LANDED_PROOF_PR=not-applicable
+    LEGACY_LANDED_PROOF_MERGE=not-applicable
+  fi
+  legacy_detached_scratch_archive_preflight || exit 1
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
@@ -1866,15 +2011,17 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+  if [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
     fi
+    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -1885,6 +2032,17 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
+fi
+
+if [ "$LEGACY_DETACHED_ENDPOINT" = 1 ]; then
+  legacy_detached_archive_scratch || {
+    echo "error: cannot archive detached task scratch for $ID; retaining task metadata" >&2
+    exit 1
+  }
+  legacy_detached_write_audit_note || {
+    echo "error: cannot write detached task audit note for $ID; retaining task metadata" >&2
     exit 1
   }
 fi
@@ -1967,7 +2125,9 @@ if [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
 fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+if [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
+  [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
