@@ -529,6 +529,15 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
     "$SESSION_START" "$@"
 }
 
+run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
+  local harness=$1 home=$2 root=$3 path=$4
+  shift 4
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    "$SESSION_START" "$@"
+}
+
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
 # secondmate home wired to the real spawn implementation through the fixture
 # root. Echoes root|home|fakebin|mate|log|spawned.
@@ -2029,6 +2038,33 @@ $(hash_file_for_test "$root/AGENTS.md")" ] \
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
+test_codex_clear_and_compact_reemit_the_drifted_contract() {
+  local rec root home fakebin startup baseline clear_out compact_out
+  rec=$(new_world codex-instruction-refresh)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" codex
+  printf '%s\n' 'CODEX_TEST_INSTRUCTION=original' > "$root/AGENTS.md"
+
+  startup=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$startup" "primary harness: codex" "codex fixture did not select the codex refresh policy"
+  baseline=$(cat "$home/state/.session-start-agents-baseline")
+  printf '%s\n' 'CODEX_TEST_INSTRUCTION=updated' > "$root/AGENTS.md"
+
+  clear_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear)
+  compact_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$clear_out" "CODEX_TEST_INSTRUCTION=updated" \
+    "a drifted Codex clear did not emit the replacement instructions"
+  assert_contains "$compact_out" "CODEX_TEST_INSTRUCTION=updated" \
+    "a drifted Codex compact did not emit the replacement instructions"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a Codex rebuild rewrote the true-start baseline"
+
+  pass "Codex clear and compact use the immutable true-start baseline to re-emit the current contract"
+}
+
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
   local rec root home fakebin reemit readonly_out holder_pid
   rec=$(new_world reemit-tangle)
@@ -2325,6 +2361,7 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_codex_clear_and_compact_reemit_the_drifted_contract
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
 echo "# fm-session-start.test.sh: all assertions passed"

@@ -13,6 +13,14 @@
 #   FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
 #     tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 #
+# To reproduce a historical stale implementation before verifying the fixed
+# branch, select a ref that lacks this change and expect the old marker:
+#
+#   FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+#   FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=origin/main \
+#   FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=stale \
+#     tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+#
 # This costs real Pi model turns and requires its normal authenticated profile.
 set -u
 
@@ -31,6 +39,12 @@ NONCE=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 OLD_MARKER="AGENTS_MARKER=old-$NONCE"
 NEW_MARKER="AGENTS_MARKER=new-$NONCE"
 READY_MARKER="INSTRUCTION_REFRESH_READY=$NONCE"
+TEST_REF=${FM_SESSIONSTART_INSTRUCTION_REFRESH_REF:-HEAD}
+EXPECTATION=${FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT:-updated}
+case "$EXPECTATION" in
+  updated|stale) ;;
+  *) printf 'not ok - expected FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=updated or stale, got: %s\n' "$EXPECTATION" >&2; exit 2 ;;
+esac
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -65,6 +79,17 @@ wait_for_file() {  # <path> [attempts]
   return 1
 }
 
+wait_for_line_count() {  # <text> <minimum-count> [attempts]
+  local expected=$1 minimum=$2 attempts=${3:-90} attempt=0 count
+  while [ "$attempt" -lt "$attempts" ]; do
+    count=$(capture | grep -Fc "$expected" || true)
+    [ "$count" -ge "$minimum" ] && return 0
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 send_line() {  # <text>
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "$1"
   sleep 1
@@ -83,7 +108,8 @@ command -v git >/dev/null 2>&1 || fail "git not found"
 
 mkdir -p "$LAB"
 git clone --quiet --no-hardlinks "$ROOT" "$PROJECT" || fail "could not create isolated Firstmate checkout"
-git -C "$PROJECT" checkout -q -B main || fail "could not make isolated checkout's main branch"
+git -C "$PROJECT" checkout -q -B main "$TEST_REF" \
+  || fail "could not check out isolated test ref $TEST_REF"
 git -C "$PROJECT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main \
   || fail "could not set the isolated checkout's default branch"
 git -C "$PROJECT" config user.email fmtest@example.invalid
@@ -94,9 +120,13 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config"
 mv "$PROJECT/bin/fm-sessionstart-run.sh" "$PROJECT/bin/.fm-sessionstart-run.real.sh"
 cat > "$PROJECT/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
+set -o pipefail
 set -u
-printf '%s\n' "$*" >> "${FM_HOME:?}/state/.sessionstart-e2e-sources"
-exec "$(dirname "$0")/.fm-sessionstart-run.real.sh" "$@"
+state="${FM_HOME:?}/state"
+printf 'argv=%s pi=%s root=%s home=%s\n' "$*" "${PI_CODING_AGENT:-absent}" "${FM_ROOT_OVERRIDE:-absent}" "${FM_HOME:-absent}" \
+  >> "$state/.sessionstart-e2e-sources"
+"$(dirname "$0")/.fm-sessionstart-run.real.sh" "$@" | tee -a "$state/.sessionstart-e2e-output"
+exit "${PIPESTATUS[0]}"
 SH
 chmod +x "$PROJECT/bin/fm-sessionstart-run.sh"
 cat > "$PROJECT/AGENTS.md" <<EOF
@@ -108,7 +138,7 @@ printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$PROJECT/.pi/settings
 
 tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$PROJECT" -x 220 -y 55 \
   -e "FM_HOME=$HOME_DIR" -e "FM_ROOT_OVERRIDE=$PROJECT" \
-  pi -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts" \
+  pi --no-tools -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts" \
   || fail "could not start isolated Pi session"
 
 # Pi may ask for project trust before project-local context files and extensions
@@ -130,20 +160,25 @@ wait_for_file "$HOME_DIR/state/.sessionstart-e2e-sources" 120 || {
   capture >&2
   fail "Pi extension did not invoke the real session-start wrapper"
 }
-grep -Fx -- '--source startup' "$HOME_DIR/state/.sessionstart-e2e-sources" >/dev/null || {
+grep -Fqx -- 'argv=--source startup pi=true root='"$PROJECT"' home='"$HOME_DIR" "$HOME_DIR/state/.sessionstart-e2e-sources" >/dev/null || {
   capture >&2
   printf '# Pi session-start sources:\n' >&2
   cat "$HOME_DIR/state/.sessionstart-e2e-sources" >&2
   fail "Pi E2E did not begin from true source=startup"
 }
-wait_for_file "$HOME_DIR/state/.session-start-agents-baseline" 120 || {
-  capture >&2
-  printf '# Pi session-start sources:\n' >&2
-  cat "$HOME_DIR/state/.sessionstart-e2e-sources" >&2
-  printf '# isolated state files:\n' >&2
-  find "$HOME_DIR/state" -maxdepth 1 -type f -print -exec sh -c 'printf "%s: " "$1"; head -n 2 "$1"' _ {} \; >&2
-  fail "Pi did not complete true-start instruction baseline recording"
-}
+if [ "$EXPECTATION" = updated ]; then
+  wait_for_file "$HOME_DIR/state/.session-start-agents-baseline" 120 || {
+    capture >&2
+    printf '# Pi session-start sources:\n' >&2
+    cat "$HOME_DIR/state/.sessionstart-e2e-sources" >&2
+    printf '# isolated state files:\n' >&2
+    find "$HOME_DIR/state" -maxdepth 1 -type f -print -exec sh -c 'printf "%s: " "$1"; head -n 2 "$1"' _ {} \; >&2
+    fail "Pi did not complete true-start instruction baseline recording"
+  }
+else
+  [ ! -e "$HOME_DIR/state/.session-start-agents-baseline" ] \
+    || fail "stale reference unexpectedly recorded an instruction baseline"
+fi
 
 cat > "$PROJECT/AGENTS.md" <<EOF
 When asked exactly "Which validation contract marker is active?", reply with exactly "$NEW_MARKER" and no other text.
@@ -163,16 +198,28 @@ wait_for_text 'Compacted from' 120 || {
   fail "Pi did not complete a real compaction"
 }
 
-send_line 'Which validation contract marker is active?'
-wait_for_text "$NEW_MARKER" 120 || {
-  capture >&2
-  fail "Pi retained the stale session-start AGENTS.md contract after compaction"
-}
-
-[ -f "$HOME_DIR/state/.session-start-agents-baseline" ] \
-  || fail "Pi startup did not record the true-start instruction baseline"
-[ "$(sed -n '2p' "$HOME_DIR/state/.session-start-agents-baseline")" != "$(shasum -a 256 "$PROJECT/AGENTS.md" | awk '{print "sha256:" $1}')" ] \
-  || fail "Pi compaction rewrote the true-start instruction baseline"
-
-pass "Pi $(pi --version 2>/dev/null | head -n 1) re-injects updated AGENTS.md after a real compact in an isolated session"
+if [ "$EXPECTATION" = updated ]; then
+  send_line 'Which validation contract marker is active?'
+  wait_for_text "$NEW_MARKER" 120 || {
+    capture >&2
+    printf '# compact delivery records:\n' >&2
+    grep -F -A5 -B2 'CURRENT AGENTS.md - INSTRUCTION REFRESH' "$HOME_DIR/state/.sessionstart-e2e-output" >&2 || true
+    printf '# session-start invocation records:\n' >&2
+    cat "$HOME_DIR/state/.sessionstart-e2e-sources" >&2
+    fail "Pi retained the stale session-start AGENTS.md contract after compaction"
+  }
+  [ -f "$HOME_DIR/state/.session-start-agents-baseline" ] \
+    || fail "Pi startup did not record the true-start instruction baseline"
+  [ "$(sed -n '2p' "$HOME_DIR/state/.session-start-agents-baseline")" != "$(shasum -a 256 "$PROJECT/AGENTS.md" | awk '{print "sha256:" $1}')" ] \
+    || fail "Pi compaction rewrote the true-start instruction baseline"
+  pass "Pi $(pi --version 2>/dev/null | head -n 1) re-injects updated AGENTS.md after a real compact in an isolated session"
+else
+  old_reply_count=$(capture | grep -Fc "$OLD_MARKER" || true)
+  send_line 'Which validation contract marker is active?'
+  wait_for_line_count "$OLD_MARKER" "$((old_reply_count + 1))" 120 || {
+    capture >&2
+    fail "stale reference did not preserve the original AGENTS.md contract after compaction"
+  }
+  pass "Pi $(pi --version 2>/dev/null | head -n 1) reproduces stale AGENTS.md after a real compact"
+fi
 echo "# fm-sessionstart-instruction-refresh-live-e2e.test.sh: all live assertions passed"

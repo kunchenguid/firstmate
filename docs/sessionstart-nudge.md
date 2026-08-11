@@ -35,7 +35,7 @@ The full digest clears that completion record after acquiring the lock and repub
 `bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
 On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its own ancestry check stays silent whenever this process already holds the lock.
 
-`bin/fm-session-start.sh --reemit` owns which work a re-emit skips; its header is the single owner of that list.
+`bin/fm-session-start.sh --reemit` owns which work a re-emit skips, its true-start AGENTS.md baseline, and its supported stale-instruction refresh pairs; its header is the single owner of those mechanics.
 
 ## Runtime bound
 
@@ -92,6 +92,7 @@ It proves the run wrapper's source routing end to end against a real `fm-session
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard that confirms each installed run-tier adapter invokes the run wrapper and delivers its output into context.
 It verifies the context-preserving reopen source for every installed run-tier harness and context-reset delivery wherever the tracked TUI surface is reachable.
+`tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
 
 [`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.
