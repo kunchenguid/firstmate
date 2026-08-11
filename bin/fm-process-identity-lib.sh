@@ -87,6 +87,10 @@ fm_process_record_terminate() {  # <record-file> <label> [--malformed=refuse|rem
   case "$term_polls" in ''|*[!0-9]*|0) term_polls=10 ;; esac
   case "$poll_interval" in ''|*[!0-9.]*) poll_interval=0.1 ;; esac
 
+  if [ -L "$ws_file" ]; then
+    FM_PROCESS_RECORD_TERMINATE_REASON='malformed'
+    return 1
+  fi
   [ -f "$ws_file" ] || return 0
   if ! IFS= read -r record < "$ws_file" 2>/dev/null; then
     if [ "$malformed" = refuse ]; then
