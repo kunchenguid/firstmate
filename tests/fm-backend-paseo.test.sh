@@ -146,10 +146,12 @@ reset_responses
   read -r agent_id wt <<EOF
 $out
 EOF
-  if [ "$agent_id" = "paseo-agent-001" ] && [ "$wt" = "$TMP_ROOT/wt-paseo-1" ]; then
-    pass "fm_backend_paseo_create_task allocated worktree and spawned agent"
+  if [ "$agent_id" = "paseo-agent-001" ] && [ "$wt" = "$TMP_ROOT/wt-paseo-1" ] && \
+     grep -q "PASEO_CALL.*run.*--env.*GOTMPDIR=$task_tmp/gotmp" "$FM_PASEO_LOG" && \
+     grep -q "PASEO_CALL.*run.*--env.*TRACEPARENT=traceparent-123" "$FM_PASEO_LOG"; then
+    pass "fm_backend_paseo_create_task allocated worktree, passed env, and spawned agent"
   else
-    fail "unexpected task creation output: '$out'"
+    fail "unexpected task creation output or call log: '$out'"
   fi
 )
 
@@ -321,6 +323,64 @@ EOF
     pass "generic fm_backend_busy_state routed to paseo"
   else
     fail "generic dispatch failed for paseo busy_state: '$st'"
+  fi
+)
+
+# Test 16: fm-spawn.sh with backend=paseo passes TASK_TMP and suppresses unintended send commands
+(
+  reset_responses
+  : > "$FM_PASEO_LOG"
+  spawn_origin="$TMP_ROOT/spawn-origin.git"
+  spawn_proj="$TMP_ROOT/spawn-proj"
+  spawn_wt="$TMP_ROOT/wt-spawn-1"
+  git init --bare -q "$spawn_origin"
+  mkdir -p "$spawn_proj"
+  git -C "$spawn_proj" init -q 2>/dev/null || true
+  git -C "$spawn_proj" config user.email "test@example.com"
+  git -C "$spawn_proj" config user.name "Test"
+  touch "$spawn_proj/README"
+  git -C "$spawn_proj" add README
+  git -C "$spawn_proj" commit -qm "init"
+  git -C "$spawn_proj" remote add origin "$spawn_origin"
+  git -C "$spawn_proj" push -q origin HEAD
+  git -C "$spawn_proj" worktree add -q -b branch-spawn-1 "$spawn_wt"
+
+  export FM_HOME="$TMP_ROOT/fm-home"
+  export FM_ROOT="$ROOT"
+  export FM_FAKE_WORKTREE="$spawn_wt"
+  mkdir -p "$FM_HOME/state" "$FM_HOME/data/paseo-task-1"
+  printf 'Test brief instructions\n' > "$FM_HOME/data/paseo-task-1/brief.md"
+
+  printf '{"id":"paseo-agent-spawn-1"}\n' > "$FM_PASEO_RESPONSES/1.out"
+
+  out=$( "$ROOT/bin/fm-spawn.sh" paseo-task-1 "$spawn_proj" --backend paseo --mode no-mistakes --yolo off 2>&1 )
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    meta_file="$FM_HOME/state/paseo-task-1.meta"
+    if [ -f "$meta_file" ]; then
+      tasktmp_val=$(grep '^tasktmp=' "$meta_file" | cut -d= -f2-)
+      if [ "$tasktmp_val" = "/tmp/fm-paseo-task-1" ]; then
+        pass "fm-spawn.sh with backend=paseo bound TASK_TMP in metadata"
+      else
+        fail "unexpected tasktmp in metadata: '$tasktmp_val'"
+      fi
+    else
+      fail "meta file missing after paseo spawn"
+    fi
+
+    if grep -q "PASEO_CALL.*run.*--env.*GOTMPDIR=/tmp/fm-paseo-task-1/gotmp" "$FM_PASEO_LOG"; then
+      pass "fm-spawn.sh passed bound GOTMPDIR env to paseo run"
+    else
+      fail "GOTMPDIR env missing from paseo run invocation log"
+    fi
+
+    if grep -q "PASEO_CALL.*send" "$FM_PASEO_LOG"; then
+      fail "fm-spawn.sh incorrectly invoked paseo send during paseo backend launch"
+    else
+      pass "fm-spawn.sh suppressed shell send commands for paseo backend"
+    fi
+  else
+    fail "fm-spawn.sh failed with exit code $rc: $out"
   fi
 )
 
