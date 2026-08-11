@@ -2122,6 +2122,12 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       }
       TOP_ENDPOINT_STABLE_TARGET=$TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET
+    elif [ "$TEARDOWN_RAW_ENDPOINT_STATE" = alive ] && [ "$BACKEND" = herdr ]; then
+      teardown_child_endpoint_identity_proven "$ID" "$META" "$KIND" "$FM_HOME" "$WT" \
+        "$BACKEND" "$T" || {
+        echo "REFUSED: could not prove the live task endpoint for $ID; preserving task state and worktree" >&2
+        exit 1
+      }
     elif [ "$TEARDOWN_RAW_ENDPOINT_STATE" = dead ] && [ "$BACKEND" = tmux ]; then
       teardown_tmux_dead_endpoint_identity_proven "$ID" "$KIND" "$FM_HOME" "$WT" "$T" || {
         echo "REFUSED: could not close the exited task endpoint for $ID; preserving task state and worktree" >&2
