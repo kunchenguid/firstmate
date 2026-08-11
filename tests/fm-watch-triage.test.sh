@@ -26,6 +26,12 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
+mkdir -p "$TMP_ROOT/source-state"
+FM_STATE_OVERRIDE="$TMP_ROOT/source-state"
+export FM_STATE_OVERRIDE
+# shellcheck source=bin/fm-watch.sh
+. "$WATCH"
+unset FM_STATE_OVERRIDE
 
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -124,6 +130,23 @@ record_pi_busy() {  # <state-dir> <id>
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
+
+test_afk_unchanged_stale_hash_rearms_wedge_timer() {
+  local dir state current surfaced decision new_decision
+  dir="$TMP_ROOT/afk-unchanged-stale"; state="$dir/state"
+  mkdir -p "$state"
+  printf '%s\n' frozen-hash > "$state/current-hash"
+  printf '%s\n' frozen-hash > "$state/surfaced-hash"
+  current=$(cat "$state/current-hash")
+  surfaced=$(cat "$state/surfaced-hash")
+  decision=$(afk_stale_decision "$current" "$surfaced")
+  [ "$decision" = wedge-timer ] \
+    || fail "unchanged AFK stale hash returned $decision instead of rearming the wedge timer"
+  new_decision=$(afk_stale_decision new-hash "$surfaced")
+  [ "$new_decision" = surface ] \
+    || fail "distinct AFK stale hash returned $new_decision instead of preserving the immediate wake"
+  pass "unchanged AFK stale hashes rearm the bounded wedge-escalation timer"
+}
 
 test_signal_reason_is_actionable_classifier() {
   local dir state
@@ -1845,6 +1868,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_afk_unchanged_stale_hash_rearms_wedge_timer
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier

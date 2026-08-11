@@ -304,6 +304,16 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
+# Pure decision seam: a new hash keeps the immediate handoff, while an unchanged
+# hash enters the existing bounded timer instead of disappearing after one wake.
+afk_stale_decision() {  # <current-hash> <surfaced-hash>
+  if [ "$1" != "$2" ]; then
+    printf 'surface\n'
+  else
+    printf 'wedge-timer\n'
+  fi
+}
+
 # busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
 # BUSY_TURN_MAX_SECS old. Ages the per-task turn-ended marker, the harness-neutral
 # signal every verified harness's turn-end hook touches; before any turn has
@@ -1026,12 +1036,18 @@ EOF
             *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
-          # Daemon owns triage: one-shot per distinct stale hash, as before.
-          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
-          fi
+          # Daemon owns triage. Surface a distinct stale hash immediately, then
+          # keep an unchanged hash on the bounded wedge-escalation cadence.
+          case "$(afk_stale_decision "$h" "$(cat "$sf" 2>/dev/null || true)")" in
+            surface)
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              printf '%s' "$h" > "$sf"
+              wake "stale: $w"
+              ;;
+            wedge-timer)
+              wedge_timer_check "$w" "$ssf" "afk stale" "$ewf"
+              ;;
+          esac
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
