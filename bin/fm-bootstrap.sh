@@ -563,13 +563,14 @@ secondmate_sync() {
   return 0
 }
 
-# A relaunch replaces the endpoint record a digest may already have printed. On
-# the local pass that digest has not been composed yet, so the fact stays behind
-# FM_BOOTSTRAP_VERBOSE_FACTS as before; on the deferred network pass the digest
-# is already out, so reporting it is what keeps the superseded record from being
-# acted on.
+# Always reported, on both passes and at every verbosity. This is an unattended
+# mutation of an endpoint nobody was watching: the confirmed-absence path closes
+# the existing endpoint first, discarding whatever the exited agent left on
+# screen, and the agent that comes back is a new incarnation with none of that
+# context. An operator who is never told cannot tell that apart from the agent
+# they left running. On the deferred network pass the report also keeps the
+# endpoint record an already-printed digest carries from being acted on.
 report_relaunch() {  # <id> <cause> <where>
-  [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] || ! local_phase || return 0
   echo "BOOTSTRAP_INFO: secondmate $1 relaunched after $2 ($3)"
 }
 

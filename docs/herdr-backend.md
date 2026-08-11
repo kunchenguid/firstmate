@@ -277,6 +277,8 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 Tmux has no equivalent stale-record trap because its own classifier already derives every verdict from the pane's foreground processes rather than from a separate registry.
 
 The session-start sweep uses this probe.
+The proved-stale record therefore reaches an unattended path as well as the operator-driven `bin/fm-control.sh <id> exit` and `bin/fm-spawn.sh <id> --relaunch` recoveries: a secondmate whose record is proved stale reads `dead` in that sweep, which closes the endpoint and discards the exited agent's scrollback before respawning the secondmate.
+That outcome is always reported as `BOOTSTRAP_INFO: secondmate <id> relaunched after <cause> (<where>)`, at every verbosity and on both bootstrap passes, because nobody is watching the mutation happen.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
 ## Push events and polling fallback

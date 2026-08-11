@@ -20,8 +20,10 @@
 #     missing pane from an existing agent-less pane.
 #   - fm_backend_agent_alive preserves the older three-state compatibility view.
 #   - bin/fm-bootstrap.sh's secondmate_liveness_sweep recovers only dead or
-#     missing endpoints, keeps successful recovery and already-live results
-#     silent by default, and reports ambiguous and unreadable targets distinctly.
+#     missing endpoints, keeps an already-live result silent, always reports a
+#     completed recovery as a BOOTSTRAP_INFO fact because it mutates an endpoint
+#     nobody was watching, and reports ambiguous and unreadable targets
+#     distinctly.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
@@ -362,12 +364,18 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
-    "a successfully respawned secondmate should be handled silently"
+    "a successful respawn is not an actionable liveness problem"
+  # Reported on a default local session start, with FM_BOOTSTRAP_VERBOSE_FACTS
+  # unset: this closed an endpoint and replaced the agent behind it with nobody
+  # watching, and an operator who is never told cannot tell the new incarnation
+  # apart from the one they left running.
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 relaunched after confirmed agent absence on existing endpoint (backend=tmux)" \
+    "an unattended kill-and-respawn must always be reported"
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
-  pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+  pass "sweep: a confirmed-dead secondmate endpoint is killed, respawned, and reported"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -399,7 +407,9 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a successful missing-window recovery should stay silent by default"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a successful missing-window recovery is not an actionable liveness problem"
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 relaunched after recorded endpoint confidently missing (backend=tmux)" \
+    "an unattended respawn must always be reported, whatever authorized it"
   assert_contains "$(cat "$log")" "new-window" "an authoritatively missing Pi secondmate should be relaunched"
   assert_not_contains "$(cat "$log")" "kill-window" "an absent window should not need a destructive pre-kill"
   pass "sweep: an authoritatively missing Pi secondmate window is relaunched"
@@ -490,9 +500,10 @@ test_sweep_converges_no_retouch_once_alive() {
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  # Round 1: dead -> respawned silently (kill + new-window logged).
+  # Round 1: dead -> respawned and reported (kill + new-window logged).
   out1=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
-  assert_not_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1 should handle the successful respawn silently"
+  assert_not_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1's successful respawn is not an actionable liveness problem"
+  assert_contains "$out1" "BOOTSTRAP_INFO: secondmate sm1 relaunched" "round 1 should report the respawn it performed"
   [ -s "$log" ] || fail "round 1 should have logged the kill+respawn window operations"
 
   # Round 2: the (now-respawned) secondmate is genuinely alive - a second
@@ -500,6 +511,7 @@ test_sweep_converges_no_retouch_once_alive() {
   : > "$log"
   out2=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
   assert_not_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should handle the already-live secondmate silently"
+  assert_not_contains "$out2" "BOOTSTRAP_INFO: secondmate sm1 relaunched" "round 2 must not report a relaunch it did not perform"
   [ ! -s "$log" ] || fail "round 2 must not re-kill or re-respawn an already-live secondmate: $(cat "$log")"
   pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
 }

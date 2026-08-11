@@ -72,6 +72,11 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 # stopped), and a literal carrying a launch brief flips it to the value in
 # `becomes` (a new agent came up). FM_FAKE_NEVER_DIES suppresses the first, so
 # a stubborn agent can be tested too.
+# FM_FAKE_STATE_READ_DELAY makes the classifier's own read cost that many real
+# seconds, which is what a backend that must settle an endpoint before it
+# answers does. It is the only knob here that spends real time, and it spends
+# it inside the read rather than around it, so a postcondition wait that counts
+# its own polls instead of reading the clock is measurable.
 make_tmux_stub() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -119,7 +124,10 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          [ -z "${FM_FAKE_STATE_READ_DELAY:-}" ] \
+            || command -p sleep "$FM_FAKE_STATE_READ_DELAY"
+          cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
@@ -800,6 +808,37 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
+# The exit wait's budget is seconds of real time, not a count of poll intervals.
+# A state read is not bounded by POLL - a classifier that must settle an
+# endpoint before it answers costs whatever it costs - so counting polls spent
+# a multiple of the budget and then reported the budget as the time waited.
+# Here one read costs 0.3s against a 1s budget and a 0.01s poll: a
+# poll-counting wait would take 100 of those reads to refuse, and would still
+# call what it spent a 1 second wait.
+test_exit_wait_budgets_real_time_and_reports_it() {
+  local dir out rc measured reported
+  dir=$(new_case slow-state-read)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  SECONDS=0
+  out=$(env FM_FAKE_NEVER_DIES=1 FM_FAKE_STATE_READ_DELAY=0.3 \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=1 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  measured=$SECONDS
+  expect_code 1 "$rc" "a slow state read must not change the fail-closed refusal"$'\n'"$out"
+  assert_contains "$out" "exit=unconfirmed; the agent did not stop within its 1s budget" \
+    "the refusal should name the budget the wait was given"
+  [ "$measured" -le 10 ] \
+    || fail "the wait should end at its real 1s budget, but the exit took ${measured}s of wall clock"
+  reported=$(printf '%s\n' "$out" | sed -n 's/.*(waited \([0-9][0-9.]*\)s).*/\1/p')
+  [ -n "$reported" ] \
+    || fail "the refusal should report the duration actually waited, got: $out"
+  awk -v w="$reported" -v m="$measured" 'BEGIN{exit !(w >= 1 && w <= m + 1.5)}' \
+    || fail "the reported ${reported}s should be the real time waited, measured ${measured}s"
+  pass "fm-control exit: the agent-state wait spends a real-time budget and reports what it really waited"
+}
+
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
@@ -901,6 +940,7 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
+test_exit_wait_budgets_real_time_and_reports_it
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
