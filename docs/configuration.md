@@ -32,6 +32,16 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Pi statusline footer (/statusline)
+
+The tracked `.pi/extensions/fm-quota-statusline.ts` extension replaces Pi's stock footer only while it is active, and the `/statusline` command owns its activation.
+`/statusline` (or `/statusline on`) enables the footer and starts the periodic Codex quota refresh; `/statusline off` restores Pi's stock footer; `/statusline refresh` refreshes the Codex quota data without changing whether the footer is active.
+The footer shows the repository path and current git branch, the active model and effective thinking level, the live context usage against the active model's context window, and every verified Codex quota window that `quota-axi --provider codex --json` reports, each labeled with its real window label, remaining percentage, and reset countdown when supplied.
+It never invents a quota window or percentage: when quota data is unavailable the footer shows a concise `quota: n/a` marker, and a transient `quota-axi` failure retains the last known good windows marked stale with a `quota~` prefix.
+The extension refreshes quota data on Pi `session_start`, when the active model or thinking level changes, on `/statusline refresh`, and on a bounded five-minute timer that is cleared on `session_shutdown`.
+The refresh runs a bounded `quota-axi --provider codex --json` subprocess with a fifteen-second timeout and an in-flight guard, and the renderer is ANSI visible-width safe and collapses or truncates on narrow terminals.
+No credentials or raw `quota-axi` errors appear in the footer; only the normalized window data is shown.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
