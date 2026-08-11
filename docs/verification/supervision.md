@@ -345,6 +345,59 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Away-mode parking
+
+Every primary with a watcher wake path was audited on 2026-08-02 for whether it can deliver an ordinary watcher wake to firstmate, bypassing the away-mode daemon, while `state/.afk` exists.
+[`../watcher-continuity.md`](../watcher-continuity.md) "Away-mode parking" owns the resulting contract.
+
+| Primary | Wake path | Away-mode result |
+| --- | --- | --- |
+| Pi, pi-signed | `.pi/extensions/fm-primary-pi-watch.ts` automatic re-arm and `pi.sendUserMessage` | Fixed defect: every arm-cycle close had delivered a wake and re-armed, taking the watcher singleton from the daemon. A close or pending retry that observes away mode now parks an owner-scoped resume and re-arms automatically after return. Its final-delivery check shares the accepted one-instant residual below. |
+| OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` automatic re-arm and `client.session.promptAsync` | Fixed partial defect: new arms were already gated, but a cycle live at away-mode entry still delivered its wake plus a spurious continuity failure. Close and retry paths that observe away mode now park a lock-owner-scoped resume and re-arm automatically after return. Its final-delivery check shares the accepted one-instant residual below. |
+| Claude | `bin/fm-claude-stop-autoarm.sh` Stop `asyncRewake` | Already correct: the hook exits at its `state/.afk` gate before claiming the home, and re-checks the flag mid-cycle before any classification or rewake. |
+| Codex | Model-driven `bin/fm-watch-checkpoint.sh` foreground checkpoint | Already correct: `.codex/hooks.json` registers only the session-start nudge, the pre-tool seatbelts, and the turn-end guard, so no adapter can inject a wake. |
+| Grok | Model-driven tracked background `bin/fm-watch-arm.sh` task | Established-state defect fixed: an arm that observes `state/.afk` at a wake-return boundary exits successfully with `watcher: stood-down` instead of producing a synthetic completion wake. Its final check shares the accepted one-instant residual below. |
+| kimi | None | Not applicable: kimi has no primary watcher adapter and follows the unknown-harness fallback protocol; its only tracked hook surface is the crewmate turn-end token hook. |
+
+Behavioral regression coverage for the executable away-mode paths uses real processes and real close handlers rather than source-text assertions:
+
+```sh
+tests/fm-watch-arm.test.sh
+tests/fm-pi-watch-extension.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+```
+
+`tests/fm-watch-arm.test.sh` starts real watcher processes and proves both a pre-existing away flag and flags introduced after restart begins park the arm before signaling or forking, preserve the daemon's watcher process and lock, emit nothing while parked, exit promptly on `TERM`, and resume normal arming from the same process once the flag is cleared.
+It also forks real owned and attached watcher cycles, creates `state/.afk` while each child is live, and proves the tracked arm exits successfully with `watcher: stood-down` without returning a wake while the wake remains in the durable queue, with an away-mode-off control proving the same cycle still returns its wake to its caller.
+The owned and attached delivery-record cases prove both paths stand down through their shared resolver when the wake reason is unavailable from the arm's child output.
+`tests/fm-pi-watch-extension.test.sh` drives the tracked Pi extension and OpenCode plugin with real arm children: an away-mode arm request starts no cycle and delivers no wake, a close that observes away mode parks without delivery and automatically re-arms after the flag clears, clearing the flag mid-restoration cannot replay the suppressed wake, pending retries resume without replay, and queued captain-relevant records remain available to daemon housekeeping.
+`tests/fm-claude-stop-autoarm.test.sh` continues to cover Claude's unchanged away-mode boundary, including the flag appearing mid-cycle.
+
+The shell and adapter regressions cover established-state parking, parked resume, and the mid-restore-clear race; they do not claim coverage of the accepted final check-to-effect instant.
+That accepted residual spans the arm layer and the Pi and OpenCode final-delivery paths: away-mode activation between the last flag check and the immediately following completion or delivery can produce at most one spurious wake per transition.
+It fails safe toward an extra wake, never a missed wake, because `state/.wake-queue` retains every wake and `bin/fm-wake-drain.sh` remains its sole consumer.
+Point-in-time checks cannot eliminate the race by construction, and fully closing it requires the deliberately deferred cross-component AFK-transition handshake.
+Every established-away-state case remains covered because an arm or adapter that observes away mode before its decision parks or suppresses delivery.
+
+The away-mode cases were confirmed to fail against the pre-fix adapters and arm layer before the fix was applied.
+
+The equivalent adapter-owned boundaries were reverified live on 2026-08-03 with Pi 0.82.0 and OpenCode 1.18.11. Both runs entered away mode with a real watcher cycle already live, observed an actionable close with no model delivery or successor, confirmed that the wake remained in `state/.wake-queue`, cleared away mode, observed automatic re-arm without replay, and then delivered and handled an ordinary away-mode-off control wake.
+
+```sh
+FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_OPENCODE_LIVE_E2E=1 \
+  FM_OPENCODE_LIVE_E2E_WATCH_ONLY=1 \
+  FM_OPENCODE_LIVE_E2E_MODEL=opencode/big-pickle \
+  tests/fm-opencode-primary-live-e2e.test.sh
+```
+
+OpenCode's stored OpenAI token was expired, so the watcher-only live path used OpenCode's bundled `opencode/big-pickle` provider rather than claiming the unrelated Ahoy model-behavior matrix passed on that provider. Exact observed outputs:
+
+```text
+ok - Pi 0.82.0 live E2E covered away-mode parking plus Calm, Ahoy, near misses, and watcher continuity
+ok - OpenCode 1.18.11 live E2E covered away-mode parking and watcher continuity
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
