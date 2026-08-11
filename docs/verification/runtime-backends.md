@@ -76,6 +76,9 @@ fm_backend_agent_state tmux museliv:zsh
 alive
 ```
 
+The crewmate-only agy 1.1.12 adapter was verified separately on 2026-08-11 against tmux on macOS arm64: its exact `agy` foreground identity classifies `alive`, anchored with no glob so names merely containing `agy` stay ambiguous (pinned by `tests/fm-agy-harness.test.sh`).
+[`antigravity.md`](antigravity.md) owns that identity evidence, and `FM_AGY_SIGNALS_LIVE=1 tests/fm-agy-signals-live-e2e.test.sh` is its refresh guard.
+
 `#{pane_current_command}` and foreground `ps -o comm=` read different name fields, but which one preserves executable identity is platform-dependent.
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
@@ -170,7 +173,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and agy share that backend cleanup boundary; their harness-specific hook files, tokens, trust entries, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
 
@@ -201,6 +204,7 @@ All six installed harnesses' real idle composers reached a proven `empty` (Claud
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after any harness upgrade; rerun it and update the versions above rather than trusting this table across releases.
+agy's separated-pair verdict is the one composer surface this matrix guard does not launch, because it requires launch-time workspace pre-trust plus a live `agy` identity; [`antigravity.md`](antigravity.md) owns its composer evidence, verified separately on 2026-08-11 through its own live guard.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 

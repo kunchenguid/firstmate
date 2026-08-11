@@ -420,7 +420,7 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 | Skill invocation | `/<skill>`, the claude/grok form. |
 | Autonomy | `--yolo`, which disables approval, disables the sandbox, and trusts the workspace for the run. |
 | Trust dialog | `Do you trust this workspace?` with `1 Trust and continue` preselected, accepted by Enter. `--yolo` suppresses it entirely, which is what firstmate relies on because every task gets a fresh worktree path. |
-| Environment marker | None. Detection is process ancestry on the anchored prefix `muse-bin-*`. The launch clears foreign primary markers before Muse starts so their higher detection precedence cannot override that ancestry. `MUSE_CURRENT_SESSION_LOG` is a session-log PATH rather than an identity, and its export to tool subprocesses is unverified. |
+| Environment marker | None. Detection is process ancestry on the anchored prefix `muse-bin-*`. The launch clears foreign harness markers before Muse starts so their higher detection precedence cannot override that ancestry. `MUSE_CURRENT_SESSION_LOG` is a session-log PATH rather than an identity, and its export to tool subprocesses is unverified. |
 | Composer | Bordered box whose prompt glyph is `⟩` (U+27E9) in truecolor `38;2;90;160;255`, luminance ~149.9 - the narrowest margin over the 128 ghost threshold in the fleet. Typed text is `38;2;204;211;219` (~209.8). No idle placeholder or ghost text was observed. |
 | Effort | `--reasoning-effort`, default `high`; see the launch-profile table above for the mapping. |
 | Resume | `muse resume --last` or `muse resume <session-uuid>`; bare `muse resume` opens a picker. |
