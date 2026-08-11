@@ -312,17 +312,8 @@ make_lease_lifecycle_fakebin() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "${1:-}" in
-  get)
-    [ ! -e "$FM_FAKE_LEASE" ] || exit 1
-    printf '%s\n' "${4:-unknown}" > "$FM_FAKE_LEASE"
-    printf '%s\n' "$FM_FAKE_POOL_WT"
-    ;;
-  return)
-    [ "${3:-}" = "$FM_FAKE_POOL_WT" ] || exit 1
-    rm -f "$FM_FAKE_LEASE"
-    ;;
-esac
+cd "$FM_REAL_TREEHOUSE_PROJECT"
+exec env HOME="$FM_REAL_TREEHOUSE_HOME" "$FM_REAL_TREEHOUSE" "$@"
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -352,13 +343,10 @@ SH
 }
 
 test_treehouse_lease_lifecycle() {
-  local home proj wt fakebin lease pane out status id
+  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id live_pid
   home="$TMP_ROOT/lease-home"
   proj=$(make_repo "$TMP_ROOT/lease-proj")
-  wt="$TMP_ROOT/lease-wt"
-  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
   fakebin=$(make_lease_lifecycle_fakebin "$TMP_ROOT/lease-fake")
-  lease="$TMP_ROOT/lease-held"
   pane="$TMP_ROOT/lease-pane"
   id=lease-life-hh8
   mkdir -p "$home/data/$id"
@@ -368,27 +356,45 @@ test_treehouse_lease_lifecycle() {
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX=fake \
-    FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" FM_FAKE_PANE_STATE="$pane" \
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" FM_FAKE_PANE_STATE="$pane" \
     PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex \
     --mode no-mistakes --yolo off 2>&1); status=$?
   expect_code 0 "$status" "durably leased spawn should succeed: $out"
-  assert_present "$lease" "spawn did not retain the durable lease"
+  stopped_wt=$(sed -n 's/^worktree=//p' "$home/state/$id.meta")
+  [ -d "$stopped_wt" ] || fail "spawn did not retain a real Treehouse worktree"
 
-  if FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" "$fakebin/treehouse" get --lease --lease-holder contender >/dev/null 2>&1; then
-    fail "a concurrently-live worker reacquired the leased pool slot"
-  fi
+  live_wt=$(FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" get --lease --lease-holder live-worker) \
+    || fail "real Treehouse could not acquire a concurrent lease"
+  [ "$live_wt" != "$stopped_wt" ] || fail "real Treehouse recycled the stopped-but-preserved lease"
+  (cd "$live_wt" && sleep 60) &
+  live_pid=$!
+  contender_wt=$(FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" get --lease --lease-holder contender) \
+    || fail "real Treehouse could not acquire a contender lease"
+  [ "$contender_wt" != "$stopped_wt" ] && [ "$contender_wt" != "$live_wt" ] \
+    || fail "real Treehouse double-booked a durable lease"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" FM_FAKE_PANE_STATE="$pane" \
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" FM_FAKE_PANE_STATE="$pane" \
     PATH="$fakebin:$PATH" "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1); status=$?
   expect_code 0 "$status" "teardown should release the durable lease: $out"
-  assert_absent "$lease" "teardown left the durable lease held"
-  FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" "$fakebin/treehouse" get --lease --lease-holder successor >/dev/null \
-    || fail "the pool slot was not reusable after teardown"
-  FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" "$fakebin/treehouse" return --force "$wt"
+  successor_wt=$(FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" get --lease --lease-holder successor) \
+    || fail "real Treehouse could not reuse the released slot"
+  [ "$successor_wt" = "$stopped_wt" ] || fail "teardown did not make its released slot reusable"
 
-  pass "fm-spawn/fm-teardown: durable leases prevent reuse until teardown"
+  kill "$live_pid" 2>/dev/null || true
+  wait "$live_pid" 2>/dev/null || true
+  for wt in "$live_wt" "$contender_wt" "$successor_wt"; do
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+      FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" return --force "$wt" >/dev/null
+  done
+
+  pass "fm-spawn/fm-teardown: real durable leases remain distinct until teardown"
 }
 
 test_lib_classification
