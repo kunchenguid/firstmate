@@ -311,9 +311,58 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
+# Pins the exact migration the fold-version bump to 3 exists for: a v2 cursor
+# persisted BEFORE _fm_decision_key learned to adopt a mis-ordered [key=...]
+# from the note filed such a line under "default" (the only behavior v2 code
+# could produce). After upgrading to v3 semantics, the version mismatch alone
+# must force a full refold that reattributes the decision to its real key
+# instead of trusting the stale "default" attribution forward.
+test_v2_cursor_default_misattribution_is_corrected_by_the_version_bump() {
+  local dir state status cursor out ident status_bytes
+  dir=$(make_case cursor-fold-version-migration)
+  state="$dir/state"
+  status="$state/task7.status"
+  cursor="$state/.task7.open-decisions-cursor"
+  out="$dir/drain.out"
+
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$status"
+  status_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain for the v2 migration test failed"
+  ident=$(sed -n 's/^ident=//p' "$cursor")
+
+  # Overwrite the just-written (current-version) cursor with a hand-built v2
+  # one that reproduces the pre-fix bug: the mis-ordered decision incorrectly
+  # cached under "default", exactly what real v2 code would have persisted.
+  {
+    printf 'version=2\n'
+    printf 'offset=%s\n' "$status_bytes"
+    printf 'ident=%s\n' "$ident"
+    printf 'default\tneeds-decision\t[key=api-shape] pick REST or RPC'
+  } > "$cursor"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while migrating past a v2 cursor"
+  grep -F 'task7' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "the v2-cursor decision was not reattributed to its real key after the version bump: $(cat "$out")"
+  if grep -F 'task7' "$out" | grep -F '[key=default]' >/dev/null; then
+    fail "the v2 cursor's stale default misattribution survived the version bump: $(cat "$out")"
+  fi
+
+  printf 'resolved [key=api-shape]: went with REST\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed resolving the reattributed decision"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "the correctly-keyed resolution failed to close the reattributed decision: $(cat "$out")"
+  fi
+
+  pass "a v2 cursor's stale default misattribution is corrected by the fold-version bump, not carried forward"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_never_silently_returns_empty
 test_cursor_cache_read_failure_refolds_authoritative_status
 test_previous_fold_cache_is_refolded_under_current_semantics
+test_v2_cursor_default_misattribution_is_corrected_by_the_version_bump
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
