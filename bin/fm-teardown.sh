@@ -2606,6 +2606,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Remove this task's browser-refusal shim directory, written by fm-spawn only when
+# the installed chrome-devtools-axi could not be confirmed capable of named
+# sessions. The id is path-safe by the validation at the top of this script. The
+# shared parent is removed only when the last task's directory leaves it empty.
+rm -rf "$STATE/.browser-refusal/$ID"
+rmdir "$STATE/.browser-refusal" 2>/dev/null || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \

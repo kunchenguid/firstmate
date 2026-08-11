@@ -1143,22 +1143,66 @@ browser_isolation_env() {
 # is the silent degradation this whole pin exists to remove. The message says what
 # is still enforced, because the profile half of the pin above still applies here
 # and an operator who reads "refused" would otherwise assume nothing is.
-# Written into the TASK's own temp root, not the home's state dir. The directory
-# holding this shim goes on that agent's PATH ahead of every system directory, so
-# a location shared by every task in the home would let anything one agent drops
-# there shadow an arbitrary command - git, node, npx - for every later-launched
-# agent that takes this path. Agents run same-uid with permissions bypassed, so a
-# private directory removes that shadowing surface by construction instead of
-# policing what lands in a shared one. The costs are accepted deliberately: the
-# shim is rewritten on every spawn that needs it rather than shared across tasks,
-# and it can only be written once the task's temp root exists, which is why the
-# caller sits after that root is created rather than beside the launch assembly.
-# Teardown removes the whole temp root, so the shim is reclaimed with it. The
-# write still goes through a temp file so a reader never sees a half-written shim.
-write_browser_refusal_shim() {  # <task-temp-root> <reason>
-  local dir="$1/browser-refusal" tmp sq_reason
-  sq_reason=$(shell_quote "$2")
-  mkdir -p "$dir" || return 1
+# The directory holding this shim goes on that agent's PATH ahead of every system
+# directory, so its location is a security property rather than a filing decision
+# and it has to satisfy two things at once.
+#
+# It is TASK-SCOPED, at state/.browser-refusal/<id>/, because a directory shared
+# by every task in the home would let anything one agent drops there shadow an
+# arbitrary command - git, node, npx - for every later-launched agent that takes
+# this path; agents run same-uid with permissions bypassed, so per-task privacy
+# removes that surface by construction rather than by policing what lands in a
+# shared one.
+#
+# It lives under the home's own state dir rather than the task's /tmp temp root
+# because /tmp is world-writable and a task id is predictable and enumerable, so
+# on a shared host or a multi-tenant CI runner another local user could pre-create
+# the path and leave executables the agent resolves ahead of /usr/bin - the same
+# shadowing class, reintroduced across users instead of across tasks. The state
+# dir is not world-writable, and it also exists long before the first backend side
+# effect, which is what lets the caller abort cleanly (see the gate below).
+#
+# Location alone is not trusted: the directory is created owner-only and then
+# vouched for - a real directory rather than a symlink, owned by this uid, and
+# neither group- nor other-writable - before it is ever put on the agent's PATH.
+# A directory that cannot be vouched for refuses the launch, because an
+# unvouchable shim directory is worse than no shim. One that already exists with
+# loose permissions is refused rather than tightened, because tightening the mode
+# does not remove whatever was planted while it was open. Teardown removes it with
+# the task's other state records. The write goes through a temp file so a reader
+# never sees a half-written shim.
+browser_refusal_dir_vouched() {  # <dir>
+  local dir=$1 mode owner
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    return 1
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    owner=$(stat -f %u "$dir" 2>/dev/null) || return 1
+  else
+    owner=$(stat -c %u "$dir" 2>/dev/null) || return 1
+  fi
+  [ "$owner" = "$(id -u)" ] || return 1
+  mode=$(fm_inherit_file_mode "$dir") || return 1
+  case "$mode" in
+    ''|*[!0-7]*) return 1 ;;
+  esac
+  [ "$(( 8#$mode & 022 ))" -eq 0 ] || return 1
+}
+
+browser_refusal_dir_prepare() {  # <dir>
+  local dir=$1
+  if [ -L "$dir" ]; then
+    return 1
+  fi
+  (umask 077 && mkdir -p "$dir") || return 1
+  browser_refusal_dir_vouched "$dir" || return 1
+}
+
+write_browser_refusal_shim() {  # <state-dir> <task-id> <reason>
+  local root="$1/.browser-refusal" dir="$1/.browser-refusal/$2" tmp sq_reason
+  sq_reason=$(shell_quote "$3")
+  browser_refusal_dir_prepare "$root" || return 1
+  browser_refusal_dir_prepare "$dir" || return 1
   tmp="$dir/.chrome-devtools-axi.$$"
   cat > "$tmp" <<SH || { rm -f "$tmp"; return 1; }
 #!/bin/sh
@@ -1325,6 +1369,34 @@ esac
 # more assignments is always valid shell and always reaches the harness process
 # and the tool calls it runs.
 LAUNCH="$(browser_isolation_env "$ID") $LAUNCH"
+
+# The capability gate for the SESSION half of that pin. Only the per-task bridge
+# depends on the installed tool; the profile pins above stand on their own and are
+# left in place in every branch here. An absent chrome-devtools-axi is neither
+# capable nor incapable - there is nothing to refuse and nothing to run - so the
+# launch is left exactly as composed, and a capable tool likewise adds nothing.
+#
+# The guarantee this placement provides is a CLEAN ABORT: it runs before the
+# backend task window is created and before `treehouse get` acquires the worktree,
+# so a spawn that cannot install the refusal exits having created nothing the
+# fleet would have to reclaim. spawn_abort_cleanup does not reclaim a window or a
+# worktree, and no task meta exists yet for fm-teardown to work from, so an abort
+# sited after those steps would orphan both. The shim's directory lives in the
+# state dir precisely so it can be written this early.
+BROWSER_REFUSAL_REASON=
+if BROWSER_TOOL_BIN=$(type -P -- chrome-devtools-axi 2>/dev/null) && [ -x "$BROWSER_TOOL_BIN" ]; then
+  fm_browser_tool_supports_named_sessions "$BROWSER_TOOL_BIN" || case $? in
+    1) BROWSER_REFUSAL_REASON="The installed chrome-devtools-axi ($BROWSER_TOOL_BIN) does not support named sessions: its --help does not document CHROME_DEVTOOLS_AXI_SESSION, so it predates the per-task bridge firstmate requires." ;;
+    *) BROWSER_REFUSAL_REASON="firstmate could not confirm that the installed chrome-devtools-axi ($BROWSER_TOOL_BIN) supports named sessions: its --help failed, produced nothing, or did not finish within the probe's bound. That is unconfirmed rather than known-too-old." ;;
+  esac
+fi
+if [ -n "$BROWSER_REFUSAL_REASON" ]; then
+  BROWSER_REFUSAL_DIR=$(write_browser_refusal_shim "$STATE" "$ID" "$BROWSER_REFUSAL_REASON") || {
+    echo "error: could not write a browser-refusal shim firstmate can vouch for under $STATE/.browser-refusal/$ID; the installed chrome-devtools-axi cannot isolate this agent's browser and firstmate will not launch it without the refusal in place" >&2
+    exit 1
+  }
+  LAUNCH="PATH=$(shell_quote "$BROWSER_REFUSAL_DIR"):\"\$PATH\" $LAUNCH"
+fi
 
 case "$HARNESS" in
   pi|pi-signed)
@@ -2363,35 +2435,6 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
-
-# The capability gate for the SESSION half of the browser pin composed onto LAUNCH
-# above. Only the per-task bridge depends on the installed tool; the profile pins
-# stand on their own and are left in place on every branch here. An absent
-# chrome-devtools-axi is neither capable nor incapable - there is nothing to
-# refuse and nothing to run - so the launch is left exactly as composed, and a
-# capable tool likewise adds nothing.
-#
-# It sits here, rather than beside the launch assembly, because the refusal shim
-# is written into the task's own temp root (see write_browser_refusal_shim) and so
-# cannot be written before that root exists. Everything it touches is the LAUNCH
-# string, which is not sent to the pane until much further below, so the later
-# placement changes nothing about what the agent receives. The refusal's failure
-# mode is unchanged: a shim that cannot be written aborts the spawn rather than
-# launching an agent that would silently reach the shared default bridge.
-BROWSER_REFUSAL_REASON=
-if BROWSER_TOOL_BIN=$(type -P -- chrome-devtools-axi 2>/dev/null) && [ -x "$BROWSER_TOOL_BIN" ]; then
-  fm_browser_tool_supports_named_sessions "$BROWSER_TOOL_BIN" || case $? in
-    1) BROWSER_REFUSAL_REASON="The installed chrome-devtools-axi ($BROWSER_TOOL_BIN) does not support named sessions: its --help does not document CHROME_DEVTOOLS_AXI_SESSION, so it predates the per-task bridge firstmate requires." ;;
-    *) BROWSER_REFUSAL_REASON="firstmate could not confirm that the installed chrome-devtools-axi ($BROWSER_TOOL_BIN) supports named sessions: its --help failed, produced nothing, or did not finish within the probe's bound. That is unconfirmed rather than known-too-old." ;;
-  esac
-fi
-if [ -n "$BROWSER_REFUSAL_REASON" ]; then
-  BROWSER_REFUSAL_DIR=$(write_browser_refusal_shim "$TASK_TMP" "$BROWSER_REFUSAL_REASON") || {
-    echo "error: could not write the browser-refusal shim under $TASK_TMP; the installed chrome-devtools-axi cannot isolate this agent's browser and firstmate will not launch it without the refusal in place" >&2
-    exit 1
-  }
-  LAUNCH="PATH=$(shell_quote "$BROWSER_REFUSAL_DIR"):\"\$PATH\" $LAUNCH"
-fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks

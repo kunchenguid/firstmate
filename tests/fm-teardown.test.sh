@@ -2371,6 +2371,34 @@ test_missing_browser_tool_never_blocks_teardown() {
   pass "an absent browser tool leaves teardown unchanged"
 }
 
+test_browser_refusal_shim_directory_is_reclaimed() {
+  local case_dir rc refusal other
+  case_dir=$(make_case browser-refusal-reclaim)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # fm-spawn writes a refusing chrome-devtools-axi into a task-scoped directory and
+  # puts it on that agent's PATH when the installed tool cannot be confirmed capable
+  # of named sessions. It is task state, so teardown owns reclaiming it; left behind
+  # it accumulates one executable-bearing directory per task that ever hit the gate.
+  refusal="$case_dir/state/.browser-refusal/task-x1"
+  other="$case_dir/state/.browser-refusal/some-other-task"
+  mkdir -p "$refusal" "$other"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$refusal/chrome-devtools-axi"
+  chmod +x "$refusal/chrome-devtools-axi"
+  : > "$other/chrome-devtools-axi"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "browser-refusal-reclaim: teardown should succeed"
+  assert_absent "$refusal" \
+    "browser-refusal-reclaim: this task's refusal shim directory outlived its teardown"
+  assert_present "$other" \
+    "browser-refusal-reclaim: teardown removed another live task's refusal shim directory"
+  pass "teardown reclaims its own task's browser-refusal shim directory and leaves other tasks' alone"
+}
+
 # The session name through bin/fm-pr-lib.sh, the single owner fm-spawn pins the
 # launch from and fm-teardown re-derives its stop from. Comparing against it is
 # what proves the two sides aim at the same bridge.
@@ -2882,6 +2910,7 @@ test_task_browser_session_is_closed
 test_secondmate_teardown_closes_its_own_and_child_browser_sessions
 test_browser_tool_without_named_sessions_is_never_stopped
 test_missing_browser_tool_never_blocks_teardown
+test_browser_refusal_shim_directory_is_reclaimed
 test_browser_stop_targets_the_task_port_not_an_inherited_one
 test_browser_stop_for_a_maximum_length_task_id_matches_the_spawned_session
 test_browser_stop_that_never_returns_does_not_wedge_teardown

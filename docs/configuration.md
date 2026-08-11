@@ -341,7 +341,10 @@ None of those five reaches an authenticated profile, so the isolation above is u
 The per-task bridge is the one part of this that depends on your installed `chrome-devtools-axi`: it needs the named-session support the tool documents as `CHROME_DEVTOOLS_AXI_SESSION`, and firstmate checks for it by reading the tool's own `--help`.
 When it cannot confirm that support - the tool is older, or its help cannot be read - the launched agent instead gets a `chrome-devtools-axi` that refuses to run and explains what is missing, rather than quietly falling back to the shared `default` bridge on port 9224 that your own use of the tool sits on.
 The throwaway-profile pins still hold in that case, so any browser the agent does start still carries none of your cookies; only the private bridge is withheld, and the refusal message says exactly that.
-That refusing shim is written into the task's own temp root at `/tmp/fm-<id>/browser-refusal/`, which is what the launch puts on that one agent's `PATH`, so nothing another task writes can shadow a command for it; tearing the task down removes the temp root and the shim with it.
+That refusing shim is written into a task-scoped directory at `state/.browser-refusal/<id>/`, which is what the launch puts on that one agent's `PATH`.
+Keeping it per task means nothing another agent writes can shadow a command for this one, and keeping it inside the home's state dir rather than under world-writable `/tmp` means no other user on the machine can plant one there first.
+firstmate creates it owner-only and then checks it is a real directory owned by you and not group- or other-writable before putting it on any agent's `PATH`; if it cannot establish that, the spawn refuses rather than launch with a shim directory it cannot vouch for.
+That refusal happens before the task window or worktree exists, so nothing is left behind to clean up, and tearing the task down removes the directory with the task's other state records.
 Spawning always succeeds either way, and a task that never opens a browser is unaffected.
 If `chrome-devtools-axi` is not installed at all there is nothing to refuse and nothing changes.
 
