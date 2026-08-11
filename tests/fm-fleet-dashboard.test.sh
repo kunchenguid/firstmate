@@ -272,7 +272,8 @@ test_cockpit_shows_exactly_three_sections() {
   assert_contains "$review_shown" "waiting on their fixes" "expanded review lost its recorded status"
   assert_contains "$review_shown" "$THEIR_PR" "expanded review lost its full link"
 
-  assert_contains "$out" "3 need Pedro | 1 stuck" "fresh recap did not count actionable local attention"
+  assert_contains "$out" "3 need Pedro - 2 now, 1 aged over 7d | 1 stuck" \
+    "fresh recap did not separate current from aged captain holds"
   assert_contains "$out" "? Pick the flake-fix destination" \
     "an answered-looking open hold was not marked uncertain"
 
@@ -362,7 +363,8 @@ test_decision_projection_labels_answered_and_aged_open_holds() {
 
   out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "decision truth render failed"
   assert_contains "$out" "DECISIONS (5)" "an open hold or blocker was silently removed"
-  assert_contains "$out" "3 need Pedro | 1 stuck" "decision recap omitted local attention"
+  assert_contains "$out" "3 need Pedro - 2 now, 1 aged over 7d | 1 stuck" \
+    "decision recap did not separate current from aged captain holds"
   assert_contains "$out" "? Pick the flake-fix destination" \
     "explicit answer text was reported as needing a new answer"
   answered_num=$(printf '%s\n' "$out" | grep -F "Pick the flake-fix destination" | tail -1 | awk '{print $1}')
@@ -420,7 +422,8 @@ test_default_rows_are_one_line_with_a_fresh_recap() {
   out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 130 --all) \
     || fail "clean-list render failed"
   assert_contains "$out" "ATTENTION NOW" "fresh recap band is absent"
-  assert_contains "$out" "3 need Pedro | 1 stuck" "recap did not count fresh local attention"
+  assert_contains "$out" "3 need Pedro - 2 now, 1 aged over 7d | 1 stuck" \
+    "recap did not separate current from aged captain holds"
   assert_contains "$out" "Decide the public API" "recap did not name a current need"
   assert_contains "$out" "+2 more below" "recap truncation hid its remaining-attention count"
   title_line=$(printf '%s\n' "$out" | grep -F "Ship the review branch" | tail -1)

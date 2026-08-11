@@ -935,6 +935,12 @@ function recapFeaturedItems(recap) {
   return featured;
 }
 
+function recapNeedsPedroLabel(recap) {
+  const aged = recap.needsPedro.filter((item) => item.attentionClass === "aged").length;
+  const current = recap.needsPedro.length - aged;
+  return `${recap.needsPedro.length} need Pedro - ${current} now, ${aged} aged over 7d`;
+}
+
 function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
   width = Math.min(width, 80);
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
@@ -967,7 +973,7 @@ function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
   } else {
     lines.push(paint("bold", "ATTENTION NOW"));
     const counts = [
-      model.recap.needsPedro.length > 0 ? `${model.recap.needsPedro.length} need Pedro` : null,
+      model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
       model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
     ].filter(Boolean);
     lines.push(`  ${counts.join(" | ")}`);
@@ -1104,7 +1110,7 @@ function renderHtml(model) {
       ? "<p>Nothing needs Pedro.</p>"
       : [
           `<p><strong>${[
-            model.recap.needsPedro.length > 0 ? `${model.recap.needsPedro.length} need Pedro` : null,
+            model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
             model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
           ].filter(Boolean).join(" | ")}</strong></p>`,
           ...featured.map((item) => `<p><strong class="marker marker-${escapeHtml(item.markerKey)}">${escapeHtml(item.marker.glyph)}</strong> ${escapeHtml(item.name)}</p>`),
