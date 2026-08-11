@@ -59,11 +59,20 @@ grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale paylo
 [ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "handle_push_transition must commit dedupe only after enqueue"
 pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
 
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+[ "$(awk -F '\t' '$3 == "stale" && $4 == "default:wG:pQ" { count++ } END { print count + 0 }' "$STATE_DIR/.wake-queue")" -eq 1 ] \
+  || fail "an unacknowledged Herdr transition appended a duplicate stale row"
+[ "$(wc -l < "$WAKE_LOG" | tr -d '[:space:]')" -eq 1 ] \
+  || fail "an unacknowledged Herdr transition requested another primary turn"
+grep -q 'absorbed stale (already queued)' "$STATE_DIR/.watch-triage.log" 2>/dev/null \
+  || fail "an unacknowledged Herdr transition did not record its absorbed duplicate"
+pass "handle_push_transition: an unacknowledged same-window stale is absorbed without another primary turn"
+
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 (
   # shellcheck disable=SC2329 # Runtime override called by the isolated production owner.
-  fm_wake_append() { return 1; }
+  fm_wake_append_unless_queued() { return 1; }
   handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
 ) >/dev/null 2>&1 || true
 [ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a failed durable enqueue must leave the blocked edge eligible for reconnect reconciliation"

@@ -122,9 +122,22 @@ mark_surfaced() {  # <status-file>
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
+# Queue one stale notification per window while an equivalent durable row is
+# still awaiting acknowledgement. Every backend shares this queue boundary, so
+# an absorbed duplicate never reaches a primary harness as another turn.
+queue_stale_once() {  # <window> <reason>
+  local window=$1 reason=$2
+  fm_wake_append_unless_queued stale "$window" "$reason" || exit 1
+  if [ "$FM_WAKE_APPEND_RESULT" = already-queued ]; then
+    triage_log "absorbed stale (already queued): $window"
+    return 1
+  fi
+  return 0
+}
+
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
+  local backend=$1 session=$2 record=$3 pane_id to window task reason queued
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
@@ -136,8 +149,9 @@ handle_push_transition() {  # <backend> <session> <record>
     return
   fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
-  fm_wake_append stale "$window" "$reason" || exit 1
+  queued=0
+  queue_stale_once "$window" "$reason" || queued=$?
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status"
-  wake "$reason"
+  [ "$queued" -ne 0 ] || wake "$reason"
 }

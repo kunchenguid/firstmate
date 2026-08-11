@@ -359,6 +359,29 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+### Unacknowledged stale coalescing
+
+The adapter-neutral stale-key queue boundary was verified on 2026-08-11 with the watcher, queue, acknowledgement, activity-reset, acknowledged deep-inspection, and Herdr push-transition suites.
+Because an absorbed detection leaves the watcher process running without actionable stdout, Claude, Codex, Grok, OpenCode, Pi, and pi-signed retain their existing delivery mechanisms without receiving another turn request; polling backends share the watcher path, while Herdr's native transition path calls the same queue owner.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-watch-triage.test.sh
+bash tests/fm-wake-queue.test.sh
+bash tests/fm-supervision-events.test.sh
+```
+
+Observed output supporting the new guarantee:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=67 local_links=236
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=188702
+ok - the queue lock atomically coalesces same-key stale appends without suppressing distinct keys or kinds
+ok - handle_push_transition: an unacknowledged same-window stale is absorbed without another primary turn
+```
+
 Deterministic entry points:
 
 ```sh

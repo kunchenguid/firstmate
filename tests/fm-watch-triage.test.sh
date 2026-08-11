@@ -1011,9 +1011,9 @@ test_paused_authoritative_working_preserves_wedge_timer() {
 
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
-# wedge escalation fires, gets classified as "still validating" one poll later
-# (the timer restarts, see wedge_timer_check), and repeats forever on a pane
-# that never changes. A single escalation reason looks identical every round,
+# acknowledged wedge escalation gets classified as "still validating" one poll
+# later, restarts the timer, and can repeat forever on a pane that never changes.
+# A single escalation reason looks identical every round,
 # so nothing in the payload itself signals "this has now happened N times in a
 # row" - that judgment call was left entirely to the supervisor noticing the
 # repetition on its own. This is the safety-net fix: past
@@ -1073,6 +1073,110 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] || fail "escalation counter did not persist across consecutive rounds"
   unset FM_FAKE_CREW_STATE
   pass "consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold"
+}
+
+test_unacknowledged_wedge_stale_is_coalesced_until_next_full_cadence() {
+  local dir state fakebin out drain_out drain_err capture_file window key pane_hash sig pid i count since age
+  dir=$(make_case wedge-unacknowledged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; drain_err="$dir/drain.err"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-pending"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-pending.meta"
+  printf 'working: still monitoring ci\n' > "$state/wedge-pending.status"
+  sig=$(seen_sig "$state/wedge-pending.status"); printf '%s' "$sig" > "$state/.seen-wedge-pending_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 5 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the first wedge cadence did not produce an actionable notification: $(cat "$out")"
+  grep -F "escalation 1" "$out" >/dev/null || fail "the first wedge cadence omitted escalation 1: $(cat "$out")"
+  count=$(awk -F '\t' -v key="$window" '$3 == "stale" && $4 == key { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 1 ] || fail "the first wedge cadence did not create exactly one durable stale row"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] || fail "the first wedge cadence did not record escalation 1"
+
+  # Presentation starts the generation-bound handling interval but deliberately
+  # leaves the stale row unacknowledged, matching a primary turn that cannot run.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "the first wedge notification could not be presented"
+  grep -F 'WAKE_ACK_REQUIRED:' "$drain_err" >/dev/null || fail "the first wedge presentation omitted its acknowledgement boundary"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=0.1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    is_live_non_zombie "$pid" || { wait "$pid" 2>/dev/null || true; fail "an unacknowledged same-key stale requested another primary turn: $(cat "$out")"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  count=$(awk -F '\t' -v key="$window" '$3 == "stale" && $4 == key { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 1 ] || { reap "$pid"; fail "six pending cadences appended duplicate same-key stale rows"; }
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] \
+    || { reap "$pid"; fail "six pending cadences increased the user-visible escalation count"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = pending ] \
+    || { reap "$pid"; fail "pending stale handling did not preserve the fresh-cadence sentinel"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "pending same-key stale detection emitted another turn request: $(cat "$out")"; }
+
+  # A distinct task signal must still surface while this stale key is pending.
+  printf 'blocked: distinct task needs review\n' > "$state/other.status"
+  wait_for_exit "$pid" 50 || fail "a distinct task signal was hidden by pending stale coalescing"
+  grep -F "signal: $state/other.status" "$out" >/dev/null || fail "the distinct task signal did not request a primary turn: $(cat "$out")"
+  count=$(awk -F '\t' -v key="$window" '$3 == "stale" && $4 == key { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 1 ] || fail "the distinct signal changed the pending stale row count"
+  count=$(awk -F '\t' '$3 == "signal" && $4 == "other.status" { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -ge 1 ] || fail "the distinct task signal was not durably queued"
+
+  ack_stopped_cycle "$state" || fail "generation-bound acknowledgement did not remove the handled stale and signal rows"
+  [ ! -s "$state/.wake-queue" ] || fail "handled rows remained after generation-bound acknowledgement"
+
+  # The pending sentinel resets on the first post-ack observation. No stale row
+  # may appear while the configured three-second cadence is still incomplete.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=3 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "acknowledgement did not start a fresh wedge cadence"; }
+  since=$(cat "$state/.stale-since-$key")
+  age=0
+  while [ "$age" -lt 3 ]; do
+    is_live_non_zombie "$pid" || { wait "$pid" 2>/dev/null || true; fail "same-key stale recurred before the full post-ack cadence: $(cat "$out")"; }
+    count=$(awk -F '\t' -v key="$window" '$3 == "stale" && $4 == key { count++ } END { print count + 0 }' "$state/.wake-queue" 2>/dev/null)
+    [ "$count" -eq 0 ] || { reap "$pid"; fail "same-key stale queued before the full post-ack cadence"; }
+    sleep 0.1
+    age=$(( $(date +%s) - since ))
+  done
+  wait_for_exit "$pid" 30 || fail "an unchanged target did not emit one stale notification after the full new cadence"
+  count=$(awk -F '\t' -v key="$window" '$3 == "stale" && $4 == key { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 1 ] || fail "the first full post-ack cadence did not emit exactly one stale row"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 2 ] || fail "the acknowledged recurrence did not advance to escalation 2"
+  ack_stopped_cycle "$state" || fail "the post-ack recurrence could not be acknowledged"
+
+  # Real worker activity resets both timer and escalation history rather than
+  # letting the acknowledged stale recur against an obsolete pane hash.
+  printf 'new output from active worker' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ -e "$state/.wedge-escalations-$key" ]; do sleep 0.1; i=$((i + 1)); done
+  is_live_non_zombie "$pid" || { wait "$pid" 2>/dev/null || true; fail "worker activity requested another stale turn: $(cat "$out")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "worker activity did not clear stale escalation history"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "worker activity queued an obsolete stale notification"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional post-activity watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "unacknowledged same-key stale notifications coalesce without hiding other tasks, then recur once after acknowledgement and a full cadence"
 }
 
 test_wedge_escalation_resets_when_pane_becomes_active() {
@@ -1862,6 +1966,7 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
+test_unacknowledged_wedge_stale_is_coalesced_until_next_full_cadence
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound

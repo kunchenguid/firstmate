@@ -52,6 +52,47 @@ test_concurrent_append_and_drain() {
   pass "concurrent append plus drain preserves durable records through acknowledgement"
 }
 
+test_concurrent_same_key_stale_append_is_coalesced() {
+  local dir state lib pids i pid count out err sequence generation
+  dir=$(make_case concurrent-stale-coalesce)
+  state="$dir/state"
+  lib="$ROOT/bin/fm-wake-lib.sh"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  pids=
+  i=1
+  while [ "$i" -le 20 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      # shellcheck disable=SC1090,SC1091
+      . "$1"
+      fm_wake_append_unless_queued stale "same-window" "stale: same-window attempt $2"
+    ' _ "$lib" "$i" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do wait "$pid" || fail "concurrent conditional stale append failed"; done
+  count=$(awk -F '\t' '$3 == "stale" && $4 == "same-window" { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 1 ] || fail "concurrent same-key stale detections created $count durable rows instead of one"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_append_unless_queued stale "other-window" "stale: other-window"
+  ' _ "$lib" || fail "a distinct stale key was suppressed"
+  append_wake "$state" signal same-window.status "signal: same-window.status" || fail "a distinct signal kind was suppressed"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 3 ] || fail "same-key stale coalescing suppressed a distinct stale key or signal"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "coalesced stale queue could not be presented"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "coalesced stale presentation omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "coalesced stale rows could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged coalesced stale rows remained queued"
+  pass "the queue lock atomically coalesces same-key stale appends without suppressing distinct keys or kinds"
+}
+
 test_signal_catchup_without_running_watcher() {
   local dir state fakebin out drain_out drain_err status_file sequence generation
   dir=$(make_case signal)
@@ -660,6 +701,7 @@ test_interruption_before_and_after_raw_commit() {
 }
 
 test_concurrent_append_and_drain
+test_concurrent_same_key_stale_append_is_coalesced
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
