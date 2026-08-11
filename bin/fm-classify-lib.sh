@@ -332,6 +332,13 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
 _fm_decision_fold_line_set() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
   _FM_DECISION_FOLD_RESULT=$open
+  # A line without any transition verb cannot alter the open set. This cheap
+  # builtin guard avoids the subprocess-heavy authoritative fold for ordinary
+  # progress history; _fm_decision_fold_line still owns every transition rule.
+  case "$line" in
+    *needs-decision*|*blocked*|*"$resolve"*|*"$held"*) : ;;
+    *) return 0 ;;
+  esac
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || return 0
   _fm_status_line_verb_set "$line"
@@ -378,13 +385,6 @@ status_open_decisions() {  # <status-file>
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    # A line without any transition verb cannot alter the open set. This cheap
-    # builtin guard avoids the subprocess-heavy authoritative fold for ordinary
-    # progress history; _fm_decision_fold_line still owns every transition rule.
-    case "$line" in
-      *needs-decision*|*blocked*|*"$resolve"*|*"$held"*) : ;;
-      *) continue ;;
-    esac
     _fm_decision_fold_line_set "$open" "$line" "$resolve" "$held"
     open=$_FM_DECISION_FOLD_RESULT
   done < "$f"

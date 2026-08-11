@@ -230,8 +230,9 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  printf '%s\0' "$state" "$source" "$detail" "$raw" | jq -Rs '
+    split("\u0000") as $fields
+    | {state:$fields[0],source:$fields[1],detail:$fields[2],raw:$fields[3]}'
 }
 
 status_event_json() {  # <status-log>
@@ -242,13 +243,11 @@ status_event_json() {  # <status-log>
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
   fi
-  jq -n \
-    --arg path "$log" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
-    --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+  printf '%s\0' "$log" "$raw" "$verb" "$note" | jq -Rs \
+    --argjson present "$(bool_json "$present")" '
+    split("\u0000") as $fields
+    | {path:$fields[0],present:$present,kind:"event_history",
+       last_event:{state:$fields[2],note:$fields[3],raw:$fields[1]}}'
 }
 
 first_pr_url_in_file() {  # <file>
