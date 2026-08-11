@@ -654,8 +654,7 @@ retire_task_lifecycle_state() {  # <state-dir> <id> <meta> <gen>
     fi
     if [ "$rc" -eq 0 ]; then
       rm -f "$state_dir/$id.status" "$state_dir/$id.turn-ended" \
-        "$state_dir/$id.traex-turn-ended.pending" "$state_dir/$id.traex-native-seq" \
-        "$state_dir/$id.meta" || rc=1
+        "$state_dir/$id.traex-turn-ended.pending" "$state_dir/$id.meta" || rc=1
     fi
     fm_backend_herdr_traex_transition_lock_release "$state_dir" "$id" || true
     return "$rc"

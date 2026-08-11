@@ -24,7 +24,7 @@ Output (one line per pane.agent_status_changed event, TAB-separated, a raw
 projection - NOT the final normalized record; the bash normalizer adds the
 from_status and builds the canonical shape):
   @subscribed
-  <pane_id>\t<workspace_id>\t<agent_status>\t<agent>\t<state_change_seq>
+  <pane_id>\t<workspace_id>\t<agent_status>\t<agent>
 
 Exit status:
   0  streamed until the timeout elapsed with no error - a clean bounded wait;
@@ -136,13 +136,11 @@ def main(argv):
         if message.get("event") != "pane.agent_status_changed":
             continue
         data = message.get("data") or {}
-        sequence = data.get("state_change_seq")
         fields = (
             _clean(data.get("pane_id") or ""),
             _clean(data.get("workspace_id") or ""),
             _clean(data.get("agent_status") or ""),
             _clean(data.get("agent") or ""),
-            _clean("" if sequence is None else sequence),
         )
         sys.stdout.write("\t".join(fields) + "\n")
         sys.stdout.flush()

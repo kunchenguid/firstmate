@@ -633,6 +633,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TRAEX_META_STAGED=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -708,6 +709,7 @@ spawn_abort_cleanup() {
         >/dev/null 2>&1 || true
     fi
   fi
+  [ -z "${TRAEX_META_STAGED:-}" ] || rm -f -- "$TRAEX_META_STAGED" 2>/dev/null || true
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -2277,6 +2279,11 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+META_WRITE_PATH="$STATE/$ID.meta"
+if [ "$HARNESS" = traex ]; then
+  TRAEX_META_STAGED="$STATE_REAL/.$ID.meta.pending.${BASHPID:-$$}.$RANDOM"
+  META_WRITE_PATH=$TRAEX_META_STAGED
+fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -2319,7 +2326,7 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_WRITE_PATH"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 spawn_traex_readiness_set() {  # <expected> <new>
@@ -2359,10 +2366,11 @@ traex_spawn_fail() {  # <detail>
 
 if [ "$HARNESS" = traex ]; then
   if ! fm_backend_herdr_traex_binding_publish \
-    "$STATE_REAL" "$ID" "$HERDR_SES" "$HERDR_PANE_ID" "$BUSY_GEN"; then
+    "$STATE_REAL" "$ID" "$HERDR_SES" "$HERDR_PANE_ID" "$BUSY_GEN" "$TRAEX_META_STAGED"; then
     traex_spawn_fail "TraeX lifecycle ownership index could not be published"
     exit 1
   fi
+  TRAEX_META_STAGED=
 fi
 
 sq_brief=$(shell_quote "$BRIEF")

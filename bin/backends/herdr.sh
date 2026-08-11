@@ -2798,7 +2798,7 @@ fm_backend_herdr_traex_trust_dialog_exact() {  # <target>
 
 fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-project> <state-dir>
   local target=$1 expected=$2 source=$3 state=$4 expected_real source_real git_top git_real
-  local out agent status native_seq cwd foreground pane cwd_real foreground_real record
+  local out agent status cwd foreground pane cwd_real foreground_real record
   local accepted=0 saw_agent=0 i=0 polls interval
   fm_backend_herdr_parse_target "$target" || {
     echo "error: TraeX launch target '$target' is not a valid Herdr pane" >&2
@@ -2832,7 +2832,6 @@ fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-
     out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
     agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
     status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-    native_seq=$(printf '%s' "$out" | jq -r '.result.agent.state_change_seq // empty' 2>/dev/null)
     if [ -n "$agent" ]; then
       saw_agent=1
       pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null)
@@ -2859,7 +2858,7 @@ fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-
           record=$(fm_backend_herdr_normalize_event \
             "$FM_BACKEND_HERDR_PANE" "" "$status" "$agent")
           if ! fm_backend_herdr_traex_observe_transition \
-            "$state" "$FM_BACKEND_HERDR_SESSION" "$record" launch-working "$native_seq"; then
+            "$state" "$FM_BACKEND_HERDR_SESSION" "$record" launch-working; then
             echo "error: TraeX began processing, but its semantic lifecycle could not be bound to this task" >&2
             return 1
           fi
@@ -2893,10 +2892,10 @@ fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-
   return 1
 }
 
-fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>\t<state-change-seq>
+fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
-  printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // "", .result.agent.state_change_seq // ""] | @tsv' 2>/dev/null
+  printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
@@ -3063,7 +3062,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # literally "the composer read empty".
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [state-dir]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local transition_state=${7:-} identity agent status native_seq record
+  local transition_state=${7:-} identity agent status record
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ -n "$transition_state" ] \
      && ! fm_backend_herdr_traex_ready_lifecycle \
@@ -3077,11 +3076,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
     agent=$(printf '%s' "$identity" | cut -f1)
     status=$(printf '%s' "$identity" | cut -f2)
-    native_seq=$(printf '%s' "$identity" | cut -f3)
     [ "$agent" = traex ] && [ -n "$status" ] || { printf 'unknown'; return 0; }
     record=$(fm_backend_herdr_normalize_event "$FM_BACKEND_HERDR_PANE" "" "$status" "$agent")
     fm_backend_herdr_traex_observe_transition \
-      "$transition_state" "$FM_BACKEND_HERDR_SESSION" "$record" submit-baseline "$native_seq" \
+      "$transition_state" "$FM_BACKEND_HERDR_SESSION" "$record" submit-baseline \
       || { printf 'unknown'; return 0; }
     status=$(fm_transition_to_status "$FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD")
     [ -n "$status" ] || { printf 'unknown'; return 0; }
@@ -3317,7 +3315,7 @@ fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
 
 fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls> [state-dir]
   local session=$1 pane_id=$2 budget=$3 polls=${4:-1} transition_state=${5:-}
-  local i interval identity agent raw native_seq bs record saw_idle=0
+  local i interval identity agent raw bs record saw_idle=0
   case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
   interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
   case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
@@ -3328,7 +3326,6 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane_id" 2>/dev/null || true)
     agent=$(printf '%s' "$identity" | cut -f1)
     raw=$(printf '%s' "$identity" | cut -f2)
-    native_seq=$(printf '%s' "$identity" | cut -f3)
     bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
     case "$bs" in
       busy)
@@ -3336,7 +3333,7 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
           [ "$raw" = working ] || { printf 'unknown'; return 0; }
           record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "$agent")
           if ! fm_backend_herdr_traex_observe_transition \
-            "$transition_state" "$session" "$record" exact-working "$native_seq"; then
+            "$transition_state" "$session" "$record" exact-working; then
             printf 'unknown'
             return 0
           fi
@@ -3538,8 +3535,8 @@ fm_backend_herdr_traex_binding_read_path() {  # <path>
   FM_BACKEND_HERDR_TRAEX_BINDING_GEN=$gen
 }
 
-fm_backend_herdr_traex_meta_for_id() {  # <state-dir> <id>
-  local state=$1 id=$2 meta backend harness kind session pane window binding
+fm_backend_herdr_traex_meta_for_id() {  # <state-dir> <id> [meta-file]
+  local state=$1 id=$2 meta=${3:-} canonical backend harness kind session pane window binding
   FM_BACKEND_HERDR_TRAEX_ID=""
   FM_BACKEND_HERDR_TRAEX_READY=""
   FM_BACKEND_HERDR_TRAEX_GEN=""
@@ -3547,7 +3544,13 @@ fm_backend_herdr_traex_meta_for_id() {  # <state-dir> <id>
   FM_BACKEND_HERDR_TRAEX_PANE=""
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   declare -F fm_backend_meta_exact_value >/dev/null 2>&1 || return 1
-  meta="$state/$id.meta"
+  canonical="$state/$id.meta"
+  if [ -n "$meta" ]; then
+    case "$meta" in "$state/.$id.meta.pending."*) ;; *) return 1 ;; esac
+    [ ! -L "$canonical" ] || return 1
+  else
+    meta=$canonical
+  fi
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   backend=$(fm_backend_meta_exact_value "$meta" backend 2>/dev/null) || return 1
   harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null) || return 1
@@ -3579,10 +3582,11 @@ fm_backend_herdr_traex_transition_meta() {  # <state-dir> <session> <pane>
     && [ "$FM_BACKEND_HERDR_TRAEX_GEN" = "$gen" ]
 }
 
-fm_backend_herdr_traex_binding_publish() {  # <state-dir> <id> <session> <pane> <gen>
-  local state=$1 id=$2 session=$3 pane=$4 gen=$5 root path candidate old_id old_gen tmp old_umask rc=0
+fm_backend_herdr_traex_binding_publish() {  # <state-dir> <id> <session> <pane> <gen> [staged-meta]
+  local state=$1 id=$2 session=$3 pane=$4 gen=$5 staged_meta=${6:-} root path candidate
+  local old_id old_gen tmp old_umask canonical rc=0
   fm_backend_herdr_traex_transition_lock_acquire "$state" "$id" || return 1
-  if ! fm_backend_herdr_traex_meta_for_id "$state" "$id" \
+  if ! fm_backend_herdr_traex_meta_for_id "$state" "$id" "$staged_meta" \
      || [ "$FM_BACKEND_HERDR_TRAEX_SESSION" != "$session" ] \
      || [ "$FM_BACKEND_HERDR_TRAEX_PANE" != "$pane" ] \
      || [ "$FM_BACKEND_HERDR_TRAEX_GEN" != "$gen" ]; then
@@ -3604,7 +3608,8 @@ fm_backend_herdr_traex_binding_publish() {  # <state-dir> <id> <session> <pane> 
       old_id=$FM_BACKEND_HERDR_TRAEX_BINDING_ID
       old_gen=$FM_BACKEND_HERDR_TRAEX_BINDING_GEN
       if [ "$old_id" != "$id" ] || [ "$old_gen" != "$gen" ]; then
-        if fm_backend_herdr_traex_meta_for_id "$state" "$old_id" \
+        if [ "$old_id" != "$id" ] \
+           && fm_backend_herdr_traex_meta_for_id "$state" "$old_id" \
            && [ "$FM_BACKEND_HERDR_TRAEX_SESSION" = "$session" ] \
            && [ "$FM_BACKEND_HERDR_TRAEX_PANE" = "$pane" ] \
            && [ "$FM_BACKEND_HERDR_TRAEX_GEN" = "$old_gen" ]; then
@@ -3626,7 +3631,7 @@ fm_backend_herdr_traex_binding_publish() {  # <state-dir> <id> <session> <pane> 
         rm -f "$candidate" || rc=1
       fi
     done
-    rm -f "$state/$id.traex-turn-ended.pending" "$state/$id.traex-native-seq" || rc=1
+    rm -f "$state/$id.traex-turn-ended.pending" || rc=1
   fi
   if [ "$rc" -eq 0 ]; then
     tmp="$path.tmp.$$.$RANDOM"
@@ -3636,6 +3641,13 @@ fm_backend_herdr_traex_binding_publish() {  # <state-dir> <id> <session> <pane> 
       && mv -f "$tmp" "$path" || rc=1
     [ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null || true
     umask "$old_umask"
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$staged_meta" ]; then
+    canonical="$state/$id.meta"
+    if [ -L "$canonical" ] || ! mv -f -- "$staged_meta" "$canonical"; then
+      rm -f "$path" 2>/dev/null || true
+      rc=1
+    fi
   fi
   fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
   return "$rc"
@@ -3658,7 +3670,7 @@ fm_backend_herdr_traex_binding_retire_locked() {  # <state-dir> <id> <gen>
       rm -f "$candidate" || rc=1
     fi
   done
-  rm -f "$state/$id.traex-turn-ended.pending" "$state/$id.traex-native-seq" || rc=1
+  rm -f "$state/$id.traex-turn-ended.pending" || rc=1
   rmdir "$root" 2>/dev/null || true
   return "$rc"
 }
@@ -3789,69 +3801,6 @@ fm_backend_herdr_traex_readiness_set() {  # <state-dir> <session> <pane> <expect
   return "$rc"
 }
 
-fm_backend_herdr_traex_native_seq_path() {  # <state-dir> <id>
-  printf '%s/%s.traex-native-seq' "$1" "$2"
-}
-
-fm_backend_herdr_traex_native_seq_valid() {  # <seq>
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-}
-
-fm_backend_herdr_traex_native_seq_compare() {  # <left> <right>
-  local left=$1 right=$2
-  fm_backend_herdr_traex_native_seq_valid "$left" \
-    && fm_backend_herdr_traex_native_seq_valid "$right" || return 1
-  while [ "${left#0}" != "$left" ]; do left=${left#0}; done
-  while [ "${right#0}" != "$right" ]; do right=${right#0}; done
-  [ -n "$left" ] || left=0
-  [ -n "$right" ] || right=0
-  if [ "${#left}" -lt "${#right}" ]; then
-    printf '%s' -1
-  elif [ "${#left}" -gt "${#right}" ]; then
-    printf '%s' 1
-  elif [ "$left" = "$right" ]; then
-    printf '%s' 0
-  elif [[ "$left" < "$right" ]]; then
-    printf '%s' -1
-  else
-    printf '%s' 1
-  fi
-}
-
-fm_backend_herdr_traex_native_seq_read() {  # <state-dir> <id> <gen>
-  local path line extra version gen_field seq_field gen seq
-  path=$(fm_backend_herdr_traex_native_seq_path "$1" "$2")
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  { IFS= read -r line && ! IFS= read -r extra; } < "$path" 2>/dev/null || return 1
-  IFS=' ' read -r version gen_field seq_field extra <<< "$line"
-  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
-  case "$gen_field" in gen=*) gen=${gen_field#gen=} ;; *) return 1 ;; esac
-  case "$seq_field" in seq=*) seq=${seq_field#seq=} ;; *) return 1 ;; esac
-  [ "$gen" = "$3" ] && fm_backend_herdr_traex_native_seq_valid "$seq" || return 1
-  FM_BACKEND_HERDR_TRAEX_NATIVE_SEQ=$seq
-}
-
-fm_backend_herdr_traex_native_seq_commit() {  # <state-dir> <id> <gen> <seq>
-  local state=$1 id=$2 gen=$3 seq=$4 path tmp old_umask existing comparison rc=0
-  fm_busy_token_valid "$gen" && fm_backend_herdr_traex_native_seq_valid "$seq" || return 1
-  path=$(fm_backend_herdr_traex_native_seq_path "$state" "$id")
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    fm_backend_herdr_traex_native_seq_read "$state" "$id" "$gen" || return 1
-    existing=$FM_BACKEND_HERDR_TRAEX_NATIVE_SEQ
-    comparison=$(fm_backend_herdr_traex_native_seq_compare "$seq" "$existing") || return 1
-    [ "$comparison" -ge 0 ] || return 1
-    [ "$comparison" -ne 0 ] || return 0
-  fi
-  tmp="$path.tmp.$$.$RANDOM"
-  old_umask=$(umask)
-  umask 077
-  printf 'v1 gen=%s seq=%s\n' "$gen" "$seq" > "$tmp" \
-    && mv -f "$tmp" "$path" || rc=1
-  [ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null || true
-  umask "$old_umask"
-  return "$rc"
-}
-
 fm_backend_herdr_traex_completion_intent_path() {  # <state-dir> <id>
   printf '%s/%s.traex-turn-ended.pending' "$1" "$2"
 }
@@ -3978,11 +3927,11 @@ fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pa
 # a record that was busy after staging its ordinary durable turn notification.
 # Reconnect level reconciliation runs this same fold, so an idle edge that fell
 # between bounded subscriptions still closes exactly once.
-fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> [mode] [native-seq]
-  local state=$1 session=$2 record=$3 observation_mode=${4:-current} reported_seq=${5:-}
-  local pane to reported_to agent identity native_agent native_seq current current_gen
+fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> [mode]
+  local state=$1 session=$2 record=$3 observation_mode=${4:-current}
+  local pane to reported_to agent identity native_agent current current_gen
   local current_state current_rest current_source event id initial_id gen rc=0 intent
-  local stored_seq sequence_path comparison strict=0 recovery=0 recovered=0
+  local strict=0 recovery=0 recovered=0
   case "$observation_mode" in
     current|stream|stream-baseline) ;;
     submit-baseline|exact-working|launch-working) strict=1 ;;
@@ -4096,51 +4045,34 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
     exact-working|launch-working)
       native_agent=$agent
       to=$reported_to
-      native_seq=$reported_seq
       ;;
     current|submit-baseline|stream-baseline)
       identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
       native_agent=$(printf '%s' "$identity" | cut -f1)
       to=$(printf '%s' "$identity" | cut -f2)
-      native_seq=$(printf '%s' "$identity" | cut -f3)
       ;;
     stream)
       identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
       native_agent=$(printf '%s' "$identity" | cut -f1)
       to=$(printf '%s' "$identity" | cut -f2)
-      native_seq=$(printf '%s' "$identity" | cut -f3)
       if [ "$native_agent" = traex ] && [ -n "$to" ]; then
-        if fm_backend_herdr_traex_native_seq_valid "$reported_seq" \
-           && fm_backend_herdr_traex_native_seq_valid "$native_seq"; then
-          comparison=$(fm_backend_herdr_traex_native_seq_compare "$reported_seq" "$native_seq") || comparison=2
-          case "$comparison" in
-            -1) ;;
-            0)
-              if [ "$reported_to" != "$to" ]; then
-                fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-                return 1
-              fi
-              ;;
-            *)
-              fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-              return 1
-              ;;
-          esac
-        fi
+        :
       elif [ -n "$native_agent" ] || [ -n "$to" ]; then
         fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
         echo "warning: Herdr transition identity changed for TraeX task $id" >&2
         return 1
-      else
-        native_agent=$agent
-        to=$reported_to
-        native_seq=$reported_seq
-        if [ "$native_agent" != traex ] \
-           || ! fm_backend_herdr_traex_native_seq_valid "$native_seq"; then
-          fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-          echo "warning: Herdr could not validate the buffered TraeX transition for task $id" >&2
-          return 1
-        fi
+      elif [ "$agent" = traex ]; then
+        case "$reported_to" in
+          idle|done)
+            native_agent=$agent
+            to=$reported_to
+            ;;
+          *)
+            FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
+            fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+            return 0
+            ;;
+        esac
       fi
       ;;
   esac
@@ -4168,24 +4100,6 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       ;;
   esac
   FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "$to" "$native_agent")
-  if fm_backend_herdr_traex_native_seq_valid "$native_seq"; then
-    sequence_path=$(fm_backend_herdr_traex_native_seq_path "$state" "$id")
-    if [ -e "$sequence_path" ] || [ -L "$sequence_path" ]; then
-      if ! fm_backend_herdr_traex_native_seq_read "$state" "$id" "$gen"; then
-        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-        return 1
-      fi
-      stored_seq=$FM_BACKEND_HERDR_TRAEX_NATIVE_SEQ
-      comparison=$(fm_backend_herdr_traex_native_seq_compare "$native_seq" "$stored_seq") || comparison=2
-      if [ "$comparison" -le 0 ]; then
-        if [ "$observation_mode" = stream ]; then
-          FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
-        fi
-        fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
-        return 0
-      fi
-    fi
-  fi
   if [ "$recovery" -eq 1 ]; then
     event="launch-failed-$to"
   else
@@ -4224,9 +4138,6 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       ;;
     *) rc=1 ;;
   esac
-  if [ "$rc" -eq 0 ] && fm_backend_herdr_traex_native_seq_valid "$native_seq"; then
-    fm_backend_herdr_traex_native_seq_commit "$state" "$id" "$gen" "$native_seq" || rc=1
-  fi
   fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
   return "$rc"
 }
@@ -4238,7 +4149,16 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
 fm_backend_herdr_traex_reconcile_current() {  # <state-dir> <session> <pane>
   local state=$1 session=$2 pane=$3 record
   record=$(fm_backend_herdr_normalize_event "$pane" "" "" "")
-  fm_backend_herdr_traex_observe_transition "$state" "$session" "$record"
+  fm_backend_herdr_traex_observe_transition "$state" "$session" "$record" && return 0
+  if fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane"; then
+    case "$FM_BACKEND_HERDR_TRAEX_READY" in
+      pending|failed)
+        fm_backend_herdr_traex_reconcile_launch_failure "$state" "$session" "$pane"
+        return
+        ;;
+    esac
+  fi
+  return 1
 }
 
 fm_backend_herdr_reconcile_transitions() {  # <state-dir> <session> <pane_window...>
@@ -4357,7 +4277,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo reader_pid line ws status agent native_seq identity record hit rc=1 reader_rc=0
+  local fifo_dir fifo reader_pid line ws status agent identity record hit rc=1 reader_rc=0
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -4414,7 +4334,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # Drain stream edges until a fresh blocked edge or the timeout. The reader is
   # a subprocess of this call (NOT a second watcher), and is killed the instant
   # a blocked edge is found.
-  # Split each raw projected line (pane_id\tworkspace_id\tagent_status\tagent\tstate_change_seq)
+  # Split each raw projected line (pane_id\tworkspace_id\tagent_status\tagent)
   # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
   # collapse an empty middle field (e.g. an absent workspace_id) and shift the
   # status into the wrong column. `cut` preserves empty fields.
@@ -4424,10 +4344,9 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     ws=$(printf '%s' "$line" | cut -f2)
     status=$(printf '%s' "$line" | cut -f3)
     agent=$(printf '%s' "$line" | cut -f4)
-    native_seq=$(printf '%s' "$line" | cut -f5)
     [ -n "$pane_id" ] || continue
     record=$(fm_backend_herdr_normalize_event "$pane_id" "$ws" "$status" "$agent")
-    if ! fm_backend_herdr_traex_observe_transition "$state" "$session" "$record" stream "$native_seq"; then
+    if ! fm_backend_herdr_traex_observe_transition "$state" "$session" "$record" stream; then
       rc=2
       break
     fi

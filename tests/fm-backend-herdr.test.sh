@@ -3943,7 +3943,7 @@ SH
 
 # make_fake_reader: a stand-in for bin/backends/herdr-eventwait.py. It ignores
 # the socket, streams the TAB-separated lines in $FM_FAKE_READER_LINES to stdout
-# (one projected event per line: pane_id\tworkspace_id\tagent_status\tagent\tstate_change_seq),
+# (one projected event per line: pane_id\tworkspace_id\tagent_status\tagent),
 # then exits $FM_FAKE_READER_EXIT (default 0). A non-zero exit with no lines
 # models a connect/subscribe failure.
 make_fake_reader() {  # <dir> -> echoes reader path
