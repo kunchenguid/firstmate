@@ -523,6 +523,56 @@ test_create_task_rejects_replaced_workspace_after_provider_id() {
   pass "fm_backend_cmux_create_task: rejects a disappeared provider id instead of adopting a same-title replacement"
 }
 
+test_create_task_rejects_invalid_surface_identity_without_replacing_record() {
+  local scenario dir fb status title
+  for scenario in missing duplicate multidoc newline tab colon equals; do
+    dir="$TMP_ROOT/create-task-surface-$scenario"; mkdir -p "$dir/responses"
+    title=$(cmux_expected_scoped_title "fm-surface-$scenario")
+    printf '{"workspaces":[]}' > "$dir/responses/1.out"
+    printf '{"workspace_id":"bbbbbbbb-1111-1111-1111-111111111111"}' > "$dir/responses/2.out"
+    cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+    case "$scenario" in
+      missing)
+        printf '{"panes":[{}]}' > "$dir/responses/4.out"
+        ;;
+      duplicate)
+        printf '{"panes":[{"selected_surface_id":"cccccccc-2222-2222-2222-222222222222","surface_ids":["cccccccc-2222-2222-2222-222222222222","cccccccc-2222-2222-2222-222222222222"]}]}' > "$dir/responses/4.out"
+        ;;
+      multidoc)
+        printf '%s\n%s\n' \
+          '{"panes":[{"selected_surface_id":"cccccccc-2222-2222-2222-222222222222","surface_ids":["cccccccc-2222-2222-2222-222222222222"]}]}' \
+          '{"panes":[{"selected_surface_id":"dddddddd-3333-3333-3333-333333333333","surface_ids":["dddddddd-3333-3333-3333-333333333333"]}]}' \
+          > "$dir/responses/4.out"
+        ;;
+      newline)
+        printf '%s' '{"panes":[{"selected_surface_id":"bad\nvalue","surface_ids":["bad\nvalue"]}]}' > "$dir/responses/4.out"
+        ;;
+      tab)
+        printf '%s' '{"panes":[{"selected_surface_id":"bad\tvalue","surface_ids":["bad\tvalue"]}]}' > "$dir/responses/4.out"
+        ;;
+      colon)
+        printf '%s' '{"panes":[{"selected_surface_id":"bad:surface","surface_ids":["bad:surface"]}]}' > "$dir/responses/4.out"
+        ;;
+      equals)
+        printf '%s' '{"panes":[{"selected_surface_id":"bad=surface","surface_ids":["bad=surface"]}]}' > "$dir/responses/4.out"
+        ;;
+    esac
+    fb=$(make_cmux_fakebin "$dir")
+    PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      FM_BACKEND_ACQUISITION_FILE="$dir/acquisition" \
+      bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task "$1" /tmp/proj' "$ROOT" "fm-surface-$scenario" >/dev/null 2>&1
+    status=$?
+    [ "$status" -ne 0 ] || fail "create_task should reject the $scenario surface identity"
+    assert_present "$dir/acquisition" "create_task did not retain the workspace cleanup record for the $scenario surface identity"
+    assert_grep 'kind=cmux-workspace' "$dir/acquisition" "create_task replaced the workspace cleanup record for the $scenario surface identity"
+    assert_grep 'workspace_id=bbbbbbbb-1111-1111-1111-111111111111' "$dir/acquisition" "create_task lost the workspace cleanup identity for the $scenario surface identity"
+    assert_grep 'surface_id=' "$dir/acquisition" "create_task did not retain the empty surface field for the $scenario surface identity"
+    [ "$(grep -c '^workspace_id=' "$dir/acquisition")" -eq 1 ] || fail "create_task published duplicate workspace ids for the $scenario surface identity"
+    [ "$(grep -c '^surface_id=' "$dir/acquisition")" -eq 1 ] || fail "create_task published duplicate surface ids for the $scenario surface identity"
+  done
+  pass "fm_backend_cmux_create_task: rejects ambiguous or unsafe surface identities without replacing exact workspace cleanup"
+}
+
 test_unresolved_record_preserves_previous_record_on_publish_failure() {
   local dir failbin record old status
   dir="$TMP_ROOT/unresolved-record-publish-failure"
@@ -1304,6 +1354,7 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_rejects_replaced_workspace_after_provider_id
+test_create_task_rejects_invalid_surface_identity_without_replacing_record
 test_unresolved_record_preserves_previous_record_on_publish_failure
 test_unresolved_record_rejects_replaced_destination_path
 test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup

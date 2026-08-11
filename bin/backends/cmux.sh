@@ -325,11 +325,20 @@ fm_backend_cmux_scoped_title() {  # <fm-task-label>
   printf 'fm-%s-%s' "$home" "$rest"
 }
 
-fm_backend_cmux_workspace_id_valid() {
-  case "${1:-}" in
-    ''|*$'\n'*|*$'\r'*|*$'\t'*|*' '*|*'='*|*':'*) return 1 ;;
-    *) return 0 ;;
+fm_backend_cmux_provider_id_valid() {
+  local provider_id=${1:-}
+  [ -n "$provider_id" ] || return 1
+  case "$provider_id" in
+    *' '*|*'='*|*':'*) return 1 ;;
   esac
+  if LC_ALL=C printf '%s' "$provider_id" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    return 1
+  fi
+  return 0
+}
+
+fm_backend_cmux_workspace_id_valid() {
+  fm_backend_cmux_provider_id_valid "$1"
 }
 
 fm_backend_cmux_workspace_ids_for_label() {  # <label>
@@ -404,9 +413,61 @@ fm_backend_cmux_created_workspace_id() {  # <provider-output>
 }
 
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
-  local wsid=$1
-  fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
-    | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
+  local wsid=$1 response surface_id
+  response=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  surface_id=$(printf '%s' "$response" | jq -s -e -r '
+    def valid_id:
+      if type != "string" then false
+      elif length == 0 then false
+      else test("^[^[:cntrl:] =:]+$")
+      end;
+    if length != 1 then
+      error("expected one cmux list-panes response")
+    elif (.[0] | type) != "object" then
+      error("cmux list-panes response is not an object")
+    elif (.[0].panes | type) != "array" then
+      error("cmux list-panes response has no panes array")
+    elif (.[0].panes | length) != 1 then
+      error("cmux list-panes response does not identify exactly one pane")
+    else
+      .[0].panes[0] as $pane
+      | if ($pane | type) != "object" then
+          error("cmux list-panes pane is not an object")
+        elif ($pane | has("selected_surface_id")) then
+          if (($pane.selected_surface_id | valid_id) | not) then
+            error("cmux list-panes response has an invalid selected surface id")
+          elif ($pane | has("surface_ids")) then
+            if (($pane.surface_ids | type) != "array") then
+              error("cmux list-panes response has an invalid surface id list")
+            elif ($pane.surface_ids | length) != 1 then
+              error("cmux list-panes response does not identify exactly one surface")
+            elif ($pane.surface_ids[0] != $pane.selected_surface_id) then
+              error("cmux list-panes response has conflicting surface ids")
+            elif (($pane.surface_ids[0] | valid_id) | not) then
+              error("cmux list-panes response has an invalid surface id")
+            else
+              $pane.selected_surface_id
+            end
+          else
+            $pane.selected_surface_id
+          end
+        elif ($pane | has("surface_ids")) then
+          if (($pane.surface_ids | type) != "array") then
+            error("cmux list-panes response has an invalid surface id list")
+          elif ($pane.surface_ids | length) != 1 then
+            error("cmux list-panes response does not identify exactly one surface")
+          elif (($pane.surface_ids[0] | valid_id) | not) then
+            error("cmux list-panes response has an invalid surface id")
+          else
+            $pane.surface_ids[0]
+          end
+        else
+          error("cmux list-panes response has no surface id")
+        end
+    end
+  ' 2>/dev/null) || return 1
+  fm_backend_cmux_provider_id_valid "$surface_id" || return 1
+  printf '%s' "$surface_id"
 }
 
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
@@ -532,6 +593,10 @@ fm_backend_cmux_acquisition_record_write() {
 
 fm_backend_cmux_acquisition_record() {
   local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 workspace_id=$2 surface_id=${3:-}
+  fm_backend_cmux_provider_id_valid "$workspace_id" || return 1
+  if [ -n "$surface_id" ]; then
+    fm_backend_cmux_provider_id_valid "$surface_id" || return 1
+  fi
   [ -n "$file" ] || return 0
   fm_backend_cmux_acquisition_record_write "$file" exact "$label" "$workspace_id" "$surface_id"
 }
