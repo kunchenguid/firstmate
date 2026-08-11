@@ -60,7 +60,19 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    if [ -n "${FM_FAKE_TMUX_CAPTURE_FILE:-}" ]; then
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_BEFORE:-}" ] \
+      && [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER:-}" ] \
+      && [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT:-}" ]; then
+      count=0
+      [ ! -f "$FM_FAKE_TMUX_CAPTURE_COUNT" ] || count=$(cat "$FM_FAKE_TMUX_CAPTURE_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_TMUX_CAPTURE_COUNT"
+      if [ "$count" -eq 1 ]; then
+        cat "$FM_FAKE_TMUX_CAPTURE_BEFORE"
+      else
+        cat "$FM_FAKE_TMUX_CAPTURE_AFTER"
+      fi
+    elif [ -n "${FM_FAKE_TMUX_CAPTURE_FILE:-}" ]; then
       cat "$FM_FAKE_TMUX_CAPTURE_FILE"
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -245,6 +257,63 @@ test_cursor_idle_placeholders_are_exact_and_scoped() {
   pass "fm-send: Cursor idle placeholders are exact and harness-scoped"
 }
 
+test_cursor_busy_footer_confirms_unknown_submit() {
+  local dir fb home err log before after count rc enters
+  dir="$TMP_ROOT/cursor-busy-confirm"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home cursorbusy); err="$dir/send.err"
+  log="$dir/tmux.log"; before="$dir/before"; after="$dir/after"; count="$dir/captures"
+  : > "$log"
+  fm_write_meta "$home/state/cursor-busy.meta" \
+    "window=sess:fm-cursor-busy" "kind=ship" "harness=cursor"
+  printf '╭────────────────────╮\n│ → Add a follow-up  │\n╰────────────────────╯\n' > "$before"
+  printf 'Cursor Agent is working\nctrl+c to stop\n' > "$after"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE_BEFORE="$before" \
+    FM_FAKE_TMUX_CAPTURE_AFTER="$after" FM_FAKE_TMUX_CAPTURE_COUNT="$count" \
+    FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$SEND" cursor-busy "deliver this text" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "Cursor busy footer should confirm an otherwise unknown submit"
+  enters=$(grep -c 'literal=0 arg=Enter' "$log" 2>/dev/null || true)
+  [ "$enters" -eq 1 ] || fail "Cursor busy transition should confirm after one Enter"
+  pass "fm-send: Cursor busy footer confirms an unknown tmux submit"
+}
+
+test_cursor_placeholder_message_requires_confirmation() {
+  local spec name message dir fb home err log capture rc enters
+  for spec in 'add|Add a follow-up' 'type|Type a message...'; do
+    name=${spec%%|*}
+    message=${spec#*|}
+    dir="$TMP_ROOT/cursor-placeholder-$name"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); home=$(setup_home "cursorplaceholder-$name")
+    err="$dir/send.err"; log="$dir/tmux.log"; capture="$dir/capture"; : > "$log"
+    fm_write_meta "$home/state/cursor-placeholder-$name.meta" \
+      "window=sess:fm-cursor-placeholder-$name" "kind=ship" "harness=cursor"
+    printf '╭────────────────────────╮\n│ → %-20s │\n╰────────────────────────╯\n' "$message" > "$capture"
+
+    PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+      FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+      "$SEND" "cursor-placeholder-$name" "$message" >/dev/null 2>"$err"; rc=$?
+    [ "$rc" -ne 0 ] || fail "Cursor placeholder message '$message' was falsely confirmed"
+    enters=$(grep -c 'literal=0 arg=Enter' "$log" 2>/dev/null || true)
+    [ "$enters" -eq 3 ] || fail "Cursor placeholder message '$message' did not require confirmation"
+  done
+
+  dir="$TMP_ROOT/cursor-placeholder-busy"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home cursorplaceholderbusy)
+  err="$dir/send.err"; log="$dir/tmux.log"; capture="$dir/capture"; : > "$log"
+  fm_write_meta "$home/state/cursor-placeholder-busy.meta" \
+    "window=sess:fm-cursor-placeholder-busy" "kind=ship" "harness=cursor"
+  printf '╭────────────────────────╮\n│ → Add a follow-up      │\n╰────────────────────────╯\nctrl+c to stop\n' > "$capture"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$SEND" cursor-placeholder-busy "Add a follow-up" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "Cursor placeholder message should confirm with busy evidence"
+  pass "fm-send: Cursor placeholder messages require transition or busy evidence"
+}
+
 test_cursor_backend_failure_uses_actionable_send_error() {
   local dir fb home err log rc
   dir="$TMP_ROOT/cursor-send-fail"; mkdir -p "$dir"
@@ -300,4 +369,6 @@ test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_cursor_idle_placeholders_are_exact_and_scoped
+test_cursor_busy_footer_confirms_unknown_submit
+test_cursor_placeholder_message_requires_confirmation
 test_cursor_backend_failure_uses_actionable_send_error

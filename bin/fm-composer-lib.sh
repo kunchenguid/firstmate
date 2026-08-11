@@ -403,12 +403,14 @@ fm_composer_idle_matches() {
 # verdict never depends on which whitespace alphabet the calling adapter
 # trimmed with.
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled]
-  local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph=''
+  local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph='' submitted_content
   local placeholder_position=${6:-0} styled=${7:-1} idle_collision=0 structure_prompt=0
   content=$2
   fm_composer_normalize_trim_var content
   plain_content=${5:-$2}
   fm_composer_normalize_trim_var plain_content
+  submitted_content=${FM_COMPOSER_SUBMIT_TEXT:-}
+  fm_composer_normalize_trim_var submitted_content
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     if _fm_composer_is_prompt_glyph "$plain_content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
       printf 'empty'; return 0
@@ -435,6 +437,9 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
   if [ "$idle_collision" = 1 ]; then
+    if [ "$content" = "$submitted_content" ]; then
+      printf 'pending'; return 0
+    fi
     # Cursor's arrow is container-only, and fm-send supplies its exact idle
     # regex only for a Cursor target. That identity scope plus a proven box is
     # the positive evidence its plain, non-de-emphasized placeholder needs.

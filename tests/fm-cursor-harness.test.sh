@@ -80,6 +80,15 @@ printf 'fm_pi_harness=%s\n' "${FM_PI_HARNESS:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
 exit 0
 SH
   chmod +x "$fakebin/cursor-agent"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  'status --json') printf '%s\n' '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   printf '%s\n' "$fakebin"
 }
@@ -409,6 +418,29 @@ test_spawn_refuses_secondmate() {
   pass "cursor is refused as a secondmate harness"
 }
 
+test_cursor_spawn_refuses_unverified_backends() {
+  local backend rec case_dir home proj wt fakebin id out status
+  for backend in zellij cmux orca; do
+    rec=$(make_spawn_case "unsupported-$backend")
+    IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+    out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+      --backend "$backend" --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "Cursor spawn accepted unverified backend $backend"
+    assert_contains "$out" "cursor is not verified on backend '$backend'" \
+      "Cursor did not explain its $backend refusal"
+    assert_absent "$home/state/$id.meta" \
+      "Cursor published task metadata on unverified backend $backend"
+    assert_absent "$wt/.cursor/hooks.json" \
+      "Cursor installed hooks on unverified backend $backend"
+    assert_absent "$home/launch.log" \
+      "Cursor launched on unverified backend $backend"
+  done
+  pass "Cursor spawn refuses every unverified runtime backend"
+}
+
 test_control_tables() {
   [ "$(fm_control_interrupt_key cursor)" = C-c ] \
     || fail "cursor interrupt must be C-c"
@@ -441,37 +473,45 @@ test_cursor_composer_placeholder_requires_cursor_glyph() {
 }
 
 test_cursor_spawn_refuses_existing_hook_target_collision() {
-  local rec case_dir home proj wt fakebin id out status expected_hooks expected_script
-  rec=$(make_spawn_case hook-target-collision)
-  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+  local spec name command rec case_dir home proj wt fakebin id out status expected_hooks expected_script
+  for spec in \
+    'literal|.cursor/hooks/fm-busy-turnend.sh user' \
+    'pwd-alias|$PWD/.cursor/hooks/fm-busy-turnend.sh user' \
+    'dotdot-alias|.cursor/hooks/../hooks/fm-busy-turnend.sh user'; do
+    name=${spec%%|*}
+    command=${spec#*|}
+    rec=$(make_spawn_case "hook-target-$name")
+    IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  mkdir -p "$wt/.cursor/hooks"
-  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh user"}]}}' > "$wt/.cursor/hooks.json"
-  printf '%s\n' 'pre-existing user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
-  expected_hooks="$case_dir/expected-hooks.json"
-  expected_script="$case_dir/expected-hook.sh"
-  cp "$wt/.cursor/hooks.json" "$expected_hooks"
-  cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_script"
-  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
-    --mode no-mistakes --yolo off 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "Cursor spawn replaced an existing hook target"
-  assert_contains "$out" "existing beforeSubmitPrompt hook targets .cursor/hooks/fm-busy-turnend.sh" \
-    "Cursor hook-target collision refusal was not explicit"
-  cmp -s "$expected_hooks" "$wt/.cursor/hooks.json" \
-    || fail "Cursor hook-target collision modified hooks.json"
-  cmp -s "$expected_script" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
-    || fail "Cursor hook-target collision replaced the user hook script"
-  assert_absent "$home/state/$id.cursor-hooks.json" \
-    "Cursor hook-target collision claimed transaction ownership"
-  assert_absent "$home/state/$id.cursor-hooks.json.installed" \
-    "Cursor hook-target collision recorded an installed snapshot"
-  assert_absent "$home/state/$id.busy-gen" \
-    "Cursor hook-target collision left busy state armed"
-  assert_absent "$home/launch.log" \
-    "Cursor hook-target collision launched the harness"
-  pass "Cursor spawn refuses an existing Firstmate hook-script target"
+    mkdir -p "$wt/.cursor/hooks"
+    printf '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"%s"}]}}\n' \
+      "$command" > "$wt/.cursor/hooks.json"
+    printf '%s\n' 'pre-existing user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+    expected_hooks="$case_dir/expected-hooks.json"
+    expected_script="$case_dir/expected-hook.sh"
+    cp "$wt/.cursor/hooks.json" "$expected_hooks"
+    cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_script"
+    out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+      --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "Cursor spawn replaced existing hook target $command"
+    assert_contains "$out" "existing beforeSubmitPrompt hook targets .cursor/hooks/fm-busy-turnend.sh" \
+      "Cursor hook-target collision refusal was not explicit for $command"
+    cmp -s "$expected_hooks" "$wt/.cursor/hooks.json" \
+      || fail "Cursor hook-target collision modified hooks.json for $command"
+    cmp -s "$expected_script" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+      || fail "Cursor hook-target collision replaced the user hook script for $command"
+    assert_absent "$home/state/$id.cursor-hooks.json" \
+      "Cursor hook-target collision claimed transaction ownership for $command"
+    assert_absent "$home/state/$id.cursor-hooks.json.installed" \
+      "Cursor hook-target collision recorded an installed snapshot for $command"
+    assert_absent "$home/state/$id.busy-gen" \
+      "Cursor hook-target collision left busy state armed for $command"
+    assert_absent "$home/launch.log" \
+      "Cursor hook-target collision launched the harness for $command"
+  done
+  pass "Cursor spawn refuses aliased Firstmate hook-script targets"
 }
 
 test_cursor_hooks_restore_existing_files() {
@@ -971,6 +1011,7 @@ test_detection_is_anchored
 test_spawn_launch_shape
 test_raw_cursor_binary_uses_verified_adapter
 test_spawn_refuses_secondmate
+test_cursor_spawn_refuses_unverified_backends
 test_control_tables
 test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph

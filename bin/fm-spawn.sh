@@ -1255,6 +1255,16 @@ if [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" = cursor ]; t
   HARNESS=cursor
 fi
 
+if [ "$HARNESS" = cursor ]; then
+  case "$BACKEND" in
+    tmux|herdr) ;;
+    *)
+      echo "error: cursor is not verified on backend '$BACKEND'; supported backends are tmux and herdr" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -2449,7 +2459,7 @@ import sys
 source, destination, busy, stop, session_end = sys.argv[1:]
 firstmate_script = ".cursor/hooks/fm-busy-turnend.sh"
 firstmate_target = re.compile(
-    r"(?<![A-Za-z0-9_./-])(?:\./)?\.cursor/hooks/fm-busy-turnend\.sh(?![A-Za-z0-9_./-])"
+    r"(?<![A-Za-z0-9_.-])fm-busy-turnend\.sh(?![A-Za-z0-9_.-])"
 )
 with open(source, encoding="utf-8") as handle:
     document = json.load(handle)
@@ -2951,7 +2961,7 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W" "$HARNESS") || {
     kimi_spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   }

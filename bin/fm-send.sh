@@ -485,12 +485,12 @@ else
         FM_BACKEND_HERDR_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
         FM_BACKEND_ORCA_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
         FM_BACKEND_CMUX_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
-        fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+        fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS"); then
       :
     else
       send_rc=$?
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS"); then
     :
   else
     send_rc=$?
