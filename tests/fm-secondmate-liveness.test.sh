@@ -352,6 +352,14 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
+run_bootstrap_unselected() {  # <fakebin> <home> <pane-cmd> <call-log> -> stdout
+  local fb=$1 home=$2 cmd=$3 log=$4
+  env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
+    PATH="$fb:$BASE_PATH" FM_BACKEND='' FM_HOME="$home" \
+    FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
 test_sweep_respawns_confirmed_dead_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead)
@@ -368,6 +376,28 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_sweep_recovery_reuses_recorded_backend() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unselected-recovery)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap_unselected "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_not_contains "$out" "respawn failed" \
+    "an unselected local recovery should reuse the task's recorded backend"
+  assert_contains "$(cat "$log")" "new-window" \
+    "an unselected local recovery did not relaunch on its recorded tmux backend"
+  : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BACKEND=herdr)
+  assert_not_contains "$out" "respawn failed" \
+    "a current backend setting must not retarget an existing local recovery"
+  assert_contains "$(cat "$log")" "new-window" \
+    "an existing local recovery did not retain its recorded tmux backend"
+  pass "sweep: local recovery reuses its recorded backend"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -545,6 +575,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_recovery_reuses_recorded_backend
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

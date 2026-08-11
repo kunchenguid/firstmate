@@ -10,7 +10,7 @@ The universal harness and toolchain requirements are in [`configuration.md`](con
 
 Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
 An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
-When the primary runs outside a detected runtime, an unselected spawn refuses before creating a detached tmux session; [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns that selection contract.
+When the primary runs outside a detected runtime, an unselected new-task spawn refuses before creating a detached tmux session; local secondmate recovery retains its recorded backend, and [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns that selection contract.
 
 No provisioning is required before the first task.
 

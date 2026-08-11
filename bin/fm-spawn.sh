@@ -51,8 +51,10 @@
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent because the primary already runs inside
-#   that visible surface. When no setting or runtime marker matches, spawn
-#   refuses before endpoint creation and names the configuration remedies.
+#   that visible surface. Recovery of an existing local secondmate reuses that
+#   exact task's recorded backend unless an authorized per-task --backend
+#   explicitly replaces it. Every other unresolved spawn refuses before
+#   endpoint creation and names the remedies.
 #   Zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Tmux spawns do not write backend= to meta;
@@ -928,16 +930,25 @@ if [ "$KIND" = secondmate ]; then
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
-# Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else runtime auto-detection; an
-# unresolved spawn refuses (fm_backend_name). fm_backend_validate_spawn refuses unknown or
+# Backend selection (data/fm-backend-design-d7): explicit --backend, else an
+# existing local secondmate recovery's exact recorded backend, else FM_BACKEND
+# env, config/backend, or runtime auto-detection. Every other unresolved spawn
+# refuses (fm_backend_name). fm_backend_validate_spawn refuses unknown or
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$RELAUNCH" -eq 0 ]; then
+  RECOVERY_BACKEND=
+  RECOVERY_META="$STATE/$ID.meta"
+  if [ "$KIND" = secondmate ] && [ -f "$RECOVERY_META" ] && [ ! -L "$RECOVERY_META" ] \
+     && [ "$(fm_meta_get "$RECOVERY_META" kind)" = secondmate ]; then
+    RECOVERY_BACKEND=$(fm_backend_of_meta "$RECOVERY_META")
+  fi
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
+  elif [ -n "$RECOVERY_BACKEND" ]; then
+    BACKEND=$RECOVERY_BACKEND
   else
     BACKEND=$(fm_backend_name spawn)
   fi
