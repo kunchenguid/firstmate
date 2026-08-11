@@ -160,7 +160,7 @@ test_stale_gen_record_unknown() {
 test_missing_record_unknown_not_idle() {
   local state out h
   state=$(new_state_dir missing)
-  for h in claude opencode pi pi-signed traex; do
+  for h in claude opencode pi pi-signed; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state")
     [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
   done
@@ -215,21 +215,6 @@ test_source_mismatch_cross_adapter() {
   pass "a record is trusted only by the adapter whose source wrote it"
 }
 
-test_traex_herdr_source_is_adapter_scoped() {
-  local state gen out
-  state=$(new_state_dir traex-source)
-  gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 busy --gen "$gen" --source herdr-traex --event agent-working
-  out=$(fm_busy_classify herdr sess:w1:p2 traex t1 "$state")
-  [ "$out" = "busy herdr-traex" ] || fail "TraeX native working must classify through its persisted source, got '$out'"
-  out=$(fm_busy_classify herdr sess:w1:p2 claude t1 "$state")
-  [ "$out" = "unknown source-mismatch" ] || fail "another adapter trusted TraeX's source, got '$out'"
-  "$EV" apply "$state" t1 idle --gen "$gen" --source herdr-traex --event agent-idle
-  out=$(fm_busy_classify herdr sess:w1:p2 traex t1 "$state")
-  [ "$out" = "idle herdr-traex" ] || fail "TraeX native idle must classify through its persisted source, got '$out'"
-  pass "TraeX trusts only its Herdr transition writer and no other adapter can consume it"
-}
-
 test_converted_adapters_ignore_footer_text() {
   local state out h
   state=$(new_state_dir no-footer)
@@ -237,7 +222,7 @@ test_converted_adapters_ignore_footer_text() {
    ■■■■⬝⬝⬝⬝  esc interrupt
 Working...
 Ctrl+c:cancel'
-  for h in claude opencode pi pi-signed traex; do
+  for h in claude opencode pi pi-signed; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state" "$tail")
     [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
   done
@@ -383,7 +368,6 @@ test_missing_record_unknown_not_idle
 test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
-test_traex_herdr_source_is_adapter_scoped
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate

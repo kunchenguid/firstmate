@@ -724,7 +724,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [state-dir]
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
@@ -953,17 +953,6 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   fm_backend_source "$backend" || return 2
   case "$backend" in
     herdr) fm_backend_herdr_wait_transition "$@" ;;
-    *) return 2 ;;
-  esac
-}
-
-fm_backend_reconcile_transitions() {  # <backend> <state_dir> <session> <pane_window...>
-  local backend=$1
-  shift
-  fm_backend_has_push "$backend" || return 2
-  fm_backend_source "$backend" || return 2
-  case "$backend" in
-    herdr) fm_backend_herdr_reconcile_transitions "$@" ;;
     *) return 2 ;;
   esac
 }

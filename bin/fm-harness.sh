@@ -30,11 +30,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # TraeX is worker/scout-only and does not publish a vendor identity marker, so
-  # Firstmate sets FM_TRAEX_HARNESS=traex on its exact launch boundary. Checking
-  # that private marker first scopes detection to Firstmate-launched workers and
-  # deliberately avoids treating an unrelated traex/traecli process as a primary.
-  [ "${FM_TRAEX_HARNESS:-}" = "traex" ] && { echo traex; return; }
+  # Firstmate sets FM_TRAEX_HARNESS only on its exact TraeX worker launch.
+  # It outranks inherited foreign markers and deliberately has no ancestry fallback,
+  # so unrelated TraeX processes cannot be misidentified as workers or primaries.
+  [ "${FM_TRAEX_HARNESS:-}" = traex ] && { echo traex; return; }
   # Only claude, pi, and grok set verified markers of their own; codex, opencode,
   # kimi, and muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before

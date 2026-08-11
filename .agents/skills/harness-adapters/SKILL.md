@@ -123,7 +123,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
-| traex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified 2026-08-08 on `traecli 0.200.19` (internal edition). `max` is refused before endpoint creation because support is model/provider-specific and was not established. TraeX is ordinary-worker/scout and Herdr only. |
+| traex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified 2026-08-11 on traecli 0.200.19 with Herdr 0.8.0. `max` is refused before endpoint creation. TraeX is ordinary-worker/scout and Herdr only. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -147,8 +147,8 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, follow the adapter-specific row rather than assuming omission.
-Most adapters record the requested `effort=` in meta and emit no effort flag, while TraeX refuses its unverified `max` value before endpoint creation.
+When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+This preserves launch success instead of passing a known-bad value.
 
 ## no-mistakes skill invocation
 
@@ -397,39 +397,23 @@ Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, 
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
-## traex (VERIFIED 2026-08-08, traecli 0.200.19 internal edition; Herdr 0.8.0)
+## traex (VERIFIED 2026-08-11, traecli 0.200.19 internal edition; Herdr 0.8.0)
 
-TraeX is an ordinary CREWMATE and SCOUT adapter only, and only on the Herdr backend.
-It is not a primary, secondmate, watcher owner, away-mode supervisor, remote coordinator, or tmux worker.
-`bin/fm-spawn.sh` refuses every unsupported role/backend before endpoint creation.
+TraeX is an ordinary CREWMATE and SCOUT adapter on Herdr only.
+It has no primary, secondmate, remote-coordinator, or away-supervisor contract.
 
 | Fact | Value |
 |---|---|
-| Binary | `traex`; its own version banner identifies `traecli 0.200.19(internal edition)`. |
-| Launch | `FM_TRAEX_HARNESS=traex traex -y --session-id <generated-task-private-UUID> [--model <model>] [-c 'model_reasoning_effort="<level>"'] <one positional launch brief>`. The optional flags come only from selected profile axes; the generated ID is persisted as task-private `traex_session_id`, and the marker intentionally outranks ancestry so unrelated TraeX processes are never detected as workers. |
-| Busy state | Herdr's native TraeX `pane.agent_status_changed` stream, persisted as source `herdr-traex` through `bin/fm-busy-event.sh`. `working` is busy; `blocked`, `idle`, and `done` are inactive; only a busy-to-idle/done fold touches the ordinary turn-ended notification. |
-| Exit command | `/exit` or `/quit`; use `/exit` as the canonical form. |
-| Interrupt | Send single Escape through `fm-send.sh`; it immediately sends `C-u`, repeats that clear if asynchronous restoration races it, and succeeds only after the exact bound agent is native idle/done with an empty structured composer. |
-| Skill invocation | Use natural language; no separate TraeX skill-command form is verified. |
-| Autonomy | `-y` / `--dangerously-bypass-approvals-and-sandbox`. This does not suppress the separate fresh-directory trust chooser. |
-| Trust dialog | Herdr manifest rule `directory_trust_prompt`, with `1. Yes, continue` preselected. Firstmate requires the live `foreground_cwd` to equal the isolated task root; Herdr's immutable pane-creation `cwd` must equal either that root or the exact source project from which ordinary `treehouse get` entered it. Only when those identities and the rule/default text agree does Firstmate send one Enter, then require native `working`; a key-send result alone is never success. |
-| Composer | Bare `❯` row, already covered by Herdr's shared structural composer owner. |
-| Resume | Read the task-private `traex_session_id` from the recorded metadata, then run `FM_HOME=<this-firstmate-home> bin/fm-traex-resume.sh <task-id> <traex-session-id>`. The owner refuses `--last`, thread names, and every selector other than that exact ID; it requires the inactive lifecycle binding and agent-less recorded Herdr pane in the same isolated task worktree, launches exactly `FM_TRAEX_HARNESS=traex traex resume -y <recorded-traex-session-id>`, and revalidates the native session, pane, worktree, and lifecycle before success. |
+| Launch | `FM_TRAEX_HARNESS=traex traex -y [--model <model>] [-c 'model_reasoning_effort="<level>"'] <one positional brief>`. The marker deliberately outranks ancestry so unrelated TraeX processes are not detected as workers. |
+| Backend lifecycle | Generic Herdr `agent get`, pane/process inspection, text/key input, busy observation, and pane cleanup, identical to other ordinary Herdr harnesses. TraeX owns no readiness state machine, transition journal, or completion protocol. |
+| Trust dialog | A fresh isolated copy may show `Do you trust the contents of this directory?`. Firstmate accepts only Herdr's exact `directory_trust_prompt` with `1. Yes, continue` visibly preselected, then requires native `working`; key transport alone is not launch success. |
+| Interrupt | Single Escape, followed by generic Herdr `C-u` because TraeX restores interrupted input into the composer. |
+| Exit | Use the generic backend pane-cleanup owner. |
+| Resume | Unsupported in this adapter. Use ordinary stopped-worker recovery to relaunch the worker in its preserved isolated copy. |
+| Busy state | Generic Herdr native status. It provides current-state evidence with the same limits as other Herdr harnesses and does not promise exactly-once completion or crash-perfect edge recovery. |
 
-A fresh worktree may show directory trust even with `-y`.
-Do not hand-edit TraeX's global trust/config store and do not send Enter merely because the pane is blocked.
-The spawn owner accepts only the exact Herdr structural rule and preselected Yes option for the exact task worktree, then verifies the task instructions reached `working`.
-Any other blocked screen is an actionable worker blocker.
-
-The completion callback is the already-required Herdr event stream, not a TraeX project hook.
-Project hooks require separate trust/review and a broad hook-trust bypass would enlarge the accepted project surface, so this adapter does not install one.
-The spawn preflight requires the selected Herdr client and running server both to report version 0.8.0 or newer plus Herdr's event capability, arms one ordinary semantic-state generation, and publishes lifecycle readiness only after the launch prompt is observed working.
-Reconnect level reconciliation closes a missed working-to-idle transition once, while the state record prevents repeated idle levels from generating duplicate turn notifications.
-
-For stopped-worker recovery, keep the existing isolated task worktree and exact Herdr endpoint ownership rules.
-A live registered TraeX pane is `alive`; a structurally missing pane is `missing`; a restored agent-less shell is `dead`; unreadable registration remains `unreadable`.
-If the TUI exited cleanly and its session id is available, use `fm-traex-resume.sh` so resume cannot lose adapter detection or cross the recorded worktree/lifecycle binding; otherwise relaunch the verified TraeX template with the same brief plus the bounded progress note.
-Never allocate a second task worktree while the first is unaccounted for.
+Raw TraeX launch commands are refused so the scoped marker and trust owner cannot be bypassed.
+The bounded raw-command detector covers direct and ordinary shell-wrapped invocations, while deliberately dynamically constructed interpreter execution is outside its supported guarantee and general raw execution remains available.
 
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
 

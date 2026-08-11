@@ -632,51 +632,6 @@ heartbeat_scan_finds_actionable() {
 # loop is the permanent fail-closed backstop). This preserves the single live
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
-RECORDED_TRAEX_HERDR_BINDINGS=()
-
-load_recorded_traex_herdr_bindings() {
-  local session window
-  RECORDED_TRAEX_HERDR_BINDINGS=()
-  fm_backend_source herdr || return 1
-  while IFS=$'\t' read -r session window; do
-    [ -n "$session" ] && [ -n "$window" ] || continue
-    RECORDED_TRAEX_HERDR_BINDINGS+=("$session"$'\t'"$window")
-  done < <(fm_backend_herdr_traex_recorded_bindings "$STATE")
-}
-
-reconcile_recorded_traex_groups_except() {  # <backend> <session>
-  local skip_backend=$1 skip_session=$2 entry session window candidate seen
-  local sessions=() windows=()
-  for entry in "${RECORDED_TRAEX_HERDR_BINDINGS[@]}"; do
-    session=${entry%%$'\t'*}
-    window=${entry#*$'\t'}
-    if [ "$skip_backend" = herdr ] && [ "$session" = "$skip_session" ]; then
-      continue
-    fi
-    seen=0
-    for candidate in "${sessions[@]}"; do
-      [ "$candidate" = "$session" ] && seen=1 && break
-    done
-    [ "$seen" -eq 1 ] || sessions+=("$session")
-  done
-  for session in "${sessions[@]}"; do
-    windows=()
-    for entry in "${RECORDED_TRAEX_HERDR_BINDINGS[@]}"; do
-      candidate=${entry%%$'\t'*}
-      window=${entry#*$'\t'}
-      [ "$candidate" = "$session" ] || continue
-      seen=0
-      for candidate in "${windows[@]}"; do
-        [ "$candidate" = "$window" ] && seen=1 && break
-      done
-      [ "$seen" -eq 1 ] || windows+=("$window")
-    done
-    [ "${#windows[@]}" -gt 0 ] || continue
-    fm_backend_reconcile_transitions \
-      herdr "$STATE" "$session" "${windows[@]}" >/dev/null 2>&1 || true
-  done
-}
-
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
   local windows=()
@@ -699,9 +654,6 @@ event_wait_or_sleep() {
     windows+=("$w")
   done < <(recorded_windows)
 
-  load_recorded_traex_herdr_bindings >/dev/null 2>&1 || true
-  reconcile_recorded_traex_groups_except "$first_backend" "$first_session"
-
   if [ "${#windows[@]}" -eq 0 ]; then
     sleep "$POLL"
     return
@@ -719,8 +671,6 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    fm_backend_reconcile_transitions \
-      "$first_backend" "$STATE" "$first_session" "${windows[@]}" >/dev/null 2>&1 || true
     sleep "$POLL"
     return
   fi
@@ -738,8 +688,6 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      fm_backend_reconcile_transitions \
-        "$first_backend" "$STATE" "$first_session" "${windows[@]}" >/dev/null 2>&1 || true
       sleep "$POLL"
       ;;
     *)

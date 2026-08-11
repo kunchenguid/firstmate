@@ -178,7 +178,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and Herdr-only TraeX share that backend cleanup boundary; their harness-specific hook files, tokens, session-log sidecars, and semantic records are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and TraeX share that backend cleanup boundary; harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 
@@ -203,6 +203,32 @@ herdr 0.7.5
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
 
+### TraeX thin worker adapter
+
+The ordinary TraeX worker/scout path was verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
+The guarded smoke used the same generic Herdr input, current-state, key, and cleanup owners as the other harnesses, while the only TraeX-specific backend fact was exact fresh-directory trust recognition.
+
+```sh
+bin/fm-test-run.sh tests/fm-traex-harness.test.sh
+FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh
+```
+
+Bounded live output:
+
+```text
+ok - real TraeX fresh-copy trust reached native working through generic Herdr
+ok - real TraeX steering and current state use generic Herdr owners
+ok - real TraeX interrupt clearing stays on generic key and send paths
+ok - real TraeX exit cleanup uses the generic Herdr owner
+traex=traecli 0.200.19(internal edition)
+herdr=herdr 0.8.0
+ok - real TraeX lab teardown preserved the default Herdr session
+ok - thin TraeX/Herdr smoke completed
+```
+
+The smoke intentionally proves no exactly-once completion, crash-perfect edge recovery, or harness-specific lifecycle storage.
+Ambiguous interruption remains owned by ordinary endpoint inspection, stale supervision, and stuck-worker recovery.
+
 The CLI matrix was checked directly:
 
 | Guarantee | Command shape | Result |
@@ -211,64 +237,12 @@ The CLI matrix was checked directly:
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
-| Native state | `herdr agent get <pane>` | Working and done transitions were visible; native `busy` remains positive generic activity evidence, while native `idle` is not trusted directly by the shared classifier, and only TraeX's metadata-bound writer converts its native transition into a semantic close. |
+| Native state | `herdr agent get <pane>` | Working and done transitions were visible; native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
-
-### TraeX ordinary-worker lifecycle
-
-TraeX `traecli 0.200.19(internal edition)` was verified on 2026-08-08 against Herdr 0.8.0's bundled TraeX manifest in a fresh git worktree under a guarded named lab.
-The launch used one positional instruction, `-y`, an exact selected model, `-c 'model_reasoning_effort="high"'`, and a task-private generated `--session-id` recorded in endpoint metadata, with the Firstmate-only `FM_TRAEX_HARNESS=traex` marker.
-
-Before acceptance, `agent get` returned `agent=traex`, `agent_status=blocked`, and both cwd fields equal to the exact disposable worktree.
-`agent explain` returned:
-
-```text
-agent: traex
-state: blocked
-manifest: bundled 2026.08.08.2
-rule: directory_trust_prompt (region=whole_recent priority=1000)
-```
-
-The visible chooser had `1. Yes, continue` preselected and `2. No, quit` below it.
-One Enter was sent only after all structural checks agreed.
-The native sequence then moved `blocked -> working -> idle`; while working, TraeX ran `sleep 3`, and the settled pane contained the exact requested `TRAE_LAB_OK` response.
-That postcondition distinguishes a genuine instruction start from a successful key transport.
-The guarded teardown restored the byte-identical default-session tripwire.
-
-A second 2026-08-10 probe exercised the complete ordinary `fm-spawn.sh` and `fm-send.sh` path while a command wrapper forced every Herdr operation through the guarded helper and named lab.
-The standard Herdr task pane retained immutable creation `cwd` at the exact disposable source project, while `foreground_cwd` followed `treehouse get` into the exact isolated task root where the trust chooser appeared; the adapter accepted that narrow provenance pair, observed `working`, and the first turn settled with the requested response.
-Three later instructions on the same pane each traversed working to idle, produced their exact requested response, advanced the bound semantic record, and emitted a turn notification without duplicate idle-level notifications.
-A live Escape probe established that TraeX restores the interrupted instruction as real composer input; the verified `C-u` clear returned the pane to native idle, and a following instruction completed on the same session and isolated copy.
-The probe copy remained clean, the named lab was deleted through the guarded helper, and the default-session tripwire was byte-identical.
-The current drift guard is refreshed with:
-
-```sh
-FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh
-```
-
-The 2026-08-10 run reported:
-
-```text
-ok - real TraeX fresh-copy trust reached native working through the guarded Herdr lab
-ok - real TraeX initial instructions completed with a durable semantic transition
-ok - real TraeX repeated send cycles preserved busy, idle, and completion semantics
-ok - real TraeX interrupt cleared restored input and the same task resumed
-traex=traecli 0.200.19(internal edition)
-herdr=herdr 0.8.0
-ok - TraeX/Herdr live drift guard completed
-```
-
-Portable coverage is refreshed with:
-
-```sh
-tests/fm-traex-harness.test.sh
-```
-
-It pins the exact trust refusal matrix, launch rendering and native session binding, scoped detection marker, Herdr-only/ordinary-role boundary, blocked-screen steering refusal, post-injection native-unknown rebinding, same-session resume ownership, native lifecycle writer, completion dedupe, asynchronous interrupt-clear recovery, model/effort mapping, and existing-adapter non-regression.
 
 ### Prune and respawn
 

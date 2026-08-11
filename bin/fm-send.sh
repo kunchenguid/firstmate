@@ -8,8 +8,7 @@
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape. A recorded TraeX
-# target reserves Enter for the verified spawn trust owner and refuses it here.
+# Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
@@ -111,73 +110,18 @@ fm_send_id_from_meta() {  # <meta-file>
   printf '%s' "${base%.meta}"
 }
 
-# fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
-# the composer when Escape cancels a turn, as real bright text (verified: fg
-# 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
-# text. Classifying that as pending input is correct - the text really is
-# unsubmitted - but leaving it there means the NEXT steer types onto the end of
-# it and submits both as one garbled message. Ctrl-U clears the composer
-# (verified), so the interrupt is not complete until it has been sent. A failed
-# clear is loud rather than silent, because the alternative is a corrupted steer.
-# Muse and TraeX both restore the interrupted prompt into their composer after
-# Escape; clear only those empirically verified adapters before another steer.
-fm_send_backend_key() {  # <key>
-  if [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ]; then
-    fm_backend_source herdr && fm_backend_herdr_traex_send_key "$STATE" "$T" "$1"
-  else
-    fm_backend_send_key "$TARGET_BACKEND" "$T" "$1" "$EXPECTED_LABEL"
-  fi
-}
-
-FM_SEND_TRAEX_CLEAR_POLLS=${FM_SEND_TRAEX_CLEAR_POLLS:-100}
-FM_SEND_TRAEX_CLEAR_INTERVAL=${FM_SEND_TRAEX_CLEAR_INTERVAL:-0.05}
-
-# Escape and the first C-u can race TraeX's asynchronous input restoration.
-# After the immediate verified clear sequence, keep observing the exact bound
-# native agent and structured composer; if restored input appears later, clear
-# that same composer again. Empty plus native idle/done is the postcondition.
-fm_send_verify_traex_interrupt_clear() {
-  local i=0 polls=$FM_SEND_TRAEX_CLEAR_POLLS interval=$FM_SEND_TRAEX_CLEAR_INTERVAL composer
-  [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ] || return 0
-  case "$polls" in ''|*[!0-9]*|0) polls=100 ;; esac
-  while [ "$i" -lt "$polls" ]; do
-    if fm_backend_herdr_traex_control_ready "$STATE" "$T"; then
-      case "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS" in
-        idle|done)
-          composer=$(fm_backend_herdr_composer_state "$T")
-          case "$composer" in
-            empty) return 0 ;;
-            pending)
-              fm_send_backend_key C-u || {
-                echo "error: Escape reached $T, but TraeX's restored input could not be cleared." >&2
-                return 1
-              }
-              ;;
-          esac
-          ;;
-        blocked)
-          echo "error: TraeX became blocked while restoring interrupted input; refusing to clear an unverified composer." >&2
-          return 1
-          ;;
-      esac
-    fi
-    i=$((i + 1))
-    [ "$i" -ge "$polls" ] || sleep "$interval"
-  done
-  echo "error: Escape reached $T, but TraeX's restored input remained in the composer after clear." >&2
-  return 1
-}
-
+# fm_send_clear_after_interrupt: muse and TraeX restore interrupted input into
+# the composer after Escape. Ctrl-U clears that real pending text before the next
+# steer; this is a harness keybinding fact layered on the generic backend key path.
 fm_send_clear_after_interrupt() {  # <key>
   local key=$1
   [ "$key" = Escape ] || return 0
   case "$TARGET_HARNESS" in muse*|traex) : ;; *) return 0 ;; esac
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_send_backend_key C-u; then
-    echo "error: Escape reached $T, but the worker composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
+    echo "error: Escape reached $T, but the worker composer could not be cleared; it still holds restored input. Clear it before sending the next message." >&2
     return 1
   fi
-  fm_send_verify_traex_interrupt_clear
 }
 
 fm_send_normalize_key() {  # <key>
@@ -456,20 +400,12 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
-  if [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ]; then
-    case "$semantic_key" in
-      Enter|enter)
-        echo "error: TraeX Enter is reserved for the verified spawn trust owner; use a text steer or the adapter recovery command" >&2
-        exit 1
-        ;;
-    esac
-  fi
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_send_backend_key "$key"; then
+  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
@@ -522,10 +458,6 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  transition_state=
-  if [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ]; then
-    transition_state=$STATE
-  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
@@ -536,7 +468,7 @@ else
       send_rc=$?
       verdict=send-failed
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$transition_state"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?

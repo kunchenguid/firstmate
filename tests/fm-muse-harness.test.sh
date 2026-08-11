@@ -480,24 +480,7 @@ EOF
   pass "every accepted muse Escape alias clears the restored composer"
 }
 
-test_traex_escape_clears_the_composer() {
-  local rec case_dir home fakebin id keylog out status
-  rec=$(make_send_case traex traex)
-  IFS='|' read -r case_dir home fakebin id <<EOF
-$rec
-EOF
-  keylog="$case_dir/keys.log"
-  : > "$keylog"
-  out=$(run_send_key "$home" "$fakebin" "$id" Escape "$keylog")
-  status=$?
-  expect_code 0 "$status" "TraeX Escape send should succeed: $out"
-  assert_grep 'Escape' "$keylog" "Escape never reached the TraeX pane"
-  assert_grep 'C-u' "$keylog" "TraeX Escape did not clear the restored composer"
-  head -1 "$keylog" | grep -q Escape || fail "the clear was sent before the TraeX interrupt"
-  pass "TraeX Escape clears the empirically restored composer"
-}
-
-test_non_restoring_escape_does_not_clear() {
+test_non_muse_escape_does_not_clear() {
   local rec case_dir home fakebin id keylog
   rec=$(make_send_case codex codex)
   IFS='|' read -r case_dir home fakebin id <<EOF
@@ -508,7 +491,7 @@ EOF
   run_send_key "$home" "$fakebin" "$id" Escape "$keylog" >/dev/null
   assert_grep 'Escape' "$keylog" "Escape never reached the codex pane"
   assert_no_grep 'C-u' "$keylog" "a non-muse interrupt sent a composer clear it does not need"
-  pass "the composer clear does not touch adapters that do not restore interrupted input"
+  pass "the composer clear is scoped to muse and does not touch other adapters"
 }
 
 # A silent clear failure would leave the restored prompt in place and corrupt
@@ -923,8 +906,7 @@ test_spawn_resolves_relative_xdg_roots
 test_spawn_refuses_secondmate
 test_spawn_writes_busy_binding_and_teardown_removes_it
 test_muse_escape_aliases_clear_the_composer
-test_traex_escape_clears_the_composer
-test_non_restoring_escape_does_not_clear
+test_non_muse_escape_does_not_clear
 test_failed_clear_is_reported
 test_run_fold_tracks_open_and_settled_turns
 test_nested_terminal_record_does_not_settle_a_run

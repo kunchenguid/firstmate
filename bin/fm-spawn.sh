@@ -20,9 +20,8 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis. Unsupported axes are normally
-#   omitted rather than guessed; adapter-specific fail-closed gates take precedence,
-#   so TraeX refuses the unverified max effort before endpoint creation.
+#   installed CLIs were verified to support that axis; unsupported axes are omitted
+#   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -88,8 +87,7 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
-#   overrides it for this spawn. TraeX and muse are ordinary crewmate/scout
-#   adapters only. A non-flag string containing
+#   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
@@ -133,7 +131,6 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-#     __TRAEXSESSION__ task-private native TraeX session id
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -142,8 +139,6 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
-# TraeX is likewise crewmate/scout only and currently Herdr-only. Herdr's native
-# TraeX transition stream writes its semantic state and turn-end notification.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -635,8 +630,6 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
-TRAEX_META_STAGED=
-TRAEX_SESSION_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -703,16 +696,6 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "${HARNESS:-}" = traex ] && [ -n "${ID:-}" ] \
-     && declare -F spawn_traex_readiness_set >/dev/null 2>&1 \
-     && spawn_traex_readiness_set pending failed 2>/dev/null; then
-    if fm_backend_herdr_parse_target "${T:-}"; then
-      fm_backend_herdr_traex_reconcile_launch_failure \
-        "${STATE_REAL:-$STATE}" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        >/dev/null 2>&1 || true
-    fi
-  fi
-  [ -z "${TRAEX_META_STAGED:-}" ] || rm -f -- "$TRAEX_META_STAGED" 2>/dev/null || true
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -894,29 +877,13 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # TraeX is a Herdr-only ordinary worker/scout adapter. The private marker
-    # scopes fm-harness detection to this exact Firstmate launch. -y is the
-    # installed CLI's full-access autonomous mode; fresh-directory trust is a
-    # separate structurally verified post-launch step below.
-    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y --session-id __TRAEXSESSION__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # TraeX is an ordinary worker/scout adapter only. The private marker is
+    # launch-scoped because TraeX has no verified child-process identity marker.
+    # Herdr owns pane/process/input/lifecycle behavior; the harness contributes
+    # only its autonomous CLI shape and the trust-dialog fact checked below.
+    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
-}
-
-traex_session_id_generate() {
-  local hex
-  hex=$(LC_ALL=C od -An -v -tx1 -N 16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
-  [ "${#hex}" -eq 32 ] || return 1
-  printf '%s-%s-4%s-8%s-%s' \
-    "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" "${hex:17:3}" "${hex:20:12}"
-}
-
-raw_launch_references_traex() {  # <raw-command>
-  local raw=$1 canonical
-  canonical=${raw//\'/}
-  canonical=${canonical//\"/}
-  canonical=${canonical//\\/}
-  [[ "$canonical" =~ (^|[^[:alnum:]_.-])traex([^[:alnum:]_.-]|$) ]]
 }
 
 RAW_LAUNCH=0
@@ -926,11 +893,16 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
-    raw_launch_references_traex "$LAUNCH" && RAW_TRAEX=1
+    # This bounded lexical check covers direct and ordinary shell-wrapped TraeX
+    # commands. Deliberately constructed interpreter code is outside the
+    # supported detection guarantee; preserving general raw execution is the
+    # captain-approved boundary.
+    canonical=${LAUNCH//\'/}
+    canonical=${canonical//\"/}
+    canonical=${canonical//\\/}
+    [[ "$canonical" =~ (^|[^[:alnum:]_.-])traex([^[:alnum:]_.-]|$) ]] && RAW_TRAEX=1
     for word in $LAUNCH; do
-      if [ -z "$HARNESS" ]; then
-        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word") ;; esac
-      fi
+      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
     ;;
   '')
@@ -976,12 +948,11 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# TraeX is deliberately narrower: current verification covers only ordinary
-# isolated workers/scouts on Herdr, whose native TraeX manifest supplies exact
-# trust-dialog, liveness, state-transition, and submit evidence. Refuse every
-# other role/backend before creating an endpoint rather than silently degrading
-# to a transport with no equivalent structural launch postcondition.
-if [ "$RAW_LAUNCH" -eq 1 ] && [ "$RAW_TRAEX" -eq 1 ]; then
+# TraeX intentionally follows the ordinary harness contract rather than owning
+# a backend lifecycle subsystem. Refuse its narrow unsupported surfaces before
+# any endpoint is created; Herdr then supplies the same generic pane, process,
+# input, liveness, busy-state, and cleanup operations used by Codex.
+if [ "$RAW_TRAEX" -eq 1 ]; then
   echo "error: TraeX must use Firstmate's verified launch template; raw TraeX launch commands remain unverified" >&2
   exit 1
 fi
@@ -995,24 +966,7 @@ if [ "$HARNESS" = traex ]; then
     exit 1
   fi
   if [ "$BACKEND" != herdr ]; then
-    echo "error: traex workers are verified only on backend=herdr; backend=$BACKEND has no proven structural trust and launch postcondition" >&2
-    exit 1
-  fi
-  TRAEX_EXISTING_READY=$(fm_backend_meta_exact_value "$STATE/$ID.meta" traex_ready 2>/dev/null || true)
-  if [ "$TRAEX_EXISTING_READY" = pending ]; then
-    TRAEX_EXISTING_TARGET=$(fm_backend_target_of_meta "$STATE/$ID.meta" 2>/dev/null || true)
-    TRAEX_EXISTING_GEN=$(fm_backend_meta_exact_value "$STATE/$ID.meta" busy_gen 2>/dev/null || true)
-    if ! fm_backend_herdr_parse_target "$TRAEX_EXISTING_TARGET" \
-       || ! fm_backend_herdr_traex_binding_publish \
-         "$STATE" "$ID" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$TRAEX_EXISTING_GEN" \
-       || ! fm_backend_herdr_traex_readiness_set \
-         "$STATE" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" pending failed; then
-      echo "error: stale TraeX launch readiness for $ID could not be reconciled safely; inspect $STATE/$ID.meta before retrying" >&2
-      exit 1
-    fi
-  fi
-  if ! fm_backend_herdr_traex_spawn_owner_publish "$SPAWN_TASK_LOCK"; then
-    echo "error: TraeX spawn ownership could not be published safely before endpoint creation" >&2
+    echo "error: traex workers are verified only on backend=herdr; backend=$BACKEND is unsupported" >&2
     exit 1
   fi
   if [ "$EFFORT" = max ]; then
@@ -1021,19 +975,6 @@ if [ "$HARNESS" = traex ]; then
   fi
   if ! command -v traex >/dev/null 2>&1; then
     echo "error: traex executable not found on PATH; install TraeX or select a different verified harness" >&2
-    exit 1
-  fi
-  TRAEX_HERDR_SESSION=$(fm_backend_herdr_session)
-  if ! fm_backend_herdr_traex_release_supported "$TRAEX_HERDR_SESSION"; then
-    echo "error: traex requires both the selected Herdr client and running server to report version $FM_BACKEND_HERDR_MIN_TRAEX_VERSION or newer before endpoint creation" >&2
-    exit 1
-  fi
-  TRAEX_SESSION_ID=$(traex_session_id_generate) || {
-    echo "error: TraeX task-private native session identity could not be generated safely" >&2
-    exit 1
-  }
-  if ! fm_backend_herdr_events_capable "$TRAEX_HERDR_SESSION"; then
-    echo "error: traex requires Herdr's pane.agent_status_changed event surface for durable worker lifecycle; update Herdr and ensure python3 is available" >&2
     exit 1
   fi
 fi
@@ -1170,18 +1111,10 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
-      ;;
-    traex)
-      # TraeX exposes the same config key on its interactive root command.
-      # The installed model picker advertises low..xhigh; spawn validation
-      # refuses max rather than remapping it to a provider-specific level.
+    codex|traex)
+      # Both installed CLIs expose model_reasoning_effort through -c and have
+      # verified low|medium|high|xhigh values. TraeX max is refused before the
+      # endpoint exists; Codex continues to omit its unsupported max value.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -2022,7 +1955,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|traex)
+    claude*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2299,11 +2232,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-META_WRITE_PATH="$STATE/$ID.meta"
-if [ "$HARNESS" = traex ]; then
-  TRAEX_META_STAGED="$STATE_REAL/.$ID.meta.pending.${BASHPID:-$$}.$RANDOM"
-  META_WRITE_PATH=$TRAEX_META_STAGED
-fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -2317,10 +2245,6 @@ fi
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  if [ "$HARNESS" = traex ]; then
-    echo "traex_ready=pending"
-    echo "traex_session_id=$TRAEX_SESSION_ID"
-  fi
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2349,52 +2273,8 @@ fi
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$META_WRITE_PATH"
+} > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-
-spawn_traex_readiness_set() {  # <expected> <new>
-  local expected=$1 new=$2 meta="$STATE/$ID.meta" count tmp
-  count=$(grep -c '^traex_ready=' "$meta" 2>/dev/null || true)
-  [ "$count" = 1 ] && grep -qxF "traex_ready=$expected" "$meta" || return 1
-  tmp="$meta.traex.$$"
-  awk -v old="traex_ready=$expected" -v replacement="traex_ready=$new" \
-    '{ if ($0 == old) print replacement; else print }' "$meta" > "$tmp" || {
-      rm -f "$tmp"
-      return 1
-    }
-  chmod 0600 "$tmp" 2>/dev/null || {
-    rm -f "$tmp"
-    return 1
-  }
-  mv -f "$tmp" "$meta" || {
-    rm -f "$tmp"
-    return 1
-  }
-}
-
-traex_spawn_fail() {  # <detail>
-  local detail=$1 ready
-  ready=$(fm_backend_meta_exact_value "$STATE/$ID.meta" traex_ready 2>/dev/null || true)
-  if [ "$ready" != 1 ]; then
-    spawn_traex_readiness_set pending failed 2>/dev/null || true
-  fi
-  if fm_backend_herdr_parse_target "$T"; then
-    fm_backend_herdr_traex_reconcile_launch_failure \
-      "$STATE_REAL" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      >/dev/null 2>&1 || true
-  fi
-  printf 'failed: %s\n' "$detail" >> "$STATE/$ID.status"
-  echo "error: $detail; inspect window $T" >&2
-}
-
-if [ "$HARNESS" = traex ]; then
-  if ! fm_backend_herdr_traex_binding_publish \
-    "$STATE_REAL" "$ID" "$HERDR_SES" "$HERDR_PANE_ID" "$BUSY_GEN" "$TRAEX_META_STAGED"; then
-    traex_spawn_fail "TraeX lifecycle ownership index could not be published"
-    exit 1
-  fi
-  TRAEX_META_STAGED=
-fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2412,9 +2292,6 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-if [ "$HARNESS" = traex ]; then
-  LAUNCH=${LAUNCH//__TRAEXSESSION__/$(shell_quote "$TRAEX_SESSION_ID")}
-fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -2470,22 +2347,11 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = traex ]; then
-  # A key send proves nothing by itself. On a fresh task copy, Herdr must either
-  # observe the initial prompt enter working directly or identify the exact
-  # TraeX directory-trust chooser, whose preselected Yes is accepted once,
-  # followed by working. Only then publish lifecycle readiness for the watcher.
-  if ! fm_backend_herdr_traex_wait_started "$T" "$WT" "$PROJ_ABS" "$STATE_REAL"; then
-    traex_spawn_fail "TraeX task instructions did not begin processing through the verified Herdr launch path"
-    exit 1
-  fi
-  if ! spawn_traex_readiness_set pending 1; then
-    traex_spawn_fail "TraeX began processing, but lifecycle readiness could not be published"
-    exit 1
-  fi
-  if ! fm_backend_herdr_parse_target "$T" \
-      || ! fm_backend_herdr_traex_reconcile_current \
-        "$STATE_REAL" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
-    traex_spawn_fail "TraeX began processing, but its current Herdr lifecycle could not be reconciled"
+  # Sending Enter proves transport only. A fresh isolated copy may show TraeX's
+  # native trust chooser; the harness adapter verifies that exact dialog and
+  # accepts it once, while Herdr remains the sole lifecycle/backend owner.
+  if ! fm_backend_herdr_traex_wait_started "$T" "$WT" "$PROJ_ABS"; then
+    echo "error: TraeX task instructions did not begin through the verified Herdr launch path; inspect window $T" >&2
     exit 1
   fi
 fi

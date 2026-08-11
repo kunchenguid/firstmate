@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Opt-in real TraeX/Herdr drift guard for the ordinary Firstmate worker path.
+# Opt-in real TraeX/Herdr smoke for the thin ordinary worker adapter.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+HELPER="$ROOT/bin/fm-herdr-lab.sh"
 REAL_HERDR=$(command -v herdr 2>/dev/null || true)
 LAB=
 PROBE=
@@ -11,44 +11,26 @@ REPO=
 WT=
 CLEAN_PATH=$PATH
 
-teardown_lab_checked() {
-  [ -z "$LAB" ] && return 0
-  PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" || return 1
-  LAB=
-}
-
 cleanup() {
-  local dirty=0 pool
-  if ! teardown_lab_checked >/dev/null 2>&1; then
-    printf 'warning: guarded TraeX lab teardown failed for %s\n' "$LAB" >&2
+  local pool
+  if [ -n "$LAB" ]; then
+    PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" >/dev/null 2>&1 || true
   fi
-  if [ -n "$WT" ] && [ -d "$WT" ] && [ -n "$REPO" ] && [ -d "$REPO/.git" ]; then
-    if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
-      printf 'warning: preserving unexpectedly dirty TraeX probe copy at %s\n' "$WT" >&2
-      dirty=1
-    else
-      if git -C "$REPO" worktree remove "$WT" >/dev/null 2>&1; then
-        # treehouse leaves its now-empty per-repository pool journal behind
-        # when a disposable source repository disappears in the same cleanup.
-        # Remove only this guard's exact demo-*/1/demo pool after the worktree
-        # itself is gone and its numbered slot is observably empty.
-        case "$WT" in
-          */.treehouse/demo-*/1/demo)
-            pool=${WT%/1/demo}
-            if [ ! -e "$WT" ] && [ -d "$pool/1" ] \
-               && [ -z "$(find "$pool/1" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-              rm -rf -- "$pool"
-            fi
-            ;;
-        esac
-      else
-        dirty=1
-      fi
+  if [ -n "$WT" ] && [ -d "$WT" ] && [ -n "$REPO" ] && [ -d "$REPO/.git" ] \
+     && [ -z "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
+    if git -C "$REPO" worktree remove "$WT" >/dev/null 2>&1; then
+      case "$WT" in
+        */.treehouse/demo-*/1/demo)
+          pool=${WT%/1/demo}
+          if [ ! -e "$WT" ] && [ -d "$pool/1" ] \
+             && [ -z "$(find "$pool/1" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+            rm -rf -- "$pool"
+          fi
+          ;;
+      esac
     fi
   fi
-  if [ "$dirty" -eq 0 ] && [ -n "$PROBE" ]; then
-    rm -rf -- "$PROBE"
-  fi
+  [ -z "$PROBE" ] || rm -rf -- "$PROBE"
 }
 
 fail() {
@@ -60,47 +42,36 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-if [ "${1:-}" = --verify-lab-teardown ]; then
-  [ "$#" -eq 2 ] || fail "--verify-lab-teardown requires one lab name"
-  LAB=$2
-  teardown_lab_checked || fail "guarded TraeX lab teardown failed for $LAB"
-  exit 0
-fi
-
 if [ "${FM_TRAEX_HERDR_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_TRAEX_HERDR_LIVE=1 to run the real TraeX/Herdr drift guard"
+  echo 'skip: set FM_TRAEX_HERDR_LIVE=1 to run the real TraeX/Herdr smoke'
   exit 0
 fi
 
-command -v traex >/dev/null 2>&1 \
-  || fail "FM_TRAEX_HERDR_LIVE=1 but no real traex executable is installed on PATH"
-[ -x "$REAL_HERDR" ] \
-  || fail "FM_TRAEX_HERDR_LIVE=1 but no real herdr executable is installed on PATH"
-command -v jq >/dev/null 2>&1 || fail "jq is required for the TraeX/Herdr drift guard"
-command -v treehouse >/dev/null 2>&1 || fail "treehouse is required for the TraeX/Herdr drift guard"
+command -v traex >/dev/null 2>&1 || fail 'real traex executable is not installed'
+[ -x "$REAL_HERDR" ] || fail 'real herdr executable is not installed'
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+command -v treehouse >/dev/null 2>&1 || fail 'treehouse is required'
 
-LAB=$("$HELPER" name traex-drift) || fail "could not allocate a guarded TraeX lab name"
+LAB=$("$HELPER" name traex-thin) || fail 'could not allocate guarded lab name'
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-"$HELPER" provision "$LAB" || fail "could not provision the guarded TraeX lab"
-PROBE=$(mktemp -d "${TMPDIR:-/tmp}/fm-traex-drift.XXXXXX") \
-  || fail "could not create the disposable TraeX home"
+"$HELPER" provision "$LAB" || fail 'could not provision guarded Herdr lab'
+PROBE=$(mktemp -d "${TMPDIR:-/tmp}/fm-traex-thin.XXXXXX") || fail 'could not create disposable home'
 mkdir -p "$PROBE/home/projects" "$PROBE/home/data/traex-live" \
-  "$PROBE/home/state" "$PROBE/home/config" "$PROBE/wrap" \
-  || fail "could not scaffold the disposable TraeX home"
+  "$PROBE/home/state" "$PROBE/home/config" "$PROBE/wrap" || fail 'could not scaffold disposable home'
 printf '%s\n' off > "$PROBE/home/config/herdr-presentation-spaces"
 
 REPO="$PROBE/home/projects/demo"
 mkdir -p "$REPO"
-git -C "$REPO" init -q -b main || fail "could not initialize the disposable source project"
-git -C "$REPO" config user.name 'TraeX drift guard'
-git -C "$REPO" config user.email 'traex-drift@example.invalid'
-printf '%s\n' '# disposable TraeX drift guard' > "$REPO/README.md"
+git -C "$REPO" init -q -b main || fail 'could not initialize disposable project'
+git -C "$REPO" config user.name 'TraeX thin smoke'
+git -C "$REPO" config user.email 'traex-thin@example.invalid'
+printf '%s\n' '# disposable TraeX thin smoke' > "$REPO/README.md"
 git -C "$REPO" add README.md
-git -C "$REPO" commit -q -m init || fail "could not commit the disposable source project"
+git -C "$REPO" commit -q -m init || fail 'could not commit disposable project'
 cat > "$PROBE/home/data/traex-live/brief.md" <<'EOF'
-This is a disposable Firstmate lifecycle drift guard in an isolated Git task copy.
-Run `sleep 2`, then reply with exactly TRAEX_LIVE_FIRST_OK and wait for more instructions.
+This is a disposable Firstmate TraeX smoke in an isolated Git task copy.
+Run `sleep 2`, then reply with exactly TRAEX_THIN_FIRST_OK and wait.
 Do not edit any file.
 EOF
 
@@ -111,9 +82,7 @@ real=$(printf '%q' "$REAL_HERDR")
 helper=$(printf '%q' "$HELPER")
 lab=$(printf '%q' "$LAB")
 log=$(printf '%q' "$PROBE/herdr-wrapper.log")
-if [ "\${FM_TRAEX_LAB_ACTIVE:-}" = 1 ]; then
-  exec "\$real" "\$@"
-fi
+if [ "\${FM_TRAEX_LAB_ACTIVE:-}" = 1 ]; then exec "\$real" "\$@"; fi
 printf '%q ' "\$@" >> "\$log"
 printf '\n' >> "\$log"
 args=("\$@")
@@ -132,70 +101,41 @@ export FM_HOME="$PROBE/home" FM_BACKEND=herdr HERDR_SESSION="$LAB" FM_SPAWN_NO_G
 unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SOCKET_PATH 2>/dev/null || true
 
 SPAWN_OUT=$("$ROOT/bin/fm-spawn.sh" traex-live "$REPO" --scout --harness traex \
-  --model Doubao-Seed-2.1-Pro --effort high 2>&1) \
-  || fail "real TraeX spawn failed: $SPAWN_OUT"
+  --model Doubao-Seed-2.1-Pro --effort high 2>&1) || fail "real TraeX spawn failed: $SPAWN_OUT"
 printf '%s\n' "$SPAWN_OUT" | grep -Fq 'spawned traex-live harness=traex kind=scout' \
-  || fail "real TraeX spawn omitted its success identity: $SPAWN_OUT"
-
+  || fail "spawn omitted success identity: $SPAWN_OUT"
 META="$PROBE/home/state/traex-live.meta"
 WT=$(sed -n 's/^worktree=//p' "$META")
 TARGET=$(sed -n 's/^window=//p' "$META")
-SESSION=${TARGET%%:*}
 PANE=${TARGET#*:}
-NATIVE_SESSION=$(sed -n 's/^traex_session_id=//p' "$META")
-[ -n "$WT" ] && [ -n "$PANE" ] || fail "spawn metadata omitted the task copy or Herdr pane"
-[[ "$NATIVE_SESSION" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
-  || fail "spawn metadata omitted the exact native TraeX session identity"
-grep -qx 'traex_ready=1' "$META" || fail "spawn never published TraeX lifecycle readiness"
-grep -q '^agent explain ' "$PROBE/herdr-wrapper.log" \
-  || fail "the fresh copy never exercised Herdr's structural TraeX trust rule"
+[ -n "$WT" ] && [ -n "$PANE" ] || fail 'spawn metadata omitted task copy or pane'
+grep -qx 'harness=traex' "$META" || fail 'metadata omitted TraeX'
+! grep -q '^traex_ready=' "$META" || fail 'thin adapter wrote TraeX readiness state'
+[ ! -e "$PROBE/home/state/traex-live.busy-gen" ] || fail 'thin adapter armed custom lifecycle state'
+grep -q '^agent explain ' "$PROBE/herdr-wrapper.log" || fail 'fresh copy did not exercise structural trust'
 [ "$(grep -c '^pane send-keys .* enter ' "$PROBE/herdr-wrapper.log")" -eq 2 ] \
-  || fail "fresh launch did not send exactly one shell Enter and one verified trust Enter"
-pass "real TraeX fresh-copy trust reached native working through the guarded Herdr lab"
+  || fail 'fresh launch did not send one shell Enter and one verified trust Enter'
+pass 'real TraeX fresh-copy trust reached native working through generic Herdr'
 
 agent_status() {
-  "$HELPER" run "$LAB" agent get "$PANE" \
-    | jq -r '.result.agent.agent_status // empty'
+  "$HELPER" run "$LAB" agent get "$PANE" | jq -r '.result.agent.agent_status // empty'
 }
 
-wait_idle() {
-  local i=0 status=
-  while [ "$i" -lt 360 ]; do
-    status=$(agent_status)
-    [ "$status" = idle ] && return 0
+wait_status() {  # <status> [polls]
+  local want=$1 polls=${2:-360} i=0 got=
+  while [ "$i" -lt "$polls" ]; do
+    got=$(agent_status)
+    [ "$got" = "$want" ] && return 0
     sleep 0.5
     i=$((i + 1))
   done
-  printf 'last native status: %s\n' "$status" >&2
+  printf 'last native status: %s\n' "$got" >&2
   return 1
 }
 
 capture_has() {
   "$HELPER" run "$LAB" pane read "$PANE" --source recent --lines 200 | grep -Fq "$1"
 }
-
-# Load the public backend owner so the live native level is folded exactly as
-# watcher reconnect recovery folds it.
-# shellcheck source=bin/fm-backend.sh
-. "$ROOT/bin/fm-backend.sh"
-fm_backend_source herdr
-wait_idle || fail "the initial real TraeX turn never settled"
-if fm_backend_herdr_wait_transition "$SESSION" 1 "$PROBE/home/state" "$TARGET" \
-    > "$PROBE/initial-transition.out"; then
-  TRANSITION_RC=0
-else
-  TRANSITION_RC=$?
-fi
-[ "$TRANSITION_RC" -eq 1 ] \
-  || fail "the real Herdr event subscription did not complete a clean idle reconciliation (rc=$TRANSITION_RC)"
-[ ! -s "$PROBE/initial-transition.out" ] \
-  || fail "the idle completion was misreported as an actionable Herdr transition"
-[ "$(fm_busy_classify herdr "$TARGET" traex traex-live "$PROBE/home/state")" = 'idle herdr-traex' ] \
-  || fail "the initial real TraeX turn did not classify idle from its bound semantic record"
-[ -e "$PROBE/home/state/traex-live.turn-ended" ] \
-  || fail "the initial real TraeX completion emitted no durable notification"
-capture_has TRAEX_LIVE_FIRST_OK || fail "TraeX did not process the initial task instructions"
-pass "real TraeX initial instructions completed with a durable semantic transition"
 
 send_text() {
   local text=$1 out
@@ -211,43 +151,43 @@ send_key() {
     || fail "real TraeX key '$key' failed: $out"
 }
 
-complete_cycle() {
-  local token=$1
-  rm -f "$PROBE/home/state/traex-live.turn-ended"
-  send_text "Run sleep 1, then reply with exactly $token."
-  [ "$(fm_busy_classify herdr "$TARGET" traex traex-live "$PROBE/home/state")" = 'busy herdr-traex' ] \
-    || fail "$token was acknowledged without persisting native working"
-  wait_idle || fail "$token never settled"
-  fm_backend_herdr_traex_reconcile_current "$PROBE/home/state" "$SESSION" "$PANE" \
-    || fail "idle $token could not be persisted"
-  [ "$(fm_busy_classify herdr "$TARGET" traex traex-live "$PROBE/home/state")" = 'idle herdr-traex' ] \
-    || fail "$token did not classify idle after settling"
-  [ -e "$PROBE/home/state/traex-live.turn-ended" ] \
-    || fail "$token emitted no durable completion notification"
-  capture_has "$token" || fail "TraeX did not produce $token"
-}
+wait_status idle || fail 'initial TraeX turn never settled'
+capture_has TRAEX_THIN_FIRST_OK || fail 'TraeX did not process initial instructions'
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+[ "$(fm_backend_busy_state herdr "$TARGET")" = idle ] || fail 'generic Herdr idle observation failed'
+send_text "Run \`sleep 2\`, then reply with exactly TRAEX_THIN_SECOND_OK."
+[ "$(fm_backend_busy_state herdr "$TARGET")" = busy ] || fail 'generic Herdr busy observation failed'
+wait_status idle || fail 'steered TraeX turn never settled'
+capture_has TRAEX_THIN_SECOND_OK || fail 'TraeX did not process generic steer'
+pass 'real TraeX steering and current state use generic Herdr owners'
 
-complete_cycle TRAEX_LIVE_SECOND_OK
-complete_cycle TRAEX_LIVE_THIRD_OK
-pass "real TraeX repeated send cycles preserved busy, idle, and completion semantics"
-
-rm -f "$PROBE/home/state/traex-live.turn-ended"
-send_text "Run \`sleep 20\`, then reply TRAEX_LIVE_SHOULD_NOT_COMPLETE."
-[ "$(fm_busy_classify herdr "$TARGET" traex traex-live "$PROBE/home/state")" = 'busy herdr-traex' ] \
-  || fail "the interrupt target was acknowledged without persisting native working"
+send_text "Run \`sleep 20\`, then reply TRAEX_THIN_SHOULD_NOT_COMPLETE."
 send_key Escape
-wait_idle || fail "TraeX Escape plus composer clear did not return native idle"
-fm_backend_herdr_traex_reconcile_current "$PROBE/home/state" "$SESSION" "$PANE" \
-  || fail "the interrupted idle level could not be persisted"
-[ "$(fm_backend_herdr_composer_state "$TARGET")" = empty ] \
-  || fail "TraeX Escape left restored input in the composer"
-complete_cycle TRAEX_LIVE_RESUME_OK
-pass "real TraeX interrupt cleared restored input and the same task resumed"
+wait_status idle || fail 'TraeX interrupt did not return native idle'
+[ "$(fm_backend_composer_state herdr "$TARGET")" = empty ] \
+  || fail 'TraeX interrupt left restored input in the composer'
+send_text 'Reply with exactly TRAEX_THIN_AFTER_INTERRUPT_OK.'
+wait_status idle || fail 'post-interrupt TraeX turn never settled'
+capture_has TRAEX_THIN_AFTER_INTERRUPT_OK || fail 'post-interrupt steer was corrupted'
+pass 'real TraeX interrupt clearing stays on generic key and send paths'
 
-[ -z "$(git -C "$WT" status --porcelain)" ] \
-  || fail "the real TraeX drift guard dirtied its isolated task copy"
+[ -z "$(git -C "$WT" status --porcelain)" ] || fail 'smoke dirtied the isolated task copy'
+fm_backend_kill herdr "$TARGET"
+cleanup_state=
+for _ in $(seq 1 50); do
+  cleanup_state=$(fm_backend_agent_state herdr "$TARGET")
+  case "$cleanup_state" in dead|missing) break ;; esac
+  sleep 0.1
+done
+case "$cleanup_state" in
+  dead|missing) ;;
+  *) fail "generic Herdr cleanup did not remove the worker pane (state=$cleanup_state)" ;;
+esac
+pass 'real TraeX exit cleanup uses the generic Herdr owner'
 printf 'traex=%s\n' "$(traex --version 2>&1 | head -1)"
 printf 'herdr=%s\n' "$(PATH="$CLEAN_PATH" "$REAL_HERDR" --version 2>&1 | head -1)"
-teardown_lab_checked || fail "guarded TraeX lab teardown failed or the default fleet session changed"
-pass "real TraeX lab teardown preserved the default Herdr session"
-pass "TraeX/Herdr live drift guard completed"
+PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" || fail 'guarded teardown or default-session tripwire failed'
+LAB=
+pass 'real TraeX lab teardown preserved the default Herdr session'
+pass 'thin TraeX/Herdr smoke completed'

@@ -34,9 +34,7 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled \
-    "$TMP"/reconciles 2>/dev/null || true
-  rm -rf "$STATE_DIR/.traex-herdr-bindings"
+    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -129,51 +127,17 @@ pass "event_wait_or_sleep: a home with no push-capable window is inert (sleeps P
 
 reset_state
 fm_write_meta "$STATE_DIR/tk5.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-fm_write_meta "$STATE_DIR/ztraex1.meta" "window=alpha:wA:p1" "endpoint_task_id=ztraex1" \
-  "backend=herdr" "harness=traex" "kind=ship" "herdr_session=alpha" \
-  "herdr_pane_id=wA:p1" "busy_gen=g1" "traex_ready=1" \
-  "traex_session_id=33333333-3333-4333-8333-333333333333"
-fm_write_meta "$STATE_DIR/ztraex2.meta" "window=beta:wB:p2" "endpoint_task_id=ztraex2" \
-  "backend=herdr" "harness=traex" "kind=scout" "herdr_session=beta" \
-  "herdr_pane_id=wB:p2" "busy_gen=g2" "traex_ready=failed" \
-  "traex_session_id=44444444-4444-4444-8444-444444444444"
-fm_write_meta "$STATE_DIR/zclaude.meta" "window=gamma:wC:p3" "endpoint_task_id=zclaude" \
-  "backend=herdr" "harness=claude" "kind=ship" "herdr_session=gamma" \
-  "herdr_pane_id=wC:p3" "busy_gen=g3" "traex_ready=1"
-fm_write_meta "$STATE_DIR/zsecondmate.meta" "window=delta:wD:p4" "endpoint_task_id=zsecondmate" \
-  "backend=herdr" "harness=traex" "kind=secondmate" "herdr_session=delta" \
-  "herdr_pane_id=wD:p4" "busy_gen=g4" "traex_ready=1"
-fm_backend_source herdr
-fm_backend_herdr_traex_binding_publish "$STATE_DIR" ztraex1 alpha wA:p1 g1 \
-  || fail "could not publish the alpha TraeX ownership index"
-fm_backend_herdr_traex_binding_publish "$STATE_DIR" ztraex2 beta wB:p2 g2 \
-  || fail "could not publish the beta TraeX ownership index"
 export EVENT_CAP_FAIL_MAX=2
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_events_capable() { return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() { printf 'WT\n' >> "$TMP/wtcalls"; return 2; }
-# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
-fm_backend_reconcile_transitions() { printf '%s\n' "$*" >> "$TMP/reconciles"; return 0; }
 : > "$TMP/wtcalls"
-: > "$TMP/reconciles"
 event_wait_or_sleep   # fails=1
 event_wait_or_sleep   # fails=2 -> disable
-event_wait_or_sleep   # disabled: reconciles and sleeps without event subscription
+event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
-RN=$(wc -l < "$TMP/reconciles" | tr -d '[:space:]')
-[ "$RN" = 9 ] || fail "every polling fallback must reconcile each recorded TraeX session group (expected 9 calls, got $RN)"
-[ "$(grep -Fc "herdr $STATE_DIR default default:wG:pQ" "$TMP/reconciles" || true)" = 3 ] \
-  || fail "polling reconciliation did not retain the active Herdr worker group"
-[ "$(grep -Fc "herdr $STATE_DIR alpha alpha:wA:p1" "$TMP/reconciles" || true)" = 3 ] \
-  || fail "polling reconciliation skipped the recorded alpha TraeX session"
-[ "$(grep -Fc "herdr $STATE_DIR beta beta:wB:p2" "$TMP/reconciles" || true)" = 3 ] \
-  || fail "polling reconciliation skipped the recorded beta TraeX session"
-! grep -Fq 'gamma:wC:p3' "$TMP/reconciles" \
-  || fail "polling reconciliation broadened grouped lifecycle reads to a non-TraeX task"
-! grep -Fq 'delta:wD:p4' "$TMP/reconciles" \
-  || fail "polling reconciliation broadened grouped lifecycle reads to a secondmate"
-pass "event_wait_or_sleep: disabled event push reconciles every recorded TraeX session group"
+pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"
