@@ -1564,6 +1564,56 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
 }
 
+test_signal_during_recovery_marker_write_exits_cleanly() {
+  local dir state fakebin out signal_once real_chmod pid i=0
+  dir=$(make_case watcher-signal-marker-lock); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; signal_once="$dir/chmod-signaled"; real_chmod=$(command -v chmod)
+  printf 'acked:downtime:test-generation\n' > "$state/.watcher-down"
+  cat > "$fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+"$REAL_CHMOD" "$@" || exit $?
+target=${!#}
+case "$target" in
+  */.watcher-down.tmp.*)
+    if [ ! -e "$FM_FAKE_CHMOD_SIGNAL_ONCE" ]; then
+      : > "$FM_FAKE_CHMOD_SIGNAL_ONCE"
+      kill -TERM "$PPID"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$fakebin/chmod"
+
+  PATH="$fakebin:$PATH" REAL_CHMOD="$real_chmod" FM_FAKE_CHMOD_SIGNAL_ONCE="$signal_once" \
+    FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "the signal-boundary watcher never initialized"; }
+  printf '%s\t1\tsignal\tfixture\tsignal: cleanup lock boundary\n' "$(date +%s)" > "$state/.wake-queue"
+
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "a signal while writing recovery evidence deadlocked watcher cleanup"
+  fi
+  wait "$pid" 2>/dev/null || true
+  [ -e "$signal_once" ] || fail "the watcher never reached the recovery-marker signal boundary"
+  [ ! -e "$state/.watch.lock" ] || fail "signal cleanup left the watcher lock behind"
+  pass "a signal during recovery-marker publication cannot deadlock watcher cleanup"
+}
+
 test_procevent_marker_keys_are_injective() {
   local dir state out pid marker_count
   dir=$(make_case procevent-marker-identity); state="$dir/state"; out="$dir/watch.out"
@@ -1882,6 +1932,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
+test_signal_during_recovery_marker_write_exits_cleanly
 test_procevent_marker_keys_are_injective
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries

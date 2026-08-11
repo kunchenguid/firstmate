@@ -759,6 +759,12 @@ watcher_cleanup() {
       transition=release-lock-existing
     fi
   fi
+  # A signal can interrupt a recovery transition after this watcher acquired
+  # one or both subordinate locks. Release only locks still owned by this pid
+  # before the EXIT path publishes its recovery evidence, or cleanup can wait
+  # forever trying to reacquire its own marker lock.
+  fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
