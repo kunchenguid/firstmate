@@ -6,7 +6,7 @@
 // message acceptance.  Without an active pairing/binding this owner is inert
 // and existing internal producers retain their direct current-session path.
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   InputEvent,
+  InputEventResult,
   MessageEndEvent,
   MessageStartEvent,
   TurnEndEvent,
@@ -26,6 +27,7 @@ import {
   claimPendingDecisionForOutbound,
   enqueueLocalIngress,
   findInboundByDeliveryRef,
+  markIngressAccepted,
   readActiveBinding,
   readPairing,
   readTransportHealth,
@@ -33,6 +35,7 @@ import {
   reconcileIngressFromSession,
   registerAssistantOutbound,
   releaseIngressClaim,
+  reserveInteractiveIngress,
   releaseLiveSession,
   type BindingRecord,
   type InboundEvent,
@@ -74,9 +77,15 @@ interface ActiveRuntime {
   waitingForTransport: boolean;
   timer: ReturnType<typeof setInterval> | null;
   latestProvenance: Provenance | null;
+  lastAssistantProvenance: Provenance | null;
+  directUnmarkedIngress: { deliveryRef: string } | null;
+  pendingPersistence: Map<string, string>;
+  pendingUnmarkedIngress: Map<string, string>;
+  pendingSensitiveEffects: Map<string, { code: string; confirmed: boolean; announced: boolean }>;
   lastAssistantText: string;
   lastAssistantOrdinal: number;
   lastOutboundOrdinal: number;
+  lastRegistrationAlertOrdinal: number;
   lastRepairMs: number;
   lastStatus: string;
 }
@@ -288,6 +297,7 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
     repairInboundLedgers(fmHome);
     runtime.lastRepairMs = Date.now();
   }
+  flushAssistantOutbound(runtime);
   if (runtime.inFlight) return;
   if (runtime.waitingForTransport) {
     if (!transportAllowsFeishuDispatch()) return;
@@ -362,9 +372,15 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     waitingForTransport: false,
     timer: null,
     latestProvenance: null,
+    lastAssistantProvenance: null,
+    directUnmarkedIngress: null,
+    pendingPersistence: new Map(),
+    pendingUnmarkedIngress: new Map(),
+    pendingSensitiveEffects: new Map(),
     lastAssistantText: "",
     lastAssistantOrdinal: 0,
     lastOutboundOrdinal: 0,
+    lastRegistrationAlertOrdinal: 0,
     lastRepairMs: Date.now(),
     lastStatus: "",
   };
@@ -387,13 +403,20 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
   return runtime;
 }
 
-function onInput(event: InputEvent, ctx: ExtensionContext, token: string): { action: "continue" | "handled" } {
+function localExpansionCommand(pi: ExtensionAPI, text: string): boolean {
+  if (!text.startsWith("/")) return false;
+  const command = text.match(/^\/([^\s]+)/)?.[1];
+  if (!command) return false;
+  return pi.getCommands().some((item) => item.name === command && (item.source === "skill" || item.source === "prompt"));
+}
+
+function onInput(event: InputEvent, ctx: ExtensionContext, token: string): InputEventResult {
   const runtime = activeRuntime;
   if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return { action: "continue" };
   if (event.source === "extension") return { action: "continue" };
   if (event.source !== "interactive") return { action: "continue" };
-  enqueueLocalIngress(fmHome, {
-    source: "tui",
+  const expandable = localExpansionCommand(runtime.pi, event.text);
+  const reserved = reserveInteractiveIngress(fmHome, {
     text: event.text,
     images: event.images,
     desiredDelivery: event.streamingBehavior ?? "steer",
@@ -401,90 +424,185 @@ function onInput(event: InputEvent, ctx: ExtensionContext, token: string): { act
     bindingId: runtime.binding.binding_id,
     bindingGeneration: runtime.binding.generation,
   });
-  schedulePump(runtime);
-  return { action: "handled" };
+  if (reserved.status !== "reserved" || !reserved.event) {
+    if (expandable) {
+      ctx.ui.setEditorText(event.text);
+      ctx.ui.notify("A prior shared-channel input is still being accepted. The local skill/template was restored to the editor; submit it again after that input starts.", "warning");
+      return { action: "handled" };
+    }
+    enqueueLocalIngress(fmHome, {
+      source: "tui",
+      text: event.text,
+      images: event.images,
+      desiredDelivery: event.streamingBehavior ?? "steer",
+      sessionId: runtime.identity.sessionId,
+      bindingId: runtime.binding.binding_id,
+      bindingGeneration: runtime.binding.generation,
+    });
+    schedulePump(runtime);
+    return { action: "handled" };
+  }
+  if (expandable) {
+    runtime.directUnmarkedIngress = { deliveryRef: reserved.event.delivery_ref };
+    return { action: "continue" };
+  }
+  return {
+    action: "transform",
+    text: `${event.text}\n${markerLine("tui", reserved.event.delivery_ref, runtime.binding.generation)}`,
+    images: event.images,
+  };
 }
 
 function onUserStart(event: MessageStartEvent, token: string): void {
   if (event.message.role !== "user") return;
   const runtime = activeRuntime;
   if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
-  const marker = parseFirstmateIngressMarker(messageText(event.message));
-  if (!marker || marker.bindingGeneration !== runtime.binding.generation) return;
-  runtime.latestProvenance = provenanceForMarker(marker);
-  runtime.lastAssistantText = "";
-  if (runtime.inFlight?.event.delivery_ref === marker.deliveryRef) {
-    runtime.inFlight = null;
-    schedulePump(runtime);
-  }
-}
-
-async function onUserEnd(event: MessageEndEvent, ctx: ExtensionContext, token: string): Promise<void> {
-  if (event.message.role !== "user") return;
-  const runtime = activeRuntime;
-  if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
   const text = messageText(event.message);
   const marker = parseFirstmateIngressMarker(text);
-  if (!marker || marker.bindingGeneration !== runtime.binding.generation) return;
-  const entryId = entryIdForMessage(ctx, text);
-  if (!entryId) return;
-  ackIngress(fmHome, marker.deliveryRef, {
-    sessionId: runtime.identity.sessionId,
-    sessionEntryId: entryId,
-    bindingGeneration: marker.bindingGeneration,
-  });
+  let provenance: Provenance | null = null;
+  let deliveryRef: string | null = null;
+  if (marker?.bindingGeneration === runtime.binding.generation) {
+    provenance = provenanceForMarker(marker);
+    deliveryRef = marker.deliveryRef;
+  } else if (runtime.directUnmarkedIngress) {
+    deliveryRef = runtime.directUnmarkedIngress.deliveryRef;
+    provenance = {
+      source: "tui",
+      deliveryRef,
+      bindingGeneration: runtime.binding.generation,
+      replyTo: null,
+      decisionRef: null,
+      decisionKey: null,
+    };
+    runtime.pendingUnmarkedIngress.set(deliveryRef, text);
+    runtime.directUnmarkedIngress = null;
+  }
+  if (!provenance || !deliveryRef) return;
+  markIngressAccepted(fmHome, deliveryRef, { sessionId: runtime.identity.sessionId, bindingGeneration: runtime.binding.generation });
+  runtime.pendingPersistence.set(deliveryRef, text);
+  runtime.latestProvenance = provenance;
+  runtime.lastAssistantText = "";
+  if (runtime.inFlight?.event.delivery_ref === deliveryRef) runtime.inFlight = null;
+  schedulePump(runtime);
+}
+
+function onUserEnd(event: MessageEndEvent, token: string): { message: MessageEndEvent["message"] } | undefined {
+  if (event.message.role !== "user") return undefined;
+  const runtime = activeRuntime;
+  if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return undefined;
+  const text = messageText(event.message);
+  const pending = [...runtime.pendingUnmarkedIngress.entries()].find(([, expected]) => expected === text);
+  if (!pending) return undefined;
+  const [deliveryRef] = pending;
+  const markedText = `${text}\n${markerLine("tui", deliveryRef, runtime.binding.generation)}`;
+  const content = event.message.content;
+  const message = typeof content === "string"
+    ? { ...event.message, content: markedText }
+    : {
+        ...event.message,
+        content: content.map((item, index) => {
+          if (item.type !== "text") return item;
+          const laterText = content.slice(index + 1).some((candidate) => candidate.type === "text");
+          return laterText ? item : { ...item, text: `${item.text}\n${markerLine("tui", deliveryRef, runtime.binding.generation)}` };
+        }),
+      };
+  runtime.pendingUnmarkedIngress.delete(deliveryRef);
+  runtime.pendingPersistence.set(deliveryRef, markedText);
+  return { message };
+}
+
+function onTurnStart(ctx: ExtensionContext, token: string): void {
+  const runtime = activeRuntime;
+  if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
+  for (const [deliveryRef, text] of runtime.pendingPersistence) {
+    const entryId = entryIdForMessage(ctx, text);
+    if (!entryId) continue;
+    ackIngress(fmHome, deliveryRef, {
+      sessionId: runtime.identity.sessionId,
+      sessionEntryId: entryId,
+      bindingGeneration: runtime.binding.generation,
+    });
+    runtime.pendingPersistence.delete(deliveryRef);
+  }
 }
 
 function onTurnEnd(event: TurnEndEvent, token: string): void {
   const runtime = activeRuntime;
   if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime) || event.message.role !== "assistant") return;
   runtime.lastAssistantText = messageText(event.message);
+  runtime.lastAssistantProvenance = runtime.latestProvenance ? { ...runtime.latestProvenance } : null;
   runtime.lastAssistantOrdinal = ++assistantOrdinal;
 }
 
-function onAgentSettled(ctx: ExtensionContext, token: string): void {
-  const runtime = activeRuntime;
-  if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
-  if (!runtime.latestProvenance || runtime.lastAssistantOrdinal <= runtime.lastOutboundOrdinal) return;
-  runtime.lastOutboundOrdinal = runtime.lastAssistantOrdinal;
-  const decision = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation);
-  const result = registerAssistantOutbound(fmHome, {
-    text: runtime.lastAssistantText,
-    source: runtime.latestProvenance.source,
-    sourceRef: runtime.latestProvenance.deliveryRef,
-    sessionId: runtime.identity.sessionId,
-    bindingGeneration: runtime.binding.generation,
-    replyTo: runtime.latestProvenance.source === "feishu" ? runtime.latestProvenance.replyTo : null,
-    decisionRef: decision?.record.decision_ref ?? null,
-    decisionKey: decision?.record.decision_key ?? null,
-  });
-  if ((result.status === "registered" || result.status === "duplicate") && result.eventId) {
-    bindPendingDecisionToOutbound(fmHome, decision, result.eventId);
-  }
-  if (["secret-refused", "chunk-refused", "resource-refused"].includes(result.status) && result.alert?.created) {
-    const message = result.status === "secret-refused"
-      ? "Feishu send refused: the entire final response matched a fixed credential pattern and stayed private."
-      : result.status === "chunk-refused"
-        ? "Feishu send refused: deterministic chunking could not preserve a complete URL within the platform limit."
-        : "Feishu send refused: the final response exceeded the local output or free-space safety threshold and stayed private.";
-    ctx.ui.notify(message, "error");
-    runtime.pi.appendEntry("fm-feishu-local-alert", {
-      kind: result.status,
-      message,
-      alertId: result.alert.id,
-      createdAt: new Date().toISOString(),
+function flushAssistantOutbound(runtime: ActiveRuntime): void {
+  if (!runtime.lastAssistantProvenance || runtime.lastAssistantOrdinal <= runtime.lastOutboundOrdinal) return;
+  try {
+    const decision = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation);
+    const provenance = runtime.lastAssistantProvenance;
+    const result = registerAssistantOutbound(fmHome, {
+      text: runtime.lastAssistantText,
+      source: provenance.source,
+      sourceRef: provenance.deliveryRef,
+      sessionId: runtime.identity.sessionId,
+      bindingGeneration: runtime.binding.generation,
+      replyTo: provenance.source === "feishu" ? provenance.replyTo : null,
+      decisionRef: decision?.record.decision_ref ?? null,
+      decisionKey: decision?.record.decision_key ?? null,
     });
+    if ((result.status === "registered" || result.status === "duplicate") && result.eventId) bindPendingDecisionToOutbound(fmHome, decision, result.eventId);
+    const terminal = ["registered", "duplicate", "skipped", "secret-refused", "chunk-refused", "resource-refused"].includes(result.status);
+    if (!terminal) throw new Error(`outbound registration refused with status ${result.status}`);
+    runtime.lastOutboundOrdinal = runtime.lastAssistantOrdinal;
+    if (["secret-refused", "chunk-refused", "resource-refused"].includes(result.status) && result.alert?.created) {
+      const message = result.status === "secret-refused"
+        ? "Feishu send refused: the entire final response matched a fixed credential pattern and stayed private."
+        : result.status === "chunk-refused"
+          ? "Feishu send refused: deterministic chunking could not preserve a complete URL within the platform limit."
+          : "Feishu send refused: the final response exceeded the local output or free-space safety threshold and stayed private.";
+      runtime.ctx.ui.notify(message, "error");
+      runtime.pi.appendEntry("fm-feishu-local-alert", { kind: result.status, message, alertId: result.alert.id, createdAt: new Date().toISOString() });
+    }
+  } catch (error) {
+    if (runtime.lastRegistrationAlertOrdinal !== runtime.lastAssistantOrdinal) {
+      runtime.lastRegistrationAlertOrdinal = runtime.lastAssistantOrdinal;
+      const message = "Feishu output registration is degraded; the exact final response remains pending for durable retry.";
+      runtime.ctx.ui.notify(`${message} ${String(error)}`, "error");
+      runtime.pi.appendEntry("fm-feishu-local-alert", { kind: "outbound-registration-degraded", message, createdAt: new Date().toISOString() });
+    }
   }
 }
 
-const sensitiveBash = /(?:^|[;&|]\s*)(?:[^\n;]*\/)?fm-(?:pr-merge|merge-local|teardown)\.sh\b|\b(?:gh|gh-axi)\s+pr\s+merge\b|\bglab\s+mr\s+merge\b|\bgit\s+(?:merge\b|reset\s+--hard|clean\s+-[^\n]*f|push\b[^\n]*--force|branch\s+-[dD]\b|worktree\s+(?:remove|prune)\b)|\brm\s+-[^\n]*r[^\n]*f\b|\blark-cli\b[^\n]*(?:\s--yes\b|\s(?:auth|config)\s+)|\b(?:auth|config)\s+(?:login|logout|init)\b/i;
+function onAgentSettled(_ctx: ExtensionContext, token: string): void {
+  const runtime = activeRuntime;
+  if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
+  flushAssistantOutbound(runtime);
+}
+
+const sensitiveBash = /(?:^|[;&|]\s*)(?:[^\n;]*\/)?fm-(?:pr-merge|merge-local|teardown)\.sh\b|\b(?:gh|gh-axi)\s+pr\s+merge\b|\bglab\s+mr\s+merge\b|\bgit\s+(?:merge\b|rebase\b|reset\b|restore\b|checkout\b|clean\b|push\b[^\n]*--force|branch\s+-[dD]\b|worktree\s+(?:remove|prune)\b)|(?:^|[;&|]\s*)(?:rm|unlink|rmdir|mv|dd|truncate|shred|chmod|chown|kill|pkill)\b|\b(?:python(?:3)?|node|perl|ruby|php|bash|sh|zsh)\b|(?:^|[^<])(?:>>?|2>)\s*[^&]|\bsed\s+[^\n]*\s-i\b|\blark-cli\b[^\n]*(?:\s--yes\b|\s(?:auth|config)\s+)|\b(?:auth|config)\s+(?:login|logout|init|set|delete)\b/i;
+const sensitivePath = /(?:^|\/)(?:\.env(?:\.|$)|\.git(?:\/|$)|\.ssh(?:\/|$)|\.pi(?:\/|$)|\.agents(?:\/|$)|[^/]*(?:credential|secret|token|password|config|settings)[^/]*)/i;
+const safeRemoteTools = new Set(["read", "grep", "find", "ls"]);
+
+function protectedEffectReason(toolName: string, input: unknown): string | undefined {
+  if (toolName === "bash") {
+    const command = String((input as { command?: unknown })?.command ?? "");
+    return sensitiveBash.test(command) ? "protected shell effect" : undefined;
+  }
+  if (toolName === "write" || toolName === "edit") {
+    const path = String((input as { path?: unknown })?.path ?? "");
+    return sensitivePath.test(path) ? "protected configuration or credential path" : undefined;
+  }
+  if (!safeRemoteTools.has(toolName)) return "unsupported arbitrary remote tool effect";
+  return undefined;
+}
+
+function effectFingerprint(toolName: string, input: unknown): string {
+  return createHash("sha256").update(`${toolName}\0${JSON.stringify(input)}`).digest("hex");
+}
 
 export function feishuSensitiveToolReason(toolName: string, input: unknown, provenance: FirstmateIngressSource | undefined): string | undefined {
   if (provenance !== "feishu") return undefined;
-  if (toolName !== "bash") return undefined;
-  const command = String((input as { command?: unknown })?.command ?? "");
-  if (!sensitiveBash.test(command)) return undefined;
-  return "This request came from Feishu. Merge, discard, destructive, irreversible, credential, and security-sensitive action requires explicit confirmation in the local TUI before this command can run.";
+  if (!protectedEffectReason(toolName, input)) return undefined;
+  return "This request came from Feishu. The exact protected effect requires an explicit matching confirmation in the local TUI before it can run.";
 }
 
 export function registerFirstmateIngressCoordinator(pi: ExtensionAPI): void {
@@ -508,14 +626,51 @@ export function registerFirstmateIngressCoordinator(pi: ExtensionAPI): void {
 
   pi.on("input", (event, ctx) => onInput(event, ctx, token));
   pi.on("message_start", (event) => onUserStart(event, token));
-  pi.on("message_end", async (event, ctx) => onUserEnd(event, ctx, token));
+  pi.on("message_end", (event) => onUserEnd(event, token));
+  pi.on("turn_start", (_event, ctx) => onTurnStart(ctx, token));
   pi.on("turn_end", (event) => onTurnEnd(event, token));
   pi.on("agent_settled", (_event, ctx) => onAgentSettled(ctx, token));
   pi.on("tool_call", (event) => {
     const runtime = activeRuntime;
     if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return {};
-    const reason = feishuSensitiveToolReason(event.toolName, event.input, runtime.latestProvenance?.source);
-    return reason ? { block: true, reason, terminate: true } : {};
+    const protectedReason = protectedEffectReason(event.toolName, event.input);
+    if (!protectedReason) return {};
+    const fingerprint = effectFingerprint(event.toolName, event.input);
+    const pending = runtime.pendingSensitiveEffects.get(fingerprint);
+    if (pending?.confirmed) {
+      runtime.pendingSensitiveEffects.delete(fingerprint);
+      return {};
+    }
+    if (runtime.latestProvenance?.source !== "feishu" && runtime.pendingSensitiveEffects.size === 0) return {};
+    const effect = pending ?? { code: randomBytes(6).toString("hex"), confirmed: false, announced: false };
+    runtime.pendingSensitiveEffects.set(fingerprint, effect);
+    if (!effect.announced) {
+      effect.announced = true;
+      const message = `Protected Feishu effect blocked (${protectedReason}). Run /fm-feishu-confirm ${effect.code} in this trusted local TUI to authorize exactly this tool call once, then retry it.`;
+      runtime.ctx.ui.notify(message, "warning");
+      runtime.pi.appendEntry("fm-feishu-local-alert", { kind: "sensitive-effect-confirmation", message, createdAt: new Date().toISOString() });
+    }
+    return { block: true, reason: "The exact protected effect is blocked until its one-time local TUI confirmation is entered.", terminate: true };
+  });
+
+  pi.registerCommand?.("fm-feishu-confirm", {
+    description: "Confirm one exact blocked Feishu-originated protected effect in the trusted local TUI.",
+    handler: async (args, ctx) => {
+      const runtime = activeRuntime;
+      if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime) || ctx.mode !== "tui" || !ctx.hasUI || !ctx.isProjectTrusted() || firstmateSessionLockOwnership() !== "owned") {
+        ctx.ui.notify("Feishu effect confirmation refused: this is not the trusted bound local TUI.", "error");
+        return;
+      }
+      const code = args.trim();
+      const matches = [...runtime.pendingSensitiveEffects.values()].filter((effect) => effect.code === code && !effect.confirmed);
+      const match = matches[0];
+      if (matches.length !== 1 || !match) {
+        ctx.ui.notify("Feishu effect confirmation refused: the exact pending code was absent or ambiguous.", "error");
+        return;
+      }
+      match.confirmed = true;
+      ctx.ui.notify("The exact blocked effect is confirmed once. Retry that same tool call; no other effect is authorized.", "info");
+    },
   });
 
   pi.registerMarkdownTransformer?.((markdown, context) => renderFirstmateSourceBadge(markdown, context.messageType));

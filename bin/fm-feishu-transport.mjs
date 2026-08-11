@@ -40,8 +40,11 @@ const COMMAND_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_COMMAND_TIMEOUT
 const HISTORY_OVERLAP_MS = positiveInteger(process.env.FM_FEISHU_HISTORY_OVERLAP_MS, 5 * 60 * 1000);
 const OUTBOX_POLL_MS = positiveInteger(process.env.FM_FEISHU_OUTBOX_POLL_MS, 500);
 const MAX_COMMAND_BYTES = 8 * 1024 * 1024;
+const MAX_CONSUMER_LINE_BYTES = positiveInteger(process.env.FM_FEISHU_MAX_CONSUMER_LINE_BYTES, 256 * 1024);
+const MAX_LIVE_BUFFER_BYTES = positiveInteger(process.env.FM_FEISHU_MAX_LIVE_BUFFER_BYTES, 8 * 1024 * 1024);
 let stopping = false;
 let consumer = null;
+let outboundDrainTask = null;
 
 function positiveInteger(value, fallback) {
   const number = Number(value);
@@ -139,7 +142,12 @@ function runArgv(executable, args, { input, timeoutMs = COMMAND_TIMEOUT_MS } = {
       stdout += chunk.toString();
     });
     child.stderr.on("data", (chunk) => {
-      if (Buffer.byteLength(stderr, "utf8") + chunk.length <= MAX_COMMAND_BYTES) stderr += chunk.toString();
+      if (Buffer.byteLength(stderr, "utf8") + chunk.length > MAX_COMMAND_BYTES) {
+        overflow = true;
+        child.kill("SIGTERM");
+        return;
+      }
+      stderr += chunk.toString();
     });
     child.on("error", (error) => { spawnError = error; });
     child.on("close", (code, signal) => {
@@ -197,10 +205,23 @@ async function readOverlappingHistory(binding, sinceMs) {
   const envelope = parseJsonEnvelope(result.stdout);
   if (Object.hasOwn(envelope, "ok") && envelope.ok !== true) throw new Error("history-envelope-not-ok");
   const data = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
+  const pagination = envelope.meta?.pagination;
+  if (data.has_more === true || pagination?.complete === false || (typeof pagination?.next_token === "string" && pagination.next_token.length > 0)) {
+    recordTransportDiagnostic(HOME, "history-incomplete", "history pagination remained incomplete at the configured page bound");
+    throw new Error("history-reconcile-incomplete");
+  }
   const messages = Array.isArray(data.messages) ? data.messages : [];
-  return messages
-    .map((message) => normalizeHistoryMessage(message, binding.chat_id))
-    .filter((message) => !message.deleted);
+  const normalized = messages.map((message) => normalizeHistoryMessage(message, binding.chat_id)).filter((message) => !message.deleted);
+  let previousTime = -1;
+  for (const message of normalized) {
+    const time = Number(message.create_time);
+    if (!Number.isSafeInteger(time) || time < 0 || time < previousTime) {
+      recordTransportDiagnostic(HOME, "history-out-of-order", "history response was not a complete ascending sequence");
+      throw new Error("history-reconcile-out-of-order");
+    }
+    previousTime = time;
+  }
+  return normalized;
 }
 
 function publishEvents(events, transport) {
@@ -282,6 +303,12 @@ async function drainOutbound() {
   }
 }
 
+function drainOutboundSingleFlight() {
+  if (outboundDrainTask) return outboundDrainTask;
+  outboundDrainTask = drainOutbound().finally(() => { outboundDrainTask = null; });
+  return outboundDrainTask;
+}
+
 function startConsumer(binding, reconnects) {
   return new Promise((resolvePromise) => {
     const child = spawn(LARK_CLI, ["event", "consume", "im.message.receive_v1", "--as", "bot"], {
@@ -302,8 +329,10 @@ function startConsumer(binding, reconnects) {
     let stdoutBuffer = "";
     let stderrBuffer = "";
     let liveBuffer = [];
+    let liveBufferBytes = 0;
     let senderTimer = null;
     let reconcileTask = null;
+    let reconcileError = null;
     const bindingTimer = setInterval(() => {
       try {
         const current = readActiveBinding(HOME);
@@ -328,12 +357,16 @@ function startConsumer(binding, reconnects) {
     const finish = (result) => {
       if (closed) return;
       if (stdoutBuffer.trim()) {
-        try { acceptEvent(JSON.parse(stdoutBuffer)); }
-        catch { recordTransportDiagnostic(HOME, "invalid-ndjson", "malformed final event line"); }
+        if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) requestReconcileRestart("overflow", "final event line exceeded the byte limit");
+        else {
+          try { acceptEvent(JSON.parse(stdoutBuffer)); }
+          catch { recordTransportDiagnostic(HOME, "invalid-ndjson", "malformed final event line"); }
+        }
         stdoutBuffer = "";
       }
-      if (stderrBuffer.trim() && parseDropDiagnostic(stderrBuffer)) {
-        requestReconcileRestart("drop", stderrBuffer.trim());
+      if (stderrBuffer.trim()) {
+        if (Buffer.byteLength(stderrBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) requestReconcileRestart("overflow", "final diagnostic line exceeded the byte limit");
+        else if (parseDropDiagnostic(stderrBuffer)) requestReconcileRestart("drop", stderrBuffer.trim());
       }
       stderrBuffer = "";
       closed = true;
@@ -342,7 +375,7 @@ function startConsumer(binding, reconnects) {
       if (senderTimer) clearInterval(senderTimer);
       if (consumer === child) consumer = null;
       void Promise.resolve(reconcileTask).catch(() => {}).then(() => {
-        resolvePromise({ ...result, drop, overflow, buffered: liveBuffer });
+        resolvePromise({ ...result, drop, overflow, buffered: liveBuffer, reconcileError });
       });
     };
 
@@ -353,6 +386,7 @@ function startConsumer(binding, reconnects) {
       if (liveBuffer.length > 0) {
         publishEvents(liveBuffer, kind === "drop" ? "lark-websocket-drop-pressure" : "lark-websocket-buffer-pressure");
         liveBuffer = [];
+        liveBufferBytes = 0;
       }
       recordTransportDiagnostic(HOME, kind === "drop" ? "drop" : "buffer-overflow", line);
       writeTransportHealth(HOME, {
@@ -366,22 +400,30 @@ function startConsumer(binding, reconnects) {
     };
 
     const acceptEvent = (value) => {
+      if (drop || overflow) return;
       if (!value || typeof value !== "object" || Array.isArray(value)) {
         recordTransportDiagnostic(HOME, "invalid-event", "non-object NDJSON event");
+        return;
+      }
+      const eventBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+      if (eventBytes > MAX_LIVE_BUFFER_BYTES) {
+        requestReconcileRestart("overflow", `single event exceeded byte limit ${MAX_LIVE_BUFFER_BYTES}`);
         return;
       }
       if (reconciled) {
         publishFeishuInbound(HOME, value, { transport: "lark-websocket" });
         return;
       }
-      if (liveBuffer.length >= MAX_BUFFERED_EVENTS) {
+      if (liveBuffer.length >= MAX_BUFFERED_EVENTS || liveBufferBytes + eventBytes > MAX_LIVE_BUFFER_BYTES) {
         publishEvents(liveBuffer, "lark-websocket-buffer-pressure");
         liveBuffer = [];
+        liveBufferBytes = 0;
         publishFeishuInbound(HOME, value, { transport: "lark-websocket-buffer-pressure" });
-        requestReconcileRestart("overflow", `buffer limit ${MAX_BUFFERED_EVENTS} reached; durable events preserved before restart`);
+        requestReconcileRestart("overflow", `buffer limit reached; durable events preserved before restart`);
         return;
       }
       liveBuffer.push(value);
+      liveBufferBytes += eventBytes;
     };
 
     child.stdout.on("data", (chunk) => {
@@ -392,8 +434,16 @@ function startConsumer(binding, reconnects) {
         const line = stdoutBuffer.slice(0, index);
         stdoutBuffer = stdoutBuffer.slice(index + 1);
         if (!line.trim()) continue;
+        if (Buffer.byteLength(line, "utf8") > MAX_CONSUMER_LINE_BYTES) {
+          requestReconcileRestart("overflow", `event line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
+          continue;
+        }
         try { acceptEvent(JSON.parse(line)); }
         catch { recordTransportDiagnostic(HOME, "invalid-ndjson", "malformed event line"); }
+      }
+      if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) {
+        stdoutBuffer = "";
+        requestReconcileRestart("overflow", `unterminated event line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
       }
     });
 
@@ -404,6 +454,10 @@ function startConsumer(binding, reconnects) {
         if (index < 0) break;
         const line = stderrBuffer.slice(0, index);
         stderrBuffer = stderrBuffer.slice(index + 1);
+        if (Buffer.byteLength(line, "utf8") > MAX_CONSUMER_LINE_BYTES) {
+          requestReconcileRestart("overflow", `diagnostic line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
+          continue;
+        }
         if (line === READY_MARKER) {
           ready = true;
           clearTimeout(readyTimer);
@@ -419,8 +473,10 @@ function startConsumer(binding, reconnects) {
               const previous = readTransportHealth(HOME);
               const sinceMs = previous?.last_reconcile_at ? Date.parse(String(previous.last_reconcile_at)) : Date.now() - HISTORY_OVERLAP_MS;
               const history = await readOverlappingHistory(binding, Number.isFinite(sinceMs) ? sinceMs : Date.now() - HISTORY_OVERLAP_MS);
+              if (drop || overflow) throw new Error("live-buffer-integrity-lost-before-history-reconcile");
               publishEvents([...history, ...liveBuffer], "lark-history-overlap");
               liveBuffer = [];
+              liveBufferBytes = 0;
               reconciled = true;
               writeTransportHealth(HOME, {
                 phase: "healthy",
@@ -430,16 +486,18 @@ function startConsumer(binding, reconnects) {
                 lastReconcileAt: new Date().toISOString(),
                 lastErrorType: null,
               });
-              await drainOutbound();
+              await drainOutboundSingleFlight();
               if (!closed) {
-                senderTimer = setInterval(() => { void drainOutbound(); }, OUTBOX_POLL_MS);
+                senderTimer = setInterval(() => { void drainOutboundSingleFlight(); }, OUTBOX_POLL_MS);
                 senderTimer.unref();
               }
             } catch (error) {
-              recordTransportDiagnostic(HOME, "reconcile-failure", String(error));
+              reconcileError = String(error);
+              recordTransportDiagnostic(HOME, "reconcile-failure", reconcileError);
               publishEvents(liveBuffer, "lark-websocket-before-reconcile-failure");
               liveBuffer = [];
-              writeTransportHealth(HOME, { phase: "degraded", healthy: false, reconnects, lastErrorType: String(error) });
+              liveBufferBytes = 0;
+              writeTransportHealth(HOME, { phase: "degraded", healthy: false, reconnects, lastErrorType: reconcileError });
               child.stdin.end();
             }
           })();
@@ -451,6 +509,10 @@ function startConsumer(binding, reconnects) {
           const error = parseStructuredError(line);
           recordTransportDiagnostic(HOME, "event-error", error ? `${error.type ?? "unknown"}:${error.subtype ?? "unknown"}` : "structured error");
         }
+      }
+      if (Buffer.byteLength(stderrBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) {
+        stderrBuffer = "";
+        requestReconcileRestart("overflow", `unterminated diagnostic line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
       }
     });
 
@@ -469,7 +531,10 @@ async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}
     throw error;
   }
   const nonce = randomBytes(24).toString("hex");
-  const owner = claimTransportOwner(HOME, { nonce, moduleFile: realpathSync(MODULE_FILE) });
+  const processStartToken = readProcessStartToken(process.pid);
+  if (!processStartToken) throw new Error("transport process incarnation cannot be verified on this host");
+  process.title = transportProcessTitle(nonce, HOME);
+  const owner = claimTransportOwner(HOME, { nonce, moduleFile: realpathSync(MODULE_FILE), processStartToken });
   if (!owner.ok) throw new Error("another Feishu transport already owns this home");
   const stop = () => {
     stopping = true;
@@ -493,6 +558,7 @@ async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}
       }
       const result = await startConsumer(binding, reconnects);
       cycles += 1;
+      if (result.reconcileError && once) throw new Error(result.reconcileError);
       if (stopping) break;
       writeTransportHealth(HOME, {
         phase: "degraded",
@@ -512,21 +578,37 @@ async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}
   }
 }
 
+function readProcessStartToken(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    return /^[0-9]+$/.test(suffix[19] ?? "") ? suffix[19] : "";
+  } catch {
+    return "";
+  }
+}
+
 function processCommandLine(pid) {
   try {
     const path = `/proc/${pid}/cmdline`;
-    if (existsSync(path)) return readFileSync(path, "utf8").replace(/\0/g, " ");
+    if (existsSync(path)) return readFileSync(path, "utf8").split("\0").filter(Boolean);
   } catch {}
-  return "";
+  return [];
+}
+
+function transportProcessTitle(nonce, home) {
+  const homeHash = createHash("sha256").update(home).digest("hex").slice(0, 16);
+  return `fm-feishu-${homeHash}-${nonce}`;
 }
 
 function ownerLooksLive(owner) {
   const pid = Number(owner?.pid);
-  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  if (!Number.isSafeInteger(pid) || pid <= 1 || owner?.home_realpath !== HOME || owner?.module_file !== realpathSync(MODULE_FILE)) return false;
   try { process.kill(pid, 0); } catch { return false; }
   const command = processCommandLine(pid);
-  if (!command) return true;
-  return command.includes(realpathSync(MODULE_FILE)) && command.includes(" run");
+  const startToken = readProcessStartToken(pid);
+  if (command.length !== 1 || command[0] !== transportProcessTitle(owner.nonce, HOME) || !startToken || startToken !== owner.process_start_token) return false;
+  return true;
 }
 
 async function startDetached() {

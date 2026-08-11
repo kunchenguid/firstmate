@@ -58,6 +58,7 @@ export interface InboundEvent {
   ingress_seq: number;
   binding_id: string;
   binding_generation: number;
+  target_session_id: string;
   delivery_ref: string;
   decision_ref: string | null;
   decision_key: string | null;
@@ -144,6 +145,18 @@ export function enqueueLocalIngress(home: string, input: {
   bindingId: string;
   bindingGeneration: number;
 }): { event: InboundEvent; ledger: InboundLedger };
+export function reserveInteractiveIngress(home: string, input: {
+  text: string;
+  images?: Array<{ type: "image"; data: string; mimeType: string }>;
+  desiredDelivery?: "steer" | "followUp";
+  sessionId: string;
+  bindingId: string;
+  bindingGeneration: number;
+}): { status: "blocked" } | { status: "reserved"; event: InboundEvent; ledger: InboundLedger };
+export function markIngressAccepted(home: string, deliveryRef: string, fence: {
+  sessionId: string;
+  bindingGeneration: number;
+}): boolean;
 export function repairInboundLedgers(home: string): number;
 export function claimNextIngress(home: string, fence: {
   sessionId: string;
@@ -215,10 +228,12 @@ export interface OutboundClaim {
   ledger: Record<string, unknown> & { attempt_id: string };
   chunk: { index: number; count: number; chunk: string; chunk_hash: string; idempotency_key: string };
 }
-export function claimNextOutbound(home: string): OutboundClaim | undefined;
+export function repairOutboundState(home: string): number;
+export function claimNextOutbound(home: string, options?: { nowMs?: number }): OutboundClaim | undefined;
 export function failOutboundAttempt(home: string, claim: OutboundClaim, error: unknown, options?: {
   ambiguous?: boolean;
   retryAfterMs?: number;
+  nowMs?: number;
 }): boolean;
 export function receiptOutbound(home: string, claim: OutboundClaim, receipt: {
   messageId: string;
@@ -238,6 +253,7 @@ export function bindPendingDecisionToOutbound(home: string, candidate: PendingDe
 export function claimTransportOwner(home: string, owner: {
   nonce: string;
   moduleFile: string;
+  processStartToken: string;
 }): { ok: boolean; owner: Record<string, unknown> };
 export function readTransportOwner(home: string): Record<string, unknown> | undefined;
 export function releaseTransportOwner(home: string, nonce: string): boolean;

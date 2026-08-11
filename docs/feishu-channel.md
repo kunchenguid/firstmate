@@ -10,11 +10,11 @@ The private state implementation and exact schemas live in [`bin/fm-feishu-state
 ## Supported MVP
 
 The MVP allows one exact Feishu user in one exact P2P chat.
-Inbound `text` and rendered static `post` messages are supported.
+Inbound plain `text` messages are supported.
 Outbound messages preserve the final Assistant text as plain text, including complete URLs.
 Group chats, cards, attachments, webhooks, multi-home routing, arbitrary remote commands, and attachment downloads are not supported.
 A remote string beginning with `/` is ordinary user content and cannot invoke a Pi command, skill, prompt template, shell, or tool directly.
-A Feishu request to merge, discard, perform a destructive or irreversible action, change credentials, or make a security-sensitive choice still needs an explicit confirmation in the local TUI.
+A Feishu request to merge, discard, perform a destructive or irreversible action, change credentials, or make a security-sensitive choice still needs an exact one-time confirmation through `/fm-feishu-confirm <code>` in the local TUI.
 
 ## Prerequisites
 
@@ -59,8 +59,8 @@ Disable never force-kills the transport.
 The transport executes fixed `lark-cli` argv arrays directly and never interpolates message text into a shell command.
 It first verifies `lark-cli whoami --as bot` against the paired app profile, bot open ID, and optional app-ID fingerprint, then waits for the documented `[event] ready event_key=im.message.receive_v1` stderr marker.
 It preserves body-free drop and backpressure diagnostics privately, reconnects with a bound, and runs overlapping bot-history reconciliation before marking live dispatch healthy.
-The pre-reconciliation live buffer is capped at 1,000 events, durable pending ingress is capped at 10,000 items, and publishing stops when the state filesystem has less than 64 MiB free.
-`FM_FEISHU_MAX_BUFFERED_EVENTS`, `FM_FEISHU_MAX_PENDING_INBOUND`, and `FM_FEISHU_MIN_FREE_BYTES` may lower or raise those local operator thresholds.
+The pre-reconciliation live buffer is capped at 1,000 events and 8 MiB, each consumer line is capped at 256 KiB, durable pending ingress is capped at 10,000 items, and publishing stops when the state filesystem has less than 64 MiB free.
+`FM_FEISHU_MAX_BUFFERED_EVENTS`, `FM_FEISHU_MAX_LIVE_BUFFER_BYTES`, `FM_FEISHU_MAX_CONSUMER_LINE_BYTES`, `FM_FEISHU_MAX_PENDING_INBOUND`, and `FM_FEISHU_MIN_FREE_BYTES` may lower or raise those local operator thresholds.
 Buffer overflow publishes the already buffered events durably, records a body-free diagnostic, and forces overlap reconciliation before resuming; a queue or free-space refusal records one local alert.
 It does not use `--quiet`, download resources, run an Agent, inspect the Pi session, or choose a different session.
 
@@ -79,7 +79,7 @@ The next durable item is not submitted until Pi observes acceptance of the prior
 
 The Pi session contains a privacy-safe delivery marker but no Feishu open ID or chat ID.
 A TUI-only Markdown transform shows the source as `Feishu - authorized P2P` or `Local TUI` without changing model context.
-A user `message_end` plus the persisted Pi session entry is the inbound ACK.
+The coordinator waits for the post-persistence `turn_start` boundary and ACKs only the exact user entry already present in Pi's SessionManager.
 On restart, the extension scans the exact session for markers and repairs an ACK written after Pi persistence but before a crash instead of injecting a duplicate turn.
 
 After `agent_settled`, the final Assistant text is registered directly in the durable outbox.
