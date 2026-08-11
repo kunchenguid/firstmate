@@ -126,13 +126,30 @@ fm_agent_proc_env() {
   printf '%s' "$value"
 }
 
+fm_agent_env_record_value() {
+  local records=$1 key=$2 line
+  while IFS= read -r line; do
+    case "$line" in
+      "$key"=*) printf '%s' "${line#"$key"=}"; return 0 ;;
+    esac
+  done <<EOF
+$records
+EOF
+  return 1
+}
+
 fm_agent_worker_identity_matches() {
   local pid=$1 expected_task=$2 expected_home=${3:-}
-  local task role owner
+  local env task role owner
   fm_agent_pid_is_numeric "$pid" || return 1
-  task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK 2>/dev/null) || return 1
-  role=$(fm_agent_proc_env "$pid" FM_AGENT_ROLE 2>/dev/null) || return 1
-  owner=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null) || return 1
+  if [ "$#" -ge 4 ]; then
+    env=$4
+  else
+    env=$(fm_agent_environ "$pid" 2>/dev/null) || return 1
+  fi
+  task=$(fm_agent_env_record_value "$env" FM_AGENT_TASK 2>/dev/null) || return 1
+  role=$(fm_agent_env_record_value "$env" FM_AGENT_ROLE 2>/dev/null) || return 1
+  owner=$(fm_agent_env_record_value "$env" FM_AGENT_OWNER_HOME 2>/dev/null) || return 1
   [ "$task" = "$expected_task" ] || return 1
   case "$role" in
     crewmate|secondmate) ;;
@@ -143,7 +160,7 @@ fm_agent_worker_identity_matches() {
     *) return 1 ;;
   esac
   [ -z "$expected_home" ] || fm_agent_paths_same "$owner" "$expected_home" || return 1
-  fm_agent_worker_home_contract_matches "$pid" "$role" "$owner"
+  fm_agent_worker_home_contract_matches "$pid" "$role" "$owner" "$env"
 }
 
 fm_agent_proc_start_time() {
@@ -177,24 +194,33 @@ fm_agent_paths_same() {
 }
 
 fm_agent_worker_home_contract_matches() {
-  local pid=$1 role=$2 owner=$3 var value expected
+  local pid=$1 role=$2 owner=$3 env var value expected
+  env=${4-}
   case "$role" in
     crewmate)
-      for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
-        value=$(fm_agent_proc_env "$pid" "$var" 2>/dev/null || true)
+      for var in $FM_WORKER_ISOLATION_HOME_VARS; do
+        if [ "$#" -ge 4 ]; then
+          value=$(fm_agent_env_record_value "$env" "$var" 2>/dev/null || true)
+        else
+          value=$(fm_agent_proc_env "$pid" "$var" 2>/dev/null || true)
+        fi
         [ -z "$value" ] || return 1
       done
       return 0
       ;;
     secondmate)
-      value=$(fm_agent_proc_env "$pid" FM_HOME 2>/dev/null || true)
+      if [ "$#" -ge 4 ]; then
+        value=$(fm_agent_env_record_value "$env" FM_HOME 2>/dev/null || true)
+      else
+        value=$(fm_agent_proc_env "$pid" FM_HOME 2>/dev/null || true)
+      fi
       [ -n "$value" ] && fm_agent_paths_same "$value" "$owner" || return 1
       ;;
     *)
       return 1
       ;;
   esac
-  for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
+  for var in $FM_WORKER_ISOLATION_HOME_VARS; do
     case "$var" in
       FM_HOME|FM_ROOT|FM_ROOT_OVERRIDE) expected=$owner ;;
       FM_STATE_OVERRIDE|STATE) expected=$owner/state ;;
@@ -204,7 +230,11 @@ fm_agent_worker_home_contract_matches() {
       FM_PENDING_REPLY_DIR_OVERRIDE) expected=$owner/state/pending-replies ;;
       *) continue ;;
     esac
-    value=$(fm_agent_proc_env "$pid" "$var" 2>/dev/null || true)
+    if [ "$#" -ge 4 ]; then
+      value=$(fm_agent_env_record_value "$env" "$var" 2>/dev/null || true)
+    else
+      value=$(fm_agent_proc_env "$pid" "$var" 2>/dev/null || true)
+    fi
     [ -z "$value" ] || fm_agent_paths_same "$value" "$expected" || return 1
   done
   return 0

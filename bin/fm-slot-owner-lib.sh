@@ -318,7 +318,11 @@ fm_slot_declared_endpoint_pid() {
   local self=$1 expected_home=${2:-} index matches pid ppid candidate_pids= root_pid= root_count=0
   local current_uid proc_uid root_home
   current_uid=$(id -u 2>/dev/null) || return 2
-  index=$(fm_agent_task_pid_index 2>/dev/null) || return 2
+  if [ "$#" -ge 3 ]; then
+    index=$3
+  else
+    index=$(fm_agent_task_pid_index 2>/dev/null) || return 2
+  fi
   matches=$(fm_agent_pids_for_task "$self" "$index" 2>/dev/null) || return 2
   [ -n "$matches" ] || return 2
   while IFS= read -r pid; do
@@ -362,12 +366,13 @@ EOF
 fm_slot_endpoint_occupant_tasks() {
   local wt=$1 self=$2 self_home=$3 self_role=$4 backend=$5 target=$6
   local wt_real pid start current cwd cwd_again env env_again task task_again home home_again role role_again
-  local endpoint_source=backend
+  local endpoint_source=backend declaration_index=
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
   if ! command -v fm_backend_foreground_process_pid >/dev/null 2>&1 \
     || ! pid=$(fm_backend_foreground_process_pid "$backend" "$target"); then
     endpoint_source=declaration
-    pid=$(fm_slot_declared_endpoint_pid "$self" "$self_home") || return 2
+    declaration_index=$(fm_agent_task_pid_index 2>/dev/null) || return 2
+    pid=$(fm_slot_declared_endpoint_pid "$self" "$self_home" "$declaration_index") || return 2
   fi
   fm_agent_pid_is_numeric "$pid" || return 2
   start=$(fm_agent_proc_start_time "$pid") || return 2
@@ -376,10 +381,10 @@ fm_slot_endpoint_occupant_tasks() {
   env=$(fm_agent_environ "$pid" 2>/dev/null) || return 2
   if [ "$endpoint_source" = backend ]; then
     current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+    [ "$current" = "$pid" ] || return 2
   else
-    current=$(fm_slot_declared_endpoint_pid "$self" "$self_home") || return 2
+    fm_agent_pid_start_matches "$pid" "$start" || return 2
   fi
-  [ "$current" = "$pid" ] || return 2
   fm_agent_pid_start_matches "$pid" "$start" || return 2
   cwd_again=$(fm_agent_proc_cwd "$pid") || return 2
   cwd_again=$(fm_agent_canonical_dir "$cwd_again") || return 2
@@ -395,15 +400,15 @@ fm_slot_endpoint_occupant_tasks() {
     && [ "$role_again" = "$role" ] || return 2
   if [ "$endpoint_source" = backend ]; then
     current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+    [ "$current" = "$pid" ] || return 2
   else
-    current=$(fm_slot_declared_endpoint_pid "$self" "$self_home") || return 2
+    fm_agent_pid_start_matches "$pid" "$start" || return 2
   fi
-  [ "$current" = "$pid" ] || return 2
   fm_agent_pid_start_matches "$pid" "$start" || return 2
   fm_agent_path_within "$wt_real" "$cwd" || return 1
   if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
      && fm_slot_same_path "$home" "$self_home" \
-     && fm_agent_worker_identity_matches "$pid" "$self" "$self_home"; then
+     && fm_agent_worker_identity_matches "$pid" "$self" "$self_home" "$env"; then
     return 1
   fi
   printf '%s\n' "${task:-unidentified-process-$pid}"

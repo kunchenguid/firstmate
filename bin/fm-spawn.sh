@@ -433,6 +433,35 @@ spawn_create_new_artifact() {
   printf -v "$digest_var" '%s' "$digest"
 }
 
+spawn_create_or_reuse_artifact() {
+  local path=$1 dir tmp status
+  dir=$(dirname -- "$path") || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  tmp=$(mktemp "$dir/.fm-artifact.XXXXXXXXXXXX") || return 1
+  if ! cat > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$tmp" "$path"; then
+      status=0
+    else
+      status=1
+    fi
+    rm -f -- "$tmp"
+    return "$status"
+  fi
+  if ! ( set -C; cat "$tmp" > "$path" ); then
+    if [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$tmp" "$path"; then
+      rm -f -- "$tmp"
+      return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
 spawn_remove_owned_artifact() {
   local path=$1 expected_inode=$2 expected_digest=$3 actual_inode actual_digest
   [ -n "$path" ] || return 1
@@ -1868,7 +1897,9 @@ EOF
       # touches grok's managed config - only firstmate-owned files.
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
-      mkdir -p "$GROK_AUTH_DIR"
+      mkdir -p "$GROK_HOOKS_DIR" "$GROK_AUTH_DIR"
+      [ -d "$GROK_HOOKS_DIR" ] && [ ! -L "$GROK_HOOKS_DIR" ] || exit 1
+      [ -d "$GROK_AUTH_DIR" ] && [ ! -L "$GROK_AUTH_DIR" ] || exit 1
       old_umask=$(umask)
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
@@ -1883,9 +1914,12 @@ ${auth_file##*/}
 EOF
       SPAWN_GROK_TOKEN_CREATED=1
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
-      cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
+      GROK_HOOK_SCRIPT="$GROK_HOOKS_DIR/fm-firstmate-turn-end.sh"
+      GROK_HOOK_CONFIG="$GROK_HOOKS_DIR/fm-firstmate-turn-end.json"
+      spawn_create_or_reuse_artifact "$GROK_HOOK_SCRIPT" <<EOF || exit 1
 #!/usr/bin/env bash
 set -u
+FM_FIRSTMATE_GROK_HOOK=1
 auth_dir=$sq_grok_auth_dir
 workspace=\${GROK_WORKSPACE_ROOT:-}
 [ -n "\$workspace" ] || exit 0
@@ -1901,9 +1935,10 @@ case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
 touch "\$t" 2>/dev/null || true
 exit 0
 EOF
-      chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
-      hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
-      printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
+      hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOK_SCRIPT")")
+      spawn_create_or_reuse_artifact "$GROK_HOOK_CONFIG" <<EOF || exit 1
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_command"}]}]}}
+EOF
       spawn_create_new_artifact "$WT/.fm-grok-turnend" SPAWN_GROK_POINTER_INODE SPAWN_GROK_POINTER_DIGEST <<EOF || exit 1
 token=${auth_file##*/}
 EOF
