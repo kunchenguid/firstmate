@@ -438,10 +438,8 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
 # Verified pitfall (finding #2 above): cmux's `current_directory` field DOES
 # reflect a `cd` run directly in the surface's own top-level shell, but stays
 # FROZEN when an interactive subshell is held open in the foreground instead.
-# The worktree-acquisition line fm-spawn.sh actually sends,
-# `cd "$(treehouse get --lease --lease-holder <id>)"`, avoids that: `--lease`
-# prints the path and exits without opening a subshell, so the `cd` itself is
-# a plain top-level command. cmux's control socket exposes no live-process cwd
+# fm-spawn.sh's controller instead acquires the durable lease synchronously,
+# then sends only a plain top-level `cd <leased-path>`. cmux's control socket exposes no live-process cwd
 # field to fall back on if that assumption ever breaks (unlike herdr's
 # `foreground_cwd`), so this probe stays in place as the already-proven
 # mechanism rather than passive polling. Active probe instead: print the

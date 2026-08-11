@@ -395,10 +395,8 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 # `cd` run directly in the pane's own top-level shell, but stays FROZEN when an
 # interactive subshell is held open in the foreground instead - verified
 # against a bare `treehouse get`, which opens exactly such a subshell. The
-# worktree-acquisition line fm-spawn.sh actually sends,
-# `cd "$(treehouse get --lease --lease-holder <id>)"`, avoids that: `--lease`
-# prints the path and exits without opening a subshell, so the `cd` itself is
-# a plain top-level command. Zellij's CLI exposes no per-pane pid and no
+# controller instead acquires the durable lease synchronously, then sends only
+# a plain top-level `cd <leased-path>`. Zellij's CLI exposes no per-pane pid and no
 # live-process cwd field to fall back on if that assumption ever breaks
 # (unlike herdr's `foreground_cwd`), so this probe stays in place as the
 # already-proven mechanism rather than passive JSON polling. Active probe:

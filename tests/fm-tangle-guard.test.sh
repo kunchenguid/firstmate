@@ -323,7 +323,7 @@ test_spawn_tmux_window_construction() {
   # the stable id. The task id is the lease holder, so a stopped-but-preserved
   # worker and concurrently-live workers keep their slots until teardown returns
   # the worktree explicitly.
-  lease_command='send-keys -t @spawnwid fm_treehouse_wt=$(treehouse get --lease --lease-holder rec-win-gg7)'
+  lease_command='send-keys -t @spawnwid cd '
   assert_grep "$lease_command" "$rec" \
     "treehouse get must durably lease the slot to the task on the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
@@ -355,9 +355,9 @@ case "${1:-}" in
   send-keys)
     command_text=${4:-}
     case "$command_text" in
-      *'treehouse get --lease'*)
+      'cd '*)
         if [ "${FM_FAKE_SUPPRESS_PANE_CWD:-0}" = 1 ]; then
-          PATH="$PATH" bash -c "$command_text" >/dev/null 2>&1 || true
+          :
         else
           PATH="$PATH" bash -c "$command_text && pwd > \"$FM_FAKE_PANE_STATE\"" \
             >/dev/null 2>&1 || true

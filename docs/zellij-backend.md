@@ -67,7 +67,7 @@ A pane can still disappear between verification and the operation; downstream su
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
 `pane_cwd` follows a top-level shell `cd` but not an interactive subshell held open in the foreground, verified against a bare `treehouse get`, which opens exactly such a subshell.
-`fm-spawn.sh`'s worktree acquisition instead runs `cd "$(treehouse get --lease --lease-holder <task-id>)"`: `--lease` prints the path and exits without opening a subshell, so the `cd` itself is the plain top-level command this rule already tracks; the marker probe stays in place regardless, as the already-proven mechanism.
+`fm-spawn.sh` instead acquires the durable lease synchronously in its controller and sends only a plain top-level `cd <leased-path>` to the pane; the marker probe stays in place regardless, as the already-proven mechanism.
 Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 
