@@ -119,7 +119,8 @@ n=$next
 fi
 if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ] \
   && [ "${FM_HERDR_DEFAULT_PROCESS_INFO:-0}" = 1 ] \
-  && [ ! -f "$RESP/$n.out" ] && [ ! -f "$RESP/$n.exit" ]; then
+  && [ ! -f "$RESP/$n.exit" ] \
+  && { [ ! -f "$RESP/$n.out" ] || ! jq -e '.result.type == "pane_process_info"' "$RESP/$n.out" >/dev/null 2>&1; }; then
   pane_id=w1:p2
   for a in "$@"; do
     case "$a" in
@@ -3140,7 +3141,7 @@ test_composer_state_bare_prompt_is_empty() {
   printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n\n  Shift+Tab:mode\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = empty ] || fail "a bare prompt glyph should read as empty, got '$out'"
   pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty"
 }
@@ -3162,7 +3163,7 @@ test_composer_state_real_text_is_pending() {
   printf '  ╭────────────────────────╮\n  │ ❯ hello captain        │\n  ╰──────── Composer ──────╯\n\n  Enter:send\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "real unsubmitted text should read as pending, got '$out'"
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
@@ -3181,7 +3182,7 @@ test_composer_state_popup_placeholder_fill_is_pending() {
   printf '  ╭──────────────────────────────────────╮\n  │ ❯ /compact compaction instructions   │\n  ╰──────────────── Composer ────────────╯\n\n  Enter:send\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "a popup-close-with-placeholder-fill must still read as pending (not yet submitted), got '$out'"
   pass "fm_backend_herdr_composer_state: a slash-command popup's argument-hint placeholder still reads pending (the incident fix)"
 }
@@ -3228,7 +3229,7 @@ test_composer_state_pi_separator_idle_is_empty() {
   herdr_pi_process_info > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 pi' "$ROOT" )
   [ "$out" = empty ] || fail "an idle native Pi separator composer should read empty, got '$out'"
   calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
   [ "$calls" -eq 1 ] || fail "Pi separator recognition must corroborate identity exactly once, made $calls agent calls"
@@ -3246,7 +3247,7 @@ test_composer_state_omp_separator_idle_is_empty() {
   herdr_bun_process_info "$fb/omp" > "$resp/2.out"
   herdr_bun_process_info "$fb/omp" > "$resp/3.out"
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 omp' "$ROOT" )
   [ "$out" = empty ] || fail "an idle native OMP separator composer should read empty, got '$out'"
   pass "fm_backend_herdr_composer_state: a native idle OMP separator composer reads empty"
 }
@@ -3324,6 +3325,57 @@ test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch() {
     fail "canonical OMP input must be rejected before sending to a relaunch"
   fi
   pass "Herdr input: canonical OMP identity requires current OMP process proof"
+}
+
+test_herdr_input_rejects_canonical_non_omp_relaunch() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-canonical-non-omp-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
+  herdr_pi_process_info > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label claude' "$ROOT" )
+  [ "$out" = unknown ] || fail "canonical Claude input must reject a same-pane Pi relaunch, got '$out'"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "canonical Claude input must be rejected before sending to a same-pane Pi relaunch"
+  fi
+
+  dir="$TMP_ROOT/input-canonical-non-omp-stale-registration"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}' > "$resp/identity.out"
+  herdr_pi_process_info > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label claude' "$ROOT" )
+  [ "$out" = unknown ] || fail "canonical Claude input must reject a stale registered Pi identity, got '$out'"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "canonical Claude input must be rejected before sending with a stale registered identity"
+  fi
+  pass "Herdr input: canonical non-OMP identity requires a matching current process"
+}
+
+test_herdr_input_rejects_non_omp_identity_read_failure_and_missing_metadata() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/input-non-omp-identity-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/identity.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key herdr lab:w1:p2 Escape label claude' "$ROOT" ) || status=$?
+  [ "${status:-0}" -ne 0 ] || fail "canonical non-OMP identity-read failure must deny Herdr control input"
+  if grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "canonical non-OMP identity-read failure must be denied before Herdr sends a key"
+  fi
+
+  dir="$TMP_ROOT/input-non-omp-missing-metadata"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
+  herdr_other_process_info > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label' "$ROOT" )
+  [ "$out" = unknown ] || fail "Herdr input without recorded harness metadata must be denied, got '$out'"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "Herdr input without recorded harness metadata must be denied before sending"
+  fi
+  pass "Herdr input: non-OMP identity failures and missing metadata fail closed"
 }
 
 test_send_text_submit_rechecks_endpoint_before_literal() {
@@ -3656,7 +3708,7 @@ test_composer_state_pi_separator_real_text_is_pending() {
   herdr_pi_process_info > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 pi' "$ROOT" )
   [ "$out" = pending ] || fail "real text in a native Pi separator composer should read pending, got '$out'"
   pass "fm_backend_herdr_composer_state: real Pi composer text remains pending"
 }
@@ -3668,7 +3720,7 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 pi' "$ROOT" )
   [ "$out" = unknown ] || fail "an incomplete Pi separator below a stale generic row should remain unknown, got '$out'"
   pass "fm_backend_herdr_composer_state: an incomplete lower Pi separator cannot inherit a stale empty row"
 }
@@ -3694,7 +3746,7 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
     esac
     fb=$(make_herdr_fakebin "$dir")
     out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 pi' "$ROOT" )
     [ "$out" = unknown ] || fail "unsafe Pi separator case '$case_id' must remain unknown, got '$out'"
   done
   pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
@@ -3719,7 +3771,7 @@ test_composer_state_claude_unbordered_prompt_is_empty() {
   printf '  20\n  21\n\n\xe2\x9c\xbb Worked for 2s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Opus 4.8 (1M context)   \xe2\x96\x8d               3%%\n  \xe2\x86\x90 for agents\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = empty ] || fail "a genuinely idle, unbordered real-claude '❯' prompt row (no border glyph anywhere in view) should read empty, got '$out' (regression: this used to read 'unknown' forever, which is exactly what broke escalate_flush's buffer-clear)"
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯' prompt row (no border box in view) reads empty"
 }
@@ -3730,7 +3782,7 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
   printf '  20\n  21\n\n\xe2\x9c\xbb Worked for 2s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf hello there this is a test message\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "real unsubmitted text in an unbordered real-claude prompt row should read pending, got '$out'"
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯ <text>' prompt row reads pending"
 }
@@ -3751,7 +3803,7 @@ test_composer_state_bare_prompt_below_stale_bordered_banner_wins() {
   printf '\xe2\x95\xad\xe2\x94\x80 Claude Code \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n\xe2\x94\x82           Welcome back Kun!           \xe2\x94\x82\n\xe2\x94\x82                                       \xe2\x94\x82\n\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf still typing captain\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "the live unbordered prompt row below a stale bordered banner must win (pending, real text present), got '$out'"
   pass "fm_backend_herdr_composer_state: a live unbordered prompt row below a stale bordered decorative box still wins (not misread as the box's own row)"
 }
@@ -3774,7 +3826,7 @@ test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty() {
   printf '\xe2\x9c\xbb Brewed for 2m 40s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf \x1b[0m\x1b[2mwhat did the wheelhouse healing verification find?\x1b[0m\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3 claude' "$ROOT" )
   [ "$out" = empty ] || fail "the overnight shape - claude's SGR-2 dim prompt-suggestion ghost after a bare '❯' - must read empty, got '$out' (regression: this false-pending wedged away-mode injection all night)"
   pass "fm_backend_herdr_composer_state: claude's dim prompt-suggestion ghost (the overnight wedge shape) reads empty"
 }
@@ -3788,7 +3840,7 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
   printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf land pr 416 now\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Fable 5                 80%%\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p3 claude' "$ROOT" )
   [ "$out" = pending ] || fail "real normal-intensity text after '❯' must still read pending, got '$out'"
   pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
 }
@@ -3805,7 +3857,7 @@ test_composer_state_grok_dark_truecolor_placeholder_is_empty() {
   printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf \x1b[38;2;50;47;70mType a message...\x1b[38;2;86;82;110m \xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = empty ] || fail "a grok bordered composer whose only content is a dark-truecolor placeholder must read empty, got '$out'"
   pass "fm_backend_herdr_composer_state: grok's dark-truecolor placeholder (the TRUECOLOR gap) reads empty"
 }
@@ -3817,7 +3869,7 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending() {
   printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf fix the login bug \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "real bright typed text in a grok bordered composer must read pending, got '$out'"
   pass "fm_backend_herdr_composer_state: grok's real bright typed input still reads pending"
 }
@@ -3828,7 +3880,7 @@ test_composer_state_codex_bare_prompt_glyph_is_empty() {
   printf '\xe2\x80\xa2 You have 2 usage limit resets available.\n\n\xe2\x80\xba\n\n  gpt-5.5 xhigh \xc2\xb7 Context 100%% left\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = empty ] || fail "a bare '›' (codex) prompt glyph with no trailing text should read empty, got '$out'"
   pass "fm_backend_herdr_composer_state: a real-codex unbordered '›' prompt row reads empty"
 }
@@ -3839,7 +3891,7 @@ test_composer_state_codex_faint_suggestion_is_empty() {
   printf '\xe2\x80\xa2 You have 2 usage limit resets available. Run /usage\nto use one.\n\n\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0m\x1b[2mFind and fix a bug in @filename\x1b[0m\n\n  gpt-5.5 xhigh \xc2\xb7 Context 100%% left\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = empty ] || fail "a faint real-codex ghost suggestion should read empty, not pending, got '$out'"
   pass "fm_backend_herdr_composer_state: a faint real-codex ghost suggestion reads empty"
 }
@@ -3850,7 +3902,7 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   printf '\xe2\x80\xa2 You have 2 usage limit resets available. Run /usage\nto use one.\n\n\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0mFind and fix a bug in @filename\n\n  gpt-5.5 xhigh \xc2\xb7 Context 100%% left\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "the same words without faint styling should still protect real typed input, got '$out'"
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
@@ -4064,11 +4116,11 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   # 6: pane read - the pre-existing turn's footer has become busy
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
   herdr_other_process_info > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  herdr_other_process_info > "$resp/5.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
-  herdr_other_process_info > "$resp/8.out"
+  herdr_other_process_info > "$resp/6.out"
+  herdr_other_process_info > "$resp/7.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/9.out"
+  herdr_other_process_info > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01 "" claude' "$ROOT" )
@@ -4218,7 +4270,7 @@ test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint() {
   printf '\xe2\x80\xa2 OK\n\n\n\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0m\x1b[2mSummarize recent commits\x1b[0m\n\n  gpt-5.5 xhigh \xc2\xb7 Context 97%% left \xc2\xb7 /private/tmp \xc2\xb7 2\xe2\x80\xa6\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 claude' "$ROOT" )
   [ "$out" = empty ] || fail "a faint real-codex dynamic idle-tip row should read empty, got '$out'"
   pass "fm_backend_herdr_composer_state: a faint real-codex dynamic idle-tip composer row reads empty"
 }
@@ -4235,7 +4287,7 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
   printf '  \xe2\x9d\xaf hello there this is a test message\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2 claude' "$ROOT" )
   [ "$out" = pending ] || fail "the pre-injection empty-box guard must still refuse real unsubmitted composer text after this change, got '$out'"
   pass "fm_backend_composer_state (herdr): the pre-injection empty-box guard still refuses a genuinely non-empty composer, unaffected by the submit-confirmation change"
 }
@@ -4341,7 +4393,7 @@ test_scripts_route_explicit_target_through_meta_backend() {
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   neutral="$dir/neutral-root"; mkdir -p "$neutral"
-  fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
+  fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr" "harness=claude"
   touch "$state/.last-watcher-beat"
   printf 'captured herdr pane\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
@@ -5020,6 +5072,8 @@ test_send_text_submit_rejects_no_metadata_exited_omp_husk
 test_herdr_input_rejects_canonical_omp_identity_read_failure_before_text
 test_herdr_input_rejects_ambiguous_omp_process_before_text
 test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch
+test_herdr_input_rejects_canonical_non_omp_relaunch
+test_herdr_input_rejects_non_omp_identity_read_failure_and_missing_metadata
 test_send_text_submit_rechecks_endpoint_before_literal
 test_checked_herdr_sends_recheck_after_readiness_relaunch
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
