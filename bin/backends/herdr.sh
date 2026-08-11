@@ -3632,6 +3632,74 @@ fm_backend_herdr_traex_readiness_set() {  # <state-dir> <session> <pane> <expect
   }
 }
 
+fm_backend_herdr_traex_completion_intent_path() {  # <state-dir> <id>
+  printf '%s/%s.traex-turn-ended.pending' "$1" "$2"
+}
+
+fm_backend_herdr_traex_completion_intent_read() {  # <state-dir> <id>
+  local path line extra version gen_field event_field gen event
+  path=$(fm_backend_herdr_traex_completion_intent_path "$1" "$2")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  { IFS= read -r line && ! IFS= read -r extra; } < "$path" 2>/dev/null || return 1
+  IFS=' ' read -r version gen_field event_field extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  case "$gen_field" in gen=*) gen=${gen_field#gen=} ;; *) return 1 ;; esac
+  case "$event_field" in event=*) event=${event_field#event=} ;; *) return 1 ;; esac
+  fm_busy_token_valid "$gen" && fm_busy_token_valid "$event" || return 1
+  FM_BACKEND_HERDR_TRAEX_COMPLETION_GEN=$gen
+  FM_BACKEND_HERDR_TRAEX_COMPLETION_EVENT=$event
+}
+
+fm_backend_herdr_traex_completion_intent_stage() {  # <state-dir> <id> <gen> <event>
+  local state=$1 id=$2 gen=$3 event=$4 path tmp old_umask rc=0
+  fm_busy_token_valid "$gen" && fm_busy_token_valid "$event" || return 1
+  path=$(fm_backend_herdr_traex_completion_intent_path "$state" "$id")
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fm_backend_herdr_traex_completion_intent_read "$state" "$id" \
+      && [ "$FM_BACKEND_HERDR_TRAEX_COMPLETION_GEN" = "$gen" ] \
+      && [ "$FM_BACKEND_HERDR_TRAEX_COMPLETION_EVENT" = "$event" ]
+    return
+  fi
+  tmp="$path.tmp.$$.$RANDOM"
+  old_umask=$(umask)
+  umask 077
+  printf 'v1 gen=%s event=%s\n' "$gen" "$event" > "$tmp" \
+    && mv -f "$tmp" "$path" || rc=1
+  [ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null || true
+  umask "$old_umask"
+  return "$rc"
+}
+
+fm_backend_herdr_traex_completion_intent_publish() {  # <state-dir> <id> <gen>
+  local state=$1 id=$2 gen=$3 path notification
+  path=$(fm_backend_herdr_traex_completion_intent_path "$state" "$id")
+  fm_backend_herdr_traex_completion_intent_read "$state" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_TRAEX_COMPLETION_GEN" = "$gen" ] || return 1
+  notification="$state/$id.turn-ended"
+  if [ -e "$notification" ] || [ -L "$notification" ]; then
+    [ -f "$notification" ] && [ ! -L "$notification" ] || return 1
+  fi
+  mv -f "$path" "$notification" || return 1
+  [ -f "$notification" ] && [ ! -L "$notification" ] && [ ! -e "$path" ]
+}
+
+fm_backend_herdr_traex_completion_intent_reconcile() {  # <state-dir> <id> <gen> <state> <source>
+  local state=$1 id=$2 gen=$3 current_state=$4 current_source=$5 event
+  fm_backend_herdr_traex_completion_intent_read "$state" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_TRAEX_COMPLETION_GEN" = "$gen" ] || return 1
+  event=$FM_BACKEND_HERDR_TRAEX_COMPLETION_EVENT
+  case "$current_state $current_source" in
+    'busy herdr-traex')
+      "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+        "$state" "$id" idle \
+        --gen "$gen" --source herdr-traex --event "$event" || return 1
+      ;;
+    'idle herdr-traex') ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_traex_completion_intent_publish "$state" "$id" "$gen"
+}
+
 fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pane>
   local state=$1 session=$2 pane=$3 identity agent status record current presence new_state source event
   local id gen initial_id rc=0
@@ -3692,13 +3760,13 @@ fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pa
 # Persist TraeX's native Herdr transitions through the existing semantic-state
 # writer. A working edge opens/continues a turn; blocked records an inactive
 # human wait (the shared blocked policy separately wakes); idle/done closes only
-# a record that was busy, then touches the ordinary durable turn notification.
+# a record that was busy after staging its ordinary durable turn notification.
 # Reconnect level reconciliation runs this same fold, so an idle edge that fell
 # between bounded subscriptions still closes exactly once.
 fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> [mode]
   local state=$1 session=$2 record=$3 observation_mode=${4:-current}
   local pane to agent identity native_agent current current_gen
-  local current_state current_rest current_source event id initial_id gen rc=0
+  local current_state current_rest current_source event id initial_id gen rc=0 intent
   local strict=0 recovery=0
   case "$observation_mode" in
     current) ;;
@@ -3816,6 +3884,22 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
     echo "warning: TraeX task $id has no valid armed lifecycle record; refusing the Herdr transition" >&2
     return 1
   fi
+  intent=$(fm_backend_herdr_traex_completion_intent_path "$state" "$id")
+  if [ -e "$intent" ] || [ -L "$intent" ]; then
+    if ! fm_backend_herdr_traex_completion_intent_reconcile \
+      "$state" "$id" "$gen" "$current_state" "$current_source"; then
+      fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+      echo "warning: TraeX task $id has an unpublishable completion notification; refusing the lifecycle update" >&2
+      return 1
+    fi
+    current=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || {
+      fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+      return 1
+    }
+    current_state=${current%% *}
+    current_rest=${current#* }
+    current_source=${current_rest%% *}
+  fi
   if [ "$recovery" -eq 1 ]; then
     event="launch-failed-$to"
   else
@@ -3838,17 +3922,16 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       ;;
     idle|done)
       if [ "$current_state" = busy ]; then
-        if "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
-          "$state" "$id" idle \
-          --gen "$gen" --source herdr-traex --event "$event"; then
-          if [ "$current_source" = herdr-traex ] && ! touch "$state/$id.turn-ended"; then
-            "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
-              "$state" "$id" busy \
-              --gen "$gen" --source herdr-traex --event notify-retry \
-              >/dev/null 2>&1 || true
+        if [ "$current_source" = herdr-traex ]; then
+          if ! fm_backend_herdr_traex_completion_intent_stage \
+            "$state" "$id" "$gen" "$event" \
+             || ! fm_backend_herdr_traex_completion_intent_reconcile \
+               "$state" "$id" "$gen" "$current_state" "$current_source"; then
             rc=1
           fi
-        else
+        elif ! "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+          "$state" "$id" idle \
+          --gen "$gen" --source herdr-traex --event "$event"; then
           rc=1
         fi
       fi

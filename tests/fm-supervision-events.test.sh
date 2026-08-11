@@ -128,6 +128,18 @@ pass "event_wait_or_sleep: a home with no push-capable window is inert (sleeps P
 
 reset_state
 fm_write_meta "$STATE_DIR/tk5.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+fm_write_meta "$STATE_DIR/ztraex1.meta" "window=alpha:wA:p1" "endpoint_task_id=ztraex1" \
+  "backend=herdr" "harness=traex" "kind=ship" "herdr_session=alpha" \
+  "herdr_pane_id=wA:p1" "busy_gen=g1" "traex_ready=1"
+fm_write_meta "$STATE_DIR/ztraex2.meta" "window=beta:wB:p2" "endpoint_task_id=ztraex2" \
+  "backend=herdr" "harness=traex" "kind=scout" "herdr_session=beta" \
+  "herdr_pane_id=wB:p2" "busy_gen=g2" "traex_ready=failed"
+fm_write_meta "$STATE_DIR/zclaude.meta" "window=gamma:wC:p3" "endpoint_task_id=zclaude" \
+  "backend=herdr" "harness=claude" "kind=ship" "herdr_session=gamma" \
+  "herdr_pane_id=wC:p3" "busy_gen=g3" "traex_ready=1"
+fm_write_meta "$STATE_DIR/zsecondmate.meta" "window=delta:wD:p4" "endpoint_task_id=zsecondmate" \
+  "backend=herdr" "harness=traex" "kind=secondmate" "herdr_session=delta" \
+  "herdr_pane_id=wD:p4" "busy_gen=g4" "traex_ready=1"
 export EVENT_CAP_FAIL_MAX=2
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_events_capable() { return 0; }
@@ -143,9 +155,17 @@ event_wait_or_sleep   # disabled: reconciles and sleeps without event subscripti
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 RN=$(wc -l < "$TMP/reconciles" | tr -d '[:space:]')
-[ "$RN" = 3 ] || fail "every polling fallback must reconcile native lifecycle levels (expected 3 calls, got $RN)"
-grep -q 'herdr.*default:wG:pQ' "$TMP/reconciles" \
-  || fail "polling reconciliation did not receive the bound Herdr worker window"
-pass "event_wait_or_sleep: disabled event push retains native lifecycle reconciliation in polling"
+[ "$RN" = 9 ] || fail "every polling fallback must reconcile each recorded TraeX session group (expected 9 calls, got $RN)"
+[ "$(grep -Fc "herdr $STATE_DIR default default:wG:pQ" "$TMP/reconciles" || true)" = 3 ] \
+  || fail "polling reconciliation did not retain the active Herdr worker group"
+[ "$(grep -Fc "herdr $STATE_DIR alpha alpha:wA:p1" "$TMP/reconciles" || true)" = 3 ] \
+  || fail "polling reconciliation skipped the recorded alpha TraeX session"
+[ "$(grep -Fc "herdr $STATE_DIR beta beta:wB:p2" "$TMP/reconciles" || true)" = 3 ] \
+  || fail "polling reconciliation skipped the recorded beta TraeX session"
+! grep -Fq 'gamma:wC:p3' "$TMP/reconciles" \
+  || fail "polling reconciliation broadened grouped lifecycle reads to a non-TraeX task"
+! grep -Fq 'delta:wD:p4' "$TMP/reconciles" \
+  || fail "polling reconciliation broadened grouped lifecycle reads to a secondmate"
+pass "event_wait_or_sleep: disabled event push reconciles every recorded TraeX session group"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

@@ -736,6 +736,38 @@ test_interrupted_spawn_clears_pending_readiness() {
   pass "traex spawn cleanup fails pending readiness before releasing ownership"
 }
 
+test_terminal_notification_intent_recovers_after_publication_failure() {
+  local rec out status verdict pending notification
+  rec=$(make_spawn_case completion-intent)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for completion-intent recovery should succeed: $out"
+  pending="$HOME_DIR/state/$TASK_ID.traex-turn-ended.pending"
+  notification="$HOME_DIR/state/$TASK_ID.turn-ended"
+  mkdir "$notification"
+  printf idle > "$CASE_DIR/phase"
+  if run_traex_reconcile >/dev/null 2>&1; then
+    fail "terminal reconciliation succeeded without publishing its notification"
+  fi
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "failed notification publication did not retain terminal idle: $verdict"
+  assert_present "$pending" \
+    "terminal idle committed without crash-recoverable notification intent"
+  rmdir "$notification"
+  run_traex_reconcile || fail "reconnect did not publish the staged completion notification"
+  assert_present "$notification" \
+    "reconnect lost the staged completion notification"
+  assert_absent "$pending" \
+    "published completion left replayable notification intent"
+  rm -f "$notification"
+  run_traex_reconcile || fail "repeated terminal reconciliation failed after intent publication"
+  assert_absent "$notification" \
+    "repeated terminal reconciliation duplicated the recovered notification"
+  pass "traex terminal notification intent survives publication failure and reconnect"
+}
+
 test_native_transition_fold_is_sparse_and_bound() {
   local rec out status verdict before
   rec=$(make_spawn_case transitions)
@@ -823,6 +855,7 @@ test_send_from_blocked_requires_native_working
 test_stale_idle_cannot_close_a_new_working_turn
 test_failed_and_orphaned_pending_launches_reconcile_terminal_level
 test_interrupted_spawn_clears_pending_readiness
+test_terminal_notification_intent_recovers_after_publication_failure
 test_native_transition_fold_is_sparse_and_bound
 test_pending_trust_block_is_suppressed_only_until_launch_fails
 
