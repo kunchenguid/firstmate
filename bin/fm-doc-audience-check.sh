@@ -183,6 +183,32 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
             details.append("not tracked/in scope: " + ", ".join(extra))
         fail("; ".join(details))
 
+    word_limits = data.get("agentRuntimeWordLimits")
+    if not isinstance(word_limits, list) or not word_limits:
+        fail("agentRuntimeWordLimits must be a non-empty array")
+    limited_paths: list[str] = []
+    for index, entry in enumerate(word_limits):
+        if not isinstance(entry, dict):
+            fail(f"agentRuntimeWordLimits[{index}] must be an object")
+        path = entry.get("path")
+        maximum = entry.get("maxWords")
+        if not isinstance(path, str) or not path:
+            fail(f"agentRuntimeWordLimits[{index}].path must be a non-empty string")
+        if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
+            fail(f"agentRuntimeWordLimits[{index}].maxWords must be a positive integer")
+        if classifications.get(path) != "agent-runtime":
+            fail(f"agent-runtime word limit path is not classified agent-runtime: {path}")
+        limited_paths.append(path)
+        try:
+            words = len((root / path).read_text(encoding="utf-8").split())
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"cannot read agent-runtime word limit path {path}: {exc}")
+        if words > maximum:
+            fail(f"{path} exceeds agent-runtime word limit: {words} > {maximum}")
+    duplicate_limits = sorted(path for path, count in Counter(limited_paths).items() if count != 1)
+    if duplicate_limits:
+        fail("agent-runtime word limits declared more than once: " + ", ".join(duplicate_limits))
+
     readme_path = root / "README.md"
     readme_targets = {
         os.path.relpath(target, root).replace(os.sep, "/")

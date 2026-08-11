@@ -1,7 +1,7 @@
 # Documentation audiences
 
 [`documentation-audiences.json`](documentation-audiences.json) is the machine-consumed classification owner for every maintained prose surface.
-`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, and local link targets.
+`bin/fm-doc-audience-check.sh` validates exact inventory coverage, the always-loaded agent-runtime word limit, README setup routing, required owner pointers, and local link targets.
 Audience metadata is centralized there rather than copied into front matter on every page.
 
 The audience classes have one placement purpose each:
@@ -14,6 +14,7 @@ The audience classes have one placement purpose each:
 - `agent-runtime` is loaded or rendered as an operating contract for Firstmate agents rather than read as product documentation.
 
 The knowledge-placement policy is owned by [`firstmate-coding-guidelines`](../.agents/skills/firstmate-coding-guidelines/SKILL.md).
+The inventory's `agentRuntimeWordLimits` keeps `AGENTS.md` within a reviewable ceiling while conditional procedures live behind precise skill triggers.
 Task-specific chronology, delivery transcripts, temporary paths, branches, failed hypotheses, and one-off process identifiers stay in private task reports or PR evidence by default.
 Before removing that evidence from a tracked page, distill every unique current fact into its classified owner and retain a focused regression pointer.
 

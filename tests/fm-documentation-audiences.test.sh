@@ -91,13 +91,15 @@ write_fixture_inventory() {
 {
   "version": 1,
   "scope": {"trackedPatterns": ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]},
-  "allowedAudiences": ["public-product", "operator-current", "maintainer-verification"],
+  "allowedAudiences": ["public-product", "operator-current", "maintainer-verification", "agent-runtime"],
   "setupAudiences": ["public-product", "operator-current"],
+  "agentRuntimeWordLimits": [{"path": "AGENTS.md", "maxWords": 10}],
   "readmeSetupTargets": ["docs/setup.md"],
   "requiredOwnerPointers": [
     {"source": "README.md", "target": "docs/policy.md"}
   ],
   "surfaces": [
+    {"path": "AGENTS.md", "audience": "agent-runtime"},
     {"path": "README.md", "audience": "public-product"},
     {"path": "docs/evidence.md", "audience": "maintainer-verification"},
     {"path": "docs/policy.md", "audience": "operator-current"},
@@ -111,6 +113,7 @@ test_local_links_and_no_keyword_heuristic() {
   local repo="$TMP_ROOT/fixture"
   mkdir -p "$repo/docs"
   git -C "$repo" init -q
+  printf '%s\n' '# Agent runtime' 'Keep this concise.' > "$repo/AGENTS.md"
   printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md"
   printf '%s\n' '# Setup' > "$repo/docs/setup.md"
   printf '%s\n' '# Policy' > "$repo/docs/policy.md"
@@ -124,15 +127,21 @@ test_local_links_and_no_keyword_heuristic() {
 Observed version 1.2.3 on branch `fm/example`.
 MD
   write_fixture_inventory "$repo"
-  git -C "$repo" add README.md docs
+  git -C "$repo" add AGENTS.md README.md docs
   "$CHECK" --root "$repo" >/dev/null \
     || fail "structural checker rejected legitimate maintainer evidence prose"
+
+  printf '%s\n' '# Agent runtime' 'one two three four five six seven eight nine' > "$repo/AGENTS.md"
+  git -C "$repo" add AGENTS.md
+  run_expect_failure "AGENTS.md exceeds agent-runtime word limit" "$CHECK" --root "$repo"
+  printf '%s\n' '# Agent runtime' 'Keep this concise.' > "$repo/AGENTS.md"
+  git -C "$repo" add AGENTS.md
 
   printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md) [Broken](docs/missing.bin)' \
     > "$repo/README.md"
   git -C "$repo" add README.md
   run_expect_failure "unresolved local link" "$CHECK" --root "$repo"
-  pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
+  pass "agent-runtime word limits and local links fail safely without keyword-linting evidence"
 }
 
 test_repository_inventory_passes

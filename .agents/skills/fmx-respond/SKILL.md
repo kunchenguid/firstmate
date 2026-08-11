@@ -18,7 +18,7 @@ Relay lets a firstmate instance answer and act on public mentions routed through
 A mention arrives through the watcher as a `check:` wake whose payload is `x-mention <request_id>`.
 The full mention is stashed locally; this skill acts on any request it carries and turns it into one public reply, or deliberately skips it when there is nothing to answer.
 
-This runs only when Relay is on (the user dropped `FMX_PAIRING_TOKEN` into `.env`; see AGENTS.md "Relay").
+This runs only when Relay is on (the user dropped `FMX_PAIRING_TOKEN` into `.env`; see `docs/configuration.md` "Relay (.env)").
 If you ever see an `x-mention` wake without Relay configured, do nothing.
 A `check:` wake can also carry `x-mode-error ...` instead of `x-mention <request_id>` - that is a poll or relay configuration problem, not a mention to answer.
 Report it directly to the captain as a Relay configuration blocker and do not treat it as a mention to answer.

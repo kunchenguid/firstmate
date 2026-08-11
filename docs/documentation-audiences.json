@@ -23,6 +23,12 @@
     "operator-current",
     "operator-example"
   ],
+  "agentRuntimeWordLimits": [
+    {
+      "path": "AGENTS.md",
+      "maxWords": 7500
+    }
+  ],
   "readmeSetupTargets": [
     "docs/configuration.md",
     "docs/wedge-alarm.md",
@@ -182,6 +188,10 @@
     },
     {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/validation-supersession/SKILL.md",
       "audience": "agent-runtime"
     },
     {
