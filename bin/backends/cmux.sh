@@ -36,7 +36,8 @@
 #      (herdr-shape): `workspace list`'s `current_directory` field reflects a
 #      `cd` run directly in the surface's own top-level shell, but stays
 #      frozen at wherever that shell was when it launched a foreground
-#      subshell (exactly what `treehouse get` does) - verified live: a nested
+#      subshell (the shape fm-spawn now uses for worktree entry) - verified
+#      live: a nested
 #      `bash -c 'cd /Users && exec bash'` left `current_directory` reporting
 #      the PARENT shell's last cwd, never following into the subshell. Fixed
 #      with zellij's own pwd-marker-probe workaround, reused verbatim in

@@ -175,11 +175,24 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       ;;
   esac
 fi
-if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    if [ "$status" -eq 0 ]; then
+      out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    elif [ ! -e "$task_dir/removed" ]; then
+      # Record the pane's REMOVAL, not the API call that asked for it. Cleanup
+      # ends the pane by whichever route fm_backend_herdr_emptying_close_plan
+      # picks, and only one of those two routes is a `pane close` the audit
+      # above can see: a pane holding a proved lone idle bare shell is removed
+      # by ending that shell, which reaches Herdr as a pane death and issues no
+      # API call at all. Both routes confirm the removal with this same read,
+      # which fails once the pane is gone, so this row appears exactly once per
+      # abort task whichever route ran.
+      : > "$task_dir/removed"
+      printf 'pane-removed\t%s\t%s\t%s\n' - - "${3:-}" >> "$FOCUS_AUDIT_LOG"
+    fi
     break
   done
 fi
@@ -286,7 +299,16 @@ EOF
       "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
     LAB_READY=0
   fi
-  rm -rf "$TMP_ROOT"
+  # The lab session, its workspaces, and every pooled worktree are released
+  # above unconditionally; only this run's scratch home and fixture repo are
+  # kept. A failure here is a ten-minute reproduction, so FM_E2E_KEEP_TMP=1
+  # preserves the recorded metadata, journals, and captured stderr that name
+  # which step diverged.
+  if [ "${FM_E2E_KEEP_TMP:-0}" = 1 ]; then
+    printf '# kept %s\n' "$TMP_ROOT" >&2
+  else
+    rm -rf "$TMP_ROOT"
+  fi
 }
 trap cleanup_all EXIT
 
@@ -376,7 +398,12 @@ make_project() {  # <dir>
   mkdir -p "$dir"
   git -C "$dir" init -q
   printf '# Herdr projection E2E fixture\n' > "$dir/README.md"
-  git -C "$dir" add README.md
+  # Every live task here durably reserves its own pooled copy until it is torn
+  # down, and this suite deliberately keeps a dozen alive at once. The default
+  # cap leaves almost no headroom for that, so raise it rather than have the pool
+  # run out and read as a projection failure.
+  printf 'max_trees = 32\n' > "$dir/treehouse.toml"
+  git -C "$dir" add README.md treehouse.toml
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
@@ -788,8 +815,8 @@ ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  $1 == "pane-removed" && $4 == a { print "close-a" }
+  $1 == "pane-removed" && $4 == b { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;

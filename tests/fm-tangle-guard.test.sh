@@ -149,7 +149,8 @@ test_brief_assertion_precedes_branch() {
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
-# A fake tmux that reports FM_FAKE_PANE_PATH as the post-`treehouse get` pane cwd
+# A fake tmux that reports FM_FAKE_PANE_PATH as the pane cwd after the spawn
+# sends it into the leased copy
 # (so the spawn's worktree-resolution loop resolves to a path we control), names
 # the session on '#S', and swallows window ops. Echoes the fakebin dir.
 make_spawn_fakebin() {
@@ -169,7 +170,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -224,8 +225,8 @@ test_spawn_isolation_abort() {
 #     tmux appends at the next free index instead of the active window index, which
 #     collides under base-index 1;
 #   - the window id is captured (-P -F #{window_id}) and automatic-rename/allow-rename
-#     are disabled so the fm-<id> name survives treehouse cd'ing into the worktree;
-#   - the treehouse-get send-keys and the worktree wait loop target that stable
+#     are disabled so the fm-<id> name survives the pane cd'ing into the worktree;
+#   - the worktree-entry send-keys and the worktree wait loop target that stable
 #     window id, never the (possibly-renamed) name - a lost name would let
 #     display-message fall back to the active client's window and misread firstmate's
 #     OWN pane as the worktree, tangling a hook into the primary checkout.
@@ -248,7 +249,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -292,9 +293,9 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): worktree entry and the worktree wait loop target the stable id.
+  assert_grep "send-keys -t @spawnwid ( cd '$wt' && exec" "$rec" \
+    "entry into the leased copy must be sent to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

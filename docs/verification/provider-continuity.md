@@ -62,7 +62,7 @@ Every axis below was inspected rather than assumed.
 
 The harness axis is uniform for both new surfaces.
 `bin/fm-provider-continuity.sh` never launches or inspects a harness: it reads recorded observations, `state/<id>.meta`, the recorded endpoint's own backend state, and `bin/fm-crew-state.sh`.
-`--resume-worktree` changes only which command enters the isolated copy (`cd <path>` instead of `treehouse get`) and leaves `launch_template()`, the model and effort flag builders, and every per-harness hook installation untouched, so `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi` all reach the same launch construction on a resume as on a fresh spawn.
+`--resume-worktree` changes only which copy the pane is sent into (the recorded one instead of a freshly leased one; both entries send the identical entry command) and leaves `launch_template()`, the model and effort flag builders, and every per-harness hook installation untouched, so `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi` all reach the same launch construction on a resume as on a fresh spawn.
 Adapter verification itself is unchanged: `bin/fm-spawn.sh` still refuses an unverified adapter during a resume, so continuity can never introduce one.
 
 | Backend | `--resume-worktree` | Inspection that established it |

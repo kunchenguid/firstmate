@@ -53,8 +53,8 @@
 #   4. `list-panes --json`'s `pane_cwd` reflects a `cd` run DIRECTLY in the
 #      pane's own top-level shell within one poll (<0.3s) - but does NOT
 #      reflect a `cd` performed by a NESTED SUBSHELL the pane's shell
-#      launched as a foreground command (verified: `treehouse get` opens
-#      exactly such a subshell). `pane_cwd` stays frozen at wherever the
+#      launched as a foreground command (the shape fm-spawn now uses to enter
+#      a leased worktree). `pane_cwd` stays frozen at wherever the
 #      pane's shell was when it invoked that foreground command - worse than
 #      herdr's frozen-cwd trap (herdr at least exposes a `foreground_cwd`
 #      that tracks this; zellij's CLI exposes no live-process cwd field and
@@ -62,7 +62,7 @@
 #      contradicts the design report's assumption ("acceptable for tmux and
 #      zellij") and required a different implementation strategy - see
 #      fm_backend_zellij_current_path below and docs/zellij-backend.md
-#      "Worktree-path discovery: pane_cwd does not track a subshell".
+#      "Current operation and safety".
 #   5. `new-tab` DOES steal focus from an attached client with NO flag to
 #      suppress it (unlike herdr's --no-focus and tmux's new-window -d).
 #      Mitigated (fm_backend_zellij_create_task): capture the previously
@@ -382,15 +382,15 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 }
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
-# Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get`.
+# Mirrors tmux's pane_current_path poll used after the pane is sent into its
+# leased worktree.
 #
-# Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
-# does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
+# Verified pitfall (docs/zellij-backend.md "Current operation and safety"):
+# `list-panes --json`'s `pane_cwd` DOES reflect a
 # `cd` run directly in the pane's own top-level shell, but stays FROZEN at
-# whatever directory the pane's shell was in when it launched `treehouse get`
-# as a foreground command - it never follows that command's own internal `cd`
-# into the acquired worktree, even after the subshell is fully interactive and
+# whatever directory the pane's shell was in when it launched the nested
+# worktree-entry shell - it never follows that shell's own internal `cd` into
+# the leased worktree, even after the subshell is fully interactive and
 # a `pwd` typed into it prints the correct live path on screen. Zellij's CLI
 # exposes no per-pane pid and no live-process cwd field to read instead
 # (unlike herdr's `foreground_cwd`), so passive JSON polling cannot solve

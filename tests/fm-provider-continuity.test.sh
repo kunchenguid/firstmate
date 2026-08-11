@@ -513,7 +513,18 @@ fi
 exec "$real_mv" "\$@"
 SH
   chmod +x "$fakebin/mv"
-  fm_fake_exit0 "$fakebin" treehouse
+  # Records every pool call so a case can assert an ordinary spawn allocated a
+  # copy and a resume never asked the pool for one.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -572,6 +583,7 @@ run_resume_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' GROK_HOME="$home/grok-home" \
     FM_FAKE_SEND_LOG="${FM_FAKE_SEND_LOG:-}" FM_FAKE_LAUNCH_LOG="${FM_FAKE_LAUNCH_LOG:-}" \
+    FM_FAKE_TREEHOUSE_LOG="${FM_FAKE_TREEHOUSE_LOG:-}" \
     FM_FAKE_KILL_LOG="${FM_FAKE_KILL_LOG:-}" FM_FAKE_FAIL_LITERAL="${FM_FAKE_FAIL_LITERAL:-0}" \
     FM_FAKE_FAIL_CONTAINER="${FM_FAKE_FAIL_CONTAINER:-0}" \
     FM_FAKE_ENDPOINT_FILE="${FM_FAKE_ENDPOINT_FILE:-$home/.fake-endpoint}" \
@@ -591,6 +603,7 @@ test_resume_reuses_the_recorded_isolated_copy_and_preserves_work() {
   head_before=$(git -C "$WT_DIR" rev-parse HEAD)
 
   FM_FAKE_SEND_LOG="$CASE_DIR/send.log" FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+  FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     run_resume_spawn "$HOME_DIR" "$FAKEBIN_DIR" "$WT_DIR" \
       "$id" "$PROJ_DIR" --mode no-mistakes --yolo off \
       --harness claude --resume-worktree "$WT_DIR"
@@ -601,9 +614,10 @@ test_resume_reuses_the_recorded_isolated_copy_and_preserves_work() {
   assert_contains "$SPAWN_OUT" "worktree=$WT_DIR" \
     "the resume recorded a worktree other than the copy the task already owns"
 
-  assert_grep "cd " "$CASE_DIR/send.log" "the resume did not enter the existing copy"
-  assert_no_grep 'treehouse get' "$CASE_DIR/send.log" \
-    "the resume allocated a second isolated copy through treehouse get"
+  assert_grep "cd '$WT_DIR'" "$CASE_DIR/send.log" \
+    "the resume did not enter the exact copy the task already owns"
+  assert_absent "$CASE_DIR/treehouse.log" \
+    "the resume asked the pool for a second isolated copy"
 
   # Task identity and durable progress survive unchanged.
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "the recorded copy changed"
@@ -869,12 +883,12 @@ test_ordinary_spawn_is_unchanged_without_the_resume_flag() {
   read_resume_record "$rec"
   rm -f "$HOME_DIR/state/$id.meta"
 
-  FM_FAKE_SEND_LOG="$CASE_DIR/send.log" \
+  FM_FAKE_SEND_LOG="$CASE_DIR/send.log" FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     run_resume_spawn "$HOME_DIR" "$FAKEBIN_DIR" "$WT_DIR" \
       "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --harness claude
   expect_code 0 "$SPAWN_STATUS" "an ordinary spawn must be unaffected: $SPAWN_OUT"
-  assert_grep 'treehouse get' "$CASE_DIR/send.log" \
-    "an ordinary spawn stopped allocating its own isolated copy"
+  assert_grep "get --lease --lease-holder $id" "$CASE_DIR/treehouse.log" \
+    "an ordinary spawn stopped durably leasing its own isolated copy"
   assert_not_contains "$SPAWN_OUT" "resumed=1" \
     "an ordinary spawn reported itself as a resume"
   assert_absent "$HOME_DIR/state/.resume-$id.meta.bak" \

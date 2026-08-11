@@ -96,6 +96,18 @@
 #   metadata publication. After treehouse selects a copy, the shared ownership
 #   check refuses a copy any other live task record still claims rather than
 #   publishing a second owner.
+#   firstmate acquires the pooled copy itself with `treehouse get --lease
+#   --lease-holder <id>` and moves the pane into it, so the reservation lives
+#   in treehouse's pool-global state for as long as the task record does, instead
+#   of only for the life of the pane's shell. Ending a pane without ending the task
+#   (session restart, crash, provider handoff) therefore no longer frees a copy a
+#   live record still claims, and the reservation holds across homes, which the
+#   home-scoped ownership check above cannot. A relaunch that allocates a fresh
+#   copy releases the superseded record's copy only after the new lease is held,
+#   and only when that copy is provably clean; otherwise it stays leased with a
+#   warning, because the lease is then what protects the unlanded work from a prune.
+#   An aborted launch whose endpoint is confirmed gone releases its own lease the
+#   same way; one that retains the replacement identity keeps the lease and says so.
 #   Every local single-task launch also publishes a durable abort fence before
 #   endpoint creation. After an endpoint attempt, a later failure restores any
 #   previous task record only when the exact replacement endpoint is confirmed
@@ -136,11 +148,11 @@
 #   git worktree root distinct from the primary project checkout.
 #   --resume-worktree <path> relaunches THIS task id in the isolated copy it
 #   already owns instead of allocating a second one, which is what a
-#   cross-provider handoff or any other keep-the-work recovery needs. It runs
-#   `cd <path>` in place of `treehouse get`, keeps every later step identical
-#   (settle poll, isolation assertion, hook installation, recorded worktree=),
-#   and additionally refuses unless the pane settles on that exact copy, so one
-#   task can never end up split across two. It is a single-task ship/scout flag:
+#   cross-provider handoff or any other keep-the-work recovery needs. It skips the
+#   pool acquisition and enters that path directly, keeping every later step
+#   identical (settle poll, isolation assertion, exact-copy proof, hook
+#   installation, recorded worktree=) and leaving that copy's existing lease alone.
+#   It is a single-task ship/scout flag:
 #   refused with --secondmate (a secondmate relaunches into its own persistent
 #   home), refused in batch dispatch (one path cannot serve several tasks), and
 #   refused on backend=orca (Orca owns the worktree itself and addresses it by
@@ -717,6 +729,8 @@ if [ "$BACKEND" = orca ]; then
 fi
 ORCA_ABORT_CLEANUP=0
 RESUME_WT=
+LEASED_WT=
+SUPERSEDED_WT=
 RESUME_META_BACKUP=
 RESUME_META_RESTORE=0
 LAUNCH_ABORT_FENCE=
@@ -790,6 +804,26 @@ spawn_record_publish() {  # <record> <destination> [recovery-prefix]
   rm -f -- "$META_TMP" || true
   META_TMP=
   return 1
+}
+
+# Give a pooled copy back to treehouse without ever discarding unlanded work.
+# `treehouse return` WITHOUT --force asks before cleaning a copy that still has
+# uncommitted changes, and with stdin closed it aborts and keeps the lease, so the
+# git probe below and treehouse's own question are two independent refusals of the
+# same thing. A copy that cannot be proved clean therefore stays leased, which is
+# strictly safer than the pre-lease behaviour where a prune could reclaim it.
+# fm-teardown.sh owns the --force path; by then it has already proved work landed.
+spawn_pool_lease_release() {  # <worktree> <why>
+  local wt=${1:-} why=${2:-} dirty
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  command -v treehouse >/dev/null 2>&1 || return 0
+  if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || [ -n "$dirty" ]; then
+    echo "warning: pooled copy $wt stays leased to $ID ($why) because it is not provably clean; that lease is now what protects the work from a prune. Reconcile it, then run 'treehouse return $wt'." >&2
+    return 0
+  fi
+  if ! ( cd "${PROJ_ABS:-$wt}" && treehouse return "$wt" ) </dev/null >/dev/null 2>&1; then
+    echo "warning: pooled copy $wt could not be returned ($why); it stays leased to $ID until 'treehouse return $wt' succeeds" >&2
+  fi
 }
 
 spawn_abort_cleanup() {
@@ -942,6 +976,14 @@ spawn_abort_cleanup() {
           echo "warning: could not restore the previous task record for $ID; it is preserved at $RESUME_META_BACKUP" >&2
         }
     fi
+  fi
+  if [ -n "$LEASED_WT" ]; then
+    if [ "$endpoint_state" = missing ]; then
+      spawn_pool_lease_release "$LEASED_WT" "the launch for $ID was rolled back"
+    else
+      echo "warning: launch cleanup for $ID kept its leased pooled copy $LEASED_WT because the replacement endpoint is not confirmed gone" >&2
+    fi
+    LEASED_WT=
   fi
   if [ "$endpoint_state" = missing ] && [ "$record_ready" = 1 ] \
      && [ "$LAUNCH_ABORT_FENCE_OWNED" = 1 ]; then
@@ -1710,10 +1752,8 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # second one. Prove the copy is a real worktree root distinct from the primary
 # checkout BEFORE any endpoint exists, and snapshot the previous authoritative
 # record for the shared abort transaction described in this script's header.
-RESUME_WT_REAL=
 if [ "$RESUME_WT_SET" -eq 1 ]; then
   RESUME_WT=$RESUME_WT_ARG
-  RESUME_WT_REAL=$(real_path_or_raw "$RESUME_WT")
   WT=$RESUME_WT
   validate_spawn_worktree "--resume-worktree" "$RESUME_WT"
   # The live pane read below is what actually records worktree=, so clear the
@@ -1749,6 +1789,16 @@ elif [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
     exit 1
   }
   RESUME_META_RESTORE=1
+fi
+
+# A relaunch that does NOT name a copy to re-enter allocates a fresh one, so the
+# copy the superseded record named would otherwise stay leased with nothing left
+# to return it. Remember it now, while its record still exists, and release it
+# only once this launch has committed (see the resume-transaction commit below).
+if [ "$RESUME_META_RESTORE" = 1 ] && [ "$RESUME_WT_SET" -eq 0 ] \
+   && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+   && [ -f "$RESUME_META_BACKUP" ]; then
+  SUPERSEDED_WT=$(sed -n 's/^worktree=//p' "$RESUME_META_BACKUP" | head -1)
 fi
 
 LAUNCH_ABORT_FENCE_TMP=$(umask 077; mktemp "$STATE/.spawn-abort-fence.XXXXXX") || {
@@ -2098,18 +2148,89 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  # A resume enters the copy this task already owns instead of allocating a new
-  # one, so it never runs treehouse get. Everything after this point - the
-  # settle poll, the isolation assertion, hook installation, and the recorded
-  # worktree= - is deliberately identical for both entries, and the resume adds
-  # one stricter check: the pane must settle on the EXACT requested copy.
+  # Pool acquisition belongs to firstmate, not to the pane. A bare `treehouse get`
+  # run INSIDE the pane reserves its copy only for the life of that shell, while
+  # the claim firstmate records in state/<id>.meta is durable. Anything that ends
+  # the shell without ending the task - a session restart, a crash, a provider
+  # handoff - therefore frees a copy that a live record still owns, and the next
+  # allocation is handed a copy belonging to another task. `--lease` records the
+  # reservation in treehouse's own pool state instead: no later get offers it and
+  # no prune reclaims it until it is returned. That reservation is also the only
+  # claim that spans homes, which the ownership check below structurally cannot do
+  # because it can only read ONE home's state/ while the pool is shared by all of
+  # them.
+  #
+  # A resume re-enters the copy this task already owns instead of allocating a
+  # second one. Both entries then send the pane the identical entry command and share
+  # every later step - the settle poll, the isolation assertion, hook installation,
+  # the recorded worktree=, and the proof that the pane settled on that EXACT copy.
   if [ "$RESUME_WT_SET" -eq 1 ]; then
-    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$RESUME_WT")"
+    ENTER_WT=$RESUME_WT
+    ENTER_WT_SOURCE="--resume-worktree"
+    ENTER_WT_LABEL="requested isolated copy"
   else
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    ENTER_WT_SOURCE="treehouse get --lease"
+    ENTER_WT_LABEL="leased isolated copy"
+    # treehouse says WHY it refused on stderr and prints only the path on stdout,
+    # so keep the two apart: the reason is the whole value of the refusal below
+    # (an exhausted pool names its own max_trees), and mixing the streams would
+    # feed a diagnostic line to the path parser.
+    LEASE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-lease.XXXXXX") || LEASE_ERR_FILE=
+    LEASE_OUT=$( ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) \
+      </dev/null 2>"${LEASE_ERR_FILE:-/dev/null}" ) || LEASE_OUT=
+    LEASE_ERR=
+    if [ -n "$LEASE_ERR_FILE" ]; then
+      LEASE_ERR=$(grep -v '^[[:space:]]*$' "$LEASE_ERR_FILE" 2>/dev/null | tail -1)
+      rm -f "$LEASE_ERR_FILE"
+    fi
+    # --lease prints only the path on stdout; take the last line so a future
+    # banner leaking onto stdout cannot be mistaken for the worktree.
+    ENTER_WT=$(printf '%s\n' "$LEASE_OUT" | sed -n '$p')
+    if [ -z "$ENTER_WT" ]; then
+      # An empty path must refuse here and not fall through: `cd ""` succeeds and
+      # stays put, so a later check would silently inspect firstmate's own cwd.
+      echo "error: $ENTER_WT_SOURCE did not yield an isolated worktree (the pool returned no path${LEASE_ERR:+; treehouse said: $LEASE_ERR}); refusing to launch to avoid tangling the primary checkout. Inspect target $T" >&2
+      exit 1
+    fi
+    case "$ENTER_WT" in
+      /*) ;;
+      *)
+        # The bare-path-on-stdout contract is treehouse's, not firstmate's, so a
+        # release that starts printing anything else must fail naming the tool
+        # and version rather than being parsed into something plausible.
+        # tests/fm-treehouse-pool-lease-live-e2e.test.sh refreshes that evidence.
+        echo "error: treehouse $(treehouse --version 2>/dev/null | head -1) printed '$ENTER_WT' on stdout instead of a bare absolute worktree path for '$ENTER_WT_SOURCE'; refusing to launch task $ID" >&2
+        exit 1
+        ;;
+    esac
+    LEASED_WT=$ENTER_WT
+    # Prove the leased copy before the pane is told about it, so a pool that
+    # handed back the primary checkout refuses here rather than after the cd.
+    WT=$ENTER_WT
+    validate_spawn_worktree "$ENTER_WT_SOURCE" "$T"
+    WT=""
   fi
+  ENTER_WT_REAL=$(real_path_or_raw "$ENTER_WT")
+  # Enter the copy in a NESTED shell, never with a bare `cd` in the pane's own
+  # top-level shell. `treehouse get` opened that nested shell itself, and
+  # teardown depends on the topology it produced: teardown selects the task's
+  # leftover processes by cwd under the worktree (fm-teardown.sh's
+  # pids_with_cwd_under) and terminates them before returning the copy to the
+  # pool. A top-level shell sitting inside the copy is selected along with the
+  # agent, so reaping ends the pane itself - and the pane has to outlive that
+  # step, because the exact focus-preserving close and the presentation-journal
+  # retirement that follow it both confirm the pane by reading it.
+  #
+  # `exec` keeps the nesting one deep. If it fails, the subshell exits and the
+  # pane stays in the project directory, so the settle poll below times out into
+  # an explicit refusal rather than launching an agent in the primary checkout.
+  # fish parses `( ... )` as command substitution rather than a subshell, which
+  # is not a new constraint: firstmate already sends this pane POSIX `export
+  # NAME=value` lines that fish rejects the same way.
+  spawn_send_text_line "$WT_TARGET" \
+    "( cd $(shell_quote "$ENTER_WT") && exec \"\${SHELL:-/bin/sh}\" )"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane's cwd to move from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -2121,7 +2242,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A single read that already differs from PROJ_ABS_REAL is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # checkout entirely) before the shell catches up with the cd. That
   # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
   # below (it resolves to a real, distinct worktree top-level too), so accepting it
   # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
@@ -2149,28 +2270,25 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    if [ "$RESUME_WT_SET" -eq 1 ]; then
-      echo "error: the pane did not enter the requested isolated copy within 60s; inspect window $T" >&2
-    else
-      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    fi
+    echo "error: the pane did not enter the $ENTER_WT_LABEL '$ENTER_WT' within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  if [ "$RESUME_WT_SET" -eq 1 ]; then
-    validate_spawn_worktree "--resume-worktree" "$T"
-    # Same-copy proof: a pane that settled on any OTHER worktree would silently
-    # split one task across two copies, so refuse rather than record it.
-    if [ "$(real_path_or_raw "$WT")" != "$RESUME_WT_REAL" ]; then
-      echo "error: the pane settled on '$WT' instead of the requested isolated copy '$RESUME_WT'; refusing to split task $ID across two copies. Inspect window $T" >&2
-      exit 1
-    fi
-  else
-    validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$ENTER_WT_SOURCE" "$T"
+  # Same-copy proof: a pane that settled on any OTHER worktree would silently
+  # split one task across two copies, so refuse rather than record it. This now
+  # covers a fresh allocation too, because firstmate chose that copy as well.
+  if [ "$(real_path_or_raw "$WT")" != "$ENTER_WT_REAL" ]; then
+    echo "error: the pane settled on '$WT' instead of the $ENTER_WT_LABEL '$ENTER_WT'; refusing to split task $ID across two copies. Inspect window $T" >&2
+    exit 1
   fi
 fi
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Belt and braces behind the pool lease above: the lease is what actually keeps a
+  # live task's copy from being re-offered, including across homes. This check is
+  # the local record's own opinion, and it still catches a copy allocated before
+  # leases existed or one whose lease was released while its record survived.
   if fm_worktree_claimed_by_other_task "$STATE" "$ID" "$WT"; then
     echo "REFUSED: pooled worktree $WT is still claimed by task $FM_WORKTREE_OWNERSHIP_OWNER; preserve both task records and reconcile ownership before allocating it." >&2
     exit 1
@@ -2683,6 +2801,16 @@ LAUNCH_NEW_META_PUBLISHED=0
 ORCA_ABORT_CLEANUP=0
 RESUME_META_RESTORE=0
 [ -z "$RESUME_META_BACKUP" ] || rm -f "$RESUME_META_BACKUP" 2>/dev/null || true
+# This launch owns its own copy now, so the abort path must stop treating the
+# lease as one it may return. The superseded record is gone, so nothing else will
+# ever give its copy back; release it only here, AFTER this launch already holds
+# its own lease, so a relaunch can never be handed the very copy it is giving up.
+LEASED_WT=
+if [ -n "$SUPERSEDED_WT" ] \
+   && [ "$(real_path_or_raw "$SUPERSEDED_WT")" != "$(real_path_or_raw "$WT")" ]; then
+  spawn_pool_lease_release "$SUPERSEDED_WT" "task $ID was relaunched into $WT"
+fi
+SUPERSEDED_WT=
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

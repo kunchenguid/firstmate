@@ -2428,8 +2428,12 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+    # Keep this close's own diagnostics. Every refusal inside it names WHICH
+    # safety condition it could not satisfy, and discarding that left the
+    # "could not be confirmed" warning below as the only trace - which says a
+    # close failed but never why, and is unreconstructable after the fact.
     fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi

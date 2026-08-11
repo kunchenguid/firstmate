@@ -603,6 +603,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

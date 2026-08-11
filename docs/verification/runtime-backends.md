@@ -46,6 +46,49 @@ The repository rule derived from this evidence is owned by [`firstmate-coding-gu
 `tests/fm-backend.test.sh` and `tests/fm-backend-orca.test.sh`, which cover that publication, are both selected only into the ubuntu-latest lanes (`bin/fm-test-run.sh --list --lane portable-serial`), and any runner carrying bash 5.1 or newer masks the defect.
 `tests/fm-backend.test.sh`'s `test_spawn_refuses_when_task_record_cannot_be_published` is the portable regression, and it asserts the script's own refusal diagnostic so it cannot pass vacuously on a shell whose `set -e` would have aborted anyway.
 
+## Treehouse worktree pool
+
+This section is backend-independent: every spawn-capable backend takes its task worktree from the same Treehouse pool.
+
+`bin/fm-spawn.sh` acquires each task's pooled copy itself with `treehouse get --lease --lease-holder <task-id>` and then sends the pane a nested shell that enters it, never a bare `cd`.
+That nesting is what `treehouse get` used to supply implicitly: teardown selects a task's leftover processes by cwd under the worktree, so a pane whose own top-level shell sat inside the copy would be killed by its own teardown, before the exact focus-preserving close and the presentation-journal retirement that follow it can read the pane.
+`tests/fm-spawn-worktree-settle.test.sh` pins that topology with real processes, independently of any harness.
+The guarantee resting on this record is that a live task's copy is never handed to another task, including a task in another firstmate home, for as long as that task's record exists.
+Verified 2026-08-11 on macOS 26.5.2 arm64 against v2.1.0 (installed) and v2.0.1, the pin `bin/fm-install-treehouse.sh` installs for the required real-Herdr CI lane.
+
+`tests/fm-treehouse-pool-lease-live-e2e.test.sh` refreshes this record and fails naming the tool and version:
+
+```sh
+FM_TREEHOUSE_POOL_DRIFT=1 tests/fm-treehouse-pool-lease-live-e2e.test.sh
+```
+
+Both versions produced the same six results, one `ok -` line per property:
+
+| Property | Observed |
+| --- | --- |
+| `get --lease --lease-holder <id>` stdout | one line, the leased worktree's absolute path, nothing else |
+| a later `get` while that lease is held and no process runs inside the leased copy | a different copy |
+| `prune` while that lease is held | the leased copy is left alone |
+| `return <copy>` without `--force` on a copy holding uncommitted work | prompts, aborts, and leaves both the copy and its uncommitted work in place |
+| `return <copy>` without `--force` on a clean copy | releases it; the next `get` is handed that same copy |
+| `return <copy> --force` on a leased copy | releases it; the next `get` is handed that same copy |
+
+That last row is what lets normal task teardown keep the pool from filling instead of racing.
+Nothing expires a lease, and `prune` skips one, so `bin/fm-teardown.sh` must release every completed task with `treehouse return --force`; an aborted launch or a relaunch into a fresh copy instead returns its own provably clean superseded lease from `bin/fm-spawn.sh`.
+A teardown path that stopped honouring `--force` over a lease would leak one slot per completed task rather than hand a live task's copy away.
+
+Two vendor behaviours the release path in `bin/fm-spawn.sh` has to work around, identical on both versions:
+
+- `treehouse return` exits 0 whether it released the copy or aborted on uncommitted work, so its exit status cannot tell the two apart.
+  With stdin closed the abort is silent on stdout; the released case prints `🌳 Worktree returned to pool.` and the aborted case prints `Worktree has uncommitted changes. Clean and return? [Y/n] 🌳 Aborted.`.
+  Firstmate therefore proves the copy clean with its own `git status --porcelain` probe before returning it, and treats treehouse's own prompt as the second, independent refusal.
+- `treehouse return --if-lease-holder` and `--if-lease-id` exist only from v2.1.0; `treehouse return --help` at v2.0.1 lists `--force` and `--help` alone.
+  `treehouse get` accepts neither flag at either version, and rejects `--json` at v2.0.1 with `unknown flag: --json`.
+  The release path is therefore built on the cleanliness probe above rather than on a lease-holder assertion the pinned version cannot make.
+
+The update-availability notice (`A new version of treehouse is available: ...`) is written to stderr, not stdout, on both versions.
+`bin/fm-spawn.sh` still reads only the last stdout line and refuses any value that is not a bare absolute path, so a future release that leaks a banner onto stdout fails naming the tool and version instead of being parsed into a plausible path.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

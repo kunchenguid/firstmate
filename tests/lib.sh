@@ -170,6 +170,49 @@ SH
   done
 }
 
+# fm_fake_treehouse_lease <fakebin> [worktree]: a treehouse stub that answers
+# `get` with <worktree>, and exits 0 for everything else. fm-spawn.sh leases the
+# pooled copy itself and then moves the pane into it, so a stub that prints
+# nothing would leave the spawn with no copy to enter at all.
+#
+# With no <worktree> the stub resolves the copy the same way the fixtures' fake
+# tmux resolves a pane path, read at call time: FM_FAKE_PANE_ROOT plus the
+# `--lease-holder` task id when a case pre-creates one copy per task, and
+# FM_FAKE_PANE_PATH otherwise.
+fm_fake_treehouse_lease() {
+  local fakebin=$1 worktree=${2:-}
+  if [ -n "$worktree" ]; then
+    cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ]; then
+  printf '%s\n' "$worktree"
+fi
+exit 0
+SH
+  else
+    cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = get ]; then
+  holder=
+  previous=
+  for argument in "$@"; do
+    [ "$previous" != --lease-holder ] || holder=$argument
+    previous=$argument
+  done
+  if [ -n "${FM_FAKE_PANE_ROOT:-}" ] && [ -n "$holder" ]; then
+    printf '%s\n' "$FM_FAKE_PANE_ROOT/fm-$holder"
+  else
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+  fi
+fi
+exit 0
+SH
+  fi
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

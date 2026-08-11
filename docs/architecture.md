@@ -140,6 +140,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For every Treehouse-backed task, one live `state/<id>.meta` record owns the canonical pooled worktree: spawn and teardown serialize ownership checks within the home, and refuse ambiguous or competing claims without removing task records, branches, or unlanded work.
+Firstmate leases each task's copy from the pool itself rather than letting the pane acquire it, so the reservation is durable and pool-global: it outlives the pane's shell, survives a session restart or a crashed worker, and holds across homes, which a home-scoped record check cannot.
+A relaunch that allocates a fresh copy returns the superseded one only when it is provably clean, so an abandoned copy holding unlanded work stays reserved and reported instead of being reclaimed.
+The pane enters its copy in a nested shell, because teardown identifies a task's leftover processes by their working directory: the pane's own shell has to stay outside the copy to survive that step and still be there for the endpoint cleanup that follows it.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
