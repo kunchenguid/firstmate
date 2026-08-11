@@ -51,6 +51,10 @@ if [ -n "$corr" ]; then
   # Preserve that observable contract in this deterministic transport fake.
   # shellcheck source=/dev/null
   . "${FM_TEST_ROOT:?}/bin/fm-pending-reply-lib.sh"
+  if [ "${FM_TEST_SEND_UNKNOWN:-0}" = 1 ]; then
+    fm_pending_reply_mark_delivery_unknown "${FM_STATE_OVERRIDE:?}" "$corr"
+    exit 255
+  fi
   fm_pending_reply_confirm_delivery "${FM_STATE_OVERRIDE:?}" "$corr"
 fi
 SH
@@ -289,6 +293,22 @@ test_failed_request_delivery_retries_existing_correlation() {
   pass "pre-delivery request failures retry with the durable correlation"
 }
 
+test_unknown_request_delivery_is_not_retried() {
+  local record pending
+  make_world send-unknown; bind_secondmate local; write_mate_meta; write_summary done
+  FM_TEST_SEND_UNKNOWN=1 run_reconcile "$MAIN" --startup
+  record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
+  pending=$(find "$MAIN/state/pending-replies" -type f ! -name '.delivery-confirmed-*' | head -1)
+  [ "$(grep '^phase=' "$pending" | tail -1)" = phase=delivery_unknown ] \
+    || fail "unknown request delivery did not retain its pending expectation"
+  [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=1 ] \
+    || fail "unknown request delivery remained retryable"
+  FM_TEST_SEND_UNKNOWN=1 run_reconcile "$MAIN" --startup
+  [ "$(wc -l < "$WORLD/send.log" | tr -d ' ')" = 1 ] \
+    || fail "unknown request delivery was sent again"
+  pass "unknown request delivery retains one non-retryable expectation"
+}
+
 test_local_secondmate_report_and_main_receipt
 test_main_cross_home_discovers_missing_report_once
 test_remote_parent_reply_is_idempotent
@@ -297,5 +317,6 @@ test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_reconciliation_never_calls_forge
 test_failed_request_delivery_retries_existing_correlation
+test_unknown_request_delivery_is_not_retried
 
 echo "all inactive reconciliation tests passed"

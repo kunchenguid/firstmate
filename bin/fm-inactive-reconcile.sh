@@ -309,7 +309,7 @@ summary_for_secondmate() { # <id> <meta>
 }
 
 request_secondmate_report() { # <record> <secondmate-id> <child-id> <state> <outcome-key>
-  local record=$1 mate=$2 child=$3 state=$4 outcome_key=$5 msg corr rc=0 marker
+  local record=$1 mate=$2 child=$3 state=$4 outcome_key=$5 msg corr rc=0 marker pending_record pending_phase
   [ "$(record_value "$record" request_attempted)" = 1 ] && return 1
   msg="INACTIVE OUTCOME RECONCILIATION: child $child is authoritatively $state but has no parent report. Append a terminal parent status report with [key=$outcome_key]."
   corr=$(record_value "$record" correlation)
@@ -326,7 +326,10 @@ request_secondmate_report() { # <record> <secondmate-id> <child-id> <state> <out
   FM_PENDING_REPLY_EXISTING_CORR="$corr" "$SEND_BIN" "$mate" "$msg" >/dev/null 2>&1 || rc=$?
   record_field_set "$record" request_result "$rc" || true
   marker=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
-  if [ "$rc" -eq 0 ] || { [ -f "$marker" ] && [ ! -L "$marker" ]; }; then
+  pending_record=$(fm_pending_reply_path "$STATE" "$corr")
+  pending_phase=$(fm_pending_reply_get "$pending_record" phase 2>/dev/null || true)
+  if [ "$rc" -eq 0 ] || [ "$pending_phase" = delivery_unknown ] \
+    || { [ -f "$marker" ] && [ ! -L "$marker" ]; }; then
     record_field_set "$record" request_attempted 1 || return 2
   fi
   return "$rc"
