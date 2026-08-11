@@ -2796,11 +2796,10 @@ fm_backend_herdr_traex_trust_dialog_exact() {  # <target>
   return 0
 }
 
-fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-project>
-  local target=$1 expected=$2 source=$3 expected_real source_real git_top git_real
-  local out agent status cwd foreground pane cwd_real foreground_real
+fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-project> <state-dir>
+  local target=$1 expected=$2 source=$3 state=$4 expected_real source_real git_top git_real
+  local out agent status cwd foreground pane cwd_real foreground_real record
   local accepted=0 saw_agent=0 i=0 polls interval
-  FM_BACKEND_HERDR_TRAEX_STARTED_RECORD=
   fm_backend_herdr_parse_target "$target" || {
     echo "error: TraeX launch target '$target' is not a valid Herdr pane" >&2
     return 1
@@ -2856,8 +2855,13 @@ fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-
       fi
       case "$status" in
         working)
-          FM_BACKEND_HERDR_TRAEX_STARTED_RECORD=$(fm_backend_herdr_normalize_event \
+          record=$(fm_backend_herdr_normalize_event \
             "$FM_BACKEND_HERDR_PANE" "" "$status" "$agent")
+          if ! fm_backend_herdr_traex_observe_transition \
+            "$state" "$FM_BACKEND_HERDR_SESSION" "$record" launch-working; then
+            echo "error: TraeX began processing, but its semantic lifecycle could not be bound to this task" >&2
+            return 1
+          fi
           return 0
           ;;
         blocked)
@@ -3077,6 +3081,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fm_backend_herdr_traex_observe_transition \
       "$transition_state" "$FM_BACKEND_HERDR_SESSION" "$record" submit-baseline \
       || { printf 'unknown'; return 0; }
+    status=$(fm_transition_to_status "$FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD")
+    [ -n "$status" ] || { printf 'unknown'; return 0; }
     baseline=$(fm_backend_herdr_classify_submit_agent_status "$status")
   else
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
@@ -3085,7 +3091,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
-    if [ -n "$transition_state" ] || [ "$baseline" = idle ]; then
+    if { [ -n "$transition_state" ] && [ "$status" != working ]; } \
+       || { [ -z "$transition_state" ] && [ "$baseline" = idle ]; }; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$transition_state")
     else

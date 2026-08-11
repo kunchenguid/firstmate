@@ -2429,16 +2429,8 @@ if [ "$HARNESS" = traex ]; then
   # observe the initial prompt enter working directly or identify the exact
   # TraeX directory-trust chooser, whose preselected Yes is accepted once,
   # followed by working. Only then publish lifecycle readiness for the watcher.
-  if ! fm_backend_herdr_traex_wait_started "$T" "$WT" "$PROJ_ABS"; then
+  if ! fm_backend_herdr_traex_wait_started "$T" "$WT" "$PROJ_ABS" "$STATE_REAL"; then
     traex_spawn_fail "TraeX task instructions did not begin processing through the verified Herdr launch path"
-    exit 1
-  fi
-  if ! fm_backend_herdr_parse_target "$T" \
-     || [ -z "$FM_BACKEND_HERDR_TRAEX_STARTED_RECORD" ] \
-     || ! fm_backend_herdr_traex_observe_transition \
-       "$STATE_REAL" "$FM_BACKEND_HERDR_SESSION" \
-       "$FM_BACKEND_HERDR_TRAEX_STARTED_RECORD" launch-working; then
-    traex_spawn_fail "TraeX began processing, but its semantic lifecycle could not be bound to this task"
     exit 1
   fi
   if ! spawn_traex_readiness_set pending 1; then

@@ -31,6 +31,7 @@ phase_file=${FM_FAKE_PHASE_FILE:?}
 trust_count=${FM_FAKE_TRUST_COUNT:?}
 project=${FM_FAKE_PROJECT:?}
 worktree=${FM_FAKE_WORKTREE:?}
+composer="$launch.composer"
 
 {
   printf '%s' "${HERDR_SESSION:-}"
@@ -87,7 +88,9 @@ case "$cmd $sub" in
     printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1","cwd":"%s","foreground_cwd":"%s"}}}\n' "$pane" "$project" "$cwd"
     ;;
   "pane send-text")
-    printf '%s\n' "${4:-}" >> "$launch"
+    text=${4:-}
+    printf '%s\n' "$text" >> "$launch"
+    [ "$phase" = shell ] || printf '%s' "$text" > "$composer"
     ;;
   "pane send-keys")
     key=${4:-}
@@ -99,16 +102,22 @@ case "$cmd $sub" in
         blocked)
           n=$(cat "$trust_count" 2>/dev/null || printf 0)
           printf '%s\n' "$((n + 1))" > "$trust_count"
+          : > "$composer"
           printf '%s' "${FM_FAKE_AFTER_TRUST:-working}" > "$phase_file"
           ;;
         idle)
+          : > "$composer"
           printf working > "$phase_file"
+          ;;
+        working)
+          [ "${FM_FAKE_SWALLOW_WORKING_ENTER:-0}" = 1 ] || : > "$composer"
           ;;
       esac
     fi
     ;;
   "pane read")
-    cat <<'EOF'
+    if [ "$phase" = blocked ]; then
+      cat <<'EOF'
 > You are in the isolated task copy
 
   Do you trust the contents of this directory?
@@ -119,6 +128,9 @@ case "$cmd $sub" in
 
   Press enter to continue
 EOF
+    else
+      printf '❯ %s\n' "$(cat "$composer" 2>/dev/null || true)"
+    fi
     ;;
   "agent get")
     case "$phase" in
@@ -174,6 +186,7 @@ make_spawn_case() {  # <name>
   touch "$home/state/.last-watcher-beat"
   : > "$dir/herdr.log"
   : > "$dir/launch.log"
+  : > "$dir/launch.log.composer"
   printf shell > "$dir/phase"
   printf '%s\n' "$dir|$home|$project|$wt|$fakebin|$id"
 }
@@ -555,6 +568,55 @@ test_send_refuses_unready_or_invalid_lifecycle_before_typing() {
   pass "traex steering validates exact readiness and lifecycle before typing"
 }
 
+test_start_observation_persists_lifecycle_before_return() {
+  local rec gen out status lifecycle
+  rec=$(make_spawn_case start-boundary)
+  read_spawn_case "$rec"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" "$TASK_ID") \
+    || fail "could not arm the startup observation fixture"
+  fm_write_meta "$HOME_DIR/state/$TASK_ID.meta" \
+    'window=traex-test-session:w1:p2' "endpoint_task_id=$TASK_ID" \
+    "worktree=$WT_DIR" "project=$PROJECT_DIR" 'harness=traex' 'kind=ship' \
+    'backend=herdr' 'herdr_session=traex-test-session' 'herdr_pane_id=w1:p2' \
+    "busy_gen=$gen" 'traex_ready=pending'
+  printf working > "$CASE_DIR/phase"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_traex_lock_runtime; lock="$2/.spawn-$3.lock"; fm_lock_try_acquire "$lock" || exit 1; fm_backend_herdr_traex_spawn_owner_publish "$lock" || exit 1; fm_backend_herdr_traex_wait_started "$4" "$5" "$6" "$2"' \
+      _ "$ROOT" "$HOME_DIR/state" "$TASK_ID" traex-test-session:w1:p2 "$WT_DIR" "$PROJECT_DIR" 2>&1)
+  status=$?
+  expect_code 0 "$status" "startup working observation should persist through its owner: $out"
+  lifecycle=$(fm_busy_record_read "$HOME_DIR/state" "$TASK_ID")
+  case "$lifecycle" in
+    'busy herdr-traex agent-working '*) ;;
+    *) fail "startup observation returned before persisting its lifecycle: $lifecycle" ;;
+  esac
+  pass "traex startup observation persists lifecycle before returning"
+}
+
+test_active_send_requires_post_submit_composer_clearance() {
+  local rec out status before after
+  rec=$(make_spawn_case active-send)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for active steering should succeed: $out"
+  before=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  out=$(FM_FAKE_SWALLOW_WORKING_ENTER=1 run_traex_send 'must remain visibly pending')
+  status=$?
+  [ "$status" -ne 0 ] || fail "pre-existing native working falsely acknowledged a swallowed steer"
+  assert_contains "$out" 'delivery unconfirmed' \
+    "swallowed active TraeX steer did not retain the loud failure boundary"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$((before + 1))" ] || fail "active TraeX steer was typed more than once"
+  [ "$(cat "$CASE_DIR/launch.log.composer")" = 'must remain visibly pending' ] \
+    || fail "active TraeX steer did not remain in the observable composer"
+  pass "traex active steering requires post-submit composer clearance"
+}
+
 test_send_persists_working_before_delivery_ack() {
   local rec out status verdict
   rec=$(make_spawn_case send-transition)
@@ -754,6 +816,8 @@ test_unsupported_tmux_refuses_before_endpoint
 test_secondmate_and_raw_launch_refuse
 test_non_traex_raw_shell_launch_remains_supported
 test_send_refuses_unready_or_invalid_lifecycle_before_typing
+test_start_observation_persists_lifecycle_before_return
+test_active_send_requires_post_submit_composer_clearance
 test_send_persists_working_before_delivery_ack
 test_send_from_blocked_requires_native_working
 test_stale_idle_cannot_close_a_new_working_turn
