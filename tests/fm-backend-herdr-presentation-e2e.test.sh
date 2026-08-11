@@ -378,6 +378,8 @@ make_project() {  # <dir>
   printf '# Herdr projection E2E fixture\n' > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$dir" "$dir.origin.git"
+  git -C "$dir" remote add origin "file://$dir.origin.git"
 }
 
 spawn_task() {  # <id> <home> <project>

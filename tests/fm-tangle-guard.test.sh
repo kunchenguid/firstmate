@@ -24,11 +24,12 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-tangle-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-# A fresh git repo on `main` with one commit. Echoes its path.
+# A fresh git repo on `main` with one commit and a local origin. Echoes its path.
 make_repo() {
   local dir=$1
   git init -q -b main "$dir"
   git -C "$dir" commit -q --allow-empty -m init
+  fm_git_add_origin "$dir" "$dir.origin.git"
   printf '%s\n' "$dir"
 }
 

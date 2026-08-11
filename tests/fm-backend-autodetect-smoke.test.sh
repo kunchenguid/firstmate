@@ -98,6 +98,8 @@ git -C "$PROJ" init -q
 printf '# scratch\n' > "$PROJ/README.md"
 git -C "$PROJ" add README.md
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+git clone --quiet --bare "$PROJ" "$PROJ.origin.git"
+git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
 

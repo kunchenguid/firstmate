@@ -130,6 +130,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Before a fresh ship or scout worker starts, its clean task worktree fetches
+#   origin, resolves the current remote default branch, and resets to its tip.
+#   An unreachable origin, unresolved default branch, or non-clean worktree
+#   refuses the spawn rather than risking a PR based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1647,6 +1651,48 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+freshen_spawn_worktree_base() {  # <worktree>
+  local worktree=$1 default target expected actual status
+  if ! git -C "$worktree" fetch --quiet origin; then
+    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  default=$(default_branch "$worktree") || {
+    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  target="origin/$default"
+  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+    echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  status=$(git -C "$worktree" status --porcelain) || {
+    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -2130,6 +2176,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
