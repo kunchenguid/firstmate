@@ -106,12 +106,12 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   return 0
 }
 
-# The key that cancels a running turn. Escape for every adapter except grok,
-# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
+# The key that cancels a running turn. Escape for every adapter except Grok
+# and Devin, whose documented cancel binding is Ctrl+C.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|muse|devin) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    claude|codex|opencode|pi|pi-signed|kimi|muse) printf 'Escape' ;;
+    grok|devin) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -220,16 +220,55 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   esac
 }
 
-# The exact native Devin Stop-hook JSON Firstmate writes for one task. Keeping
-# this pure rendering beside Devin's artifact path lets cleanup prove it is
-# retiring Firstmate's own hook, rather than deleting a project's hook file.
-fm_control_devin_stop_hook_json() {  # <turnend-marker>
-  local marker=${1-} quoted command escaped
-  [ -n "$marker" ] || return 1
-  quoted=$(printf '%s' "$marker" | sed "s/'/'\\''/g") || return 1
-  command="touch '$quoted'"
-  escaped=$(printf '%s' "$command" | sed 's/\\/\\\\/g; s/"/\\"/g') || return 1
-  printf '{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"%s"}]}]}\n' "$escaped"
+# The narrow busy-generation reader used by control-plane artifact ownership
+# checks.  It validates only the immutable sidecar token and never imports the
+# semantic busy-state classifier into cleanup paths.
+fm_control_busy_gen_token_valid() {  # <value>
+  case "${1:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+fm_control_busy_current_gen() {  # <state-dir> <id>
+  local gen_file gen
+  gen_file="$1/$2.busy-gen"
+  [ -f "$gen_file" ] || return 1
+  IFS= read -r gen < "$gen_file" 2>/dev/null || gen=
+  fm_control_busy_gen_token_valid "$gen" || return 1
+  printf '%s' "$gen"
+}
+
+# The exact native Devin lifecycle-hook JSON Firstmate writes for one task.
+# Keeping this pure rendering beside Devin's artifact path lets cleanup prove
+# it is retiring Firstmate's own hook, rather than deleting a project's hook
+# file. The busy generation is immutable in the commands, so a retained old
+# hook can never update the replacement worker after relaunch.
+fm_control_devin_hook_json() {  # <turnend-marker> <busy-event-bin> <state-dir> <id> <busy-gen>
+  local marker=${1-} busy_event=${2-} state=${3-} id=${4-} gen=${5-}
+  local marker_quoted busy_event_quoted state_quoted id_quoted gen_quoted submit stop submit_escaped stop_escaped
+  [ -n "$marker" ] && [ -n "$busy_event" ] && [ -n "$state" ] && [ -n "$id" ] && [ -n "$gen" ] || return 1
+  marker_quoted=$(printf '%s' "$marker" | sed "s/'/'\\''/g") || return 1
+  busy_event_quoted=$(printf '%s' "$busy_event" | sed "s/'/'\\''/g") || return 1
+  state_quoted=$(printf '%s' "$state" | sed "s/'/'\\''/g") || return 1
+  id_quoted=$(printf '%s' "$id" | sed "s/'/'\\''/g") || return 1
+  gen_quoted=$(printf '%s' "$gen" | sed "s/'/'\\''/g") || return 1
+  submit="'$busy_event_quoted' apply '$state_quoted' '$id_quoted' busy --gen '$gen_quoted' --source devin-hook --event user-prompt-submit 2>/dev/null || true"
+  stop="touch '$marker_quoted'; '$busy_event_quoted' apply '$state_quoted' '$id_quoted' idle --gen '$gen_quoted' --source devin-hook --event stop 2>/dev/null || true"
+  submit_escaped=$(printf '%s' "$submit" | sed 's/\\/\\\\/g; s/"/\\"/g') || return 1
+  stop_escaped=$(printf '%s' "$stop" | sed 's/\\/\\\\/g; s/"/\\"/g') || return 1
+  printf '{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"%s"}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"%s"}]}]}\n' "$submit_escaped" "$stop_escaped"
+}
+
+# An unacknowledged Devin Ctrl+C leaves the worker alive but provides no native
+# cancellation-close event. The control plane records that bounded uncertainty
+# rather than preserving a potentially stale busy record or claiming idle.
+fm_control_interrupt_busy_bound() {  # <harness> -> unknown | empty
+  case "${1-}" in
+    devin) printf 'unknown' ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse) ;;
+    *) return 1 ;;
+  esac
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

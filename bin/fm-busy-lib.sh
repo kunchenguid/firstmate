@@ -31,6 +31,7 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   devin-hook       Devin lifecycle hooks (UserPromptSubmit/Stop)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -138,13 +139,14 @@ fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
 
-# Devin CLI's native UserPromptSubmit and Stop hooks were observed in a
-# task-local probe on 2026-08-11, but this adapter has not yet proved a
-# complete semantic lifecycle across cancellation and session shutdown.
-# Keep it unknown until that lifecycle is verified end to end; Stop is used
-# only for the watcher notification in fm-spawn.
+# Devin CLI 3000.4.16's task-local UserPromptSubmit and Stop hooks were
+# observed live on 2026-08-11. The generation-bound writer opens a submitted
+# turn and Stop closes a completed one. Ctrl+C has no verified native close
+# event, so fm-control records unknown/fm-interrupt after proving the worker
+# remains alive; /quit is bounded by its proven dead-endpoint control path.
+# No unverified SessionEnd or cancellation hook is credited here.
 fm_busy_devin_verified() {
-  return 1
+  return 0
 }
 
 fm_busy_record_path() {  # <state-dir> <id>
@@ -192,7 +194,6 @@ fm_busy_sources_for_harness() {  # <harness>
       adapter='codex-hook codex-appserver'
       ;;
     devin*)
-      fm_busy_devin_verified || { printf ''; return 0; }
       adapter=devin-hook
       ;;
     opencode*) adapter=opencode-plugin ;;
@@ -636,12 +637,6 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     codex*)
       if ! fm_busy_codex_semantic_source; then
         printf 'unknown codex-unverified'
-        return 0
-      fi
-      ;;
-    devin*)
-      if ! fm_busy_devin_verified; then
-        printf 'unknown devin-unverified'
         return 0
       fi
       ;;

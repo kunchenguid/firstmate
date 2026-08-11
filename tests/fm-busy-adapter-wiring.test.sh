@@ -282,7 +282,7 @@ run_devin_hook() {  # <hooks.json> <hook-event>
   sh -c "$cmd"
 }
 
-test_devin_stop_hook_is_task_local_and_busy_stays_unknown() {
+test_devin_hooks_semantic_lifecycle() {
   local rec id=busy-devin-1 out state hooks launch brief
   rec=$(make_spawn_case devin-lifecycle devin "$id")
   read_case_record "$rec"
@@ -291,9 +291,11 @@ test_devin_stop_hook_is_task_local_and_busy_stays_unknown() {
   state="$HOME_DIR/state"
   hooks="$WT_DIR/.devin/hooks.v1.json"
   assert_present "$hooks" "devin spawn did not write its task-local hook file"
+  jq -e '.UserPromptSubmit[0].hooks[0].command' "$hooks" >/dev/null \
+    || fail "devin hook file lacks its native UserPromptSubmit command"
   jq -e '.Stop[0].hooks[0].command' "$hooks" >/dev/null \
     || fail "devin hook file lacks its native Stop command"
-  assert_absent "$state/$id.busy-gen" "devin must not arm incomplete busy-state wiring"
+  assert_present "$state/$id.busy-gen" "devin did not arm its semantic busy-state contract"
   launch=$(cat "$CASE_DIR/literals")
   brief=$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md
   assert_contains "$launch" "--permission-mode dangerous" \
@@ -303,13 +305,41 @@ test_devin_stop_hook_is_task_local_and_busy_stays_unknown() {
   assert_contains "$launch" "--prompt-file '$brief'" \
     "devin launch did not pass the absolute brief through --prompt-file"
 
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "the launch brief must seed Devin busy, got '$out'"
+
   rm -f "$state/$id.turn-ended"
   run_devin_hook "$hooks" Stop || fail "Devin Stop hook command failed"
   [ -f "$state/$id.turn-ended" ] || fail "Devin Stop did not touch the turn-end notification"
   out=$(classify devin "$id" "$state")
-  [ "$out" = "unknown devin-unverified" ] \
-    || fail "Devin must retain its explicit unknown busy verdict, got '$out'"
-  pass "devin uses a task-local Stop hook for notification while semantic busy stays unknown"
+  [ "$out" = "idle devin-hook" ] \
+    || fail "Devin Stop must classify idle, got '$out'"
+
+  run_devin_hook "$hooks" UserPromptSubmit \
+    || fail "Devin UserPromptSubmit hook command failed"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "busy devin-hook" ] \
+    || fail "Devin UserPromptSubmit must classify busy, got '$out'"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" unknown \
+    --gen "$(cat "$state/$id.busy-gen")" --source fm-interrupt --event interrupt-delivered
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "unknown fm-interrupt" ] \
+    || fail "an unacknowledged Devin cancellation must remain unknown, got '$out'"
+
+  run_devin_hook "$hooks" Stop || fail "second Devin Stop hook command failed"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "idle devin-hook" ] \
+    || fail "a native Devin Stop must settle cancellation uncertainty, got '$out'"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_devin_hook "$hooks" UserPromptSubmit \
+    || fail "a stale Devin hook must still exit cleanly"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a stale Devin hook must not alter the replacement generation, got '$out'"
+  pass "devin task-local hooks open on UserPromptSubmit, settle unknown cancellation on Stop, and reject stale generations"
 }
 
 test_devin_refuses_to_replace_project_hook_file() {
@@ -446,7 +476,7 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
-test_devin_stop_hook_is_task_local_and_busy_stays_unknown
+test_devin_hooks_semantic_lifecycle
 test_devin_refuses_to_replace_project_hook_file
 test_devin_relaunch_preserves_project_replacement
 

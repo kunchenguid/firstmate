@@ -800,7 +800,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path hook expected actual
+  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path hook expected actual gen
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -812,7 +812,10 @@ clear_relaunch_harness_wiring() {
   if [ "$harness" = devin ]; then
     hook=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id") || return 1
     if [ -n "$hook" ] && [ -f "$hook" ] && [ ! -L "$hook" ]; then
-      expected=$(fm_control_devin_stop_hook_json "$state/$id.turn-ended") || return 1
+      gen=$(fm_control_busy_current_gen "$state" "$id" 2>/dev/null || true)
+      [ -n "$gen" ] || return 0
+      expected=$(fm_control_devin_hook_json "$state/$id.turn-ended" "$FM_ROOT/bin/fm-busy-event.sh" \
+        "$state" "$id" "$gen") || return 1
       actual=$(<"$hook") || return 1
       if [ "$actual" = "$expected" ]; then
         rm -f -- "$hook" || return 1
@@ -2323,7 +2326,8 @@ if [ "$KIND" != secondmate ]; then
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
   # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
-  # opens, so neither is armed here.
+  # opens, so neither is armed here. Devin uses its live-proven
+  # UserPromptSubmit/Stop pair and is armed below.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
@@ -2334,7 +2338,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|devin*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2350,11 +2354,6 @@ if [ "$KIND" != secondmate ]; then
         echo "error: kimi semantic busy-state wiring is not implemented; open the gate only together with verified wiring" >&2
         exit 1
       fi
-      ;;
-    devin*)
-      # Devin's native UserPromptSubmit and Stop hooks are proven to fire, but
-      # the complete busy lifecycle is not.  Do not seed state that no verified
-      # event can safely settle.
       ;;
   esac
   case "$HARNESS" in
@@ -2571,14 +2570,17 @@ EOF
     devin*)
       # The documented project hook file is the verified scope: it affects
       # only this Firstmate task worktree and never the operator's Devin user
-      # configuration or another session.  Existing project hooks are not
-      # merged or replaced - refusing preserves their exact behavior.
+      # configuration or another session. UserPromptSubmit opens the semantic
+      # busy turn, while Stop both wakes the watcher and closes it. Existing
+      # project hooks are not merged or replaced - refusing preserves their
+      # exact behavior.
       if [ -e "$WT/.devin/hooks.v1.json" ] || [ -L "$WT/.devin/hooks.v1.json" ]; then
         echo "error: refusing Devin spawn because $WT/.devin/hooks.v1.json already exists; Firstmate will not replace project-owned Devin hooks" >&2
         exit 1
       fi
       mkdir -p "$WT/.devin"
-      fm_control_devin_stop_hook_json "$TURNEND" > "$WT/.devin/hooks.v1.json"
+      fm_control_devin_hook_json "$TURNEND" "$FM_ROOT/bin/fm-busy-event.sh" \
+        "$STATE_REAL" "$ID" "$BUSY_GEN" > "$WT/.devin/hooks.v1.json"
       exclude_path '.devin/hooks.v1.json'
       ;;
   esac

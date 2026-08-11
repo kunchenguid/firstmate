@@ -668,16 +668,19 @@ remove_kimi_turnend_auth() {
 }
 
 # Remove a Devin hook only when the exact task-local file is the canonical
-# Firstmate Stop hook. A project can replace that file after launch, so a
+# Firstmate lifecycle hook. A project can replace that file after launch, so a
 # merely matching path is never enough authority to delete it.
 remove_devin_turnend_hook() {  # <recorded-harness> <worktree> <state-dir> <id>
-  local harness=$1 wt=$2 state_dir=$3 id=$4 hook expected actual
+  local harness=$1 wt=$2 state_dir=$3 id=$4 hook expected actual gen
   harness=$(fm_control_harness_family "$harness") || return 0
   [ "$harness" = devin ] || return 0
   hook=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state_dir" "$id") || return 1
   [ -n "$hook" ] || return 0
   [ -f "$hook" ] && [ ! -L "$hook" ] || return 0
-  expected=$(fm_control_devin_stop_hook_json "$state_dir/$id.turn-ended") || return 1
+  gen=$(fm_control_busy_current_gen "$state_dir" "$id" 2>/dev/null || true)
+  [ -n "$gen" ] || return 0
+  expected=$(fm_control_devin_hook_json "$state_dir/$id.turn-ended" "$SCRIPT_DIR/fm-busy-event.sh" \
+    "$state_dir" "$id" "$gen") || return 1
   actual=$(<"$hook") || return 1
   if [ "$actual" = "$expected" ]; then
     rm -f -- "$hook"

@@ -49,11 +49,13 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
-#   (z) Devin-owned Stop hook / project replacement            -> remove / retain
+#   (z) Devin-owned lifecycle hook / project replacement       -> remove / retain
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-control-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -1328,14 +1330,15 @@ test_teardown_missing_busy_sidecar_completes() {
 }
 
 test_teardown_removes_only_firstmate_owned_devin_hook() {
-  local owned_case foreign_case rc hook foreign
+  local owned_case foreign_case rc hook foreign gen
   owned_case=$(make_case devin-owned-hook-cleanup)
   write_meta "$owned_case" local-only ship
   printf '%s\n' 'harness=devin' >> "$owned_case/state/task-x1.meta"
   mkdir -p "$owned_case/wt/.devin"
   hook="$owned_case/wt/.devin/hooks.v1.json"
-  printf '{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"touch '\''%s'\''"}]}]}\n' \
-    "$owned_case/state/task-x1.turn-ended" > "$hook"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$owned_case/state" task-x1)
+  fm_control_devin_hook_json "$owned_case/state/task-x1.turn-ended" \
+    "$ROOT/bin/fm-busy-event.sh" "$owned_case/state" task-x1 "$gen" > "$hook"
   cat > "$owned_case/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 [ ! -e "$hook" ] && printf 'hook-removed\n' > "$owned_case/return-state"

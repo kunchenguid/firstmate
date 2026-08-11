@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -51,7 +53,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
-    devin) printf '/quit\tEscape\t1\t\n' ;;
+    devin) printf '/quit\tC-c\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -705,6 +707,36 @@ test_interrupt_without_acknowledgement_preserves_busy_state() {
   pass "fm-control interrupt: unconfirmed delivery preserves observed busy state"
 }
 
+test_devin_interrupt_bounds_busy_and_exit_retires_wiring() {
+  local dir out rc gen state
+  dir=$(new_case devin-control-cleanup)
+  add_task "$dir" t1 devin
+  alive_as "$dir" devin
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 busy --gen "$gen" \
+    --source devin-hook --event user-prompt-submit
+
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a Devin interrupt should deliver cleanly"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "C-c" ] \
+    || fail "a Devin interrupt must send Ctrl+C, got: $(keys_sent "$dir")"
+  state=$(fm_busy_classify tmux fake:fm-t1 devin t1 "$dir/home/state")
+  [ "$state" = "unknown fm-interrupt" ] \
+    || fail "an unacknowledged Devin Ctrl+C must bound state as unknown, got '$state'"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
+    "a Devin Ctrl+C must not claim a cancellation acknowledgement"
+
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a Devin exit should prove its worker stopped"$'\n'"$out"
+  [ "$(literals "$dir")" = "/quit" ] \
+    || fail "Devin exit must send /quit after an unacknowledged interrupt, got: $(literals "$dir")"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] \
+    || fail "a proven Devin exit must retire the busy generation"
+  [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "a proven Devin exit must retire the busy record"
+  pass "fm-control bounds an unacknowledged Devin Ctrl+C and retires lifecycle state after a proven /quit"
+}
+
 test_muse_interrupt_confirms_adapter_acknowledgement() {
   local dir root log out rc
   dir=$(new_case confirmed)
@@ -888,6 +920,7 @@ test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
+test_devin_interrupt_bounds_busy_and_exit_retires_wiring
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt

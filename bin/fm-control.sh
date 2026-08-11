@@ -24,8 +24,10 @@
 #              keeps running. Postcondition: delivery succeeded, the endpoint
 #              still exists, and the agent is still alive where the backend can
 #              classify that. Cancellation is confirmed only from an adapter-
-#              owned acknowledgement and otherwise reported unconfirmed. Busy
-#              state is never rewritten as proof of the action.
+#              owned acknowledgement and otherwise reported unconfirmed. Devin
+#              alone records an unacknowledged Ctrl+C as unknown, never idle,
+#              so an absent native cancellation close cannot leave stale busy
+#              state masquerading as live work.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
@@ -418,9 +420,17 @@ verify_interrupt_running() {
 }
 
 do_interrupt() {
-  local proof cancel
+  local proof cancel bound gen
   cancel=$(deliver_interrupt) || return $?
   proof=$(verify_interrupt_running) || return $?
+  bound=$(fm_control_interrupt_busy_bound "$HARNESS") || return 1
+  if [ -n "$bound" ]; then
+    gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+    if [ -n "$gen" ]; then
+      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" "$bound" \
+        --gen "$gen" --source fm-interrupt --event interrupt-delivered >/dev/null 2>&1 || true
+    fi
+  fi
   printf '%s cancel=%s' "$proof" "$cancel"
 }
 

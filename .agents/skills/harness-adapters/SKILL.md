@@ -407,12 +407,15 @@ The guarded turn-end signal remains a wake notification; standalone Kimi has no 
 Devin is a CREWMATE and SCOUT adapter only.
 `fm-spawn.sh` resolves the executable from `PATH`, requires `devin auth status` to succeed, and launches the interactive worker with `--permission-mode dangerous --respect-workspace-trust false --prompt-file <brief>`.
 The initial prompt therefore carries the brief without a trust or tool-approval dialog.
-`fm-spawn.sh` writes one gitignored task-local `.devin/hooks.v1.json` containing only a native `Stop` hook that touches that task's turn-end marker.
+`fm-spawn.sh` writes one gitignored task-local `.devin/hooks.v1.json` whose native `UserPromptSubmit` hook opens a generation-bound busy turn and whose `Stop` hook both touches that task's turn-end marker and closes that turn.
 It refuses if that file already exists, so it never replaces project-owned hooks, and normal relaunch or teardown removes only that Firstmate-owned path.
-`/quit` exits and one Escape interrupts a turn.
+`/quit` exits through the control plane's dead-endpoint proof and retires its busy generation.
+Devin's documented cancellation binding is one `Ctrl+C`; repeated Escape did not cancel a live exec turn.
+The control plane records an unacknowledged `Ctrl+C` as `unknown fm-interrupt`, never idle, until a native lifecycle event proves the next state.
 The tmux liveness classifier recognizes the exact `devin` process identity, while Herdr uses its native worker state.
-Devin's `UserPromptSubmit`, `Stop`, and `SessionStart` hooks were observed in a task-local live probe, but semantic busy state, composer recognition for later steering, a deterministic resume, and a primary session-start/watcher protocol are not yet verified.
-`fm-busy-lib.sh` therefore returns `unknown devin-unverified`, and secondmate launches are refused rather than relying on an unverified primary protocol.
+Devin's `UserPromptSubmit`, `Stop`, and `SessionStart` hooks were observed in a task-local live probe, so normal completed turns classify semantically through `devin-hook`.
+Composer recognition for later steering, a deterministic resume, native cancellation-close behavior, and a primary session-start/watcher protocol are not yet verified.
+Secondmate launches remain refused rather than relying on an unverified primary protocol.
 
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
 
