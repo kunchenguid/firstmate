@@ -2565,8 +2565,8 @@ FM_WAKE_LEDGER="$LEDGER_PATH" \
   --model "$(meta_value "$META" model)" \
   --effort "$(meta_value "$META" effort)" \
   --mode "$MODE" \
-  --role "$ROLE" \
-  --deliverable "$DELIVERABLE" \
+  --role "$KIND" \
+  --deliverable "$KIND" \
   --project "$PROJ" \
   --backend "$BACKEND" \
   --route "$(meta_value "$META" route)" \
