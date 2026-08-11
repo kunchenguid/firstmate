@@ -83,6 +83,13 @@ SH
   # invocation just succeeds, so `command -v no-mistakes` still passes.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+# Bootstrap now gates no-mistakes on a version floor as well as on watch
+# capability, so the fake answers --version too. Cases that exercise the floor
+# override FM_FAKE_NO_MISTAKES_VERSION; every other case wants a compliant one.
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake)}"
+  exit 0
+fi
 if [ "${1:-}" = watch ] && [ "${2:-}" = --help ]; then
   case "${FM_FAKE_NM_WATCH:-ok}" in
     missing)

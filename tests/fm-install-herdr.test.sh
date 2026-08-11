@@ -175,8 +175,14 @@ test_ci_wires_installers_and_required_lane() {
     "portable CI must run parallel shard 1"
   assert_grep 'lane portable-parallel-2' "$CI" \
     "portable CI must run parallel shard 2"
-  assert_grep 'lane portable-serial' "$CI" \
+  # The serial remainder is sharded across runners, so the workflow names it
+  # through FM_SERIAL_LANE rather than as a literal `--lane portable-serial`.
+  # Assert the shard expression that bin/fm-test-run.sh's --check-coverage
+  # partitions against, not the pre-sharding spelling.
+  assert_grep 'FM_SERIAL_LANE: portable-serial-' "$CI" \
     "portable CI must run the serial remainder"
+  assert_grep 'lane "$FM_SERIAL_LANE"' "$CI" \
+    "portable CI must invoke the serial remainder through its sharded lane name"
   assert_grep 'fm-test-run.sh --check-coverage' "$CI" \
     "CI must prove portable lanes and Herdr partition the complete inventory"
   # Live harness credential tests must stay out of the default Herdr lane.
