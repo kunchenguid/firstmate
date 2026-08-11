@@ -1598,7 +1598,7 @@ SH
   chmod +x "$fakebin/readlink" "$fakebin/chmod"
 
   (
-    export PATH="$fakebin:$PATH" REAL_READLINK="$real_readlink" REAL_CHMOD="$real_chmod"
+    export REAL_READLINK="$real_readlink" REAL_CHMOD="$real_chmod"
     export FM_FAKE_READLINK_SIGNAL_LOCK="$state/.watcher-down.lock.steal"
     export FM_FAKE_READLINK_SIGNAL_ONCE="$signal_once"
     export FM_FAKE_READLINK_WATCHER_PID=${BASHPID:-$$}
@@ -1607,7 +1607,7 @@ SH
     export FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims"
     export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
     export FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
-    exec "$WATCH"
+    exec env PATH="$fakebin:$PATH" "$WATCH"
   ) > "$out" 2>&1 &
   pid=$!
   while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
