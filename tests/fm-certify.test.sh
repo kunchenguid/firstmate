@@ -183,6 +183,60 @@ test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one() {
   pass "a run whose session was never recorded is not masked by a sibling run that recorded one"
 }
 
+test_a_run_that_never_reached_the_review_step_weakens_the_branch() {
+  local dir out rc
+  dir=$(make_case never-reviewed yes yes)
+  # Two runs on ONE branch: the first reviewed independently, the second never
+  # reached the review step and so captured no verifier identity at all. Which
+  # runs are members of the branch fold decides the verdict before any dimension
+  # is judged, and a run that provides NO independence evidence must WEAKEN the
+  # branch rather than be invisible to it. Dropping it is the reassuring answer
+  # and it is the same defect as an absent session row reading as independent.
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|||none" \
+    || { pass "SKIP (python3 unavailable): a run that never reviewed weakens the branch"; return; }
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  [ "$rc" = 4 ] || fail "never-reviewed: a run with no reviewing invocation certified anyway (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "process:could-not-observe" \
+    "never-reviewed: a run that never reviewed was dropped instead of weakening the branch"
+  assert_contains "$out" "no reviewing invocation" \
+    "never-reviewed: the refusal did not say WHICH absence it rests on"
+  case "$out" in
+    *"state=LANDED_AND_CERTIFIED"*)
+      fail "never-reviewed: a run that captured no verifier identity certified:"$'\n'"$out" ;;
+  esac
+  pass "a run that never reached the review step weakens the branch instead of vanishing from it"
+}
+
+test_a_cancelled_run_does_not_decide_the_branch() {
+  local dir out rc
+  dir=$(make_case cancelled-run yes yes)
+  # The completed run reviewed with an independent model on its own pool. A
+  # SECOND run, which the pipeline cancelled, reviewed with the maker's own
+  # model - and under weakest-member it was deciding the verdict for bytes it
+  # never finished verifying. A cancelled run was never a verifier, so it is not
+  # a member of the fold at all.
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|anthropic|claude-opus-5|review||cancelled" \
+    || { pass "SKIP (python3 unavailable): a cancelled run does not decide the branch"; return; }
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  [ "$rc" = 0 ] || fail "cancelled: a cancelled run decided a certifiable branch (rc=$rc):"$'\n'"$out"
+  case "$out" in
+    *"pool:not-independent"*)
+      fail "cancelled: an unfinished run's reviewer decided the verdict:"$'\n'"$out" ;;
+  esac
+  # And the exclusion is never silent. It can only ever STRENGTHEN what is left,
+  # so a reader is told it happened rather than being handed a cleaner branch
+  # than the pipeline actually recorded.
+  assert_contains "$out" "cancelled or failed run(s) excluded" \
+    "cancelled: the exclusion silently strengthened the verdict"
+  pass "a cancelled run is not a member of the fold, and excluding it is reported"
+}
+
 test_an_absent_reviewing_identity_never_becomes_evidence() {
   local sessioned unsessioned out
   # A reviewing invocation the pipeline recorded with NEITHER a provider NOR a
@@ -409,6 +463,120 @@ test_historical_records_are_never_backfilled() {
   pass "a run whose identity was never captured is never backfilled with a guess"
 }
 
+# --- the identifier is a path, and a path is a git boundary ------------------
+
+test_a_hostile_task_id_is_refused() {
+  local dir hostile out rc
+  dir=$(make_case hostile-id no yes)
+  # A durable record the caller can only reach by ESCAPING the state directory,
+  # naming a repository the caller also controls. The task id builds the path of
+  # the record, the record's worktree and project reach git -C, and a
+  # repository's own config decides what git does once it is entered - so an
+  # unguarded id chooses which repository this command runs git in.
+  hostile="$TMP_ROOT/hostile-repo"
+  mkdir -p "$hostile" "$dir/elsewhere" "$dir/bin"
+  git -C "$hostile" init --quiet 2>/dev/null
+  printf 'project=%s\nworktree=%s\nmode=local-only\nharness=claude\nmodel=opus\n' \
+    "$hostile" "$hostile" > "$dir/elsewhere/evil.meta"
+
+  # A git that records every invocation before delegating. Without it the case
+  # could only show that nothing useful came back, which an unguarded command
+  # that reached the repository and found nothing would also show.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexec %s "$@"\n' \
+    "$dir/git.log" "$(command -v git)" > "$dir/bin/git"
+  chmod +x "$dir/bin/git"
+
+  out=$(
+    PATH="$dir/bin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_STATE_OVERRIDE="$dir/state" \
+    FM_PIPELINE_STATE_DB="$dir/pipeline.sqlite" \
+      "$CERTIFY" '../elsewhere/evil' 2>&1
+  ) && rc=0 || rc=$?
+
+  # REFUSED, not merely unproductive: a usage refusal that names the id.
+  [ "$rc" = 2 ] || fail "hostile id: expected a usage refusal (2), got $rc:"$'\n'"$out"
+  assert_contains "$out" "unsafe task id" \
+    "hostile id: the refusal did not name the id as unsafe"
+  # And refused BEFORE the boundary it would have crossed: no git ran anywhere
+  # near the repository the crafted record names.
+  if [ -f "$dir/git.log" ]; then
+    case "$(cat "$dir/git.log")" in
+      *"$hostile"*)
+        fail "hostile id: git ran in the repository a crafted id named:"$'\n'"$(cat "$dir/git.log")" ;;
+    esac
+  fi
+
+  # The composed check must not be the way around the guard either.
+  out=$(
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
+      "$ROOT/bin/fm-decision-surface.sh" check certified '../elsewhere/evil' 2>&1
+  ) && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "hostile id: the decision surface forwarded a hostile id (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "unsafe task id" \
+    "hostile id: the decision surface did not refuse the id"
+  pass "a hostile task id is refused at the git boundary"
+}
+
+# --- certification after the task-local state is gone -------------------------
+
+# Write one terminal ledger record for <id> through the ledger's own writer, the
+# way teardown does, so the case proves the real chain rather than a hand-built
+# line: the writer DERIVES the critic independence from the pipeline record, and
+# fm-certify.sh reads back what it wrote.
+record_terminal_task() {  # <case_dir> <id> <repo> <branch>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$1" FM_CONFIG_OVERRIDE="$1/config" \
+  FM_STATE_OVERRIDE="$1/state" FM_PIPELINE_STATE_DB="$1/pipeline.sqlite" \
+    "$ROOT/bin/fm-wake-ledger.sh" task "$2" \
+      --outcome landed --source declared --harness claude --model opus \
+      --mode local-only --critic-repo "$3" --critic-branch "$4"
+}
+
+test_certified_evaluates_after_teardown() {
+  local dir out rc
+  dir=$(make_case after-teardown no yes)
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|anthropic|claude-opus-5" "fm/beta|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): certified evaluates after teardown"; return; }
+
+  # Teardown deletes state/<id>.meta immediately after the terminal record is
+  # written, so no task-local state exists here - which is the state EVERY
+  # finished task is in, and certification is claimed about finished work.
+  record_terminal_task "$dir" dependent "$dir/repo" fm/alpha \
+    || fail "after-teardown: the terminal record for the dependent task failed"
+  [ ! -f "$dir/state/dependent.meta" ] \
+    || fail "after-teardown: the fixture left task-local state behind"
+
+  out=$(certify "$dir" dependent) && rc=0 || rc=$?
+  # The checker ran the maker's own model on the maker's own pool. That finding
+  # was derived at teardown, rides on the durable record, and survives the loss
+  # of everything task-local.
+  [ "$rc" = 3 ] || fail "after-teardown: a recorded dependence did not contradict the claim (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "pool:not-independent" \
+    "after-teardown: the recorded dependence was not read back from the durable record"
+  case "$out" in
+    *"no durable record"*)
+      fail "after-teardown: a finished task still had no durable record to read:"$'\n'"$out" ;;
+  esac
+
+  # The positive form of the same fixture, so the refusal above cannot pass by
+  # accident of a record nobody read: an independent checker reads back as
+  # satisfied, and only the head - which has no durable home once the worktree
+  # is returned - stays could-not-observe, saying so plainly.
+  record_terminal_task "$dir" independent "$dir/repo" fm/beta \
+    || fail "after-teardown: the terminal record for the independent task failed"
+  out=$(certify "$dir" independent) && rc=0 || rc=$?
+  [ "$rc" = 4 ] || fail "after-teardown: an independent recorded checker did not read back (rc=$rc):"$'\n'"$out"
+  assert_contains "$(squeezed "$out")" "independence satisfied" \
+    "after-teardown: a recorded independence was not read back as satisfied"
+  assert_contains "$out" "carries no landed head" \
+    "after-teardown: the input with no durable home was not named plainly"
+  case "$out" in
+    *"pool:not-independent"*)
+      fail "after-teardown: another task's recorded dependence was read for these bytes:"$'\n'"$out" ;;
+  esac
+  pass "certified evaluates after teardown from the durable terminal record"
+}
+
 test_json_form_carries_every_dimension_and_the_route() {
   local dir out
   command -v jq >/dev/null 2>&1 || { pass "SKIP (jq unavailable): json form"; return; }
@@ -444,7 +612,11 @@ test_a_shared_pool_refuses_and_names_the_dimension
 test_missing_verifier_identity_refuses_as_unobserved
 test_a_review_with_no_recorded_session_is_could_not_observe
 test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one
+test_a_run_that_never_reached_the_review_step_weakens_the_branch
+test_a_cancelled_run_does_not_decide_the_branch
 test_an_absent_reviewing_identity_never_becomes_evidence
+test_a_hostile_task_id_is_refused
+test_certified_evaluates_after_teardown
 test_an_observed_attestation_failure_is_not_labelled_not_independent
 test_an_unreadable_repository_is_could_not_observe_not_a_refusal
 test_an_observed_failure_is_never_softened_by_an_unobservable_sibling

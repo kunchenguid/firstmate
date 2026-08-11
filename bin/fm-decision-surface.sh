@@ -91,6 +91,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# bin/fm-pr-lib.sh owns fm_task_id_path_safe, this fleet's one predicate for
+# "may this task id be used to build a path?". Sourced rather than restated so a
+# target this surface forwards is held to the same rule everywhere else applies.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+
 EXIT_OK=0
 EXIT_USAGE=2
 EXIT_CONTRADICTED=3
@@ -131,6 +137,14 @@ while [ $# -gt 0 ]; do
           shift
           [ $# -gt 0 ] || die "check $CHECK_CLAIM needs an id"
           TARGET=$1
+          # The certified claim is the one that hands its target to a command
+          # which builds a path from it and then runs git in whatever repository
+          # that path names. This surface composes owners; composing one is not
+          # a licence to pass it an id nobody checked, so the id is REFUSED here
+          # too rather than relied upon to be refused downstream.
+          if [ "$CHECK_CLAIM" = certified ]; then
+            fm_task_id_path_safe "$TARGET" || die "unsafe task id: $TARGET"
+          fi
           ;;
         *) die "unknown claim '$CHECK_CLAIM': capacity-blocked, decision-pending, duplicate-dispatch, certified" ;;
       esac
@@ -619,7 +633,19 @@ check_certified() {
       "the certification predicate is not executable at $certify; certification cannot be evaluated"
     return $?
   fi
-  out=$("$certify" "$TARGET" 2>&1) && rc=0 || rc=$?
+  # BOUNDED, like every other thing this surface reaches that can leave the
+  # machine. The certification predicate reads a recorded pull request's check
+  # rollup through `gh`, which imposes no bound of its own, and this command is
+  # contracted as a cheap local read that agents run before asserting a fact. A
+  # hung network call must not be able to hold that read open, so it is bounded
+  # by the same budget the platform probe uses and a timeout is reported as
+  # unevaluable - never as a claim that could not be contradicted.
+  out=$(run_timed "$FM_DECISION_SURFACE_PROBE_TIMEOUT" "$certify" "$TARGET" 2>&1) && rc=0 || rc=$?
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    verdict unevaluable "certified $TARGET" \
+      "the certification predicate could not be bounded or did not finish within ${FM_DECISION_SURFACE_PROBE_TIMEOUT}s; a read that cannot be bounded is not made from this surface"
+    return $?
+  fi
   case "$rc" in
     0)
       verdict not-contradicted "certified $TARGET" \

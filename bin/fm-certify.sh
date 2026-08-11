@@ -55,9 +55,22 @@
 #                 to read an empty rollup as a pass. NOT APPLICABLE on the
 #                 local-only route, which has no pull request by design.
 #
+# WHERE A TASK'S FACTS COME FROM, AND WHY THERE ARE TWO PLACES. A live task is
+# read from its own state/<id>.meta. A FINISHED one has none: teardown deletes
+# that file immediately after bin/fm-wake-ledger.sh writes the task's terminal
+# record, and certification is claimed after work finishes, not during it. So a
+# task with no task-local state is read from that terminal record instead - the
+# same evidence, in the durable place, carrying the independence this library
+# already derived for exactly those bytes. Facts with no durable home (the
+# repository path, the branch, the landed head) are NOT reconstructed: the
+# predicates that need them report could-not-observe and say which fact is
+# missing, because a repository resolved by name or a head guessed afterwards
+# would be indistinguishable from an observed one.
+#
 # Usage:
 #   fm-certify.sh <task-id> [--json]
-#       Certify a live task from its own durable record.
+#       Certify a task from its own durable record: its live task state while it
+#       has any, and its terminal ledger record once teardown has removed that.
 #   fm-certify.sh --repo <path> --branch <name> [--maker-harness H]
 #                 [--maker-model M] [--mode MODE] [--head SHA] [--pr URL] [--json]
 #       Certify explicit bytes. Every argument names WHICH BYTES to look at or
@@ -88,6 +101,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-independence-lib.sh
 . "$SCRIPT_DIR/fm-independence-lib.sh"
+# bin/fm-pr-lib.sh owns fm_task_id_path_safe, this fleet's one predicate for
+# "may this task id be used to build a path?". Reused rather than restated: the
+# id below names a file to read and, through it, repositories to run git in.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 SCHEMA=fm-certify.v1
 
@@ -131,6 +149,14 @@ while [ "$#" -gt 0 ]; do
     -*) die "unknown option: $1" ;;
     *)
       [ -z "$TASK" ] || die "only one task id may be given"
+      # REFUSED AT THE BOUNDARY, never sanitized. The id builds the path of the
+      # durable record read below, and that record's worktree and project values
+      # are then handed to git -C - so an id that can escape the state directory
+      # selects which repository this command runs git in, and a repository's
+      # own config decides what git does there. Every other task-id entry point
+      # in this fleet applies the same predicate; a caller that has not heard of
+      # the rule must not be the thing that enforces it.
+      fm_task_id_path_safe "$1" || die "unsafe task id: $1"
       TASK=$1
       shift
       ;;
@@ -142,11 +168,25 @@ meta_value() {  # <file> <key>
   sed -n "s/^$2=//p" "$1" | tail -1
 }
 
+# A field of the terminal ledger record. The ledger writes the word "unknown"
+# for a fact nobody resolved, and an unresolved fact is an ABSENT one here: it
+# must reach the predicates as nothing at all, so they report could-not-observe
+# rather than treating "unknown" as a mode, a model or a pull request.
+record_value() {  # <key>
+  local v
+  v=$(printf '%s\n' "$RECORD" | sed -n "s/^$1=//p" | tail -1)
+  [ "$v" != unknown ] || v=''
+  printf '%s' "$v"
+}
+
+RECORD=''
+RECORD_SOURCE=task-state
+RECORDED_INDEPENDENCE=''
+
 # Fill unstated facts from the task's own durable record. A task id names WHICH
 # bytes to certify; it can no more assert a result than the explicit form can.
-if [ -n "$TASK" ]; then
+if [ -n "$TASK" ] && [ -f "$STATE/$TASK.meta" ]; then
   META="$STATE/$TASK.meta"
-  [ -f "$META" ] || die "no durable record for task $TASK"
   [ -n "$REPO" ] || REPO=$(meta_value "$META" project)
   [ -n "$MAKER_HARNESS" ] || MAKER_HARNESS=$(meta_value "$META" harness)
   [ -n "$MAKER_MODEL" ] || MAKER_MODEL=$(meta_value "$META" model)
@@ -165,9 +205,35 @@ if [ -n "$TASK" ]; then
     # gate, it is a certification command that can only ever refuse.
     [ -n "$HEAD" ] || HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
   fi
+elif [ -n "$TASK" ]; then
+  # THE TASK-LOCAL STATE IS GONE, WHICH IS THE NORMAL CASE. bin/fm-teardown.sh
+  # deletes state/<id>.meta immediately after bin/fm-wake-ledger.sh writes the
+  # terminal record, so reading only the metadata made this predicate
+  # permanently unevaluable for every FINISHED task - and "this work is
+  # certified" is a claim nobody makes about a task that is still running. The
+  # fix is not to make task-local state survive; it is to read the evidence that
+  # was never task-local. That record is append-only, was written at the last
+  # moment the join existed, and already carries the DERIVED critic
+  # independence for exactly these bytes.
+  RECORD=$("$SCRIPT_DIR/fm-wake-ledger.sh" task-record "$TASK" 2>/dev/null) \
+    || die "no durable record for task $TASK"
+  RECORD_SOURCE=terminal-record
+  [ -n "$MAKER_HARNESS" ] || MAKER_HARNESS=$(record_value harness)
+  [ -n "$MAKER_MODEL" ] || MAKER_MODEL=$(record_value model)
+  [ -n "$MODE" ] || MODE=$(record_value mode)
+  [ -n "$PR" ] || PR=$(record_value pr)
+  RECORDED_INDEPENDENCE=$(record_value critic_independence)
+  # The repository PATH, the branch and the landed head have no durable home:
+  # the terminal record deliberately keeps only the project's basename, so no
+  # path leaks into fleet-wide evidence. They are left empty and the predicates
+  # that need them say so, because a repository resolved by name afterwards
+  # could be a different repository and a guessed head is indistinguishable
+  # from an observed one. --repo and --head remain available for a caller that
+  # knows which bytes it means.
 fi
 
-[ -n "$REPO" ] || die "nothing to certify: give a task id or --repo"
+[ -n "$REPO" ] || [ "$RECORD_SOURCE" = terminal-record ] \
+  || die "nothing to certify: give a task id or --repo"
 
 # --- route derivation ---------------------------------------------------------
 #
@@ -208,11 +274,23 @@ add_row() {  # <predicate> <result> <reason> [route]
 #
 # Loaded in THIS shell rather than through a command substitution, so the
 # derivation below inherits the block and the pipeline is read once.
-fm_independence_steps_load "$REPO" "$BRANCH" || true
-STEPS=$FM_INDEPENDENCE_STEPS_VAL
+STEPS=''
+if [ -z "$RECORDED_INDEPENDENCE" ]; then
+  fm_independence_steps_load "$REPO" "$BRANCH" || true
+  STEPS=$FM_INDEPENDENCE_STEPS_VAL
+fi
 
 # INDEPENDENCE. Always applicable.
-IND=$(fm_independence_dimensions "$REPO" "$BRANCH" "$MAKER_HARNESS" "$MAKER_MODEL")
+#
+# Derived live from the pipeline's invocation records while the bytes can still
+# be named, and otherwise read back from the terminal record that derived it the
+# same way at teardown. Neither form takes a value from a caller: there is no
+# argument that carries an independence verdict into this command.
+if [ -n "$RECORDED_INDEPENDENCE" ]; then
+  IND=$(fm_independence_from_record "$RECORDED_INDEPENDENCE" "task=$TASK source=terminal-record")
+else
+  IND=$(fm_independence_dimensions "$REPO" "$BRANCH" "$MAKER_HARNESS" "$MAKER_MODEL")
+fi
 IND_RESULT=$(fm_independence_overall "$IND")
 IND_GAPS=$(fm_independence_gaps "$IND" | paste -sd, - 2>/dev/null || true)
 case "$IND_RESULT" in
@@ -226,6 +304,12 @@ if [ "$LANDING_ROUTE" = fork-landing ]; then
   add_row attestation NOT_APPLICABLE \
     "this route lands on a fork, whose branch is deliberately unsigned because signing it would duplicate a live contribution" \
     fork-landing
+elif [ -z "$HEAD" ] && [ "$RECORD_SOURCE" = terminal-record ]; then
+  # Named plainly rather than reconstructed. The landed head has no durable home
+  # once the worktree is returned, and a head resolved by guesswork afterwards
+  # would be indistinguishable from one that was observed.
+  add_row attestation NO_VERIFIER_RAN \
+    "this task's worktree is gone and its terminal record carries no landed head, so no attestation could be read for those bytes; pass --head to name them"
 elif [ -z "$HEAD" ]; then
   add_row attestation NO_VERIFIER_RAN "no landed head was given, so no attestation could be read for those bytes"
 else
@@ -351,6 +435,7 @@ if [ "$MODE_OUT" = json ]; then
                        | ltrimstr("  independence-") | split(",")
                        | {dimension: .[0], result: .[1], reason: .[2]} ],
        steps: [ $steps | split("\n")[] | select(length > 0) | split("\t")
+                | select(.[0] != "")
                 | {step: .[0], round: .[1], purpose: .[2], agent: .[3],
                    vendor: (if (.[4] // "") == "" then null else .[4] end),
                    model: (if (.[5] // "") == "" then null else .[5] end),
@@ -375,20 +460,16 @@ else
     printf '  %-14s %-18s %s\n' "$name" "$label" "$reason"
     [ -z "$route" ] || printf '  %-14s %-18s route=%s\n' '' '' "$route"
   done
-  # bin/fm-independence-lib.sh owns the result-to-word mapping; it is passed in
-  # rather than restated, so this renderer cannot drift into a fourth word for a
-  # value the library already named.
-  printf '%s\n' "$IND" | awk -F, \
-    -v pass="$(fm_independence_label PASS)" \
-    -v fail="$(fm_independence_label FAIL)" \
-    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN)" '
-    /^  independence-/ {
-      dim = $1
-      sub(/^  independence-/, "", dim)
-      if (dim == "overall") next
-      label = ($2 == "PASS" ? pass : ($2 == "FAIL" ? fail : unobserved))
-      printf "  %-14s %-18s %s\n", "  " dim, label, $3
-    }'
+  # bin/fm-independence-lib.sh owns both the record's shape and the
+  # result-to-word mapping; this renderer only formats what that owner walks, so
+  # it cannot drift into a second parser or a fourth word for a value the
+  # library already named.
+  while IFS='	' read -r dim result label reason; do
+    [ -n "$dim" ] || continue
+    printf '  %-14s %-18s %s\n' "  $dim" "$label" "$reason"
+  done <<EOF
+$(fm_independence_each_dimension "$IND")
+EOF
   [ -z "$GAPS" ] || printf 'gap=%s\n' "$GAPS"
 fi
 

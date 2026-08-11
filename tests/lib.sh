@@ -232,11 +232,14 @@ fm_git_worktree() {
 # for the validation pipeline's state database, holding exactly the tables and
 # columns the independence derivation joins.
 #
-# Each <invocation> is "<branch>|<provider>|<model>[|<purpose>[|<sessions>]]".
+# Each <invocation> is
+# "<branch>|<provider>|<model>[|<purpose>[|<sessions>[|<status>]]]".
 # An empty provider or model writes SQL NULL, the shape the real database uses
 # when it recorded no such fact. <purpose> defaults to review, the reviewing
 # invocation; pass review-fix for the agent that rewrites code in response,
-# which is maker-side and must never be read as the critic.
+# which is maker-side and must never be read as the critic, or none for a run
+# that recorded NO agent invocation at all - the run that touched these bytes
+# and never reached the review step.
 #
 # <sessions> selects which of the three recorded session shapes this run has,
 # because all three have to be expressible or the derivation's three values
@@ -247,6 +250,11 @@ fm_git_worktree() {
 #   none    the run records NO session rows at all - the reviewing invocation
 #           happened and whose process ran it was never captured, which is
 #           could-not-observe and must never read as independent
+#
+# <status> is the run's own status and defaults to completed. cancelled and
+# failed are the statuses that make a run a NON-MEMBER of the branch fold: it
+# never finished verifying anything, so its reviewer does not decide whether
+# these bytes were verified independently.
 #
 # Returns nonzero when python3 is unavailable, which callers report as a
 # skipped case.
@@ -262,7 +270,8 @@ db, repo, specs = sys.argv[1], sys.argv[2], sys.argv[3:]
 conn = sqlite3.connect(db)
 conn.executescript(
     "create table repos (id text primary key, working_path text);"
-    "create table runs (id text primary key, repo_id text, branch text);"
+    "create table runs (id text primary key, repo_id text, branch text,"
+    "  status text not null default 'completed');"
     "create table agent_invocations ("
     "  id text primary key, run_id text, step_name text, round integer,"
     "  purpose text, agent text, model_provider text, model text,"
@@ -276,8 +285,14 @@ for n, spec in enumerate(specs):
     branch, provider, model = parts[0], parts[1], parts[2]
     purpose = parts[3] if len(parts) > 3 and parts[3] else "review"
     sessions = parts[4] if len(parts) > 4 else ""
+    status = parts[5] if len(parts) > 5 and parts[5] else "completed"
     run = "run%d" % n
-    conn.execute("insert into runs values (?, 'r1', ?)", (run, branch))
+    conn.execute("insert into runs values (?, 'r1', ?, ?)", (run, branch, status))
+    # A run that recorded no agent invocation at all: it touched these bytes and
+    # never reached the review step. It has no invocation row and no session
+    # rows, because there was nothing to hold either.
+    if purpose == "none":
+        continue
     conn.execute(
         "insert into agent_invocations"
         " values (?, ?, 'review', 1, ?, 'codex', ?, ?, ?, 'success')",
@@ -300,11 +315,14 @@ for n, spec in enumerate(specs):
         "insert into run_agent_sessions values (?, 'review-fixer', 'codex', ?)",
         (run, fixer),
     )
-# A non-review step on the same run must never be read as a review.
-conn.execute(
-    "insert into agent_invocations"
-    " values ('other', 'run0', 'test', 1, 'test', 'codex', 'nobody', 'no-model', 99, 'success')"
-)
+# A non-review step on the same run must never be read as a review. It is not
+# added to a run declared to have recorded no invocation at all, which would
+# quietly undo that shape.
+if specs and (specs[0].split("|") + ["", "", ""])[3] != "none":
+    conn.execute(
+        "insert into agent_invocations"
+        " values ('other', 'run0', 'test', 1, 'test', 'codex', 'nobody', 'no-model', 99, 'success')"
+    )
 conn.commit()
 conn.close()
 PYDB

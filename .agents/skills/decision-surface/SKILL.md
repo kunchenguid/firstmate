@@ -73,6 +73,9 @@ Never report a not-applicable predicate as a gap, and never let it vanish: it ri
 Independence is reported on four dimensions - process, model, vendor, and credential pool - because the pipeline's checkers draw on shared subscription windows, so a different runtime does not by itself mean an independent checker.
 "Independent model, same billing account" is a real and different answer from "independent vendor entirely"; relay which one the evidence gives.
 
+A finished task has no task-local state left, because teardown removes it immediately after the terminal ledger record is written, so the check reads that durable record instead.
+That record carries the maker's identity, the delivery mode, the pull request and the derived independence for exactly those bytes, but no landed head, so the attestation predicate on a finished task reads could-not-observe until a caller names the bytes with `bin/fm-certify.sh --repo` and `--head`.
+
 ## What is still firstmate's
 
 `bin/fm-decision-surface.sh owners` prints the durable ledger of deterministic work, each row either owned by a landed command or marked pending with the capability that must land first.

@@ -138,6 +138,26 @@ FM_INDEPENDENCE_DIMENSIONS='process model vendor pool'
 # maker's own vendor and model be reported as the checker's.
 FM_INDEPENDENCE_CRITIC_PURPOSE='review'
 
+# THE MEMBER SET, WHICH IS A RUN QUESTION AND NOT A ROW QUESTION. The branch
+# view folds RUNS, so which runs are members of that fold decides the verdict
+# before any dimension is judged. Two readings are wrong in opposite directions
+# and both were reachable:
+#
+#   a run that never reached the review step is NOT invisible. It provides no
+#   independence evidence about these bytes, so it WEAKENS the fold to
+#   could-not-observe. Dropping it is the reassuring answer and it is the same
+#   defect as an absent session row reading as independent.
+#
+#   a run that was cancelled or failed is NOT a member. It never finished
+#   verifying anything, so its reviewer is not the verifier of these bytes and
+#   must not decide the branch's verdict. It is excluded - and the exclusion is
+#   REPORTED on every dimension's reason, because an exclusion that strengthens
+#   a verdict silently is the same laundering in the other direction.
+#
+# The governing asymmetry is unchanged: unobserved or unfinished evidence may
+# only ever weaken a claim of independence, never a finding of dependence.
+FM_INDEPENDENCE_NONMEMBER_RUN_STATUS='cancelled failed'
+
 # --- the record ---------------------------------------------------------------
 #
 # One line per dimension plus one overall line, in bin/fm-verify.sh's record
@@ -200,6 +220,26 @@ fm_independence_rank() {  # <PASS|FAIL|NO_VERIFIER_RAN>
   esac
 }
 
+# The overall verdict over a set of dimensions: the WEAKEST one, on the same
+# asymmetry every fold in this file obeys. Any observed not-independent
+# dimension makes the whole verdict not-independent and no unresolved sibling
+# dimension may erase it - a checker PROVEN to have drawn on the maker's own
+# credential pool is a finding, and reporting it as "could not observe" because
+# the vendor mapping was missing would launder it into the milder word.
+# Could-not-observe applies only when nothing was observed dependent: a checker
+# proven to run its own model still tells a reader nothing about whose account
+# paid for it, so that may never read as plain "independent" either.
+#
+# Stated once here because every producer of the record block folds it the same
+# way, and two copies of this rule would drift the moment only one was edited.
+fm_independence_overall_of() {  # <process> <model> <vendor> <pool>
+  case "${1:-}${2:-}${3:-}${4:-}" in
+    *FAIL*) printf 'FAIL' ;;
+    *NO_VERIFIER_RAN*) printf 'NO_VERIFIER_RAN' ;;
+    *) printf 'PASS' ;;
+  esac
+}
+
 # The validation pipeline's own state database.
 fm_independence_db() {
   printf '%s' "${FM_PIPELINE_STATE_DB:-$HOME/.no-mistakes/state.sqlite}"
@@ -211,7 +251,13 @@ fm_independence_db() {
 # Echo one TSV row per agent-backed step the pipeline recorded for those bytes:
 #
 #   <step>\t<round>\t<purpose>\t<agent>\t<vendor>\t<model>\t<exit_status>
-#     \t<shared_sessions>\t<reviewer_sessions>\t<run>
+#     \t<shared_sessions>\t<reviewer_sessions>\t<run>\t<run_status>
+#
+# A run that recorded NO agent invocation at all still emits one row, with every
+# invocation field empty. It has to: the fold below counts RUNS, and a run that
+# never reached the review step is a member whose verifier identity was never
+# captured. Leaving it out of the block would delete it from the fold entirely,
+# which is the reassuring answer rather than the honest one.
 #
 # EVERY SESSION FACT IS THAT ROW'S OWN RUN'S, never a total over the branch.
 # Independence is a property of a RUN against specific bytes: a branch is
@@ -261,15 +307,18 @@ try:
         for r in conn.execute("select id, working_path from repos")
         if r[1] and os.path.realpath(r[1]) == wanted
     ]
+    # The run's own status rides on every row it produces. Whether a run is a
+    # member of the branch fold is a fact about the RUN, so it has to travel
+    # with the run rather than be re-derived per row by the caller.
+    status_of = {}
     run_ids = []
     for repo_id in repo_ids:
-        run_ids.extend(
-            r[0]
-            for r in conn.execute(
-                "select id from runs where repo_id = ? and branch = ?",
-                (repo_id, branch),
-            )
-        )
+        for run_id, status in conn.execute(
+            "select id, status from runs where repo_id = ? and branch = ?",
+            (repo_id, branch),
+        ):
+            run_ids.append(run_id)
+            status_of[run_id] = status or ""
     if not run_ids:
         conn.close()
         sys.exit(0)
@@ -297,15 +346,20 @@ try:
 
     rows = []
     for run_id in run_ids:
-        rows.extend(
-            (run_id,) + tuple(r)
-            for r in conn.execute(
+        invocations = list(
+            conn.execute(
                 "select step_name, round, purpose, agent, model_provider, model,"
                 " exit_status from agent_invocations where run_id = ?"
                 " order by started_at",
                 (run_id,),
             )
         )
+        if invocations:
+            rows.extend((run_id,) + tuple(r) for r in invocations)
+        else:
+            # A run that recorded no agent-backed step at all. It is still a run
+            # that touched these bytes, and the fold has to be able to see it.
+            rows.append((run_id, "", None, "", "", None, None, ""))
     conn.close()
 except Exception:
     sys.exit(1)
@@ -325,6 +379,7 @@ for run_id, step, rnd, purpose, agent, provider, model, exit_status in rows:
                 str(shared),
                 str(reviewer_sessions),
                 str(run_id or ""),
+                str(status_of.get(run_id) or ""),
             )
         )
     )
@@ -388,6 +443,29 @@ fm_independence_collapse() {
   }'
 }
 
+# fm_independence_members <steps>: echo only the rows belonging to runs that are
+# MEMBERS of the branch fold, which is every run the pipeline recorded except
+# one it marked cancelled or failed. A run that did not finish never verified
+# these bytes, so its reviewer may not decide whether they were verified
+# independently. An unrecognized status is a member: a status this fleet cannot
+# read is not a licence to drop a run from the evidence.
+fm_independence_members() {  # <steps>
+  printf '%s\n' "${1:-}" | awk -F'\t' -v drop="$FM_INDEPENDENCE_NONMEMBER_RUN_STATUS" '
+    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) out[d[i]] = 1 }
+    NF && !($11 in out)'
+}
+
+# fm_independence_dropped <steps>: how many RUNS the member set excludes. The
+# count is reported on every dimension rather than kept here, because an
+# exclusion that quietly strengthens a verdict is the same laundering as a gap
+# that quietly weakens one.
+fm_independence_dropped() {  # <steps>
+  printf '%s\n' "${1:-}" | awk -F'\t' -v drop="$FM_INDEPENDENCE_NONMEMBER_RUN_STATUS" '
+    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) out[d[i]] = 1 }
+    NF && ($11 in out) && !($10 in seen) { seen[$10] = 1; c++ }
+    END { printf "%d", c + 0 }'
+}
+
 # fm_independence_critic <steps>
 # Echo
 #   "<vendor>\t<model>\t<count>\t<shared_runs>\t<unobserved_runs>\t<runs>"
@@ -440,27 +518,37 @@ fm_independence_critic() {  # <steps>
 # separator preserves empty fields, so an unrecorded identity stays unrecorded.
 FM_INDEPENDENCE_FS=$'\037'
 
-# fm_independence_runs <steps>
-# Echo one row per reviewing RUN, in the order the pipeline recorded them, with
+# fm_independence_runs <member steps>
+# Echo one row per MEMBER RUN, in the order the pipeline recorded them, with
 # FM_INDEPENDENCE_FS between the fields:
 #
 #   <run><FS><vendor><FS><model><FS><shared_sessions><FS><reviewer_sessions><FS><reviews>
 #
-# This is the unit every dimension is judged on. The vendor and model are
-# collapsed WITHIN the run only, so a branch whose runs used different reviewers
-# yields two rows with two identities rather than one row saying "mixed" - two
-# answers, not an absence of answers. Only a run whose own reviewing invocations
-# disagree can be mixed, and that is a genuine ambiguity in one run's record.
-fm_independence_runs() {  # <steps>
+# This is the unit every dimension is judged on. EVERY member run gets a row,
+# including one whose reviews count is zero: a run that touched these bytes and
+# never reached the review step captured no verifier identity, and the caller
+# reports that as could-not-observe. Selecting only the runs that DID review
+# would let a run with no reviewer disappear behind a sibling that had one,
+# which is the branch-scoped reading this file exists to refuse.
+#
+# The vendor and model are collapsed WITHIN the run only, so a branch whose runs
+# used different reviewers yields two rows with two identities rather than one
+# row saying "mixed" - two answers, not an absence of answers. Only a run whose
+# own reviewing invocations disagree can be mixed, and that is a genuine
+# ambiguity in one run's record.
+fm_independence_runs() {  # <member steps>
   printf '%s\n' "${1:-}" | awk -F'\t' -v p="$FM_INDEPENDENCE_CRITIC_PURPOSE" -v fs="$FM_INDEPENDENCE_FS" '
-    $3 == p {
+    NF {
       run = $10
+      if (run == "") next
       if (!(run in seen)) {
         seen[run] = 1
         order[++n] = run
         shared[run] = $8 + 0
         sess[run] = $9 + 0
+        reviews[run] = 0
       }
+      if ($3 != p) next
       reviews[run]++
       if ($5 != "") vendor[run] = (run in vendor) && vendor[run] != $5 ? "mixed" : $5
       if ($6 != "") model[run] = (run in model) && model[run] != $6 ? "mixed" : $6
@@ -487,9 +575,9 @@ fm_independence_runs() {  # <steps>
 # declared routing config, which is what makes independence underivable by hand.
 fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
-  local steps critic cvendor cmodel ccount cruns
+  local steps='' members='' dropped=0 dropped_why critic cvendor cmodel ccount
   local mkey mprovider mpool ckey cprovider cpool ckey_for=''
-  local run rvendor rmodel rshared rsess rreviews r_rank
+  local run rvendor rmodel rshared rsess rreviews r_rank runs_n=0
   local r_process r_model r_vendor r_pool
   local r_process_why r_model_why r_vendor_why r_pool_why
   local process=NO_VERIFIER_RAN model=NO_VERIFIER_RAN vendor=NO_VERIFIER_RAN pool=NO_VERIFIER_RAN
@@ -499,14 +587,33 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
 
   evidence="branch=${branch:-unknown}"
 
-  if ! steps=$(fm_independence_steps "$repo" "$branch") || [ -z "$steps" ]; then
+  # WHICH RUNS ARE MEMBERS, decided before any dimension is judged. A run the
+  # pipeline cancelled or marked failed never finished verifying these bytes, so
+  # it is not a member and its reviewer does not decide the branch.
+  if steps=$(fm_independence_steps "$repo" "$branch") && [ -n "$steps" ]; then
+    members=$(fm_independence_members "$steps")
+    dropped=$(fm_independence_dropped "$steps")
+    [ "${dropped:-0}" = 0 ] || evidence="$evidence excluded=$dropped"
+  else
+    steps=''
+  fi
+
+  if [ -z "$steps" ]; then
     # No readable invocation record for these bytes. Every dimension is
     # could-not-observe, and none of them may read as independent.
     process_why='the validation pipeline recorded no agent invocation for these bytes'
     model_why=$process_why
     vendor_why=$process_why
     pool_why=$process_why
-  elif ! critic=$(fm_independence_critic "$steps"); then
+  elif [ -z "$members" ]; then
+    # Every run that touched these bytes was cancelled or failed. Excluding them
+    # is right - none of them verified anything - but it leaves NOTHING that
+    # did, and an empty member set may never read as a clean branch.
+    process_why='every run the pipeline recorded for these bytes was cancelled or failed; none of them verified them'
+    model_why=$process_why
+    vendor_why=$process_why
+    pool_why=$process_why
+  elif ! critic=$(fm_independence_critic "$members"); then
     process_why='the pipeline recorded steps for these bytes but no reviewing invocation'
     model_why=$process_why
     vendor_why=$process_why
@@ -515,8 +622,6 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     cvendor=$(printf '%s' "$critic" | cut -f1)
     cmodel=$(printf '%s' "$critic" | cut -f2)
     ccount=$(printf '%s' "$critic" | cut -f3)
-    cruns=$(printf '%s' "$critic" | cut -f6)
-    evidence="$evidence reviews=$ccount runs=$cruns critic=${cvendor:-unrecorded}/${cmodel:-unrecorded}"
 
     # The maker's routed identity resolves once: it is the same maker whichever
     # run reviewed its bytes.
@@ -527,14 +632,23 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     process='' model='' vendor='' pool=''
     while IFS="$FM_INDEPENDENCE_FS" read -r run rvendor rmodel rshared rsess rreviews; do
       [ -n "$run" ] || continue
+      runs_n=$((runs_n + 1))
 
       # PROCESS. The recorded SESSIONS are the evidence, not the invocation: an
       # invocation row says a review ran, and says nothing about whose process
       # it ran in. On this run an empty reviewer/review-fixer overlap counts as
       # separation only because this run recorded sessions to overlap.
+      #
+      # A run with NO reviewing invocation cannot pass this dimension however
+      # many sessions it recorded - there was no review to run in a process of
+      # its own - but an OBSERVED overlap is still a positive finding and is
+      # still reported, because the asymmetry runs one way only.
       if [ "${rshared:-0}" -gt 0 ] 2>/dev/null; then
         r_process=FAIL
         r_process_why="the reviewer shared $rshared session(s) with the agent that fixes its findings"
+      elif [ "${rreviews:-0}" -eq 0 ] 2>/dev/null; then
+        r_process=NO_VERIFIER_RAN
+        r_process_why='this run recorded no reviewing invocation at all; nothing about it verified these bytes'
       elif [ "${rsess:-0}" -gt 0 ] 2>/dev/null; then
         r_process=PASS
         r_process_why="$rreviews reviewing invocation(s) ran in $rsess session(s) of their own"
@@ -543,62 +657,76 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
         r_process_why="$rreviews reviewing invocation(s) ran and no reviewer session was recorded; whose process reviewed is not observable"
       fi
 
-      # This run's reviewing identity, resolved through declarations rather than
-      # through name similarity. Held across iterations because consecutive runs
-      # usually reviewed with the same identity and each resolution is a jq.
-      if [ "$rvendor|$rmodel" != "$ckey_for" ]; then
-        ckey_for="$rvendor|$rmodel"
-        ckey=$(fm_model_key_for_pipeline "$rvendor" "$rmodel")
-        cprovider=$(fm_model_registry_provider_of "$ckey")
-        cpool=$(fm_model_pool_of "$ckey")
-      fi
-
-      # MODEL. Comparable only once both sides resolve to a registry key: "opus"
-      # and "claude-opus-5" are neither observably the same model nor observably
-      # two, and guessing either way is the failure this whole file exists to
-      # prevent.
-      if [ "$rmodel" = mixed ] || [ "$rvendor" = mixed ]; then
+      # A run that never reached the review step captured no reviewing identity,
+      # so every identity dimension is could-not-observe for it. This is the
+      # weakening that makes such a run visible to the fold at all; dropping it
+      # would let it disappear behind a sibling run that did review.
+      if [ "${rreviews:-0}" -eq 0 ] 2>/dev/null; then
         r_model=NO_VERIFIER_RAN
-        r_model_why='the reviewing invocations of this run disagree on which model reviewed'
-      elif [ -z "$mkey" ]; then
-        r_model=NO_VERIFIER_RAN
-        r_model_why="the model registry declares no entry for the making model ${mharness:-unknown}/${mmodel:-unknown}"
-      elif [ -z "$ckey" ]; then
-        r_model=NO_VERIFIER_RAN
-        r_model_why="the model registry declares no pipeline_model_ids mapping for the reviewing model ${rvendor:-unrecorded}/${rmodel:-unrecorded}"
-      elif [ "$mkey" = "$ckey" ]; then
-        r_model=FAIL
-        r_model_why="the maker and the reviewer both ran $mkey"
-      else
-        r_model=PASS
-        r_model_why="maker ran $mkey and the reviewer ran $ckey"
-      fi
-
-      # VENDOR.
-      if [ -z "$mprovider" ] || [ -z "$cprovider" ]; then
+        r_model_why='this run recorded no reviewing invocation; no reviewing identity was captured for it'
         r_vendor=NO_VERIFIER_RAN
-        r_vendor_why='the model registry does not resolve both the making and the reviewing provider'
-      elif [ "$mprovider" = "$cprovider" ]; then
-        r_vendor=FAIL
-        r_vendor_why="the maker and the reviewer both ran on provider $mprovider"
-      else
-        r_vendor=PASS
-        r_vendor_why="maker ran on $mprovider and the reviewer on $cprovider"
-      fi
-
-      # POOL - the account or quota window the call was billed to. A different
-      # harness does not imply a different pool, which is why this is derived
-      # from the declared shared_quota_pool and never from a harness or vendor
-      # name.
-      if [ -z "$mpool" ] || [ -z "$cpool" ]; then
+        r_vendor_why=$r_model_why
         r_pool=NO_VERIFIER_RAN
-        r_pool_why='the model registry records no shared_quota_pool for both the making and the reviewing model'
-      elif [ "$mpool" = "$cpool" ]; then
-        r_pool=FAIL
-        r_pool_why="the maker and the reviewer both drew on the $mpool credential pool"
+        r_pool_why=$r_model_why
       else
-        r_pool=PASS
-        r_pool_why="maker drew on $mpool and the reviewer on $cpool"
+        # This run's reviewing identity, resolved through declarations rather
+        # than through name similarity. Held across iterations because
+        # consecutive runs usually reviewed with the same identity and each
+        # resolution is a jq.
+        if [ "$rvendor|$rmodel" != "$ckey_for" ]; then
+          ckey_for="$rvendor|$rmodel"
+          ckey=$(fm_model_key_for_pipeline "$rvendor" "$rmodel")
+          cprovider=$(fm_model_registry_provider_of "$ckey")
+          cpool=$(fm_model_pool_of "$ckey")
+        fi
+
+        # MODEL. Comparable only once both sides resolve to a registry key:
+        # "opus" and "claude-opus-5" are neither observably the same model nor
+        # observably two, and guessing either way is the failure this whole file
+        # exists to prevent.
+        if [ "$rmodel" = mixed ] || [ "$rvendor" = mixed ]; then
+          r_model=NO_VERIFIER_RAN
+          r_model_why='the reviewing invocations of this run disagree on which model reviewed'
+        elif [ -z "$mkey" ]; then
+          r_model=NO_VERIFIER_RAN
+          r_model_why="the model registry declares no entry for the making model ${mharness:-unknown}/${mmodel:-unknown}"
+        elif [ -z "$ckey" ]; then
+          r_model=NO_VERIFIER_RAN
+          r_model_why="the model registry declares no pipeline_model_ids mapping for the reviewing model ${rvendor:-unrecorded}/${rmodel:-unrecorded}"
+        elif [ "$mkey" = "$ckey" ]; then
+          r_model=FAIL
+          r_model_why="the maker and the reviewer both ran $mkey"
+        else
+          r_model=PASS
+          r_model_why="maker ran $mkey and the reviewer ran $ckey"
+        fi
+
+        # VENDOR.
+        if [ -z "$mprovider" ] || [ -z "$cprovider" ]; then
+          r_vendor=NO_VERIFIER_RAN
+          r_vendor_why='the model registry does not resolve both the making and the reviewing provider'
+        elif [ "$mprovider" = "$cprovider" ]; then
+          r_vendor=FAIL
+          r_vendor_why="the maker and the reviewer both ran on provider $mprovider"
+        else
+          r_vendor=PASS
+          r_vendor_why="maker ran on $mprovider and the reviewer on $cprovider"
+        fi
+
+        # POOL - the account or quota window the call was billed to. A different
+        # harness does not imply a different pool, which is why this is derived
+        # from the declared shared_quota_pool and never from a harness or vendor
+        # name.
+        if [ -z "$mpool" ] || [ -z "$cpool" ]; then
+          r_pool=NO_VERIFIER_RAN
+          r_pool_why='the model registry records no shared_quota_pool for both the making and the reviewing model'
+        elif [ "$mpool" = "$cpool" ]; then
+          r_pool=FAIL
+          r_pool_why="the maker and the reviewer both drew on the $mpool credential pool"
+        else
+          r_pool=PASS
+          r_pool_why="maker drew on $mpool and the reviewer on $cpool"
+        fi
       fi
 
       # Fold this run into the branch view, weakest run winning. A run that
@@ -630,8 +758,10 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
         pool_n=$((pool_n + 1))
       fi
     done <<EOF
-$(fm_independence_runs "$steps")
+$(fm_independence_runs "$members")
 EOF
+
+    evidence="$evidence reviews=$ccount runs=$runs_n critic=${cvendor:-unrecorded}/${cmodel:-unrecorded}"
 
     if [ -z "$process" ]; then
       # Reviewing invocations the pipeline recorded against no run at all. There
@@ -642,15 +772,26 @@ EOF
       model_why=$process_why vendor_why=$process_why pool_why=$process_why
     fi
 
-    # More than one run means the branch view is a choice among readings, so it
-    # says how many runs read the way the verdict does. A reader who sees 1 of 3
-    # knows two other runs said something else and can go and look.
-    if [ "${cruns:-1}" -gt 1 ] 2>/dev/null; then
-      process_why="$process_why ($process_n of $cruns reviewing run(s) read this way)"
-      model_why="$model_why ($model_n of $cruns reviewing run(s) read this way)"
-      vendor_why="$vendor_why ($vendor_n of $cruns reviewing run(s) read this way)"
-      pool_why="$pool_why ($pool_n of $cruns reviewing run(s) read this way)"
+    # More than one member run means the branch view is a choice among readings,
+    # so it says how many runs read the way the verdict does. A reader who sees
+    # 1 of 3 knows two other runs said something else and can go and look.
+    if [ "$runs_n" -gt 1 ]; then
+      process_why="$process_why ($process_n of $runs_n run(s) read this way)"
+      model_why="$model_why ($model_n of $runs_n run(s) read this way)"
+      vendor_why="$vendor_why ($vendor_n of $runs_n run(s) read this way)"
+      pool_why="$pool_why ($pool_n of $runs_n run(s) read this way)"
     fi
+  fi
+
+  # An exclusion is never silent. Dropping a cancelled or failed run is right,
+  # and it can only ever STRENGTHEN what is left, so the reader is told on every
+  # dimension that it happened and can go and look at what was dropped.
+  if [ "${dropped:-0}" -gt 0 ] 2>/dev/null; then
+    dropped_why=" ($dropped cancelled or failed run(s) excluded from the fold: a run that did not finish never verified these bytes)"
+    process_why="$process_why$dropped_why"
+    model_why="$model_why$dropped_why"
+    vendor_why="$vendor_why$dropped_why"
+    pool_why="$pool_why$dropped_why"
   fi
 
   fm_independence_record process "$process" "$process_why" "$evidence"
@@ -667,14 +808,78 @@ EOF
   # only when nothing was observed dependent - a checker proven to run its own
   # model still tells a reader nothing about whose account paid for it, so that
   # may never read as plain "independent" either.
-  overall=PASS
-  case "$process$model$vendor$pool" in
-    *FAIL*) overall=FAIL ;;
-    *NO_VERIFIER_RAN*) overall=NO_VERIFIER_RAN ;;
-  esac
+  overall=$(fm_independence_overall_of "$process" "$model" "$vendor" "$pool")
   fm_independence_record overall "$overall" \
     "process=$(fm_independence_label "$process") model=$(fm_independence_label "$model") vendor=$(fm_independence_label "$vendor") pool=$(fm_independence_label "$pool")" \
     "$evidence"
+}
+
+# fm_independence_from_record <summary> <evidence>
+# Print the same block fm_independence_dimensions prints, read back from the
+# compact per-dimension summary a terminal task record already carries.
+#
+# THIS IS NOT A WRITABLE INDEPENDENCE CLAIM, and the difference is the whole
+# point. The summary was DERIVED by this library from the pipeline's invocation
+# records at teardown - the last moment the join existed - and appended to
+# bin/fm-wake-ledger.sh's append-only evidence record. Reading it back is
+# reading an authoritative record of what was observed about those exact bytes.
+# No caller may hand this value in from outside that record: bin/fm-certify.sh
+# takes no argument that carries it, and a fleet that let one exist would be
+# back to the stated independence claim this seam closed.
+#
+# A word the summary does not carry - "unknown", or a dimension it never
+# recorded at all - is could-not-observe. It is NEVER filled in from anywhere
+# else: a value guessed for a torn-down task would be indistinguishable from an
+# observed one afterwards.
+fm_independence_from_record() {  # <summary> <evidence>
+  local summary=${1:-} evidence=${2:-} dim value result overall pass_word fail_word
+  local process=NO_VERIFIER_RAN model=NO_VERIFIER_RAN vendor=NO_VERIFIER_RAN pool=NO_VERIFIER_RAN
+
+  # The words come from the owner that wrote them rather than being restated, so
+  # renaming a value cannot silently stop this reader recognizing it.
+  pass_word=$(fm_independence_label PASS)
+  fail_word=$(fm_independence_label FAIL)
+
+  while IFS=: read -r dim value; do
+    [ -n "$dim" ] || continue
+    case "$value" in
+      "$pass_word") result=PASS ;;
+      "$fail_word") result=FAIL ;;
+      *) result=NO_VERIFIER_RAN ;;
+    esac
+    case "$dim" in
+      process) process=$result ;;
+      model) model=$result ;;
+      vendor) vendor=$result ;;
+      pool) pool=$result ;;
+    esac
+  done <<EOF
+$(printf '%s' "$summary" | tr '+' '\n')
+EOF
+
+  fm_independence_record process "$process" "$(fm_independence_recorded_why "$process")" "$evidence"
+  fm_independence_record model "$model" "$(fm_independence_recorded_why "$model")" "$evidence"
+  fm_independence_record vendor "$vendor" "$(fm_independence_recorded_why "$vendor")" "$evidence"
+  fm_independence_record pool "$pool" "$(fm_independence_recorded_why "$pool")" "$evidence"
+  overall=$(fm_independence_overall_of "$process" "$model" "$vendor" "$pool")
+  fm_independence_record overall "$overall" \
+    "process=$(fm_independence_label "$process") model=$(fm_independence_label "$model") vendor=$(fm_independence_label "$vendor") pool=$(fm_independence_label "$pool")" \
+    "$evidence"
+}
+
+# The reason a dimension read back from a durable record carries. It always says
+# WHERE the value came from, so a reader can never mistake a record of an old
+# observation for a fresh one made against the bytes in front of them.
+fm_independence_recorded_why() {  # <PASS|FAIL|NO_VERIFIER_RAN>
+  case "${1:-}" in
+    PASS|FAIL)
+      printf 'the durable terminal record for these bytes derived this dimension as %s' \
+        "$(fm_independence_label "$1")"
+      ;;
+    *)
+      printf 'the durable terminal record for these bytes carries no observation of this dimension'
+      ;;
+  esac
 }
 
 # fm_independence_overall <records>: echo the overall three-valued result from a
@@ -683,18 +888,40 @@ fm_independence_overall() {
   printf '%s\n' "${1:-}" | sed -n 's/^  independence-overall,\([A-Z_]*\),.*/\1/p' | head -1
 }
 
-# fm_independence_gaps <records>: echo the dimensions that are not independent,
-# each as "<dimension>:<label>", so a refusal can NAME what could not be
-# established instead of reporting a generic failure.
-fm_independence_gaps() {
+# fm_independence_each_dimension <records> [unobserved-word]
+# Echo one TSV row per DIMENSION record in a block this file printed, never the
+# overall one:
+#
+#   <dimension>\t<result>\t<label>\t<reason>
+#
+# THE RECORD SHAPE IS PARSED HERE AND NOWHERE ELSE. Three consumers wanted the
+# same walk - the certification command's human render, the ledger's compact
+# per-task field, and the gap list below - and each had written its own copy of
+# "iterate the independence- lines, strip the prefix, skip overall, map the
+# result onto a word". That is three places to update when the shape moves and
+# three places for a fourth word to appear for a value this library already
+# named, which is the same reason the label mapping itself was centralised.
+# Consumers format this output; they no longer read the record.
+#
+# The optional unobserved word is passed through to fm_independence_label, which
+# owns which of the three values a caller may rename and which it may not.
+fm_independence_each_dimension() {  # <records> [unobserved-word]
   printf '%s\n' "${1:-}" | awk -F, \
+    -v pass="$(fm_independence_label PASS)" \
     -v fail="$(fm_independence_label FAIL)" \
-    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN)" '
+    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN "${2:-}")" '
     /^  independence-/ {
       dim = $1
       sub(/^  independence-/, "", dim)
       if (dim == "overall") next
-      if ($2 == "PASS") next
-      print dim ":" ($2 == "FAIL" ? fail : unobserved)
+      label = ($2 == "PASS" ? pass : ($2 == "FAIL" ? fail : unobserved))
+      printf "%s\t%s\t%s\t%s\n", dim, $2, label, $3
     }'
+}
+
+# fm_independence_gaps <records>: echo the dimensions that are not independent,
+# each as "<dimension>:<label>", so a refusal can NAME what could not be
+# established instead of reporting a generic failure.
+fm_independence_gaps() {
+  fm_independence_each_dimension "${1:-}" | awk -F'\t' '$2 != "PASS" { print $1 ":" $3 }'
 }

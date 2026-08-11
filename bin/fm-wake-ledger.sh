@@ -210,6 +210,13 @@
 #       --critic-branch names WHICH BYTES the reviewing identity is resolved for;
 #       neither can assert what was found there, and there is no argument that
 #       can.
+#   fm-wake-ledger.sh task-record <id>
+#       Print the LAST terminal record's key=value fields for a task, one per
+#       line, and exit non-zero when this ledger holds none. Teardown deletes
+#       state/<id>.meta immediately after writing that record, so this is the
+#       durable home of a finished task's maker identity, delivery mode, pull
+#       request and derived critic independence. bin/fm-certify.sh reads it to
+#       certify a task whose task-local state is gone.
 #   fm-wake-ledger.sh derive <status-file>
 #       Print "<outcome> <outcome_source>" for a task's status log: the LAST
 #       `done:` or `failed:` line decides, and a log with neither prints
@@ -400,27 +407,23 @@ ledger_resolve_critic() {  # <repo> <branch> <maker-harness> <maker-model>
   fm_independence_steps_load "$repo" "$branch" || return 1
   steps=$FM_INDEPENDENCE_STEPS_VAL
   [ -n "$steps" ] || return 1
-  critic=$(fm_independence_critic "$steps") || return 1
+  # The reviewing identity is read from the MEMBER runs only, for the same
+  # reason the derived verdict is: a run the pipeline cancelled or marked failed
+  # never verified these bytes, so recording its reviewer as this task's checker
+  # would name the wrong agent on the terminal line.
+  critic=$(fm_independence_critic "$(fm_independence_members "$steps")") || return 1
   vendor=$(printf '%s' "$critic" | cut -f1)
   model=$(printf '%s' "$critic" | cut -f2)
   dims=$(fm_independence_dimensions "$repo" "$branch" "$mharness" "$mmodel")
   # One compact field per dimension, so the record answers "independent on
   # WHICH dimensions" rather than collapsing four different facts into one
   # word. bin/fm-certify.sh refuses certification on the same derivation, and
-  # the words come from the library that owns the derivation rather than being
-  # restated here - only the unobserved word is this record's own, matching the
-  # "unknown" every other unresolved field on the same line already says.
-  summary=$(printf '%s\n' "$dims" | awk -F, \
-    -v pass="$(fm_independence_label PASS)" \
-    -v fail="$(fm_independence_label FAIL)" \
-    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN unknown)" '
-    /^  independence-/ {
-      dim = $1
-      sub(/^  independence-/, "", dim)
-      if (dim == "overall") next
-      label = ($2 == "PASS" ? pass : ($2 == "FAIL" ? fail : unobserved))
-      out = out (out == "" ? "" : "+") dim ":" label
-    }
+  # both the walk over the record and the words come from the library that owns
+  # them rather than being restated here - only the unobserved word is this
+  # record's own, matching the "unknown" every other unresolved field on the
+  # same line already says.
+  summary=$(fm_independence_each_dimension "$dims" unknown | awk -F'\t' '
+    { out = out (out == "" ? "" : "+") $1 ":" $3 }
     END { print out }')
   printf '%s\t%s\t%s' "${vendor:-unknown}" "${model:-unknown}" "${summary:-unknown}"
 }
@@ -760,6 +763,37 @@ cmd_task() {
     return 1
   }
   return 0
+}
+
+# Echo the key=value tail of the LAST terminal record for <id>, one field per
+# line, and return non-zero when this ledger holds none.
+#
+# WHY A READER EXISTS AT ALL. The terminal record is written immediately before
+# teardown deletes state/<id>.meta, which makes it the only durable home for a
+# finished task's harness, model, delivery mode, pull request and DERIVED critic
+# independence. Every consumer that wants those facts after teardown would
+# otherwise re-implement the line format, and this file is that format's single
+# owner - a second parser is how an append-only evidence file starts being read
+# two different ways.
+#
+# The LAST record wins, matching every other reader here: `sweep` may record a
+# declared failure at declaration time and a later teardown records the same
+# task's release.
+cmd_task_record() {
+  local id=${1:-}
+  [ -n "$id" ] || die "task-record needs a task id"
+  fm_task_id_path_safe "$id" || die "unsafe task id: $id"
+  [ -f "$LEDGER" ] || return 1
+  LC_ALL=C awk -F"$TAB" -v want="task=$id" '
+    $2 == "task" {
+      match_found = 0
+      for (i = 4; i <= NF; i++) if ($i == want) match_found = 1
+      if (!match_found) next
+      last = ""
+      for (i = 4; i <= NF; i++) last = last $i "\n"
+    }
+    END { if (last == "") exit 1; printf "%s", last }
+  ' "$LEDGER"
 }
 
 # --- terminal outcome derivation --------------------------------------------
@@ -1169,10 +1203,11 @@ case "$SUBCOMMAND" in
   drain-record) cmd_drain_record "$@" ;;
   outcome) cmd_outcome "$@" ;;
   task) cmd_task "$@" ;;
+  task-record) cmd_task_record "$@" ;;
   derive) cmd_derive "$@" ;;
   sweep) cmd_sweep "$@" ;;
   reconcile) cmd_reconcile "$@" ;;
   report) cmd_report "$@" ;;
   -h|--help|help) usage ;;
-  *) die "unknown subcommand: $SUBCOMMAND (drain-record outcome task derive sweep reconcile report)" ;;
+  *) die "unknown subcommand: $SUBCOMMAND (drain-record outcome task task-record derive sweep reconcile report)" ;;
 esac
