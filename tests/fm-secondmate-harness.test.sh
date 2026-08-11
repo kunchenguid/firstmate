@@ -891,6 +891,12 @@ SH
   [ "$(meta_field "$meta" effort)" = high ] \
     || fail "OMP secondmate meta did not preserve the selected effort"
   launch=$(cat "$launchlog")
+  [ -s "$w/home/state/sm.busy-gen" ] \
+    || fail "OMP secondmate did not arm a semantic busy generation"
+  [ -s "$w/home/state/sm.omp-ext.ts" ] \
+    || fail "OMP secondmate did not generate its per-task semantic extension"
+  assert_contains "$launch" "$w/home/state/sm.omp-ext.ts" \
+    "OMP secondmate launch did not load its per-task semantic extension"
   assert_contains "$launch" "OMPCODE=1" \
     "OMP secondmate launch did not establish its positive identity marker"
   assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u GROK_HOOK_EVENT" \

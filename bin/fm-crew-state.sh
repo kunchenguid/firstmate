@@ -101,6 +101,7 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+RAW_LAUNCH=$(meta_value raw_launch)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read.
@@ -165,7 +166,7 @@ crew_busy_verdict() {  # <target>
   case "$HARNESS" in
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
-  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40" "$RAW_LAUNCH"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --

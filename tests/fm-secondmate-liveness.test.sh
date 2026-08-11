@@ -46,7 +46,7 @@ TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
 # #{pane_current_command} display-message query answers with the fixed value;
 # every other subcommand is a silent no-op success.
 make_probe_tmux() {
-  local dir=$1 comm=$2 fakebin
+  local dir=$1 comm=$2 window=${3:-win} fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -57,7 +57,7 @@ set -u
     for a in "\$@"; do case "\$a" in *pane_pid*) printf '4242\n'; exit 0 ;; esac; done
     for a in "\$@"; do case "\$a" in *pane_tty*) printf '/dev/pts/42\n'; exit 0 ;; esac; done
     exit 0 ;;
-  list-windows) printf '%s\n' win; exit 0 ;;
+  list-windows) printf '%s\n' '$window'; exit 0 ;;
 esac
 exit 0
 SH
@@ -235,11 +235,35 @@ test_tmux_canonical_omp_accepts_current_endpoint() {
 }
 
 test_tmux_canonical_omp_accepts_proven_clean_shell_exit() {
-  local fb out
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-canonical-omp-shell-exit" zsh)
-  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp' "$ROOT")
+  local dir fb out state target id
+  dir="$TMP_ROOT/tmux-canonical-omp-shell-exit"
+  state="$dir/state"; id=canonical-omp-shell-exit; target="sess:fm-$id"
+  mkdir -p "$state"
+  printf '%s\n' g123 > "$state/$id.busy-gen"
+  printf '%s\n' g123 > "$state/$id.omp-session-stop"
+  fb=$(make_probe_tmux "$dir" zsh "fm-$id")
+  out=$(PATH="$fb:$BASE_PATH" FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1" omp' "$ROOT" "$target")
   [ "$out" = dead ] || fail "a canonical OMP endpoint over a lone shell must classify as cleanly stopped, got '$out'"
-  pass "tmux liveness: canonical OMP accepts only the strict lone-shell stop shape"
+  rm -f "$state/$id.omp-session-stop"
+  out=$(PATH="$fb:$BASE_PATH" FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1" omp' "$ROOT" "$target")
+  [ "$out" = ambiguous ] || fail "a lone shell without observed OMP terminal evidence must remain indeterminate, got '$out'"
+  pass "tmux liveness: canonical OMP clean stop requires terminal evidence and a lone shell"
+}
+
+test_tmux_raw_omp_is_not_verified() {
+  local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-omp" omp)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win raw-omp 1' "$ROOT")
+  [ "$out" = ambiguous ] || fail "a raw OMP launch must not classify as a verified live agent, got '$out'"
+  pass "tmux liveness: raw OMP suppresses verified attribution while raw behavior stays conservative"
+}
+
+test_tmux_omp_endpoint_requires_target_inventory() {
+  local fb out
+  fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-omp-endpoint-unreadable" unreadable)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; if fm_backend_omp_endpoint_allows tmux sess:fm-omp omp; then printf allowed; else printf denied; fi' "$ROOT")
+  [ "$out" = denied ] || fail "an unreadable tmux inventory must not authorize a canonical OMP endpoint"
+  pass "tmux endpoint gate: exact target inventory precedes process identity"
 }
 
 
@@ -719,6 +743,8 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_tmux_canonical_omp_rejects_stale_endpoint
 test_tmux_canonical_omp_accepts_current_endpoint
 test_tmux_canonical_omp_accepts_proven_clean_shell_exit
+test_tmux_raw_omp_is_not_verified
+test_tmux_omp_endpoint_requires_target_inventory
 test_tmux_control_rejects_stale_canonical_omp
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility

@@ -3108,6 +3108,17 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
+test_busy_state_quarantines_raw_omp() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/busy-raw-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"working"}}}' > "$resp/identity.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state herdr default:w1:p2 raw-omp 1' "$ROOT" )
+  [ "$out" = unknown ] || fail "raw OMP must not receive Herdr native busy semantics, got '$out'"
+  pass "Herdr busy: raw OMP suppresses native semantic handling"
+}
+
 
 
 
@@ -3365,6 +3376,31 @@ test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch() {
   pass "Herdr liveness: canonical OMP does not remain live after a non-OMP relaunch"
 }
 
+test_herdr_liveness_rejects_registered_non_omp_for_canonical_omp() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/liveness-canonical-omp-registered-claude" claude working \
+    "$(herdr_other_process_info)" '1 0
+4242 1
+5150 4242' 'S+' omp)
+  [ "$out" = unknown ] || fail "canonical OMP with a registered Claude agent must remain indeterminate, got '$out'"
+  pass "Herdr liveness: canonical OMP rejects a registered non-OMP agent"
+}
+
+test_herdr_liveness_quarantines_raw_omp() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/liveness-raw-omp"; mkdir -p "$dir/canonical" "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/canonical/omp"
+  chmod +x "$dir/canonical/omp"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/2.out"
+  herdr_bun_process_info "$dir/canonical/omp" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$dir/canonical:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 raw-omp 1' "$ROOT" )
+  [ "$out" = unreadable ] || fail "a raw OMP descendant must not become a recoverable live endpoint, got '$out'"
+  pass "Herdr liveness: raw OMP process identity is quarantined before generic mapping"
+}
+
 test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp() {
   local dir out info
   dir="$TMP_ROOT/liveness-canonical-omp-agent-not-found"
@@ -3519,6 +3555,16 @@ test_omp_idle_registration_over_a_lone_shell_is_no_agent() {
   [ "$out" = no-agent ] \
     || fail "the same stale OMP registration reported done must also be a husk, got '$out'"
   pass "herdr agent state: a stale OMP registration over the bare worktree shell classifies no-agent"
+}
+
+test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-canonical-husk-idle" omp idle \
+    "$(omp_lone_shell_process_info 4242)" '1 0
+4242 1' 'S+' omp)
+  [ "$out" = no-agent ] \
+    || fail "canonical OMP over the verified lone shell must be a husk, got '$out'"
+  pass "herdr agent state: canonical OMP accepts only a strictly proven lone-shell exit"
 }
 
 test_omp_idle_registration_over_a_running_bun_stays_live() {
@@ -4927,6 +4973,7 @@ test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_busy_state_quarantines_raw_omp
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
@@ -4942,11 +4989,14 @@ test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch
 test_send_text_submit_rechecks_endpoint_before_literal
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
 test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch
+test_herdr_liveness_rejects_registered_non_omp_for_canonical_omp
+test_herdr_liveness_quarantines_raw_omp
 test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp
 test_herdr_presence_is_checked_before_process_identity
 test_herdr_no_metadata_omp_requires_current_identity
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_over_a_lone_shell_is_no_agent
+test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent
 test_omp_idle_registration_over_a_running_bun_stays_live
 test_omp_idle_registration_over_a_shell_with_a_child_stays_live
 test_omp_idle_registration_with_mismatched_shell_pid_stays_live

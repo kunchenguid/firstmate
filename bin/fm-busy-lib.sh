@@ -29,7 +29,7 @@
 # task's recorded harness classifies unknown, so one adapter's writer can
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
-#   omp-ext          OMP per-task extension (agent_start/session_stop; agent_end/session_shutdown fallbacks)
+#   omp-ext          OMP per-task extension (agent_start; session_stop terminal edge; agent_end/session_shutdown fallbacks)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -842,6 +842,10 @@ fm_busy_grok_tail_busy() {
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [raw-launch]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} raw_launch=${7-}
   local out rc r_state r_source native log endpoint_checked=0
+  if [ "$raw_launch" = 1 ] && { [ "$harness" = omp ] || [ "$harness" = raw-omp ]; }; then
+    printf 'unknown raw-unverified'
+    return 0
+  fi
   if [ "$harness" = omp ] && [ "$raw_launch" != 1 ] \
     && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
     && command -v fm_backend_omp_endpoint_allows >/dev/null 2>&1; then

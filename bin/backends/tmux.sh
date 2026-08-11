@@ -353,8 +353,67 @@ fm_backend_tmux_process_identity() {  # <target> -> harness|shell|other|unknown
   fm_backend_tmux_foreground_process_identity "$1"
 }
 
+fm_backend_tmux_target_inventory_state() {  # <target> -> present|missing|unreadable
+  local target=${1:-} session window windows
+  case "$target" in
+    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
+    *:*) ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+    if printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      printf 'present'
+    else
+      printf 'missing'
+    fi
+    return 0
+  fi
+  case "$windows" in
+    *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+      printf 'missing'
+      ;;
+    *) printf 'unreadable' ;;
+  esac
+}
+
+fm_backend_tmux_classify_process_name_raw() {  # <path> [argv0] -> agent|shell|other
+  local path=${1:-} argv0=${2:-}
+  case "${path##*/}" in
+    omp) printf 'other'; return 0 ;;
+  esac
+  case "${argv0##*/}" in
+    omp) printf 'other'; return 0 ;;
+  esac
+  if fm_harness_omp_script_matches "$path" || fm_harness_omp_script_matches "$argv0"; then
+    printf 'other'
+    return 0
+  fi
+  fm_backend_tmux_classify_process_name "$path" "$argv0"
+}
+
+fm_backend_tmux_omp_terminal_stop_observed() {  # <target>
+  local target=${1:-} window id state generation marker
+  case "$target" in
+    *:fm-*) ;;
+    *) return 1 ;;
+  esac
+  window=${target#*:}
+  id=${window#fm-}
+  [ -n "$id" ] || return 1
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  generation=$(cat "$state/$id.busy-gen" 2>/dev/null) || return 1
+  marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null) || return 1
+  case "$generation:$marker" in
+    *[!A-Za-z0-9._:-]*|:*) return 1 ;;
+  esac
+  [ "$generation" = "$marker" ]
+}
+
 fm_backend_tmux_omp_exited_to_shell() {
   local target=$1 name current count=0
+  fm_backend_tmux_omp_terminal_stop_observed "$target" || return 1
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     count=$((count + 1))
@@ -382,39 +441,18 @@ fm_backend_tmux_omp_exited_to_shell() {
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} comm session window windows inventory_status process_identity
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} comm comm_state inventory_status process_identity
   if [ "$recorded_harness" = 1 ] && [ -z "$raw_launch" ]; then
     raw_launch=1
     recorded_harness=
   fi
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
-  case "$target" in
-    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
+  inventory_status=$(fm_backend_tmux_target_inventory_state "$target")
+  case "$inventory_status" in
+    present) ;;
+    missing) printf 'missing'; return 0 ;;
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
-    esac
-    return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
-  fi
   if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
     && [ "$recorded_harness" != unknown ] && [ "$raw_launch" != 1 ]; then
     process_identity=$(fm_backend_tmux_process_identity "$target")
@@ -447,11 +485,19 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     fg_seen=1
-    case "$(fm_backend_tmux_classify_process_name "$name")" in
-      agent) printf 'alive'; return 0 ;;
-      shell) fg_shell=1 ;;
-      *) fg_other=1 ;;
-    esac
+    if [ "$raw_launch" = 1 ]; then
+      case "$(fm_backend_tmux_classify_process_name_raw "$name")" in
+        agent) printf 'alive'; return 0 ;;
+        shell) fg_shell=1 ;;
+        *) fg_other=1 ;;
+      esac
+    else
+      case "$(fm_backend_tmux_classify_process_name "$name")" in
+        agent) printf 'alive'; return 0 ;;
+        shell) fg_shell=1 ;;
+        *) fg_other=1 ;;
+      esac
+    fi
   done <<EOF
 $foreground
 EOF
@@ -459,7 +505,12 @@ EOF
   argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
+    if [ "$raw_launch" = 1 ]; then
+      if [ "$(fm_backend_tmux_classify_process_name_raw '' "$name")" = agent ]; then
+        printf 'alive'
+        return 0
+      fi
+    elif [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
       printf 'alive'
       return 0
     fi
@@ -471,7 +522,12 @@ EOF
     printf 'unreadable'
     return 0
   }
-  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+  if [ "$raw_launch" = 1 ]; then
+    comm_state=$(fm_backend_tmux_classify_process_name_raw "$comm")
+  else
+    comm_state=$(fm_backend_tmux_classify_process_name "$comm")
+  fi
+  if [ "$comm_state" = agent ]; then
     printf 'alive'
     return 0
   fi
@@ -488,7 +544,7 @@ EOF
   case "$comm" in
     '') printf 'unreadable'; return 0 ;;
   esac
-  case "$(fm_backend_tmux_classify_process_name "$comm")" in
+  case "$comm_state" in
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac

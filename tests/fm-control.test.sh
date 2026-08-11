@@ -96,6 +96,12 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
+        if [ "$(cat "$D/command" 2>/dev/null)" = omp ] \
+          && [ -n "${FM_FAKE_TASK_ID:-}" ]; then
+          gen=$(cat "$FM_HOME/state/$FM_FAKE_TASK_ID.busy-gen" 2>/dev/null || true)
+          [ -n "$gen" ] \
+            && printf '%s\n' "$gen" > "$FM_HOME/state/$FM_FAKE_TASK_ID.omp-session-stop"
+        fi
         printf 'zsh' > "$D/command"
       fi
       case "$payload" in
@@ -122,6 +128,7 @@ case "${1:-}" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+        *pane_tty*) printf '/dev/fm-control-fake-tty\n'; exit 0 ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
@@ -146,6 +153,20 @@ fi
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  -t)
+    printf '100 100 100 %s\n' "$(cat "$FM_FAKE_DIR/command")"
+    ;;
+  -p)
+    cat "$FM_FAKE_DIR/command"
+    printf '\n'
+    ;;
+esac
+SH
+  chmod +x "$fb/ps"
   printf '%s\n' "$fb"
 }
 
@@ -184,6 +205,7 @@ add_task() {
     echo "effort=default"
     [ "$backend" = tmux ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
+  [ "$harness" = omp ] && printf 'control-test-gen\n' > "$home/state/$id.busy-gen"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
 }
@@ -192,7 +214,10 @@ add_task() {
 # the stubbed provider on PATH. Echoes combined output; returns its exit code.
 run_control() {
   local dir=$1; shift
+  local task_id=${1:-}
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_FAKE_TASK_ID="$task_id" \
+    FM_TMUX_PS_BIN="$dir/fakebin/ps" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
@@ -202,7 +227,9 @@ run_control() {
 }
 
 alive_as() {  # <case-dir> <command-name>
-  printf '%s' "$2" > "$1/fake/command"
+  local identity=$2
+  identity=$(fm_control_harness_family "$identity" 2>/dev/null) || identity=$2
+  printf '%s' "$identity" > "$1/fake/command"
 }
 
 literals() {  # <case-dir>

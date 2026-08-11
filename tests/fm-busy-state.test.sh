@@ -357,6 +357,19 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+test_raw_omp_busy_is_unverified() {
+  local state out
+  state=$(new_state_dir raw-omp)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr s:p raw-omp t1 "$state" '' 1)
+  [ "$out" = "unknown raw-unverified" ] || fail "raw OMP must not use native busy, got '$out'"
+  out=$(fm_busy_classify herdr s:p omp t1 "$state" '' 1)
+  [ "$out" = "unknown raw-unverified" ] || fail "raw OMP metadata must not use semantic busy, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "raw OMP busy classification stays unverified at the shared boundary"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -419,6 +432,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_raw_omp_busy_is_unverified
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

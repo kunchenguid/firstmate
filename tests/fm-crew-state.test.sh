@@ -865,6 +865,25 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr's native busy verdict reads working with no record present"
 }
 
+test_no_run_raw_omp_does_not_use_native_busy() {
+  command -v jq >/dev/null 2>&1 || { pass "raw OMP busy quarantine skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case raw-omp)
+  make_repo_on_branch "$d/wt" fm/feat-raw-omp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-raw-omp.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=raw-omp" "raw_launch=1"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  local out; out=$(run_crew_state "$d" feat-raw-omp)
+  assert_contains "$out" "state: unknown" "raw OMP must not become working through Herdr native busy"
+  assert_not_contains "$out" "state: working" "raw OMP must not use verified busy semantics"
+  pass "raw OMP metadata reaches crew-state and suppresses native busy semantics"
+}
+
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
 # herdr's agent.get reports generation state ("working" only while the model is
 # actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
@@ -1337,6 +1356,7 @@ test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_raw_omp_does_not_use_native_busy
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log

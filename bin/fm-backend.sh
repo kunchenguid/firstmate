@@ -648,7 +648,10 @@ fm_backend_current_omp_identity() {  # <backend> <target>
       [ "$(fm_backend_herdr_omp_process_identity \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = omp ]
       ;;
-    tmux) fm_backend_tmux_foreground_omp_identity "$target" ;;
+    tmux)
+      [ "$(fm_backend_tmux_target_inventory_state "$target")" = present ] || return 1
+      fm_backend_tmux_foreground_omp_identity "$target"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -663,7 +666,11 @@ fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness]
       state=$(fm_backend_herdr_process_identity \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
       ;;
-    tmux) state=$(fm_backend_tmux_process_identity "$target") ;;
+    tmux)
+      state=$(fm_backend_tmux_target_inventory_state "$target")
+      [ "$state" = present ] || { printf '%s' "$state"; return 0; }
+      state=$(fm_backend_tmux_process_identity "$target")
+      ;;
     *) state=other ;;
   esac
   printf '%s' "$state"
@@ -865,7 +872,7 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] 
     return 0
   fi
   case "$backend" in
-    herdr) fm_backend_herdr_busy_state "$target" ;;
+    herdr) fm_backend_herdr_busy_state "$target" "$recorded_harness" "$raw_launch" ;;
     *) printf 'unknown' ;;
   esac
 }

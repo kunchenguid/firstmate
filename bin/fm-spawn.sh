@@ -1137,7 +1137,7 @@ launch_template() {
       ;;
     omp)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u GROK_HOOK_EVENT OMPCODE=1 omp __MODELFLAG____EFFORTFLAG__--approval-mode yolo -e __OMPTURNEND__ -e __OMPWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u GROK_HOOK_EVENT OMPCODE=1 omp __MODELFLAG____EFFORTFLAG__--approval-mode yolo -e __OMPEXT__ -e __OMPTURNEND__ -e __OMPWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
         printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u GROK_HOOK_EVENT OMPCODE=1 omp __MODELFLAG____EFFORTFLAG__--approval-mode yolo -e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
@@ -2355,7 +2355,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  rm -f "$STATE_REAL/$ID.omp-session-stop"
+fi
+if [ "$KIND" != secondmate ] || { [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; }; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -2528,6 +2531,13 @@ const touchTurnEnd = () =>
   new Promise<void>((resolve) => {
     execFile("touch", ["$TURNEND"], () => resolve());
   });
+const recordSessionStop = () =>
+  new Promise<void>((resolve) => {
+    execFile("sh", [
+      "-c", "printf '%s\\n' \"\$1\" > \"\$2\"",
+      "fm-omp-session-stop", "$BUSY_GEN", "$STATE_REAL/$ID.omp-session-stop",
+    ], () => resolve());
+  });
 let runSettled = false;
 const settleRun = async (event: string) => {
   if (runSettled) return;
@@ -2540,7 +2550,10 @@ export default function (omp: any) {
     runSettled = false;
     return busyEvent("busy", "agent-start");
   });
-  omp.on("session_stop", () => settleRun("session-stop"));
+  omp.on("session_stop", async () => {
+    await recordSessionStop();
+    await settleRun("session-stop");
+  });
   omp.on("agent_end", () => settleRun("agent-end"));
   omp.on("session_shutdown", () => settleRun("session-shutdown"));
 }

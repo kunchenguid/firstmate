@@ -303,7 +303,14 @@ fm_backend_validate "$BACKEND" || exit 1
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T" "$RECORDED_HARNESS" "$RAW_LAUNCH"
+  local state fallback
+  state=$(fm_backend_agent_state "$BACKEND" "$T" "$RECORDED_HARNESS" "$RAW_LAUNCH")
+  if [ "$state" = ambiguous ] && [ "$BACKEND" = tmux ] \
+    && [ "$RECORDED_HARNESS" != omp ] && [ "$RAW_LAUNCH" != 1 ]; then
+    fallback=$(fm_backend_agent_state "$BACKEND" "$T" "" "$RAW_LAUNCH")
+    [ "$fallback" = dead ] && state=dead
+  fi
+  printf '%s' "$state"
 }
 
 busy_verdict() {
@@ -316,7 +323,12 @@ wait_agent_state() {  # <timeout> <wanted>...
   local timeout=$1 state want elapsed=0
   shift
   while :; do
-    state=$(agent_state)
+    if [ "${FM_CONTROL_POST_EXIT:-0}" = 1 ] \
+      && [ "$BACKEND" = tmux ] && [ "$RECORDED_HARNESS" != omp ]; then
+      state=$(fm_backend_agent_state "$BACKEND" "$T" "" "$RAW_LAUNCH")
+    else
+      state=$(agent_state)
+    fi
     for want in "$@"; do
       if [ "$state" = "$want" ]; then
         printf '%s' "$state"
@@ -474,7 +486,7 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+  state=$(FM_CONTROL_POST_EXIT=1 wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
