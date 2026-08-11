@@ -147,16 +147,9 @@ pass "real herdr: a registration left behind over a bare shell reads dead, so ex
 # so no lifecycle verb can act as though the endpoint were free. The occupant
 # ignores SIGINT, exactly like a real agent surviving its interrupt key.
 
-fm_herdr_lab_cli "$SESSION" pane run "$PANE_ID" \
-  "sh -c 'trap \"\" INT; while :; do sleep 1; done'" >/dev/null 2>&1 \
-  || fail "could not start the pane occupant"
+herdr_occupy_pane "$SESSION" "$PANE_ID" || fail "could not occupy the task pane"
 
-STATE=
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
-  [ "$STATE" = alive ] && break
-  sleep 0.3
-done
+STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 [ "$STATE" = alive ] \
   || fail "a registered agent whose process occupies the pane's terminal must read alive, got '$STATE'"
 pass "real herdr: a registered agent occupying the pane's terminal still reads alive"

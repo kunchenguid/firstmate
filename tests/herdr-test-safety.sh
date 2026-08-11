@@ -40,3 +40,40 @@ herdr_refuse_if_default() { # <session>
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
+
+# herdr_occupy_pane: give <pane-id> a real foreground process, so a fixture
+# that means "a live agent is here" is genuinely live.
+#
+# `herdr pane report-agent` registers an agent RECORD, and a record is not
+# evidence that an agent PROCESS is running: no herdr agent_status reports that
+# an agent exited, so the adapter's liveness classifier corroborates every
+# registration against the pane's real terminal ownership
+# (bin/backends/herdr.sh's fm_backend_herdr_pane_agent_state). A registration
+# left over a bare idle shell is therefore correctly classified agent-free.
+# A live-agent fixture must occupy the terminal as well as register, or it
+# asserts nothing - and worse, it can pass by accident on a pane whose shell has
+# not settled yet, which is a silently vacuous test rather than a failing one.
+#
+# The occupant ignores SIGINT so it also models an agent surviving its
+# interrupt key. This waits for the pane to actually take it up and returns
+# non-zero if it never does, so a caller can never proceed on an unoccupied
+# pane believing it is live.
+herdr_occupy_pane() { # <session> <pane-id>
+  local session=$1 pane=$2 attempt=0 info shell_pid foreground_pgid
+  local max_attempts=${HERDR_OCCUPY_PANE_POLLS:-40}
+  fm_herdr_lab_cli "$session" pane run "$pane" \
+    "sh -c 'trap \"\" INT; while :; do sleep 1; done'" >/dev/null 2>&1 || return 1
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    info=$(fm_herdr_lab_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || info=
+    shell_pid=$(printf '%s' "$info" | jq -r \
+      '.result.process_info.shell_pid // empty' 2>/dev/null)
+    foreground_pgid=$(printf '%s' "$info" | jq -r \
+      '.result.process_info.foreground_process_group_id // empty' 2>/dev/null)
+    if [ -n "$shell_pid" ] && [ -n "$foreground_pgid" ] && [ "$shell_pid" != "$foreground_pgid" ]; then
+      return 0
+    fi
+    sleep 0.25
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
