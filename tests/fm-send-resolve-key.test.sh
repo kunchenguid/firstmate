@@ -132,6 +132,35 @@ test_answer_send_closes_open_decision() {
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
 }
 
+# The reported failure behind issue #2109: a worker that put the colon first
+# (needs-decision: [key=X] ...) had its key silently folded to "default", so
+# the answer's --resolve-key X refused with "no open decision or blocker with
+# that key". The stated key must be honored in that position too, end to end
+# through the real send.
+test_colon_first_key_position_is_answerable() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/colon-first"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home colon-first)
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'needs-decision: [key=seam-max-bound] cap the seam at 4 or 8\n' > "$home/state/t8.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=seam-max-bound]' >/dev/null \
+    || fail "precondition: the colon-first decision should list as open under its stated key: $out"
+
+  run_send "$fb" "$home" "$log" t8 --resolve-key seam-max-bound "cap it at 4"; rc=$?
+  expect_code 0 "$rc" "answering a colon-first stated key should succeed, not refuse as unknown"
+  grep -F 'resolved [key=seam-max-bound]: answered: cap it at 4' "$home/state/t8.status" >/dev/null \
+    || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t8.status")"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the answered colon-first decision still lists as open: $out"
+  fi
+  pass "fm-send --resolve-key: a colon-first stated key is open under that key and answerable"
+}
+
 test_answer_starts_work_never_orphans() {
   local dir fb log home rc out
   dir="$TMP_ROOT/starts-work"; mkdir -p "$dir"
@@ -396,6 +425,7 @@ test_flag_misuse_refuses() {
 }
 
 test_answer_send_closes_open_decision
+test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
