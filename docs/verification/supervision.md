@@ -59,7 +59,7 @@ The third is recorded below.
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
-| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
+| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`; the adapter uses the continuation invocation and restored entries to deliver wrapper `source=resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
@@ -79,8 +79,8 @@ Compacted from 7,697 tokens
 compact
 ```
 
-Pi disagrees with Claude and Codex on `resume`: a NEW Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-That is correct for the run tier rather than a problem, because a new process holds no lock and must take the helm; the routing table in [`../sessionstart-nudge.md`](../sessionstart-nudge.md#source-routing) is written to whichever source each harness actually reports.
+Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
+The adapter therefore refines startup-reason `-c`/`--continue`, resume selection, explicit session loading, forking, or an observably restored entry set to the existing context-preserving wrapper source. A continuation never records or replaces the true-start baseline; if the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
 
 ### Post-start instruction refresh
 
@@ -103,7 +103,7 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 ```
 
 This is live coverage only for Pi compaction.
-The portable session-start tests cover the baseline and source-routing behavior.
+The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
 Pi compaction is the only supported stale-cache refresh pair. Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook

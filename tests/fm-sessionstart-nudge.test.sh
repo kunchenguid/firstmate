@@ -321,6 +321,67 @@ test_run_clear_rejects_previous_owner_completion() {
   pass "run wrapper: clear accepts completion only from the current harness"
 }
 
+test_pi_startup_classifies_cli_and_loaded_session_continuations() {
+  local fixture out expected actual status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi continuation classification test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-continuation-source"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_HOME:?}/state/sources"
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?continuation=${Date.now()}`);
+extension.default(pi);
+const fire = async (args, entries = []) => {
+  process.argv.splice(1, process.argv.length, "pi", ...args);
+  await handlers.get("session_start")(
+    { reason: "startup" },
+    { sessionManager: { getEntries: () => entries } },
+  );
+};
+await fire([]);
+await fire(["-c"]);
+await fire(["--continue"]);
+await fire(["--session", "session-id"]);
+await fire(["--fork=session-id"]);
+await fire([], [{ type: "message" }]);
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi continuation classification"
+  [ -z "$out" ] || fail "Pi continuation classification printed output: $out"
+  expected=$(printf '%s\n' \
+    '--source startup' \
+    '--source resume' \
+    '--source resume' \
+    '--source resume' \
+    '--source fork' \
+    '--source resume')
+  actual=$(cat "$fixture/state/sources")
+  [ "$actual" = "$expected" ] \
+    || fail "Pi continuation classification produced unexpected sources: $actual"
+  pass "Pi maps CLI and loaded-session continuations away from true startup"
+}
+
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
   local fixture out status=0
   command -v node >/dev/null 2>&1 || {
@@ -361,7 +422,10 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);
 extension.default(pi);
-await handlers.get("session_start")({ reason: "startup" });
+await handlers.get("session_start")(
+  { reason: "startup" },
+  { sessionManager: { getEntries: () => [] } },
+);
 if (messages.length !== 1) throw new Error(`expected one message, got ${messages.length}`);
 const content = messages[0].content;
 if (!content.includes("PI_LARGE_DIGEST_PREFIX")) throw new Error("digest prefix was lost");
@@ -465,4 +529,5 @@ test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
+test_pi_startup_classifies_cli_and_loaded_session_continuations
 test_pi_large_sessionstart_digest_is_delivered_loudly

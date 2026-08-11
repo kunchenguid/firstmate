@@ -1986,6 +1986,12 @@ EOF
 FIRSTMATE_TEST_INSTRUCTION=updated
 The complete updated instruction must survive every stale rebuild.
 EOF
+  resume_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source resume)
+  assert_not_contains "$resume_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a context-preserving continuation emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a context-preserving continuation rebased the true-start baseline"
+
   compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
   assert_contains "$compact_first" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
     "a drifted Pi compact did not emit the replacement instructions"
@@ -2010,14 +2016,11 @@ EOF
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
     || fail "a clear rebuild rebased the original-session baseline"
 
-  resume_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source resume)
   reset_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source reset)
-  assert_not_contains "$resume_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
-    "resume, which has no context-reset delivery path, emitted a replacement contract"
   assert_not_contains "$reset_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
     "an unrecognized reset source emitted a replacement contract"
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
-    || fail "resume or reset rebased the original-session baseline"
+    || fail "reset rebased the original-session baseline"
 
   rm -f "$home/state/.session-start-agents-baseline"
   compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)

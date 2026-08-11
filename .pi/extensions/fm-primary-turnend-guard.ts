@@ -60,11 +60,21 @@ function markLoaded(): void {
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
 // separate session_compact event fires after a compaction. "new" is Pi's /clear
-// (a fresh session in the SAME process, so the fleet lock is still ours), while
-// reload, resume, and fork all keep prior context. bin/fm-sessionstart-run.sh
-// owns what each source means; this maps Pi's vocabulary onto its --source
-// names and injects whatever it prints.
+// while reload, resume, and fork all keep prior context.
 const sessionstartDeliveryBytes = 512 * 1024;
+
+function startupRebuildSource(hasRestoredEntries: boolean): "resume" | "fork" | undefined {
+  const args = process.argv.slice(2);
+  for (const arg of args) {
+    if (arg === "--fork" || arg.startsWith("--fork=")) return "fork";
+    if (
+      arg === "-c" || arg === "--continue" ||
+      arg === "-r" || arg === "--resume" ||
+      arg === "--session" || arg.startsWith("--session=")
+    ) return "resume";
+  }
+  return hasRestoredEntries ? "resume" : undefined;
+}
 const sessionstartTruncatedMarker =
   "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
   "Treat omitted context as unread and inspect the named files directly before acting on it.";
@@ -167,9 +177,12 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", async (event) => {
+  pi.on?.("session_start", async (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
-    const source = { startup: "startup", new: "clear", resume: "resume", fork: "fork" }[reason];
+    const restoredEntries = reason === "startup" && ctx.sessionManager.getEntries().length > 0;
+    const source = reason === "startup"
+      ? startupRebuildSource(restoredEntries) ?? "startup"
+      : { new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
     if (!source) return;
     await injectSessionstart(pi, source);
