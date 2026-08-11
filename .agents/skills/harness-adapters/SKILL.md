@@ -357,6 +357,7 @@ The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.
 The tracked Claude Stop hooks skip themselves under Grok (`GROK_AGENT`, `GROK_WORKSPACE_ROOT`, or harness ancestry via `fm-harness.sh`), because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path; Grok often omits `GROK_AGENT` on Stop hooks (that marker is for tool children), so ancestry is required.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
+For Grok background-notify completions around `bin/fm-watch-arm.sh`, drain and re-arm exactly as the supervision protocol requires, but do not compose a captain-chat acknowledgement for an empty wake drain or other non-actionable supervision tick.
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 
