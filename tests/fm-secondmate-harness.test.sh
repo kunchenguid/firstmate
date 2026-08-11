@@ -578,6 +578,10 @@ meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 make_launch_capturing_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
+  # This fixture builds its fakebin directly rather than through fm_fakebin, so
+  # it needs the treehouse stub explicitly: without it a crew spawn reaches the
+  # real binary and leases a real pool slot for a throwaway repo.
+  fm_fake_treehouse "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

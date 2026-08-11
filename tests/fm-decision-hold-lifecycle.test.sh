@@ -27,7 +27,8 @@ make_home() {  # <name>
 ## Done
 EOF
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$home"
 }
 
@@ -426,7 +427,8 @@ test_secondmate_hold_stays_in_authoritative_home() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse "$fakebin"
   origin=sample-mate-review
   mkdir -p "$mate/data/$origin"
   tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null
@@ -550,8 +552,138 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
-test_uninventoried_report_decision_refuses_completion
+# An untagged needs-decision or blocked event carries the reserved key "default",
+# which the documented worker paths close: a bare resolved: event, an explicitly
+# keyed resolved [key=default] event, or a captain hold registered under "default".
+# Locks in that all three still work, so a tightened completion gate can never make
+# a decision that was actually dealt with unclosable.
+test_untagged_decision_closes_through_every_documented_path() {
+  local home id open
+  home=$(make_home untagged-close-paths)
+  for id in sample-bare-close sample-keyed-close sample-hold-close; do
+    mkdir -p "$home/data/$id"
+    tasks_in "$home" add "$id" "Investigate $id" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create $id fixture"
+    write_origin_meta "$home" "$id"
+    printf '# %s\n\nThe evidence is complete.\n' "$id" > "$home/data/$id/report.md"
+  done
 
+  printf 'needs-decision: choose route A or route B\nresolved: the captain chose route A\n' \
+    > "$home/state/sample-bare-close.status"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/sample-bare-close.status")
+  [ -z "$open" ] || fail "a bare resolved event did not close an untagged decision: $open"
+  run_decisions "$home" complete sample-bare-close --none >/dev/null \
+    || fail "an untagged decision closed by a bare resolved event blocked completion"
+
+  printf 'needs-decision: choose route A or route B\nresolved [key=default]: the captain chose route A\n' \
+    > "$home/state/sample-keyed-close.status"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/sample-keyed-close.status")
+  [ -z "$open" ] || fail "an explicit resolved [key=default] event did not close an untagged decision: $open"
+  run_decisions "$home" complete sample-keyed-close --none >/dev/null \
+    || fail "an untagged decision closed by a keyed resolved event blocked completion"
+
+  printf 'needs-decision: choose route A or route B\n' > "$home/state/sample-hold-close.status"
+  run_decisions "$home" hold sample-hold-close default \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample >/dev/null \
+    || fail "an untagged decision could not be registered under its default key"
+  run_decisions "$home" complete sample-hold-close default >/dev/null \
+    || fail "an untagged decision with a registered hold blocked completion"
+  run_decisions "$home" verify sample-hold-close >/dev/null \
+    || fail "an untagged decision with a registered hold blocked verification"
+  run_teardown "$home" sample-hold-close >/dev/null 2> "$home/untagged-teardown.err" \
+    || fail "an inventoried untagged decision blocked teardown: $(cat "$home/untagged-teardown.err")"
+  pass "an untagged decision closes through every documented worker and hold path"
+}
+
+# Every untagged decision on one investigation collapses onto the single reserved
+# key "default", so a SECOND untagged decision lands on an identity the first one
+# already spent. Completion accepted that reused key against the earlier hold and
+# released the source with the newer captain decision durably owned by nobody.
+test_second_untagged_decision_cannot_reuse_a_spent_identity() {
+  local home id hold rc open show
+  home=$(make_home spent-untagged-identity)
+  id=sample-spent-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample routing" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation fixture"
+  write_origin_meta "$home" "$id"
+  printf '# Sample routing review\n\nThe evidence is complete.\n' > "$home/data/$id/report.md"
+  printf 'needs-decision: choose route north or route south\n' > "$home/state/$id.status"
+
+  hold=$(run_decisions "$home" hold "$id" default \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the first untagged decision"
+  run_decisions "$home" complete "$id" default >/dev/null \
+    || fail "the first untagged decision could not be inventoried"
+  tasks_in "$home" add sample-route-work "Apply the selected sample route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create dependent work fixture"
+  printf 'Use route north for the sample system.\n' > "$home/first-decision.txt"
+  run_decisions "$home" resolve "$id" default --decision-file "$home/first-decision.txt" \
+    --routed-to sample-route-work >/dev/null \
+    || fail "could not resolve the first untagged decision"
+
+  # A second, genuinely different captain choice, written the documented untagged way.
+  printf 'needs-decision: choose vendor A or vendor B\n' >> "$home/state/$id.status"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  assert_contains "$open" "choose vendor A or vendor B" \
+    "the second untagged decision must be open in the authoritative fold"
+
+  if run_decisions "$home" hold "$id" default \
+    --title "Choose the sample vendor" --reason "captain vendor choice pending" --repo sample \
+    > "$home/spent-hold.out" 2> "$home/spent-hold.err"; then
+    fail "a spent decision identity accepted a second, different decision"
+  fi
+  if run_decisions "$home" complete "$id" --none \
+    > "$home/spent-none.out" 2> "$home/spent-none.err"; then
+    fail "completion accepted a second untagged decision against the spent default identity"
+  fi
+  assert_grep "spent identity" "$home/spent-none.err" "the refusal must name the spent identity"
+  if run_decisions "$home" complete "$id" default \
+    > "$home/spent-key.out" 2> "$home/spent-key.err"; then
+    fail "completion accepted the spent default key when it was supplied explicitly"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Use route north" "the earlier resolution must stay bound to its own decision"
+  assert_not_contains "$show" "vendor" "the newer decision must not be folded into the resolved hold"
+
+  set +e
+  run_teardown "$home" "$id" > "$home/spent-teardown.out" 2> "$home/spent-teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown released a source whose second untagged decision was unowned"
+  assert_grep "REFUSED" "$home/spent-teardown.err" "teardown refusal must be explicit"
+  assert_present "$home/state/$id.meta" "refused teardown must preserve investigation metadata"
+  assert_present "$home/data/$id/report.md" "refused teardown must preserve the investigation report"
+
+  # The documented way out: close the spent copy and reopen under an unused key.
+  printf 'resolved [key=default]: superseded, reopened as vendor\n' >> "$home/state/$id.status"
+  printf 'needs-decision [key=vendor]: choose vendor A or vendor B\n' >> "$home/state/$id.status"
+  if run_decisions "$home" complete "$id" --none \
+    > "$home/rekeyed-none.out" 2> "$home/rekeyed-none.err"; then
+    fail "the reopened decision released completion before it had a captain hold"
+  fi
+  run_decisions "$home" hold "$id" vendor \
+    --title "Choose the sample vendor" --reason "captain vendor choice pending" --repo sample >/dev/null \
+    || fail "the reopened decision could not claim its own durable identity"
+  run_decisions "$home" complete "$id" vendor >/dev/null \
+    || fail "the reopened decision could not be inventoried"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the reopened decision blocked verification after inventory"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/rekeyed-teardown.err" \
+    || fail "teardown stayed blocked after the second decision was durably owned: $(cat "$home/rekeyed-teardown.err")"
+  show=$(tasks_in "$home" show "$id-decision-vendor" --full)
+  assert_contains "$show" "state: queued" "the reopened captain decision must survive teardown"
+  assert_contains "$show" "held: yes" "the reopened captain decision must stay held"
+  pass "a second untagged decision cannot reuse a spent identity and clears through an unused key"
+}
+
+test_uninventoried_report_decision_refuses_completion
+test_untagged_decision_closes_through_every_documented_path
+test_second_untagged_decision_cannot_reuse_a_spent_identity
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction

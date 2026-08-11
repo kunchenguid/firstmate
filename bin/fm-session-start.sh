@@ -681,7 +681,16 @@ for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
   id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
+  # The crew name is a readable handle for chat and for glancing at a busy
+  # screen; the id stays the identity everywhere. Derived, never stored, and
+  # deliberately best-effort: a missing or failing fm-name.sh must never be able
+  # to break session start, so the header falls back to the bare id.
+  name=$("$SCRIPT_DIR/fm-name.sh" "$id" 2>/dev/null) || name=""
+  if [ -n "$name" ]; then
+    printf '\n--- %s (%s) ---\n' "$id" "$name"
+  else
+    printf '\n--- %s ---\n' "$id"
+  fi
   cat "$meta"
 
   window=$(fm_meta_get "$meta" window)

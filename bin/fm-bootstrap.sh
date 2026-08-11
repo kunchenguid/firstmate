@@ -150,6 +150,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
@@ -685,12 +687,9 @@ secondmate_liveness_one() {  # <meta> <id>
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
-    *)
-      case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
-      ;;
-  esac
+  if ! fm_control_harness_state_recovery_grade "$harness"; then
+    case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
+  fi
   case "$agent_state" in
     alive)
       if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
@@ -997,7 +996,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","muse"] | index($h);
+def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cline","cursor-agent","copilot","muse","agy"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1005,8 +1004,11 @@ crew_dispatch_validate() {
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "cline" then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "copilot" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" then false
+      elif $h == "agy" then (["low","medium","high"] | index($e))
+      elif $h == "opencode" or $h == "kimi" or $h == "cursor-agent" then false
       else true
       end;
     def profiles($value):
@@ -1020,6 +1022,15 @@ crew_dispatch_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
+    def malformed_provider($items):
+      ($items | any(has("provider") and (((.provider | type) != "string") or (.provider | length) == 0)));
+    def routing_setting_ok($key; $value):
+      if ($value | type) != "number" or ($value | floor) != $value then false
+      elif $key == "reservePercent" then $value >= 0 and $value <= 99
+      elif $key == "telemetryMaxAgeSeconds" then $value >= 1 and $value <= 3600
+      elif $key == "cooldownSeconds" then $value >= 60 and $value <= 86400
+      else false
+      end;
     def bad_efforts:
       configured_profiles
       | map({h: .harness, e: .effort})
@@ -1029,6 +1040,11 @@ crew_dispatch_validate() {
       | map("\(.h):\(.e)")
       | unique;
     if type != "object" then "top-level value must be an object"
+    elif has("subscriptionRouting") and (.subscriptionRouting | type) != "object" then "subscriptionRouting must be an object"
+    elif has("subscriptionRouting") and ([.subscriptionRouting | keys[] | . as $key | select((["reservePercent","telemetryMaxAgeSeconds","cooldownSeconds"] | index($key)) == null)] | length) > 0 then
+      "subscriptionRouting has unknown field: " + ([.subscriptionRouting | keys[] | . as $key | select((["reservePercent","telemetryMaxAgeSeconds","cooldownSeconds"] | index($key)) == null)] | sort | join(", "))
+    elif has("subscriptionRouting") and ([.subscriptionRouting | to_entries[] | select(. as $entry | routing_setting_ok($entry.key; $entry.value) | not)] | length) > 0 then
+      "subscriptionRouting setting is out of range: " + ([.subscriptionRouting | to_entries[] | select(. as $entry | routing_setting_ok($entry.key; $entry.value) | not) | .key] | sort | join(", "))
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
@@ -1036,6 +1052,7 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif malformed_provider([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile provider must be a non-empty string when present"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
@@ -1044,6 +1061,7 @@ crew_dispatch_validate() {
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif has("default") and malformed_provider([profiles(.default)[]?]) then "default profile provider must be a non-empty string when present"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
     else
       (configured_profiles
@@ -1051,7 +1069,13 @@ crew_dispatch_validate() {
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
+      | (configured_profiles | map(.provider? // empty) | map(. as $provider | select((["claude","codex","grok"] | index($provider)) == null)) | unique) as $bad_providers
+      | (configured_profiles | map(select(.harness == "kimi" or .provider == "kimi")) | length) as $bad_kimi_routes
+      | (configured_profiles | map(select((.harness == "claude" or .harness == "codex" or .harness == "grok") and .provider? != null and .provider != .harness) | "\(.harness):\(.provider)") | unique) as $mismatched_native_providers
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
+        elif $bad_kimi_routes > 0 then "Kimi is unsupported for subscription dispatch"
+        elif ($mismatched_native_providers | length) > 0 then "native harness/provider mismatch: " + ($mismatched_native_providers | join(", "))
+        elif ($bad_providers | length) > 0 then "unsupported subscription provider: " + ($bad_providers | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
         else empty
         end

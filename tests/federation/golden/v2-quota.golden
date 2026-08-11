@@ -1,0 +1,5 @@
+SURFACE  HEADROOM  STATUS     SOURCE   NOTE
+claude   1%        fresh      oauth    observable
+codex    90%       fresh      cli-rpc  observable
+copilot  88%       logged_in  custom   test
+cursor   55%       logged_in  custom   test

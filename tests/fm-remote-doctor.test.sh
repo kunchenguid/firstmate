@@ -39,6 +39,7 @@ new_case() {
   local platform=$1 want_herdr=${2:-with-herdr} want_gui=${3:-gui}
   unset CASE_REMOTE_JOB_ACTIVE
   unset CASE_PLATFORM_OVERRIDE
+  unset CASE_BASH_ENV
   CASE_N=$((CASE_N + 1))
   CASE_DIR="$TMP_ROOT/case$CASE_N"
   CASE_BIN="$CASE_DIR/bin"
@@ -220,7 +221,9 @@ doctor() {
     HOME="$CASE_HOME" \
     FM_HOME="$CASE_PROJECT_HOME" \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
+    BASH_ENV="${CASE_BASH_ENV:-}" \
     FM_FAKE_STATE="$CASE_STATE" \
+    FM_FAKE_CASE_BIN="$CASE_BIN" \
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \
     FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG" \
     FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING" \
@@ -519,6 +522,36 @@ pass "a non-darwin host skips launch agents and starts its herdr server directly
 # --- --fix may add only owned wrappers for version-manager tools -------------
 
 new_case Linux with-herdr no-gui
+CASE_BASH_ENV="$CASE_STATE/hide-host-harnesses.bash"
+cat > "$CASE_BASH_ENV" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in
+      claude|codex|opencode|pi|pi-signed|grok|kimi)
+        local old_ifs dir candidate
+        old_ifs=$IFS
+        IFS=:
+        for dir in $PATH; do
+          IFS=$old_ifs
+          candidate="$dir/$2"
+          case "$candidate" in
+            "$HOME/.local/bin/"*|"$FM_FAKE_CASE_BIN/"*)
+              if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+              fi
+              ;;
+          esac
+          IFS=:
+        done
+        IFS=$old_ifs
+        return 1
+        ;;
+    esac
+  fi
+  builtin command "$@"
+}
+SH
 MANAGER_BIN="$CASE_HOME/.nvm/versions/node/v24/bin"
 mkdir -p "$MANAGER_BIN"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/codex"

@@ -247,6 +247,7 @@ If its first reportable event is \`working [key=<work-slug>]: {material phase}\`
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 \`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
 The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
+Give every escalation after your first one its own \`[key=<slug>]\`, because all unkeyed escalations share one identity and a second one cannot be tracked separately.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -298,6 +299,13 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Shared worker-safety rules, defined once and referenced by both the scout
+# and ship Rules sections below (one-owner rule; firstmate-coding-guidelines).
+RULE_NO_PROMPT="8. A decision above your authority is reported only through rule 6's status-file mechanism, then you stop.
+   Never render it as an interactive question, confirmation, menu, or any other construct that waits on a human reply - nobody reads this pane, so a prompt just burns your window idling for a reply that never comes."
+RULE_NO_POLL="9. Never arm your own watch, poll, sleep, or retry loop to wait on a step you already handed off, such as a validation run or CI.
+   Firstmate already supervises every task centrally, and a worker-side loop burns turns for no signal firstmate lacks - follow that step's own response flow, or report and stop."
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -332,9 +340,12 @@ The report is the only thing that survives, so anything worth keeping must be in
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   If you already escalated an earlier decision or blocker on this task, give the new one its own \`[key=<slug>]\`, because every unkeyed escalation shares one identity and a second one cannot be tracked separately.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$RULE_NO_PROMPT
+$RULE_NO_POLL
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -448,9 +459,12 @@ $RULE1
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   If you already escalated an earlier decision or blocker on this task, give the new one its own \`[key=<slug>]\`, because every unkeyed escalation shares one identity and a second one cannot be tracked separately.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$RULE_NO_PROMPT
+$RULE_NO_POLL
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

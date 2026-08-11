@@ -23,7 +23,7 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep "${FAKE_NM_SLEEP_SECONDS:-30}"
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -473,11 +473,15 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" timedout "$timedout" "old timed work"
 
   fakebin=$(make_fakebin "$home")
-  json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json)
+  # A 3s budget against a 30s sleep leaves comfortable headroom for the
+  # non-sleeping homes (invalid/unreadable/malformed/missing) to complete under
+  # load, while still forcing the sleeping "timedout" home to genuinely time out.
+  json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=3 run "$home" "$fakebin" --json)
   chmod 700 "$unreadable/data"
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
-      and all(.secondmates[]; .state == "unknown")
+      and all(.secondmates[] | select(.id != "timedout"); .state == "unknown")
+      and (.secondmates | any(.[]; .id == "timedout" and .state == "timeout"))
       and (.in_flight | map(.id) | all(. != "invalid" and . != "unreadable" and . != "malformed" and . != "timedout"))
       and (.secondmates | any(.[]; .id == "missing" and .provenance == "unknown"
         and .freshness == "unknown" and (.reason | contains("invalid home"))))
@@ -487,8 +491,47 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
       and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
-  ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
-  pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
+      and (.omitted | any(.surface | test("timed out reading.*1 home")))
+  ' >/dev/null || fail "bad home outcomes revived stale work, lacked provenance, or hid the timeout: $json"
+  pass "missing, invalid, unreadable, and malformed homes stay explicit unknowns while a timed-out home is loudly distinct"
+}
+
+test_default_secondmate_timeout_tolerates_a_slow_home() {
+  local home mate fakebin json
+  home=$(make_home slow-home-default-timeout)
+  mate="$TMP_ROOT/slow-default-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  mkdir -p "$mate/projects/phase8"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
+
+## Queued
+- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
+
+## Done
+EOF
+  fm_write_meta "$mate/state/phase8.meta" \
+    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" phase8 idle
+
+  fakebin=$(make_fakebin "$home")
+  # No FM_SNAPSHOT_SECONDMATE_TIMEOUT override: this exercises the raised default
+  # directly. A per-home read that takes several seconds (well past the old 8s
+  # default, comfortably inside the new one) must still come back as a real,
+  # complete read - this home's queued captain decision must reach the digest,
+  # not be silently dropped the way a timed-out read drops it. FM_CREW_STATE_NM_TIMEOUT
+  # is raised so the child's own unrelated no-mistakes status bound
+  # (fm-crew-state.sh, default 10s) does not confound this: this test is about
+  # the outer FM_SNAPSHOT_SECONDMATE_TIMEOUT default only.
+  json=$(FAKE_NM_SLEEP=1 FAKE_NM_SLEEP_SECONDS=12 FM_CREW_STATE_NM_TIMEOUT=60 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "domain-alpha" and .provenance == "structured-home" and .state != "timeout"))
+      and (.decisions_open | any(.[]; .id == "domain-alpha/phase8-decision-release"
+        and .key == "phase8-decision-release" and .verb == "captain-hold"))
+  ' >/dev/null || fail "raised default timeout still lost a several-second-slow home's captain decision: $json"
+  pass "the raised default secondmate snapshot timeout tolerates a several-second per-home read and keeps its captain decision"
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
@@ -1895,6 +1938,7 @@ test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
+test_default_secondmate_timeout_tolerates_a_slow_home
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only

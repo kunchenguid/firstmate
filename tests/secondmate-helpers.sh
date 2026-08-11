@@ -55,6 +55,7 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+[ -z "${FM_FAKE_TREEHOUSE_HOME_LOG:-}" ] || printf '%s\t%s\n' "${1:-}" "${HOME:-}" >> "$FM_FAKE_TREEHOUSE_HOME_LOG"
 case "${1:-}" in
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),

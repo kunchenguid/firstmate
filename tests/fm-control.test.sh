@@ -35,22 +35,26 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse cline cursor-agent copilot agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
 # clear that must FOLLOW the interrupt key, empty for every adapter that leaves
 # its composer empty on cancel.
-verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repeat, clear key
+verified_adapter_contract() {  # <harness> -> exit spec, interrupt key, repeat, clear key
   case "$1" in
-    claude) printf '/exit\tEscape\t1\t\n' ;;
-    codex) printf '/quit\tEscape\t1\t\n' ;;
-    opencode) printf '/exit\tEscape\t2\t\n' ;;
-    pi) printf '/quit\tEscape\t1\t\n' ;;
-    pi-signed) printf '/quit\tEscape\t1\t\n' ;;
-    grok) printf '/exit\tC-c\t1\t\n' ;;
-    kimi) printf '/exit\tEscape\t1\t\n' ;;
-    muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    claude) printf 'text:/exit\tEscape\t1\t\n' ;;
+    codex) printf 'text:/quit\tEscape\t1\t\n' ;;
+    opencode) printf 'text:/exit\tEscape\t2\t\n' ;;
+    pi) printf 'text:/quit\tEscape\t1\t\n' ;;
+    pi-signed) printf 'text:/quit\tEscape\t1\t\n' ;;
+    grok) printf 'text:/exit\tC-c\t1\t\n' ;;
+    kimi) printf 'text:/exit\tEscape\t1\t\n' ;;
+    muse) printf 'text:/exit\tEscape\t1\tC-u\n' ;;
+    cline) printf 'key:C-c\tEscape\t1\t\n' ;;
+    cursor-agent) printf 'text:/quit\tC-c\t1\t\n' ;;
+    copilot) printf 'text:/exit\tC-c\t1\t\n' ;;
+    agy) printf 'text:/exit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -103,6 +107,11 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/keys"
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
+        printf 'zsh' > "$D/command"
+      fi
+      if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
+         && [ "$payload" = C-c ] \
+         && [ "$(cat "$D/command")" = cline ]; then
         printf 'zsh' > "$D/command"
       fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
@@ -216,30 +225,43 @@ keys_sent() {  # <case-dir>
 # --- 1. adapter contract across every verified harness -----------------------
 
 test_exit_types_each_harness_verified_command() {
-  local dir out rc harness expected key repeat clear
+  local dir out rc harness exit_spec key repeat clear
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "exit-$harness")
     add_task "$dir" t1 "$harness"
     alive_as "$dir" "$harness"
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
-    IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
-    [ "$(literals "$dir")" = "$expected" ] \
-      || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
+    IFS=$'\t' read -r exit_spec key repeat clear <<< "$(verified_adapter_contract "$harness")"
+    case "$exit_spec" in
+      text:*)
+        [ "$(literals "$dir")" = "${exit_spec#text:}" ] \
+          || fail "exit on $harness should type exactly '${exit_spec#text:}', got: $(literals "$dir")"
+        [ -z "$(keys_sent "$dir")" ] \
+          || fail "exit on $harness should not send a named key, got: $(keys_sent "$dir")"
+        ;;
+      key:*)
+        [ -z "$(literals "$dir")" ] \
+          || fail "exit on $harness should not type text, got: $(literals "$dir")"
+        [ "$(keys_sent "$dir")" = "${exit_spec#key:}" ] \
+          || fail "exit on $harness should send key '${exit_spec#key:}', got: $(keys_sent "$dir")"
+        ;;
+      *) fail "bad exit spec for $harness: $exit_spec" ;;
+    esac
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
   done
-  pass "fm-control exit: every verified harness gets its own verified exit command"
+  pass "fm-control exit: every verified harness gets its own verified exit input"
 }
 
 test_interrupt_sends_each_harness_verified_key() {
-  local dir out rc harness expected key repeat clear got want
+  local dir out rc harness exit_spec key repeat clear got want
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "int-$harness")
     add_task "$dir" t1 "$harness"
     alive_as "$dir" "$harness"
     out=$(run_control "$dir" t1 interrupt); rc=$?
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
-    IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
+    IFS=$'\t' read -r exit_spec key repeat clear <<< "$(verified_adapter_contract "$harness")"
     want=$(for _ in $(seq 1 "$repeat"); do printf '%s\n' "$key"; done)
     [ -z "$clear" ] || want="$want"$'\n'"$clear"
     got=$(keys_sent "$dir")
@@ -257,7 +279,10 @@ test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi muse:muse \
-      muse-bin-0.1.0:muse pi:pi pi-signed:pi-signed; do
+      muse-bin-0.1.0:muse cline:cline cline-cli:cline \
+      cursor-agent:cursor-agent cursor-agent-cli:cursor-agent \
+      copilot:copilot copilot-cli:copilot agy:agy agy-cli:agy \
+      pi:pi pi-signed:pi-signed; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -363,8 +388,10 @@ test_harness_kind_capability() {
     fm_control_harness_supports_kind "$harness" scout \
       || fail "$harness should be able to run a scout task"
   done
-  fm_control_harness_supports_kind muse secondmate \
-    && fail "muse has no primary supervision protocol and must not claim a secondmate"
+  for harness in muse cline cursor-agent copilot agy; do
+    fm_control_harness_supports_kind "$harness" secondmate \
+      && fail "$harness has no primary supervision protocol and must not claim a secondmate"
+  done
   for harness in claude codex opencode pi pi-signed grok kimi; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"

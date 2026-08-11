@@ -104,6 +104,23 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:*) printf '0.2.4\n' ;;
+  update:--help) printf '%s\n' --archive-body ;;
+  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  *) exit 0 ;;
+esac
+SH
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '0.1.17\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi" "$fakebin/quota-axi"
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
 }
 
@@ -510,11 +527,11 @@ run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
     env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
       "$SESSION_START"
   fi
 }
@@ -718,13 +735,23 @@ EOF
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
-  local rec root home fakebin holder_pid out status
+  local rec root home fakebin holder_pid out status bash_env
   rec=$(new_world lock-refusal)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  rm -f "$fakebin/tasks-axi"
+  bash_env="$home/no-tasks-axi.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = tasks-axi ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
 
   # A live secondmate meta with a window pointed at nothing real - if the
   # bootstrap sweep's secondmate_sync ran (a MUTATING step), it would try to
@@ -741,7 +768,7 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
 
   status=0
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  out=$(BASH_ENV="$bash_env" run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 
@@ -918,7 +945,7 @@ SH
 # read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
   local rec root home fakebin out lock_line boot_line wake_line read_once_line
-  local context_line fleet_line next_line inventory_line missing_line
+  local context_line fleet_line next_line inventory_line missing_line bash_env
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -927,11 +954,20 @@ EOF
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
+  bash_env="$home/no-node.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$bash_env" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -940,7 +976,7 @@ EOF
   context_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
   fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
   next_line=$(printf '%s\n' "$out" | grep -n '^NEXT STEP$' | head -1 | cut -d: -f1)
-  inventory_line=$(printf '%s\n' "$out" | grep -n '^--- task-a ---$' | head -1 | cut -d: -f1)
+  inventory_line=$(printf '%s\n' "$out" | grep -n '^--- task-a ' | head -1 | cut -d: -f1)
 
   if [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] \
     || [ -z "$read_once_line" ] || [ -z "$context_line" ] || [ -z "$fleet_line" ] \
@@ -1323,7 +1359,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out bash_env
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1331,11 +1367,20 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  bash_env="$home/no-node.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$bash_env" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -1549,7 +1594,16 @@ EOF
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
   assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
-  assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
+  # Assert the ID, not the whole header line. bin/fm-session-start.sh prints
+  # `--- <id> (<crew-name>) ---` whenever bin/fm-name.sh resolves a name, and
+  # falls back to a bare `--- <id> ---` only when it fails - the name is
+  # explicitly "derived, never stored, best-effort". Pinning the bare form made
+  # this assertion pass only on hosts where fm-name.sh happens NOT to work; where
+  # it does, the header reads `--- compact-startup (high-cutter) ---` and the
+  # suite failed for a naming feature working as designed. The id is the
+  # identity this test cares about, so match that and let the suffix vary.
+  # (The orphan-status assertion above stays exact: that path never adds a name.)
+  assert_contains "$out" "--- compact-startup" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
   assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
@@ -1651,16 +1705,26 @@ EOF
 }
 
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback() {
-  local rec root home fakebin out
+  local rec root home fakebin out bash_env
   rec=$(new_world backlog-compact-unavailable)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  rm -f "$fakebin/tasks-axi"
+  bash_env="$home/no-tasks-axi.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = tasks-axi ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
   write_long_body_backlog "$home/data/backlog.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$bash_env" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "compact backlog listing (tasks-axi unavailable or incompatible; done rows omitted;" \
     "unavailable tasks-axi did not fall back to compact title-line rendering"

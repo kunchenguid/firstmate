@@ -1,0 +1,60 @@
+{
+  "_comment": "TEMPLATE — copy to config/accounts.json (gitignored) and replace every /home/YOUR-USER path with your own. Paths are used LITERALLY: ~ and $HOME are NOT expanded, so write absolute paths. Delete the accounts you do not use; an entry whose config_dir/key_file does not exist is only an error when that account is actually selected. One entry per account. 'isolation' MUST match the harness matrix in docs/fleet-addon.md. NEVER put a secret here: api-key accounts point at a key_file (a 0600 file in YOUR OWN home); fm-account-exec.sh reads it for direct launches. config_dir/key_file must live under your own home (foreign private homes such as /home/<other> or /Users/<other> are refused).",
+
+  "claude-personal": {
+    "provider": "anthropic",
+    "harness": "claude",
+    "isolation": "config-dir-env",
+    "env": "CLAUDE_CONFIG_DIR",
+    "config_dir": "/home/YOUR-USER/.claude",
+    "scopes": ["backend", "infra", "deploy"]
+  },
+  "claude-work": {
+    "provider": "anthropic",
+    "harness": "claude",
+    "isolation": "config-dir-env",
+    "env": "CLAUDE_CONFIG_DIR",
+    "config_dir": "/home/YOUR-USER/.claude-accounts/work",
+    "scopes": ["backend"]
+  },
+  "codex-personal": {
+    "provider": "openai",
+    "harness": "codex",
+    "isolation": "config-dir-env",
+    "env": "CODEX_HOME",
+    "config_dir": "/home/YOUR-USER/.codex",
+    "scopes": ["backend"]
+  },
+  "pi-personal": {
+    "provider": "pi",
+    "harness": "pi",
+    "isolation": "config-dir-env",
+    "env": "PI_CODING_AGENT_DIR",
+    "config_dir": "/home/YOUR-USER/.pi/agent",
+    "scopes": ["long-autonomous"]
+  },
+  "cline-personal": {
+    "provider": "anthropic",
+    "harness": "cline",
+    "isolation": "config-dir-flag",
+    "flag": "--config",
+    "config_dir": "/home/YOUR-USER/.cline",
+    "scopes": ["web"]
+  },
+  "grok-personal": {
+    "provider": "xai",
+    "harness": "grok",
+    "isolation": "api-key-env",
+    "env": "GROK_API_KEY",
+    "key_file": "/home/YOUR-USER/.secrets/grok-personal.key",
+    "scopes": ["research"]
+  },
+  "cursor-personal": {
+    "provider": "cursor",
+    "harness": "cursor-agent",
+    "isolation": "api-key-env",
+    "env": "CURSOR_API_KEY",
+    "key_file": "/home/YOUR-USER/.secrets/cursor-personal.key",
+    "scopes": ["web"]
+  }
+}

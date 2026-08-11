@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -31,11 +32,46 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+          # The payload body is a point-in-time snapshot, and no-mistakes pushes
+          # commits (synchronize) BEFORE it writes the '## Pipeline' section
+          # (edited). A head-change run that starts late therefore replays a
+          # pre-signature body after the body was already signed, and because
+          # body events and head changes sit in different concurrency groups
+          # that stale verdict is never superseded - leaving a compliant PR red.
+          # Re-read the live body for a bounded window before failing; fall
+          # back to the snapshot only when the live body is unreadable, so an
+          # unreachable API can never pass an unsigned PR.
+          body=${PR_BODY:-}
+          origin='event payload'
+          repo=${GH_REPO:-${GITHUB_REPOSITORY:-}}
+          if [ -n "${GH_TOKEN:-}" ] && [ -n "$repo" ] && command -v gh >/dev/null 2>&1; then
+            live_attempts=6
+            live_delay_seconds=15
+            attempt=1
+            while [ "$attempt" -le "$live_attempts" ]; do
+              if ! live_body=$(gh api "repos/${repo}/pulls/${PR_NUMBER}" --jq '.body // ""' 2>/dev/null); then
+                echo "::warning::could not read the live body for PR #${PR_NUMBER}; judging the event payload snapshot instead."
+                break
+              fi
+              body=$live_body
+              origin='live PR body'
+              if printf '%s' "$live_body" | grep -qF -- "$marker"; then
+                echo "Found no-mistakes signature in PR #${PR_NUMBER} live body (attempt ${attempt})."
+                exit 0
+              fi
+              if [ "$attempt" -lt "$live_attempts" ]; then
+                sleep "$live_delay_seconds"
+              fi
+              attempt=$((attempt + 1))
+            done
+          fi
+          if printf '%s' "$body" | grep -qF -- "$marker"; then
+            echo "Found no-mistakes signature in PR #${PR_NUMBER} (${origin})."
             exit 0
           fi
           {

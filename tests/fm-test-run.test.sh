@@ -16,12 +16,13 @@ assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
 
 test_list_all_exact_suite_coverage() {
-  local listed expected missing extra f
+  local listed expected missing extra f rel
   listed=$("$RUNNER" --list --all | LC_ALL=C sort)
   expected=$(
-    for f in "$ROOT"/tests/*.test.sh; do
+    for f in "$ROOT"/tests/*.test.sh "$ROOT"/tests/federation/test_*.sh; do
       [ -f "$f" ] || continue
-      printf 'tests/%s\n' "$(basename "$f")"
+      rel=${f#"$ROOT"/}
+      printf '%s\n' "$rel"
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
@@ -113,6 +114,23 @@ init_changed_fixture_repo() {
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
+  mkdir -p "$repo/tests/federation/golden" "$repo/bin/quota-sources" "$repo/scripts"
+  for script in \
+    test_accounts.sh \
+    test_account_quota.sh \
+    test_fleet.sh \
+    test_fleet_guards.sh \
+    test_fleet_ops.sh \
+    test_quota_surfaces.sh \
+    test_spawn_account.sh; do
+    printf '#!/usr/bin/env bash\n# federation test fixture\n' >"$repo/tests/federation/$script"
+    chmod +x "$repo/tests/federation/$script"
+  done
+  : >"$repo/tests/federation/golden/v2-quota.golden"
+  : >"$repo/bin/fm-account-env.sh"
+  : >"$repo/bin/fm-fleet-lib.sh"
+  : >"$repo/bin/quota-sources/cursor.sh"
+  : >"$repo/scripts/fleet-root-prereq.sh"
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
@@ -158,6 +176,25 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-account-env.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/federation/test_accounts.sh" "account script selects federation coverage"
+  assert_contains "$listed" "tests/federation/test_quota_surfaces.sh" "account script selects quota-surface coverage"
+  git -C "$repo" add bin/fm-account-env.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm account-change
+
+  printf '\n' >>"$repo/tests/federation/golden/v2-quota.golden"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/federation/test_account_quota.sh" "quota golden selects federation quota coverage"
+  git -C "$repo" add tests/federation/golden/v2-quota.golden
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm federation-golden-change
+
+  printf '\n' >>"$repo/scripts/fleet-root-prereq.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/federation/test_fleet.sh" "fleet prereq script selects federation coverage"
+  git -C "$repo" add scripts/fleet-root-prereq.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm federation-script-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

@@ -511,7 +511,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca bash_env
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -519,7 +519,16 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  bash_env="$case_dir/no-orca.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = orca ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
@@ -887,7 +896,7 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 # split is a PARTITION: `skip` plus `only` together do exactly what `all` does,
 # with no step dropped and no step run twice.
 test_network_phase_partitions_the_run() {
-  local case_dir fakebin all_out skip_out only_out combined
+  local case_dir fakebin all_out skip_out only_out combined bash_env
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -895,23 +904,32 @@ test_network_phase_partitions_the_run() {
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
   rm -f "$fakebin/node"
+  bash_env="$case_dir/no-node.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
   chmod +x "$fakebin/gh"
 
-  all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  all_out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
-  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  skip_out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
-  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  only_out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
@@ -922,7 +940,7 @@ SH
 
   # A typo must never silently drop a safety sweep, so anything unrecognized
   # resolves to the complete run.
-  [ "$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  [ "$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
@@ -1123,11 +1141,20 @@ unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","us
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+new verified adapters are accepted^{"rules":[{"when":"cline work","use":{"harness":"cline","model":"anthropic/claude-sonnet-5","effort":"xhigh"}},{"when":"cursor work","use":{"harness":"cursor-agent","model":"claude-opus-4-8"}},{"when":"copilot work","use":{"harness":"copilot","model":"gpt-5.6","effort":"max"}}],"default":{"harness":"copilot"}}^empty^
+unsupported cline max effort is flagged^{"rules":[{"when":"cline work","use":{"harness":"cline","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cline:max
+unsupported cursor-agent effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor-agent","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor-agent:high
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
-kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
-unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
+Kimi model profile is rejected from subscription dispatch^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - Kimi is unsupported for subscription dispatch
+native subscription providers and routing settings are accepted^{"subscriptionRouting":{"reservePercent":15,"telemetryMaxAgeSeconds":120,"cooldownSeconds":600},"default":[{"harness":"claude","provider":"claude"},{"harness":"codex","provider":"codex"}]}^empty^
+native subscription provider mismatch is flagged^{"default":[{"harness":"codex","provider":"claude"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - native harness/provider mismatch: codex:claude
+malformed subscription settings object is flagged^{"subscriptionRouting":[],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - subscriptionRouting must be an object
+unknown subscription setting is flagged^{"subscriptionRouting":{"reservePercent":20,"mystery":1},"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - subscriptionRouting has unknown field: mystery
+out of range subscription setting is flagged^{"subscriptionRouting":{"reservePercent":100},"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - subscriptionRouting setting is out of range: reservePercent
+unsupported subscription provider is flagged^{"default":[{"harness":"pi","provider":"moonshot"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unsupported subscription provider: moonshot
+unsupported Kimi effort remains rejected at the subscription boundary^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - Kimi is unsupported for subscription dispatch
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^

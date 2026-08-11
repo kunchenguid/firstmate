@@ -125,7 +125,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_treehouse "$fakebin"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
@@ -179,7 +180,9 @@ EOF
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
   id="kimi-success-z1-$$"
-  task_tmp="/tmp/fm-$id"
+  # The per-task temp root carries the operator's uid so two operators running the
+  # same task id on one host cannot collide (bin/fm-spawn.sh).
+  task_tmp="/tmp/fm-$(id -u)-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")

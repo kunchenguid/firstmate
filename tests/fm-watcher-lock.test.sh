@@ -997,6 +997,69 @@ SH
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_lock_identity_survives_symlinked_home() {
+  # One home reachable through a symlinked ancestor has two names, and bin/ derives
+  # its root both ways: bin/fm-arm-pretool-check.sh and bin/fm-cd-pretool-check.sh
+  # resolve with pwd -P while most scripts use a logical pwd. So the lock can be
+  # published under one name and re-read under the other. Comparing the raw strings
+  # rejects the home's own live watcher, and re-arming records the same divergent
+  # pair again, so nothing recovers. Both names must resolve to one identity.
+  local dir real link state live identity
+  dir=$(make_case symlinked-home)
+  real="$dir/real-home"
+  link="$dir/link-home"
+  mkdir -p "$real/bin" "$real/state/.watch.lock" "$dir/other-home/bin"
+  : > "$real/bin/fm-watch.sh"
+  : > "$dir/other-home/bin/fm-watch.sh"
+  ln -s "$real" "$link"
+  state="$real/state"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  # Publish the lock under the PHYSICAL names, the way a pwd -P deriver records it.
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$real" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$real/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+
+  # Re-read under the SYMLINKED names, the way a logical-pwd deriver sees them.
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$link/bin/fm-watch.sh" "$live" "$link" \
+    || { kill "$live" 2>/dev/null; fail "lock published under the physical home did not match the same home read through a symlink"; }
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$link/bin/fm-watch.sh" "$link" \
+    && { kill "$live" 2>/dev/null; fail "fm_watcher_healthy passed with a stale beacon"; }
+  touch "$state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$link/bin/fm-watch.sh" "$link" \
+    || { kill "$live" 2>/dev/null; fail "a fresh watcher was not healthy when read through the symlinked home"; }
+
+  # A genuinely different home must still be rejected: resolving is not loosening.
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$dir/other-home/bin/fm-watch.sh" "$live" "$dir/other-home"; then
+    kill "$live" 2>/dev/null
+    fail "a different home matched this home's watcher lock"
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watcher lock identity resolves symlinked and physical home names to one identity"
+}
+
+test_lock_paths_equal_keeps_unresolvable_paths_distinct() {
+  # A stale lock can name a home that no longer exists. Those paths cannot be
+  # resolved, so they must fall back to their raw value: collapsing them to an
+  # empty string would make every removed home match every other removed home.
+  FM_STATE_OVERRIDE="$TMP_ROOT/paths-equal-state" bash -c '
+    . "$1"
+    fm_lock_paths_equal "$2/gone-a" "$2/gone-a" || exit 1
+    fm_lock_paths_equal "$2/gone-a" "$2/gone-b" && exit 1
+    fm_lock_paths_equal "" "$2/gone-a" && exit 1
+    exit 0
+  ' _ "$LIB" "$TMP_ROOT/removed-homes" \
+    || fail "fm_lock_paths_equal mishandled unresolvable or empty paths"
+  pass "fm_lock_paths_equal keeps unresolvable and empty paths distinct"
+}
+
 write_fake_proc_identity() {
   local proc_root=$1 pid=$2 starttime=$3
   mkdir -p "$proc_root/$pid"
@@ -1100,6 +1163,8 @@ test_msys_pid_identity_uses_proc() {
 
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_lock_identity_survives_symlinked_home
+test_lock_paths_equal_keeps_unresolvable_paths_distinct
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed

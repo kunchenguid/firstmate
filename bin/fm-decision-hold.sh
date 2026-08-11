@@ -13,6 +13,15 @@
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
 # is idempotent. A different decision key creates a different backlog identity.
+#
+# A decision key is therefore a durable identity, not a label. Once `complete` has
+# bound a key to its hold with a `captain-held [key=<key>]` transfer event, that key
+# is spent, and a later needs-decision or blocked event carrying the same key is a
+# different decision the existing hold cannot represent, so completion refuses it.
+# Untagged needs-decision and blocked events all carry the key `default`, so a
+# second untagged decision must be reopened under an unused key: append
+# `resolved [key=default]: ...` to close the spent copy and
+# `needs-decision [key=<slug>]: ...` to reopen it, then hold and complete <slug>.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
 #
@@ -170,6 +179,18 @@ origin_open_decisions() {  # <origin-id>
   printf '%s' "$open"
 }
 
+# An open status decision may only be inventoried against a captain hold that
+# represents THAT decision. Refuse a key whose durable identity an earlier
+# captain-held transfer already spent, because the existing hold answers the
+# earlier decision under that key, not the one open now. Without this the reused
+# key silently satisfies the completion gate and the source is released with
+# nothing durable holding the newer captain decision.
+require_unspent_decision_key() {  # <origin-id> <status-file> <decision-key>
+  local origin=$1 status_file=$2 key=$3
+  status_captain_held_keys "$status_file" | grep -Fxq -- "$key" || return 0
+  fail "open structured decision $origin/$key reuses the spent identity $(hold_id "$origin" "$key"); close it with a resolved [key=$key] status event and reopen it under an unused decision key"
+}
+
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
   show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
@@ -266,9 +287,9 @@ command_hold() {
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
-    [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
+    [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; reopen the status decision under an unused decision key, then register that key"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
-    [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title; reopen a genuinely different decision under an unused decision key"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -332,6 +353,7 @@ EOF
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key has no captain-held inventory entry"
+    require_unspent_decision_key "$origin" "$status_file" "$key"
   done <<EOF
 $open
 EOF
@@ -359,10 +381,11 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys key open
+  local origin=${1:-} meta status_file reviewed keys key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
+  status_file="$STATE/$origin.status"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
   require_tasks_axi
   reviewed=$(meta_value "$meta" decisions_reviewed)
@@ -382,6 +405,7 @@ EOF
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key is outside the reviewed inventory"
     verify_hold_durable "$(hold_id "$origin" "$key")"
+    require_unspent_decision_key "$origin" "$status_file" "$key"
   done <<EOF
 $open
 EOF

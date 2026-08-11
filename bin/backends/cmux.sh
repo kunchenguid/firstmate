@@ -119,6 +119,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-composer-lib.sh"
+FM_BACKEND_CMUX_IDLE_RE=${FM_BACKEND_CMUX_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
 
 # Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
 FM_BACKEND_CMUX_MIN_MAJOR=0

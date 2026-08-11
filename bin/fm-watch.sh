@@ -190,19 +190,64 @@ hash_pane() {
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
-# <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
+# <tail40> is the same bounded capture already read for hashing and is consumed
+# by the contract's scoped rendered fallback paths.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
-  task=$(window_to_task "$w" "$STATE")
-  meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+  local w=$1 tail40=$2 backend harness task meta verdict state lines
+  local bs key now native_max since
+  backend=$(window_backend "$w")
+  harness=$(window_harness "$w")
+  if command -v window_to_task >/dev/null 2>&1; then
+    task=$(window_to_task "$w" "$STATE")
   else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
+    task=
   fi
-  [ "${verdict%% *}" = busy ]
+  meta="$STATE/$task.meta"
+  key=${w//:/_}; key=${key//\//_}; key=${key//./_}
+
+  if command -v fm_busy_classify >/dev/null 2>&1; then
+    if [ -n "$task" ] && [ -f "$meta" ]; then
+      verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+    else
+      verdict=$(fm_busy_classify "$backend" "$w" "$harness" "${task:-unknown}" "$STATE" "$tail40")
+    fi
+    state=${verdict%% *}
+    [ "$state" = busy ]
+    return
+  else
+    bs=$(fm_backend_busy_state "$backend" "$w" 2>/dev/null)
+  fi
+
+  case "$bs" in
+    busy)
+      native_max=${FM_BUSY_NATIVE_MAX_SECONDS:-120}
+      case "$native_max" in ''|*[!0-9]*) native_max=120 ;; esac
+      now=${EPOCHSECONDS:-$(date +%s)}
+      since=$(cat "$STATE/.busy-since-$key" 2>/dev/null || true)
+      case "$since" in
+        ''|*[!0-9]*)
+          since=$now
+          printf '%s\n' "$since" > "$STATE/.busy-since-$key"
+          ;;
+      esac
+      if [ $((now - since)) -lt "$native_max" ]; then
+        return 0
+      fi
+      ;;
+    idle)
+      rm -f "$STATE/.busy-since-$key"
+      return 1
+      ;;
+    *)
+      rm -f "$STATE/.busy-since-$key"
+      ;;
+  esac
+  lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+  if command -v fm_busy_lines_match >/dev/null 2>&1; then
+    printf '%s' "$lines" | fm_busy_lines_match "$harness"
+  else
+    return 1
+  fi
 }
 
 window_kind() {
@@ -382,13 +427,19 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
+    # A LIVE agent under a DECLARED pause is the normal healthy case, not a
+    # wedge. AGENTS.md's contract is that a declared pause means a bounded
+    # external wait and firstmate leaves that idle pane alone, rechecking it on
+    # a long cadence. Requiring a dead agent here inverted that: every poll of a
+    # live parked crew returned 'none', routing to surface_nonterminal_stale and
+    # re-escalating a bare stale forever, which is precisely the shape of a crew
+    # parked on a captain merge decision. It also deleted the recheck marker on
+    # the way out, so the condition could never hold again either.
+    # A genuinely busy crew is still separated out by crew_absorb_class.
+    if [ "$(crew_absorb_class "$task")" = working ]; then
+      rm -f "$recheck_file"
+      printf 'working'
+      return
     fi
     printf 'paused'
     return
@@ -399,7 +450,11 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
+  # FIRST SIGHT of a declared pause must still surface once, so a live crew
+  # parked at an active external-decision gate is not hidden behind the pause
+  # cadence. `.paused-<key>` is precisely the record that the one-time surface
+  # already happened, so its ABSENCE is what identifies first sight.
+  if [ ! -e "$STATE/.paused-$key" ] && [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
@@ -407,12 +462,20 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  # Already surfaced once, the status line still DECLARES a pause, and the crew
+  # is not provably working: honour the declaration whether the agent is alive or
+  # dead. Requiring a dead agent here was the same inversion as the branch above,
+  # and it is what kept the escalation alive after that branch was fixed - this
+  # path also deleted the recheck marker on its way out, so once the marker aged
+  # past STALE_ESCALATE_SECS a live parked crew fell through here, surfaced a
+  # bare stale, and had its marker rewritten, re-entering the same path every
+  # STALE_ESCALATE_SECS for as long as its PR stayed unmerged.
+  #
+  # A pause that has stopped being true still cannot rot invisibly:
+  # handle_paused_stale re-surfaces it on its own bounded PAUSE_RESURFACE_SECS
+  # cadence, which is the designed recheck.
+  date +%s > "$recheck_file"
+  printf 'paused'
 }
 
 surface_nonterminal_stale() {  # <window> <hash>

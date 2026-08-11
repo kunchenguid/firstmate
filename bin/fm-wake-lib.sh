@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
 
-FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
+# pwd -P so this default root is canonical.
+# A home is routinely reachable through a symlinked ancestor, and a logical pwd
+# keeps whichever route the caller happened to use, so two scripts in the same
+# home can derive two different strings for it.
+# fm_lock_paths_equal below is what keeps that survivable for lock identity;
+# deriving canonically here removes the divergence at the source.
+FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd -P)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
@@ -78,6 +84,45 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Compare two watcher-lock identity paths for "names the same place".
+#
+# The home and watcher-path recorded in the lock come from whichever script forked
+# the watcher, and are re-read by whichever script is checking it. Those scripts do
+# not agree on symlink resolution: bin/fm-arm-pretool-check.sh and
+# bin/fm-cd-pretool-check.sh resolve with pwd -P, while most of bin/ derives its
+# root with a logical pwd. When a home is reachable through a symlinked ancestor
+# (a real fleet layout, not a hypothetical), the two styles produce two different
+# strings for one directory, and a raw string comparison then reports the home's
+# own live watcher as somebody else's forever - every identity check fails, and
+# nothing can repair it because re-arming records the same divergent pair again.
+#
+# Resolving both sides makes any mix of the two styles agree. Equal raw strings
+# short-circuit, so the common case costs nothing. A path that cannot be resolved
+# (a stale lock naming a removed home) keeps its raw value rather than becoming
+# empty, so an unresolvable path never matches a different unresolvable path.
+# Resolve a lock identity path as far as it can be resolved.
+# A home is a directory whose own final component can be the symlink (~/dev ->
+# an external volume), so it must be resolved too - fm_lock_abs_path deliberately
+# leaves the final component alone, which is right for the watcher-path file but
+# would leave a symlinked home unresolved.
+fm_lock_resolve_path() {  # <path>
+  local path=$1 real
+  if [ -d "$path" ] && real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$real"
+    return 0
+  fi
+  fm_lock_abs_path "$path"
+}
+
+fm_lock_paths_equal() {  # <a> <b>
+  local a=$1 b=$2 a_real b_real
+  [ "$a" = "$b" ] && return 0
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  a_real=$(fm_lock_resolve_path "$a" 2>/dev/null) || a_real=$a
+  b_real=$(fm_lock_resolve_path "$b" 2>/dev/null) || b_real=$b
+  [ "$a_real" = "$b_real" ]
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
@@ -86,8 +131,8 @@ fm_watcher_lock_matches_pid() {
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  fm_lock_paths_equal "$lock_home" "$home" || return 1
+  fm_lock_paths_equal "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1

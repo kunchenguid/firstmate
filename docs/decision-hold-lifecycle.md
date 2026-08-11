@@ -20,6 +20,13 @@ It verifies every listed identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
+That transfer also spends the decision key as a durable identity.
+`bin/fm-classify-lib.sh`'s `status_captain_held_keys` reads the spent set back out of the same stream, and both `complete` and `verify` refuse an open decision whose key is already spent.
+Untagged `needs-decision` and `blocked` events all carry the reserved key `default`, so this is the only mechanical signal that separates a second untagged decision from the first one on the same origin.
+Without it a later untagged decision satisfied the gate against the earlier decision's hold and its source was released with nothing durably owning the newer captain choice.
+The refusal clears by giving the newer decision its own identity: append `resolved [key=default]: ...` to close the spent copy, append `needs-decision [key=<slug>]: ...` to reopen it, then hold and complete that key.
+A decision that was actually dealt with still closes unconditionally through a bare or keyed `resolved` event, which removes it from the fold before any identity check runs.
+
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
@@ -43,6 +50,12 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Spent-identity and untagged-closure regression verification date: 2026-08-02.
+
+The spent-identity regression drives only `bin/fm-decision-hold.sh` and `bin/fm-teardown.sh` with synthetic `sample` identities.
+It registers, inventories, and resolves a first untagged decision, appends a second untagged decision, and asserts that registration, `--none` completion, explicit-key completion, verification, and teardown all refuse while the earlier resolution stays bound to its own decision.
+It then reopens the second decision under an unused key and asserts that completion, verification, and teardown succeed while the reopened captain decision survives as a held backlog item.
+A companion regression asserts that a bare `resolved` event, a `resolved [key=default]` event, and a `default` captain hold each still close an untagged decision, so the tightened gate cannot make a dealt-with decision unclosable.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.

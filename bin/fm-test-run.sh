@@ -137,7 +137,7 @@ family_for_basename() {
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-agy-harness.test.sh|fm-dispatch-select.test.sh|fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -195,6 +195,7 @@ family_for_basename() {
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
+    fm-spawn-capacity.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
@@ -218,6 +219,10 @@ family_for_basename() {
       ;;
     fm-backend-orca.test.sh)
       printf '%s\n' orca
+      ;;
+    test_account_quota.sh|test_accounts.sh|test_fleet.sh|test_fleet_guards.sh|\
+    test_fleet_ops.sh|test_quota_surfaces.sh|test_spawn_account.sh)
+      printf '%s\n' federation
       ;;
     *)
       printf '%s\n' unclassified
@@ -250,6 +255,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+federation
 unclassified
 EOF
 }
@@ -396,6 +402,7 @@ tests/fm-claude-stop-autoarm.test.sh 60521
 tests/fm-codex-continuity-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 15140
 tests/fm-documentation-audiences.test.sh 572
+tests/fm-agy-harness.test.sh 900
 tests/fm-fleet-snapshot-view.test.sh 5902
 tests/fm-fleet-sync.test.sh 16417
 tests/fm-gate-refuse.test.sh 2839
@@ -668,7 +675,7 @@ run_coverage_guard() {
   missing=$(comm -23 "$tmp/all" "$tmp/union" || true)
   extra=$(comm -13 "$tmp/all" "$tmp/union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
-    log "coverage guard: union of portable shards + portable serial + Herdr must equal tests/*.test.sh"
+    log "coverage guard: union of portable shards + portable serial + Herdr must equal the canonical test inventory"
     [ -z "$missing" ] || { log "missing from union:"; printf '%s\n' "$missing" >&2; }
     [ -z "$extra" ] || { log "extra beyond inventory:"; printf '%s\n' "$extra" >&2; }
     rm -rf "$tmp"
@@ -757,11 +764,18 @@ PY
 all_repo_tests() {
   # Deterministic lexical order (same as bash glob expansion under LC_ALL=C).
   local f
-  # shellcheck disable=SC2035
-  for f in tests/*.test.sh; do
-    [ -f "$f" ] || continue
-    printf '%s\n' "$f"
-  done | LC_ALL=C sort
+  {
+    # shellcheck disable=SC2035
+    for f in tests/*.test.sh; do
+      [ -f "$f" ] || continue
+      printf '%s\n' "$f"
+    done
+    # shellcheck disable=SC2035
+    for f in tests/federation/test_*.sh; do
+      [ -f "$f" ] || continue
+      printf '%s\n' "$f"
+    done
+  } | LC_ALL=C sort
 }
 
 normalize_script_path() {
@@ -843,6 +857,12 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/federation/test_*.sh)
+      printf '%s\n' federation
+      ;;
+    tests/federation/golden/*)
+      printf '%s\n' federation
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
@@ -906,6 +926,12 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-account-*|bin/fm-accounts-*|bin/fm-home-boundary-lib.sh|bin/fm-fleet.sh|bin/fm-fleet-join.sh|\
+    bin/fm-fleet-lib.sh|bin/fm-fleet-quota-lib.sh|bin/fm-fleet-wait.sh|\
+    bin/fm-spawn-acct.sh|bin/quota-copilot-usage.sh|bin/quota-cursor-usage.sh|\
+    bin/quota-sources/*|scripts/fleet-root-prereq.sh)
+      printf '%s\n' federation
+      ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
@@ -921,6 +947,16 @@ families_for_changed_path() {
       printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
+      ;;
+    bin/fm-capacity.sh|bin/fm-capacity-lib.sh|tests/capacity-pin.sh)
+      # The capacity guard admits every spawn path, so a change here re-runs at
+      # least everything bin/fm-spawn.sh itself selects - pure-contract-unit
+      # included, because several suites execute a real fm-spawn.sh - plus the
+      # secondmate and real-Herdr suites that drive real spawns too.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      printf '%s\n' real-herdr-gated
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
@@ -942,6 +978,7 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-runtime-handoff.sh|bin/fm-statusline-quota.sh|bin/fm-statusline-quota-lib.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

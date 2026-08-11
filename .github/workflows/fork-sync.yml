@@ -1,0 +1,180 @@
+name: Fork sync
+
+# Keeps the fork's main current with upstream kunchenguid/firstmate main. A clean
+# merge is validated and pushed; a conflicting merge is parked on sync/upstream as
+# a pull request instead, so a conflict never lands unreviewed and never blocks the
+# next run. Lint and tests stay on their single owners (bin/fm-lint.sh,
+# bin/fm-test-run.sh); do not re-spell either command here.
+#
+# The work is split so freshly fetched upstream-controlled code never executes
+# while a write-scoped credential is reachable:
+#   validate  read-only (contents: read, persist-credentials: false): merges
+#             upstream in its own checkout and runs the validators there.
+#             The validators self-locate to their own repo root, so they must
+#             run from the merged tree; that is exactly why this job holds no
+#             write credential.
+#   publish   write job, gated on validate: redoes the proven merge with git
+#             plumbing only and pushes it, or parks the conflict PR. It runs
+#             no script, hook, or binary from the fetched tree.
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Merge upstream main and validate (read-only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Lint plus the changed-test selection over upstream drift; this cap is a hang
+    # tripwire, not the expected healthy end of the job.
+    timeout-minutes: 30
+    outputs:
+      merge: ${{ steps.merge.outcome }}
+      upstream_sha: ${{ steps.shas.outputs.upstream_sha }}
+      base_sha: ${{ steps.shas.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        id: shas
+        run: |
+          set -eu
+          git remote add upstream https://github.com/kunchenguid/firstmate.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin main
+          git checkout -B main origin/main
+          echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream
+        id: merge
+        continue-on-error: true
+        run: |
+          set -eu
+          git merge --no-edit upstream/main
+
+      - name: Install pinned ShellCheck
+        if: steps.merge.outcome == 'success'
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install tasks-axi
+        if: steps.merge.outcome == 'success'
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+
+      # Full canonical lint (the CI file set), then the behavior tests mapped to
+      # everything this sync introduces. origin/main is the pre-merge fork tip, so
+      # the selection stays correct whether the merge fast-forwarded or not.
+      - name: Validate merged tree
+        if: steps.merge.outcome == 'success'
+        run: |
+          set -eu
+          bin/fm-lint.sh
+          bin/fm-test-run.sh --changed --base origin/main
+
+  publish:
+    name: Push the validated sync or park a conflict PR
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 10
+    env:
+      UPSTREAM_SHA: ${{ needs.validate.outputs.upstream_sha }}
+      BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Configure git identity
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          set -eu
+          git remote add upstream https://github.com/kunchenguid/firstmate.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin main
+
+      # Redoes the exact merge the validate job proved (same parents, git
+      # plumbing only) and pushes it. A github.token push does not trigger
+      # ci.yml's push run, so the synced main gets only the validate job's
+      # coverage; configure a scoped PAT or App token in place of github.token
+      # here to restore post-sync full CI.
+      - name: Push clean sync
+        if: needs.validate.outputs.merge == 'success'
+        run: |
+          set -eu
+          if [ "$(git rev-parse origin/main)" != "$BASE_SHA" ]; then
+            echo "Fork main moved while validating; the next scheduled run will redo the sync."
+            exit 0
+          fi
+          git checkout -B main origin/main
+          git merge --no-edit "$UPSTREAM_SHA"
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "Fork main already contains upstream main."
+            exit 0
+          fi
+          git push origin HEAD:main
+
+      # A github.token PR gets no pull_request checks; a scoped PAT or App
+      # token in place of github.token restores them on the parked PR.
+      - name: Open or refresh conflict PR
+        if: needs.validate.outputs.merge != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          if git ls-remote --exit-code --heads origin sync/upstream >/dev/null 2>&1; then
+            git fetch --no-tags origin sync/upstream
+            git checkout -B sync/upstream origin/sync/upstream
+            if ! git merge --no-edit "$UPSTREAM_SHA"; then
+              echo "::error::Existing sync/upstream branch also conflicts with upstream/main; manual refresh required."
+              exit 1
+            fi
+          else
+            git checkout -B sync/upstream "$UPSTREAM_SHA"
+          fi
+          git push origin HEAD:sync/upstream
+          pr_url=$(gh pr list --head sync/upstream --base main --state open --json url --jq '.[0].url // empty')
+          body_file="$RUNNER_TEMP/fork-sync-pr.md"
+          {
+            printf '%s\n\n' 'Automated upstream sync could not merge cleanly into fork `main`.'
+            printf '%s\n' 'This branch tracks upstream `kunchenguid/firstmate` main so the conflict can be resolved in a normal pull request.'
+          } > "$body_file"
+          if [ -n "$pr_url" ]; then
+            gh pr edit "$pr_url" --title "sync: upstream main" --body-file "$body_file"
+            echo "Updated $pr_url"
+          else
+            gh pr create --base main --head sync/upstream --title "sync: upstream main" --body-file "$body_file"
+          fi

@@ -235,16 +235,18 @@ C_RIGHT_NEIGHBOUR=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -A1 -Fx "$C_DOOM
 C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS\$" | paste -sd, -) \
   || fail 'could not capture the Part C survivor order'
 
-# One persistent background child of the pane's shell, started outside any
-# worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+# One persistent background child of the pane's shell is enough to fail the
+# proof on every sample. Keep the command to one shell builtin-free job so
+# loaded real-Herdr runs do not spend the whole settle window between compound
+# command parsing and process publication.
+lab pane send-text "$C_DOOMED_PANE" 'sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
 C_SHELL_PID=
 C_CHILD_ATTEMPT=0
 C_CHILD_STABLE=0
-while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
+while [ "$C_CHILD_ATTEMPT" -lt 300 ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
   if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '

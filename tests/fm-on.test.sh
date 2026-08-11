@@ -55,7 +55,8 @@ case "\${1:-}:\${2:-}" in
 esac
 SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-composer-lib.sh" \
+  "$ROOT/bin/fm-transition-lib.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
@@ -315,7 +316,7 @@ set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
 assert_contains "$out" 'required herdr=MISSING' "the remote doctor did not mark a missing required tool"
 assert_contains "$out" 'required tasks-axi=MISSING' "the remote doctor did not mark every missing required tool"
-assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: herdr tasks-axi treehouse harness' "the remote doctor did not name the missing tools"
+assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: herdr tasks-axi treehouse' "the remote doctor did not name the missing tools"
 assert_contains "$out" '.local/bin' "the remote doctor did not offer the wrapper escape hatch"
 ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
 # The direct doctor fixture needs the complete required tool set. These stubs

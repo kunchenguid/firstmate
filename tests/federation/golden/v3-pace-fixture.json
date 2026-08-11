@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 3,
+  "generatedAt": "2026-07-28T00:00:00.000Z",
+  "providers": [
+    {
+      "provider": "A", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 80,
+         "pace": {"status": "ahead", "timeRemainingPercent": 98, "reservePercentPoints": -18}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 80,
+         "boundedBy": ["five_hour"], "limitingWindowIds": ["five_hour"],
+         "pace": {"status": "ahead", "aheadWindowIds": ["five_hour"], "behindWindowIds": [],
+                   "onPaceWindowIds": [], "unknownWindowIds": [],
+                   "worstReservePercentPoints": -18, "worstReserveWindowId": "five_hour"}}
+      ]}
+    },
+    {
+      "provider": "B", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 55,
+         "pace": {"status": "behind", "timeRemainingPercent": 35, "reservePercentPoints": 20}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 55,
+         "boundedBy": ["five_hour"], "limitingWindowIds": ["five_hour"],
+         "pace": {"status": "behind", "aheadWindowIds": [], "behindWindowIds": ["five_hour"],
+                   "onPaceWindowIds": [], "unknownWindowIds": [],
+                   "worstReservePercentPoints": 20, "worstReserveWindowId": "five_hour"}}
+      ]}
+    },
+    {
+      "provider": "C", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 70,
+         "pace": {"status": "behind", "timeRemainingPercent": 55, "reservePercentPoints": 15}},
+        {"id": "seven_day", "label": "7d", "kind": "rolling", "percentRemaining": 45,
+         "pace": {"status": "ahead", "timeRemainingPercent": 60, "reservePercentPoints": -15}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 45,
+         "boundedBy": ["five_hour", "seven_day"], "limitingWindowIds": ["seven_day"],
+         "pace": {"status": "mixed", "aheadWindowIds": ["seven_day"], "behindWindowIds": ["five_hour"],
+                   "onPaceWindowIds": [], "unknownWindowIds": [],
+                   "worstReservePercentPoints": -15, "worstReserveWindowId": "seven_day"}}
+      ]}
+    },
+    {
+      "provider": "D", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 60,
+         "pace": {"status": "ahead", "timeRemainingPercent": 64, "reservePercentPoints": -4}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 60,
+         "boundedBy": ["five_hour"], "limitingWindowIds": ["five_hour"],
+         "pace": {"status": "ahead", "aheadWindowIds": ["five_hour"], "behindWindowIds": [],
+                   "onPaceWindowIds": [], "unknownWindowIds": [],
+                   "worstReservePercentPoints": -4, "worstReserveWindowId": "five_hour"}}
+      ]}
+    },
+    {
+      "provider": "E", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 60,
+         "pace": {"status": "unknown", "reason": "provider window pace undetermined"}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 60,
+         "boundedBy": ["five_hour"], "limitingWindowIds": ["five_hour"],
+         "pace": {"status": "unknown", "aheadWindowIds": [], "behindWindowIds": [],
+                   "onPaceWindowIds": [], "unknownWindowIds": ["five_hour"]}}
+      ]}
+    },
+    {
+      "provider": "F", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 70}
+      ]
+    },
+    {
+      "provider": "G", "source": "oauth", "state": {"status": "fresh"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 3,
+         "pace": {"status": "behind", "timeRemainingPercent": 20, "reservePercentPoints": 50}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 3,
+         "boundedBy": ["five_hour"], "limitingWindowIds": ["five_hour"],
+         "pace": {"status": "behind", "aheadWindowIds": [], "behindWindowIds": ["five_hour"],
+                   "onPaceWindowIds": [], "unknownWindowIds": [],
+                   "worstReservePercentPoints": 50, "worstReserveWindowId": "five_hour"}}
+      ]}
+    },
+    {
+      "provider": "H", "source": "cache", "state": {"status": "stale", "error": "rate limited"},
+      "windows": [
+        {"id": "five_hour", "label": "5h", "kind": "rolling", "percentRemaining": 95,
+         "pace": {"status": "behind", "timeRemainingPercent": 15, "reservePercentPoints": 80}}
+      ],
+      "quotaSemantics": {"status": "known", "effectiveAvailability": [
+        {"scope": "all_models", "status": "known", "effectivePercentRemaining": 95,
+         "boundedBy": ["five_hour"], "limitingWindowIds": ["five_hour"],
+         "pace": {"status": "behind", "aheadWindowIds": [], "behindWindowIds": ["five_hour"],
+                   "onPaceWindowIds": [], "unknownWindowIds": [],
+                   "worstReservePercentPoints": 80, "worstReserveWindowId": "five_hour"}}
+      ]}
+    }
+  ]
+}

@@ -170,7 +170,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, Cline, Cursor-agent, Copilot, and agy share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
 
@@ -241,6 +241,53 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Kimi 0.29.1 exit limitation
+
+Kimi's installed version and official surface were checked on 2026-07-30.
+
+```sh
+kimi --version
+kimi --help
+```
+
+Observed version:
+
+```text
+0.29.1
+```
+
+The official [interaction guide](https://moonshotai.github.io/kimi-code/en/guides/interaction.html), [keyboard reference](https://moonshotai.github.io/kimi-code/en/reference/keyboard.html), and [`@moonshot-ai/kimi-code@0.29.1` source tag](https://github.com/MoonshotAI/kimi-code/tree/%40moonshot-ai%2Fkimi-code%400.29.1) document `/exit`, double Ctrl-C while idle, and Ctrl-D with an empty input box.
+Every live check used a fresh non-default session from `fm-herdr-lab.sh`, installed the helper-owned teardown trap before provisioning, routed every Herdr operation through `run`, and let teardown recheck the default-fleet tripwire.
+
+An idle direct diagnostic sent `/exit` as literal text followed by Enter and sent `ctrl+d` twice with a 0.4-second interval to two independent panes.
+The bounded observed output was:
+
+```text
+DIAG_SLASH_EXITED=yes
+DIAG_SLASH_AGENT=dead
+DIAG_CTRLD_1_EXITED=yes
+DIAG_CTRLD_1_AGENT=dead
+DIAG_CTRLD_2_EXITED=yes
+DIAG_CTRLD_2_AGENT=dead
+DIAG_CTRLD_PASS=2/2
+DIAG_DEFAULT_TRIPWIRE=unchanged
+```
+
+The complete Firstmate lifecycle verifier then exercised spawn, readiness-gated brief delivery, tool execution, turn-end notification, repeat send, busy current-state reconciliation, interrupt, exit, explicit resume, unlanded-work refusal, and cleanup in one lab.
+The relevant observed output was:
+
+```text
+ok - real Kimi/Herdr: isolated spawn, readiness-gated brief delivery, tool execution, and turn-end notification succeeded
+ok - real Kimi/Herdr: verified send, busy current-state reconciliation, and repeat turn-end notification succeeded
+ok - real Kimi/Herdr: single-Escape interrupt stopped the active tool without its deferred write
+not ok - Kimi double Ctrl-D did not retire Herdr's registered agent identity
+```
+
+The helper teardown emitted no cleanup or default-fleet tripwire failure.
+The initiating defect in the earlier `/exit` attempt was ordinary text-submit confirmation: a successful exit transitions from idle directly to no agent, while the normal message contract requires a working-state observation.
+The full rerun then supplied disconfirming evidence against Ctrl-D as a complete fix because the same key sequence that exited two clean idle sessions did not exit after the required interrupt transition.
+Kimi 0.29.1 is therefore unsupported for automatic subscription dispatch, and `fm-dispatch-select.mjs` rejects it rather than treating a health probe as lifecycle readiness.
 
 ### Prune and respawn
 

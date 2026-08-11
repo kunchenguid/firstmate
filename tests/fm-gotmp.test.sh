@@ -44,6 +44,44 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
 # live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
 # `if [ -d "$WT" ]` guards skip, so teardown runs straight to the cleanup + state rm.
+# Symlink every bin/ sibling a script sources, transitively, into the fake root.
+#
+# The fixtures below hand-maintain a symlink list, and that list rots every time
+# fm-teardown.sh gains a sibling: it had already fallen behind
+# fm-treehouse-lib.sh and fm-wake-lib.sh, so teardown died on a missing `source`
+# and the suite reported the useless "teardown exited non-zero with a valid
+# tasktmp" - its output is swallowed by >/dev/null 2>&1, so the real cause was
+# invisible. Deriving the closure from the actual source lines means the fixture
+# cannot go stale again. Additive: the explicit links stay, this only fills gaps.
+# sed program that extracts `<lib>.sh` from a `. "$SCRIPT_DIR/<lib>.sh"` source
+# line. Single-quoted deliberately: the `\$` is a literal dollar inside the
+# regex, matching the text `$SCRIPT_DIR`, not a shell expansion.
+# shellcheck disable=SC2016
+SOURCED_LIB_SED='s#^[[:space:]]*\.[[:space:]]+"\$(SCRIPT_DIR|FM_ROOT|ROOT)[^"]*/([A-Za-z0-9._-]+\.sh)".*#\2#p'
+link_sourced_siblings() { # <fake-root> <script-name>
+  local fake=$1 pending=$2 seen="" cur lib
+  while [ -n "$pending" ]; do
+    cur=${pending%% *}; pending=${pending#"$cur"}; pending=${pending# }
+    case " $seen " in *" $cur "*) continue ;; esac
+    seen="$seen $cur"
+    [ -f "$ROOT/bin/$cur" ] || continue
+    while IFS= read -r lib; do
+      [ -n "$lib" ] || continue
+      [ -f "$ROOT/bin/$lib" ] || continue
+      # COPY, never symlink. Some of these siblings are deliberately STUBBED
+      # further down with `cat > "$fake/bin/<lib>"`, and a `cat >` onto a symlink
+      # follows it and overwrites the REAL file in bin/ - it truncated the
+      # tracked bin/fm-tasks-axi-lib.sh from 76 lines to a 1-line stub, which
+      # then broke unrelated suites because three shipped scripts call
+      # fm_tasks_axi_compatible from it. A copy is equivalent for a sourced lib
+      # and cannot escape the fixture.
+      [ -e "$fake/bin/$lib" ] || cp "$ROOT/bin/$lib" "$fake/bin/$lib"
+      pending="$pending $lib"
+    done < <(sed -nE "$SOURCED_LIB_SED" "$ROOT/bin/$cur")
+  done
+}
+
+
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
@@ -75,16 +113,19 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
+  link_sourced_siblings "$fake" fm-teardown.sh
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   # fm-wake-lib.sh: teardown sources it for serialized secondmate lifecycle locks.
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
+  rm -f "$fake/bin/fm-guard.sh"   # never write THROUGH a symlink into the real bin/
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
   chmod +x "$fake/bin/fm-guard.sh"
   # fm-fleet-sync.sh: stub (called for non-scout/non-local-only teardowns).
+  rm -f "$fake/bin/fm-fleet-sync.sh"   # never write THROUGH a symlink into the real bin/
   cat > "$fake/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -92,6 +133,7 @@ SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
   # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
   # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
+  rm -f "$fake/bin/fm-tasks-axi-lib.sh"   # never write THROUGH a symlink into the real bin/
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH
@@ -154,6 +196,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
+  link_sourced_siblings "$fake" fm-teardown.sh
+  rm -f "$fake/bin/fm-guard.sh"   # never write THROUGH a symlink into the real bin/
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
@@ -161,11 +205,13 @@ test_teardown_skips_gracefully_without_tasktmp() {
 exit 0
 SH
   chmod +x "$fake/bin/fm-guard.sh"
+  rm -f "$fake/bin/fm-fleet-sync.sh"   # never write THROUGH a symlink into the real bin/
   cat > "$fake/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
+  rm -f "$fake/bin/fm-tasks-axi-lib.sh"   # never write THROUGH a symlink into the real bin/
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH

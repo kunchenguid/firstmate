@@ -42,15 +42,25 @@
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
-#     failure reasons. Parent status and bounded terminal evidence are historical,
-#     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. Actionable captain holds
-#     appear in decisions_open; blocked captain holds remain queued with metadata.
-#   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
-#     compatibility landed-work roll-up derived from secondmate_current. Readable
-#     structured homes with an unknown current classification are partial, not
-#     unreadable, and retain independently trustworthy structured surfaces.
+#     or timeout failure reasons. current.state is "timeout" - never "unknown" -
+#     when the per-home structured read itself exceeded FM_SNAPSHOT_SECONDMATE_TIMEOUT;
+#     that state means the home's decisions_open, active_children, and landed
+#     records below are empty because the read never completed, not because the
+#     home has nothing to report. Every other read failure (missing registration,
+#     invalid home, unreadable or malformed backlog, oversized summary) keeps the
+#     prior "unknown" state. Parent status and bounded terminal evidence are
+#     historical, untrusted supplements only and never override readable
+#     structured-home facts. Each structured-home record carries active_children,
+#     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
+#     Actionable captain holds appear in decisions_open; blocked captain holds
+#     remain queued with metadata.
+#   secondmate_landed: {records[],truncated[],unreadable[],timed_out[],partial[]} -
+#     the compatibility landed-work roll-up derived from secondmate_current.
+#     Readable structured homes with an unknown current classification are
+#     partial, not unreadable, and retain independently trustworthy structured
+#     surfaces. timed_out lists homes whose structured read exceeded budget -
+#     kept distinct from unreadable so a slow home is never rendered the same as
+#     an empty one.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -78,7 +88,10 @@ case "$SNAPSHOT_EPOCH" in ''|*[!0-9]*) SNAPSHOT_EPOCH=$(date +%s) ;; esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
+# 45s is a verified-sufficient default at today's registered-fleet scale, not a
+# permanently correct one - it was calibrated on a small home and larger fleets
+# may still need FM_SNAPSHOT_SECONDMATE_TIMEOUT raised further.
+FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-45}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -1162,6 +1175,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     reason=$registry_error
     summary='{}'
     summary_valid=false
+    timed_out=false
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
     if [ -z "$reason" ]; then
       case "$home" in
@@ -1209,7 +1223,12 @@ secondmate_current_json() {  # <parent-tasks-json>
         summary_rc=$?
       fi
       if [ "$summary_rc" -ne 0 ]; then
-        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
+        if [ "$summary_rc" -eq 124 ]; then
+          reason="structured home snapshot timed out"
+          timed_out=true
+        else
+          reason="structured home snapshot failed"
+        fi
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
@@ -1285,13 +1304,22 @@ secondmate_current_json() {  # <parent-tasks-json>
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
+      # A timed-out read is loudly distinct from "unknown": "unknown" means the
+      # read completed and found nothing trustworthy to report, while "timeout"
+      # means the read never finished, so decisions_open/active_children/landed
+      # below are empty because they were never collected, not because they are
+      # actually empty. Collapsing the two back into one value is the defect
+      # this state split exists to prevent - never do it.
+      current_state_value=unknown
+      [ "$timed_out" = true ] && current_state_value=timeout
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
+        --arg current_state "$current_state_value" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
-         current:{state:"unknown",reason:$reason},invalidity:null,
+         current:{state:$current_state,reason:$reason},invalidity:null,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
@@ -1324,6 +1352,9 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
      unreadable:[ $current.records[]
        | select(.current.state == "unknown" and .provenance.selected != "structured-home")
        | .home // ("<" + .id + ": unavailable>")],
+     timed_out:[ $current.records[]
+       | select(.current.state == "timeout")
+       | .home // ("<" + .id + ": timed out>")],
      partial:[ $current.records[]
        | select(.current.state == "unknown" and .provenance.selected == "structured-home")
        | .home // ("<" + .id + ": partial>")]}

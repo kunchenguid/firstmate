@@ -21,6 +21,10 @@ file_mode() {
   fi
 }
 
+treehouse_home_for_verb() {
+  awk -F '\t' -v verb="$2" '$1==verb { print $2; exit }' "$1"
+}
+
 install_fake_process_event_sweep() {
   local home=$1 log=$2
   mkdir -p "$home/bin"
@@ -266,7 +270,7 @@ EOF
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log lease out
+  local home acquired acquired_abs fakebin log lease homelog out expected_pool recorded_pool
   home="$TMP_ROOT/dash-home"
   acquired="$TMP_ROOT/dash-acquired-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -277,15 +281,20 @@ test_home_seed_uses_treehouse_acquired_home() {
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fake")
   log="$TMP_ROOT/dash-fake/tmux.log"
   lease="$TMP_ROOT/dash-fake/lease"
+  homelog="$TMP_ROOT/dash-fake/treehouse-home.log"
+  expected_pool=$(bash -c '. "$1"; fm_treehouse_pool_home "$2"' _ "$ROOT/bin/fm-treehouse-lib.sh" "$ROOT")
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
-    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_FAKE_TREEHOUSE_HOME_LOG="$homelog" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
   grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
+  recorded_pool=$(treehouse_home_for_verb "$homelog" get)
+  [ "$recorded_pool" = "$expected_pool" ] \
+    || fail "seed leased under HOME '$recorded_pool', expected '$expected_pool'"
   [ -f "$lease" ] || fail "seed did not record a treehouse lease"
   [ "$(cat "$lease")" = dash ] || fail "seed did not set the lease holder to the secondmate id"
   [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"
@@ -296,7 +305,7 @@ test_home_seed_uses_treehouse_acquired_home() {
 }
 
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
-  local home acquired acquired_abs fakebin log err
+  local home acquired acquired_abs fakebin log homelog err expected_pool recorded_pool
   home="$TMP_ROOT/dash-fail-home"
   acquired="$TMP_ROOT/dash-fail-acquired-home"
   err="$TMP_ROOT/dash-fail.err"
@@ -309,8 +318,11 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fail-fake")
   log="$TMP_ROOT/dash-fail-fake/tmux.log"
+  homelog="$TMP_ROOT/dash-fail-fake/treehouse-home.log"
+  expected_pool=$(bash -c '. "$1"; fm_treehouse_pool_home "$2"' _ "$ROOT/bin/fm-treehouse-lib.sh" "$ROOT")
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_HOME_LOG="$homelog" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed reused an acquired home marked for another secondmate"
@@ -318,6 +330,9 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
   grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
     || fail "failed acquired seed did not return the home through treehouse"
+  recorded_pool=$(treehouse_home_for_verb "$homelog" return)
+  [ "$recorded_pool" = "$expected_pool" ] \
+    || fail "seed returned under HOME '$recorded_pool', expected '$expected_pool'"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
   fi
@@ -1520,7 +1535,7 @@ test_fm_send_refuses_bare_window_without_home_meta() {
 }
 
 test_secondmate_teardown_retires_empty_home() {
-  local home subhome subhome_abs fakebin log lease fmroot
+  local home subhome subhome_abs fakebin log homelog lease fmroot expected_pool recorded_pool
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
   fmroot="$TMP_ROOT/teardown-fmroot"
@@ -1543,13 +1558,18 @@ EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
   log="$TMP_ROOT/teardown-fake/tmux.log"
+  homelog="$TMP_ROOT/teardown-fake/treehouse-home.log"
   lease="$TMP_ROOT/teardown-fake/lease"
   printf 'domain\n' > "$lease"
+  expected_pool=$(bash -c '. "$1"; fm_treehouse_pool_home "$2"' _ "$ROOT/bin/fm-treehouse-lib.sh" "$fmroot")
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
-    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_FAKE_TREEHOUSE_HOME_LOG="$homelog" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
     || fail "teardown failed for empty secondmate home"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
+  recorded_pool=$(treehouse_home_for_verb "$homelog" return)
+  [ "$recorded_pool" = "$expected_pool" ] \
+    || fail "teardown returned secondmate home under HOME '$recorded_pool', expected '$expected_pool'"
   [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
   [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"

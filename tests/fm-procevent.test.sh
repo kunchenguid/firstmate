@@ -745,7 +745,7 @@ sleep 0.5
 assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the crashed generation remains alive"
 case "$orphan_out" in
   *"started=1"*)
-    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
+    wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" \
       || fail "a replacement runner started without recording its own claim"
     [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 2 ] \
       || fail "reconcile did not start exactly one replacement source: $(cat "$ORPHAN_LOG")"

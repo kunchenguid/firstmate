@@ -968,6 +968,69 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   pass "a declared pause is periodically rechecked against authoritative active-run state"
 }
 
+# A crew that finished, opened its PR and DECLARED a pause sits idle with a LIVE
+# agent while it waits on the captain's merge. That is the healthy parked shape,
+# not a wedge, and AGENTS.md's contract is that firstmate leaves the pane alone
+# and rechecks on a long cadence. pause_state_class used to require a DEAD agent
+# before it would honour the declaration, so every poll of a live parked crew
+# returned 'none' and re-escalated a bare stale forever - and it deleted the
+# recheck marker on the way out, so the condition could never recover either.
+# Nothing covered the live-agent path, which is why the inversion survived.
+test_live_agent_declared_pause_is_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case live-agent-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-live-paused"
+  printf 'idle awaiting the captain merge\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/live-paused.meta"
+  printf 'paused: PR open, idling on the captain merge decision\n' > "$state/live-paused.status"
+  sig=$(seen_sig "$state/live-paused.status"); printf '%s' "$sig" > "$state/.seen-live-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting the captain merge")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  # A FRESH recheck marker selects the declared-pause branch under test.
+  date +%s > "$state/.paused-rechecked-$key"
+  # Not working: the crew is finished and parked, so only the declaration and a
+  # live agent stand between it and a bare stale re-escalation.
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · PR ready for review'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a live crew's declared pause was re-escalated as a stale instead of absorbed: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the declared pause was dropped for a live agent"; }
+  [ -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "the recheck marker was deleted, so the pause could never hold again"; }
+  assert_not_contains "$(cat "$out")" "stale: $window" "a bare stale surfaced for a declared pause on a live agent"
+  reap "$pid"
+  rm -f "$state/.watcher-down"
+
+  # Second path, and the one that kept the escalation alive after the first was
+  # fixed: the recheck marker AGES OUT past STALE_ESCALATE_SECS, so the branch
+  # above is skipped and classification falls through. That fall-through carried
+  # the identical dead-agent requirement and deleted the marker on its way out,
+  # so a live parked crew re-entered it every STALE_ESCALATE_SECS forever.
+  # `.paused-<key>` is retained here, which is what distinguishes an already
+  # surfaced pause from first sight - first sight must still surface once, and
+  # test_exited_pause_and_captain_held_use_bounded_cadence pins that.
+  printf '%s\n' $(( $(date +%s) - 5000 )) > "$state/.paused-rechecked-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an aged recheck marker re-escalated a declared pause as a bare stale: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the declared pause was dropped on the aged-marker path"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a live agent's declared pause is absorbed, on both the fresh and the aged-recheck path"
+}
+
 test_paused_authoritative_working_preserves_wedge_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case paused-working-preserves-wedge-timer); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1877,6 +1940,7 @@ test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
+test_live_agent_declared_pause_is_absorbed
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts

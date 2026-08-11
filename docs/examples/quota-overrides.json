@@ -1,0 +1,5 @@
+{
+  "_comment": "OPTIONAL authed usage readers, per surface. Map a surface -> a shell command that prints exactly ONE integer 0-100 = percent headroom remaining. The fleet runs it and uses the result as that surface's headroom, overriding quota-axi / the blind default. Use it for surfaces whose usage is not observable via quota-axi. The command OWNS all secret handling (read the token from a 0600 file; never put it on argv). Copy this to config/quota-overrides.json (gitignored) and fill in. Empty string or missing key = blind / fail-open (the default). Copilot and Cursor ship working readers: set \"copilot\": \"<repo>/bin/quota-copilot-usage.sh\" and \"cursor\": \"<repo>/bin/quota-cursor-usage.sh\".",
+  "copilot": "",
+  "cursor": ""
+}

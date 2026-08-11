@@ -21,6 +21,13 @@ REVIEW_DIFF="$ROOT/bin/fm-review-diff.sh"
 TMP_ROOT=$(fm_test_tmproot fm-review-diff-tests)
 
 make_case() {
+  # This helper RETURNS its path on stdout, so nothing else may write there.
+  # `git push` runs the caller's pre-push hook, and a hook that logs
+  # informationally to stdout instead of stderr lands its banner INSIDE the
+  # caller's `$(...)` capture, prefixing every derived path and collapsing the
+  # fixture with "No such file or directory". `-q` silences git, never the hook.
+  # Grouping the setup makes the stdout contract explicit for ANY hook.
+  {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
   mkdir -p "$case_dir/state"
@@ -39,6 +46,7 @@ make_case() {
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
   touch "$case_dir/state/.last-watcher-beat"
+  } >/dev/null
   printf '%s\n' "$case_dir"
 }
 

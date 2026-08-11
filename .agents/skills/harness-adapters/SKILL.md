@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and muse.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, muse, cline, cursor-agent, copilot, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -11,8 +11,8 @@ metadata:
 Use this reference before any harness-specific firstmate operation: spawn, recovery, trust-dialog handling, skill invocation, interrupt, exit, resume, or adapter verification.
 
 Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
-Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
-When a matched rule or default is a profile array, load `quota-array-dispatch` for the completion-aware candidate choice after this skill establishes harness and model/provider facts.
+Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, provider, model, and effort axes at intake.
+When a matched rule or default is a profile array, load `quota-array-dispatch` for the subscription-aware candidate choice after this skill establishes harness and model/provider facts.
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
 
@@ -53,6 +53,7 @@ When verifying a new adapter, record its env marker and command name in `bin/fm-
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
+When firstmate must move a live ship/scout to another verified harness without losing work, use `bin/fm-runtime-handoff.sh` rather than guessing exit keys or hand-editing meta; that script reads these exit-command facts and rewrites `harness=` after a successful in-place relaunch.
 
 ## Primary turn-end guard
 
@@ -104,7 +105,7 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 ## Launch profile axes
 
-`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
+`bin/fm-spawn.sh` accepts concrete `--harness`, `--provider`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
@@ -125,7 +126,11 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| cline | `--model <id>` | `--thinking <low\|medium\|high\|xhigh>` | Verified 2026-07-27 on Cline CLI 3.0.46. `max` is omitted. |
+| cursor-agent | `--model <id>` | none | Verified 2026-07-27 on Cursor CLI 2026.07; effort is not a firstmate launch flag for this adapter. |
+| copilot | `--model <id>` | `--reasoning-effort <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-28 on GitHub Copilot CLI 1.0.75; firstmate's shared effort vocabulary is a supported subset. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <id>` | `--effort <low\|medium\|high>` | Verified 2026-08-01 on Antigravity CLI 1.1.9. Base model ids require `--effort`; effort-baked model ids work alone; matching baked+effort works; conflict fails closed. Ceiling is `high`: firstmate's shared `xhigh`/`max` clamp to `--effort high` against a base model id, and are withheld entirely against an effort-baked id so the baked tier stands. Preferred form: base model + `--effort`. Crewmate launches only. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -143,6 +148,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| agy | Run `agy models`, which lists model ids available to the current Antigravity CLI install and account (includes effort-baked slugs). |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -361,6 +367,7 @@ Grok's primary watcher protocol remains background-notify around `bin/fm-watch-a
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 
 Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back to the executable `$HOME/.kimi-code/bin/kimi`.
+Kimi 0.29.1 is excluded from automatic subscription dispatch because a guarded Herdr lifecycle run could not deterministically exit after interrupt; explicit Kimi work must not be selected by `fm-dispatch-select.mjs`.
 
 | Fact | Value |
 |---|---|
@@ -399,6 +406,87 @@ Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, 
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
+## cline (VERIFIED 2026-07-27, Cline CLI 3.0.46)
+
+Cline runs as an interactive TUI crewmate. Unlike Kimi, a positional prompt seeds AND auto-runs the first turn, so the brief rides the launch command like claude/codex/grok.
+
+| Fact | Value |
+|---|---|
+| Binary | `cline` from `PATH` (`~/.local/bin/cline`, a Node script). Detection matches `cline` in the process argv like opencode (ancestry command name may be `node`). |
+| Launch | `cline -i --tui --auto-approve true [--model <id>] [--thinking <effort>] "<brief>"`. `-i --tui` opens the persistent interactive TUI; the positional brief seeds and auto-runs the first turn (verified via tmux capture). |
+| Models | Provider/model shown in the status bar (e.g. `ClinePass: Kimi K3`); `--model`/`-m` selects within the active provider. Default provider is `cline` (ClinePass). |
+| Busy-pane signature | A braille spinner plus `Thinking... (esc to cancel)`; `esc to cancel` is the stable token and clears the instant the turn ends. Deliberately distinct from claude/codex `esc to interrupt`. |
+| Exit command | Single `Ctrl+C` exits the TUI cleanly (rc 0). There is no `/exit` slash exit. |
+| Interrupt | `Esc` cancels the current turn (the footer shows `esc to cancel`). Ctrl+C would EXIT, not interrupt — do not use it to interrupt. |
+| Autonomy | `--auto-approve true` (on by default; passed explicitly for version robustness); the status bar reads `Auto-approve all enabled`. |
+| Trust dialog | None on a clean launch with a pre-authed provider (ClinePass). |
+| Submission | Typing then Enter submits; a seeded positional prompt auto-submits on launch. |
+| Environment marker | None verified; detection relies on process ancestry (`cline` in argv). |
+| Composer | Bordered box with a bare `❯` (U+276F) agent glyph — already a verified empty-composer glyph. The idle placeholder (`What can I do for you?` on first ready, `Ask anything...` thereafter) is muted grey (truecolor `38;2;131;137;140`, luma ~136) and also drawn bold, so it survives the dim/faint ghost stripper and would misread as pending; the shared idle-placeholder default (`FM_COMPOSER_IDLE_RE_DEFAULT` in `fm-composer-lib.sh`, consumed by the tmux classifier and the herdr/cmux/orca backends) lists both placeholders so an empty cline composer reads empty on every backend. The composer row has no side borders, so cmux/orca reach it through the bare agent-glyph promotion (`❯`). |
+| Effort | Maps to `--thinking none|low|medium|high|xhigh` (no `max`; omit rather than pass an unsupported value). A live `--thinking high` launch showed `(high)` in the status bar. |
+| TTY | Even `cline config` refuses without a TTY; supervise only through a pty/pane, never a bare pipe. |
+
+Turn-end is observed from the pane, not a hook: the `esc to cancel` spinner clears and the composer returns to its idle placeholder. cline exposes `--hooks-dir` and a `hook` subcommand, which is the path for a future primary-session turn-end guard (only needed when firstmate ITSELF runs on cline); a cline CREWMATE needs no launch-side turn-end placeholder. cline is not wired for secondmate launches.
+
+Full empirical capture evidence: [`docs/verification/cline-adapter.md`](../../../docs/verification/cline-adapter.md).
+
+## cursor-agent (VERIFIED 2026-07-27, Cursor CLI 2026.07.16 / 2026.07.23)
+
+cursor-agent runs as a persistent interactive TUI crewmate. A positional prompt seeds AND auto-runs the first turn (after the workspace-trust gate is cleared), so the brief rides the launch command like claude/codex/cline.
+
+| Fact | Value |
+|---|---|
+| Binary | `cursor-agent` from `PATH` (`~/.local/bin/cursor-agent`, a Node app). Detection matches `cursor` in the process argv. |
+| Launch | `cursor-agent --force [--model <id>] "<brief>"`. `--force` (= status-bar "Run Everything") makes the crewmate autonomous. The default `agent` subcommand is the persistent TUI; a positional prompt seeds and auto-runs once trust is cleared. |
+| Models | `--model gpt-5 \| sonnet-4-thinking \| 'claude-opus-4-8[context=1m,effort=high,fast=false]'`. Effort is a MODEL bracket parameter, NOT a standalone flag — so fm-spawn passes `--model` only, no effort flag. |
+| Busy-pane signature | Braille spinner + `Working` + composer hint `ctrl+c to stop` (present only mid-turn). `ctrl+c to stop` is the anchor (`FM_TMUX_CURSOR_AGENT_BUSY_REGEX_DEFAULT`); bare `Working` is NOT used because pi owns `Working...`. |
+| Exit command | `/quit` (slash popup + Enter) — verified to exit cleanly. Ctrl-C and Esc do NOT exit an idle session (Esc only quits the pre-session trust dialog). |
+| Interrupt | `Ctrl-C` mid-turn (the busy footer shows `ctrl+c to stop`). |
+| Autonomy | `--force` (alias `--yolo`); status bar reads `Run Everything`. `--auto-review` is the softer classifier mode (not used for unattended crew). |
+| **Workspace trust (blocking)** | Interactive mode shows a blocking `⚠ Workspace Trust Required` dialog (`[a] Trust / [q] Quit`). **`--trust` does NOT bypass it — it only works with `--print`/headless.** Two verified bypasses: (1) pre-seed `~/.cursor/projects/<path-slug>/.workspace-trusted` = JSON `{"trustedAt":"<iso8601>","workspacePath":"<abs path>"}` before launch (path-slug = abspath, drop leading `/`, `/`→`-`, with a length-cap+hash variant for long paths); (2) send `a` after the readiness gate detects the dialog. A pre-seeded marker was verified to skip the dialog entirely. `fm-spawn` wires both: it pre-seeds the marker before launch and its readiness gate answers a residual dialog with `a`, failing the spawn loudly instead of hanging. |
+| Composer | Bare agent glyph `→` (U+2192) with idle placeholder `Plan, search, build anything` (first ready) / `Add a follow-up` (post-turn). `→` is a verified AGENT glyph in the shared classifier and bare-row promotion set (`fm-composer-lib.sh`: `FM_COMPOSER_BARE_PROMPT_RE_DEFAULT`), so the unbordered composer row is structurally recognized on every backend, and the idle placeholders read empty via the shared `FM_COMPOSER_IDLE_RE_DEFAULT` (the glyph-prefixed alternates). A dead shell (`>` `$` `%` `#`) still never promotes. |
+| TTY | Interactive mode needs a pty; supervise only through a pane. |
+| Auth | `cursor-agent login` (browser/device; set `NO_OPEN_BROWSER=1` on a headless box) or `--api-key`/`CURSOR_API_KEY` (the `api-key-env` account method). Verified logged-in as a Cursor account. |
+
+The trust gate is the one integration a cursor CREWMATE needs beyond the registry facts above, and `fm-spawn` wires it: the spawn pre-seeds `.workspace-trusted` before launch and its post-launch readiness gate answers a residual dialog with `a` (once), failing the spawn instead of hanging when the pane never reaches a ready/working signal. A full live crewmate dispatch through the herdr backend is the remaining acceptance step (needs a full firstmate home). cursor is not wired for secondmate launches, so no `backends/tmux.sh` liveness entry is required yet.
+
+Full empirical capture evidence: [`docs/verification/cursor-agent-adapter.md`](../../../docs/verification/cursor-agent-adapter.md).
+
+## copilot (VERIFIED 2026-07-28, GitHub Copilot CLI 1.0.75)
+
+GitHub Copilot CLI runs as a persistent interactive TUI crewmate. A positional
+prompt (via `-i`) seeds AND auto-runs the first turn once the folder-trust
+dialog is cleared, so the brief rides the launch command like claude/codex/
+cline/cursor-agent.
+
+| Fact | Value |
+|---|---|
+| Binary | `copilot` from `PATH` (`~/.local/bin/copilot`), a standalone stripped ELF executable, NOT a node/python script. `/proc/<pid>/comm` reports the runtime-internal thread name `MainThread` (consistent with a Bun-compiled single-file binary), never `copilot`/`node`/`python`; detection matches `copilot` in the process argv via a dedicated `MainThread` ancestry case. |
+| Launch | `copilot --allow-all --no-ask-user [--model <id>] [--reasoning-effort <tier>] -i "<brief>"`. `-i, --interactive <prompt>` seeds and auto-runs once the trust dialog clears (verified via tmux capture). |
+| Models | Enumerated live via `/model` or `copilot help config`: `claude-sonnet-5`, `claude-sonnet-4.6`, `claude-sonnet-4.5`, `claude-haiku-4.5`, `claude-fable-5`, `claude-opus-5`, `claude-opus-4.8[-fast]`, `claude-opus-4.7`, `claude-opus-4.6`, `claude-opus-4.5`, `gpt-5.6-sol`, `gpt-5.6-terra` (default), `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5-mini`, `gemini-3.1-pro-preview`, `gemini-3.6-flash`, `gemini-3.5-flash`, `kimi-k2.7-code`, plus `auto`. `--model` is validated before any API call (verified: a bogus id errors cleanly with exit 1). |
+| Busy-pane signature | Rotating circle/quarter-phase spinner + literal `Working esc interrupt` (optionally with a ` · <size>` tool-output-size infix between the two words). Bare `esc interrupt` alone collides with opencode's own anchor, so the busy regex is the compound `Working.*esc interrupt` (`FM_TMUX_COPILOT_BUSY_REGEX_DEFAULT`). |
+| Exit command | `/exit` (verified rc 0). Double `Ctrl-C` from idle also exits (footer shows `ctrl+c again to exit`, reverting on its own if not repeated). |
+| Interrupt | Single `Ctrl-C` mid-turn (`● Operation cancelled by user`; session survives). `Esc` is a no-op both mid-turn and idle — unlike cline (interrupt) or cursor-agent (dialog-quit) — it only does something inside a modal (trust dialog "No", `/model` picker cancel). |
+| Autonomy | `--allow-all` (alias `--yolo`; identical, `--allow-all-tools --allow-all-paths --allow-all-urls`) is the targeted equivalent of claude's `--dangerously-skip-permissions`. `--no-ask-user` additionally disables the `ask_user` tool; a live underspecified-brief test did not stall without it, but it is shipped anyway as a zero-downside defensive addition (no attended human to answer it in a supervised pane). |
+| **Trust dialog (blocking, GATED)** | Interactive mode on an untrusted directory shows a blocking `Confirm folder trust` dialog (`1. Yes` / `2. Yes, and remember` / `3. No (Esc)`). **`--allow-all` does NOT bypass it** (verified with the flag already in argv), and the untested `--add-dir` flag was probed (WI-4 T0) and also does NOT bypass it. `fm-spawn` wires a post-launch readiness gate (`copilot_wait_for_trust_clear`, invoked right after the launch `Enter`): while the dialog is present, send one default-focus `Enter` (session-scoped trust, option 1, "Yes"); once the pane reaches the busy footer or the idle status bar, proceed; on budget exhaustion (`FM_COPILOT_TRUST_POLLS`/`FM_COPILOT_POLL_INTERVAL`), fail the spawn loudly via `copilot_spawn_fail`. Deliberately **no pre-seed** of copilot's persistent trust allow-list, unlike cursor-agent's isolated per-project marker — copilot's only pre-seed target is a single shared, global, credential-bearing JSONC config file with no delegated writer and no config-dir override, so the keystroke-only mechanism gets the same guarantee with zero writes to the operator's home. See `docs/verification/copilot-adapter.md` § *Trust / permission gate* for the full options analysis and the S4 reversal procedure (trivial: nothing is ever written). |
+| Submission | A seeded `-i` prompt auto-submits once trust clears; typing then Enter can require a second Enter in practice (observed intermittently when injecting text into an already-running session — not yet root-caused, possibly bracketed-paste/debounce related). |
+| Environment marker | `COPILOT_CLI=1`, set for copilot-spawned child processes (verified) — the harness-detection Layer-1 marker, alongside `CLAUDECODE`/`PI_CODING_AGENT`/`GROK_AGENT`. |
+| Composer | Bare agent glyph `❯` (U+276F) — the exact same codepoint already verified for claude in the shared classifier; no new glyph needed. **No idle placeholder text of any kind was observed** (first-ready and post-turn composer rows are byte-identical: just the glyph, nothing else) — unlike cline/cursor-agent, so no `FM_COMPOSER_IDLE_RE_DEFAULT` addition and no backend `IDLE_RE` override were needed. |
+| Effort | Maps to `--reasoning-effort <none\|minimal\|low\|medium\|high\|xhigh\|max>` — the fullest vocabulary of any adapter (verified via `--help` AND a zero-quota pre-flight validation probe). firstmate's shared `low\|medium\|high\|xhigh\|max` axis is a full subset; no tier is omitted. |
+| TTY | Interactive mode needs a pty; supervise only through a pane. |
+
+Turn-end is observed from the pane, not a hook: the `Working.*esc interrupt`
+spinner/footer clears and the composer returns to its bare `❯` idle glyph.
+copilot is not wired for secondmate launches, so no `backends/tmux.sh`
+secondmate support is intentionally absent, matching cline/cursor-agent
+precedent. The folder-trust readiness gate (WI-4) is now wired, so a spawn
+into a genuinely fresh worktree at any path reaches a ready/working pane
+without human interaction, or fails loudly within the poll budget instead of
+hanging — a live end-to-end dispatch through the herdr backend is still
+deferred (matching the cline/cursor-agent precedent) but is no longer
+blocked on this gate.
+
+Full empirical capture evidence: [`docs/verification/copilot-adapter.md`](../../../docs/verification/copilot-adapter.md).
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
 
 Muse Code is a CREWMATE and SCOUT adapter only.
@@ -465,3 +553,31 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+## agy (VERIFIED 2026-08-01, Antigravity CLI 1.1.9)
+
+agy runs as a persistent interactive TUI crewmate (product name: Antigravity CLI).
+A `-i` / `--prompt-interactive` prompt seeds AND auto-runs the first turn once the project-trust dialog is cleared, so the brief rides the launch command like claude/codex/grok rather than needing kimi's bare launch plus injected pointer.
+
+| Fact | Value |
+|---|---|
+| Binary | `agy` from `PATH` (`~/.local/bin/agy`, standalone Mach-O). Detection matches `agy` in process ancestry and the env marker below. |
+| Launch | `agy --dangerously-skip-permissions [--model <id>] [--effort <low\|medium\|high>] -i "<brief>"`. `-i` seeds and auto-runs once trust clears (verified via tmux capture). |
+| Models | `agy models` lists effort-baked ids such as `gemini-3.6-flash-{low,medium,high}`, `gemini-3.5-flash-*`, `gemini-3.1-pro-{high,low}`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`. |
+| Model / effort interaction | Base model (e.g. `gemini-3.6-flash`) **requires** `--effort`. Baked suffix alone works. Matching baked + `--effort` works. Conflicting baked + `--effort` fails closed (`conflicts with --effort=...`). Preferred firstmate form: base model + `--effort`. Ceiling is `high`. firstmate resolves its shared `xhigh`/`max` tiers against the model id: a BASE id clamps to `--effort high`, because a base id with no `--effort` refuses to launch and the spawn would only surface that as a trust-gate timeout; an id that already bakes `-low`/`-medium`/`-high` gets NO effort flag, because it launches alone and a non-matching `--effort` fails closed. |
+| Busy-pane signature | Braille spinner + `Generating...` / `Running...` mid-turn; stable footer token `esc to cancel` (clears the instant the turn ends). Idle footer is `? for shortcuts`. agy owns its own constant and harness-scoped matcher case (`FM_TMUX_AGY_BUSY_REGEX_DEFAULT`) and never borrows another harness's signature. No semantic task-state writer is wired yet, so this is delivery busy only and task-state classification stays `unknown` until a lifecycle source is credited. |
+| Exit command | `/exit` (verified rc 0). Prints `Resume with -c (or command below):` and `agy --conversation=<uuid>`. |
+| Interrupt | Single `Esc` mid-turn; body shows `Interrupted · What should Antigravity CLI do instead?`; session survives. |
+| Autonomy | `--dangerously-skip-permissions` auto-approves tool permission prompts (does **not** bypass project trust). |
+| **Trust dialog (blocking, GATED)** | Interactive mode on an untrusted directory shows `Do you trust the contents of this project?` (`Yes, I trust this folder` / `No, exit`). Default focus is Yes; one `Enter` accepts it and **persists** the path into `~/.gemini/antigravity-cli/settings.json` `trustedWorkspaces` (verified). `fm-spawn` wires a post-launch readiness gate only (no pre-seed of that operator-global settings file): while the dialog is present, send one Enter; once `esc to cancel` or `? for shortcuts` appears, proceed; on budget exhaustion, fail the spawn loudly. Past-trust deliberately does **not** use the substring `Antigravity CLI` because that text also appears inside the dialog body. |
+| Submission | Seeded `-i` prompt auto-submits once trust clears; typing then Enter submits follow-ups. |
+| Environment marker | `ANTIGRAVITY_AGENT=1` on child/tool processes (verified with clean `env -i` launch). Checked **before** `CLAUDECODE` in `fm-harness.sh` so an agy worker is never misread as claude. |
+| Composer | Bordered box with bare `>` prompt glyph; **no idle placeholder text** observed. Bordered `>` already reads empty in the shared classifier; no `FM_COMPOSER_IDLE_RE_DEFAULT` addition. |
+| Resume | `agy --conversation <id>` or `agy -c` / `--continue` (most recent for cwd). |
+| TTY | Interactive mode needs a pty; supervise only through a pane. |
+| Skill invocation | Not separately verified beyond natural language; use natural language if the exact slash skill form is uncertain. |
+
+Turn-end is observed from the pane, not a hook: the `esc to cancel` footer clears and the composer returns to `? for shortcuts`.
+agy is not wired for secondmate launches, so the combination is refused rather than left readable-in-name-only.
+`fm-spawn.sh` enforces that: a `--secondmate` spawn resolving to `agy` (bare name, `--harness=`, or the `config/secondmate-harness` chain) refuses before endpoint creation, and `fm-bootstrap.sh`'s secondmate liveness sweep does not treat agy's `dead`/`missing` readings as recovery-grade.
+
+Full empirical capture evidence: [`docs/verification/agy-adapter.md`](../../../docs/verification/agy-adapter.md).

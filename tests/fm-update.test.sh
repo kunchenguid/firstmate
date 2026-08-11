@@ -35,6 +35,15 @@ TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
+  # This helper RETURNS the world dir on stdout, so nothing else may write
+  # there. `git push` runs the caller's pre-push hook, and a hook that logs
+  # informationally to stdout (rather than stderr) lands its banner INSIDE the
+  # caller's `w=$(new_world ...)` capture. Every path derived from $w is then
+  # prefixed with that banner and the whole fixture collapses with a pile of
+  # "No such file or directory". `-q` silences git itself, never the hook.
+  # Grouping the setup and sending its stdout to /dev/null makes the contract
+  # explicit and holds for any hook, not just the one that exposed this.
+  {
   mkdir -p "$w/home/state" "$w/home/data"
   # Fresh watcher beacon keeps fm-guard quiet.
   touch "$w/home/state/.last-watcher-beat"
@@ -54,6 +63,7 @@ new_world() {
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  } >/dev/null
 
   printf '%s\n' "$w"
 }
@@ -84,7 +94,9 @@ bump_origin() {
   fi
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm "bump-$mode"
-  git -C "$w/seed" push -q origin main
+  # Same pre-push hook chatter as new_world. Not captured here, so it only
+  # littered the TAP stream, but silencing it keeps a failing run readable.
+  git -C "$w/seed" push -q origin main >/dev/null
 }
 
 run_update() {

@@ -1,4 +1,9 @@
 {
+  "subscriptionRouting": {
+    "reservePercent": 20,
+    "telemetryMaxAgeSeconds": 300,
+    "cooldownSeconds": 1800
+  },
   "rules": [
     {
       "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
@@ -13,14 +18,14 @@
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
+        { "harness": "claude", "provider": "claude", "model": "claude-sonnet-5", "effort": "high" },
+        { "harness": "codex", "provider": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+      "why": "Use comparable strong coding profiles while fresh capacity evidence and the configured reserve permit them."
     }
   ],
   "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+    { "harness": "claude", "provider": "claude", "model": "sonnet", "effort": "medium" },
+    { "harness": "codex", "provider": "codex", "model": "gpt-5.5", "effort": "medium" }
   ]
 }

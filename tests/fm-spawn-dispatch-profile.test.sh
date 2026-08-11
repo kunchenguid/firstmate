@@ -59,7 +59,9 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # Must come before the spawn path starts: fm-spawn executes treehouse to lease
+  # the worktree and reads the path off its stdout.
+  fm_fake_treehouse "$fakebin"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -112,6 +114,10 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_SPAWN_ACCOUNT_ENV_NAME="${FM_SPAWN_ACCOUNT_ENV_NAME:-}" \
+    FM_SPAWN_ACCOUNT_ENV_VALUE="${FM_SPAWN_ACCOUNT_ENV_VALUE:-}" \
+    FM_SPAWN_ACCOUNT_ARGV_FLAG="${FM_SPAWN_ACCOUNT_ARGV_FLAG:-}" \
+    FM_SPAWN_ACCOUNT_ARGV_VALUE="${FM_SPAWN_ACCOUNT_ARGV_VALUE:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -706,6 +712,49 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_account_env_isolation_wraps_canonical_launch() {
+  local rec id out status launch acct_dir
+  id=account-env-launch-z1
+  rec=$(make_spawn_case account-env-launch claude "$id")
+  read_case_record "$rec"
+  acct_dir="$CASE_DIR/account __MODELFLAG__ dir; touch $CASE_DIR/pwned #"
+  mkdir -p "$acct_dir"
+
+  out=$(FM_SPAWN_ACCOUNT_ENV_NAME=CLAUDE_CONFIG_DIR \
+    FM_SPAWN_ACCOUNT_ENV_VALUE="$acct_dir" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude account-env spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$acct_dir' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
+    "account env isolation did not wrap the canonical claude launch"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "account env isolation lost the canonical launch brief envelope"
+  [ ! -e "$CASE_DIR/pwned" ] || fail "account env path was interpreted as shell syntax"
+  pass "account env isolation wraps the canonical launch template"
+}
+
+test_account_argv_isolation_precedes_canonical_brief() {
+  local rec id out status launch acct_dir
+  id=account-argv-launch-z1
+  rec=$(make_spawn_case account-argv-launch cline "$id")
+  read_case_record "$rec"
+  acct_dir="$CASE_DIR/cline __BRIEF__ config dir"
+  mkdir -p "$acct_dir"
+
+  out=$(FM_SPAWN_ACCOUNT_ARGV_FLAG=--config \
+    FM_SPAWN_ACCOUNT_ARGV_VALUE="$acct_dir" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "cline account-argv spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cline -i --tui --auto-approve true --config '$acct_dir' \"\$('" \
+    "account argv isolation did not precede the canonical brief argument"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "account argv isolation lost the canonical launch brief envelope"
+  pass "account argv isolation is inserted before the canonical launch brief"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -722,6 +771,23 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
   pass "active crew-dispatch profile does not block secondmate launches"
+}
+
+test_crewmate_only_adapters_refuse_secondmate_launches() {
+  local rec id sm out status h
+  id=profile-secondmate-refuse-z17
+  rec=$(make_spawn_case profile-secondmate-refuse codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  for h in cline cursor-agent copilot agy; do
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --harness "$h")
+    status=$?
+    expect_code 1 "$status" "secondmate spawn should refuse crewmate-only harness $h"
+    assert_contains "$out" "cannot run a secondmate" "secondmate refusal should name unsupported harness $h"
+  done
+  pass "crewmate-only adapters refuse secondmate launches"
 }
 
 test_no_profile_keeps_claude_profile_defaults
@@ -750,6 +816,9 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_account_env_isolation_wraps_canonical_launch
+test_account_argv_isolation_precedes_canonical_brief
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_crewmate_only_adapters_refuse_secondmate_launches
 
 echo "# all fm-spawn-dispatch-profile tests passed"

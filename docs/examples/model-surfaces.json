@@ -1,0 +1,20 @@
+{
+  "_comment": "Canonical model family -> ORDERED surfaces (quota pools) that can serve it. A 'surface' is a quota-axi provider (claude/codex/grok/cursor/copilot/kimi) or a custom source in bin/quota-sources/<surface>.sh. The operator-facing picker walks the list left-to-right and reports the first preferred surface with observable headroom; a surface whose quota is unobservable is treated fail-open as a valid fallback target. Same model, several pools: this is how 'grok from whichever pool (grok CLI or Cursor) has tokens' is expressed. NOTE: cline is intentionally NOT a monitored surface (its usage is locked behind an internal WS-hub credential); it stays a usable crewmate harness but is out of quota picking \u2014 choose another LLM for open work when it hits its wall. Extend freely.",
+  "grok": [
+    "grok",
+    "cursor"
+  ],
+  "kimi": [
+    "kimi"
+  ],
+  "claude": [
+    "claude",
+    "copilot",
+    "cursor"
+  ],
+  "gpt": [
+    "codex",
+    "copilot",
+    "cursor"
+  ]
+}

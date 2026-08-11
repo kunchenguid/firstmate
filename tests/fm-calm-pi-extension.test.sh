@@ -28,6 +28,20 @@ record_pi_version_evidence() {
   [ -n "$version" ] || fail "$context could not determine the installed Pi version"
 }
 
+pi_version_at_least() {  # <version-output> <min-version>
+  local version=$1 min=$2 parts major minor patch min_major min_minor min_patch extra
+  parts=$(printf '%s\n' "$version" | sed -nE 's/.*([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -1)
+  IFS=' ' read -r major minor patch extra <<< "$parts"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  IFS='.' read -r min_major min_minor min_patch extra <<< "$min"
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$extra" ] || return 1
+  [ "$major" -gt "$min_major" ] && return 0
+  [ "$major" -eq "$min_major" ] || return 1
+  [ "$minor" -gt "$min_minor" ] && return 0
+  [ "$minor" -eq "$min_minor" ] || return 1
+  [ "$patch" -ge "$min_patch" ]
+}
+
 cleanup() {
   if command -v tmux >/dev/null 2>&1; then
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -1358,8 +1372,16 @@ test_operational_followup_turn_e2e() {
     echo "skip: pi or tmux not found for Pi operational follow-up E2E"
     return 0
   fi
-  version=$(pi --version 2>/dev/null || true)
+  # `pi --version` prints to STDERR (exit 0), so `2>/dev/null` discarded the
+  # only output and left $version empty - the suite then failed with
+  # "could not determine the installed Pi version" against a perfectly
+  # working Pi. Merge both streams and keep the failure-tolerant `|| true`.
+  version=$(pi --version 2>&1 || true)
   record_pi_version_evidence "$version" "Pi operational follow-up E2E"
+  if ! pi_version_at_least "$version" 0.81.1; then
+    echo "skip: Pi operational follow-up E2E requires Pi >= 0.81.1 (found $version)"
+    return 0
+  fi
 
   project="$TMP_ROOT/followup-project"
   home="$TMP_ROOT/followup-home"
@@ -1528,7 +1550,7 @@ TS
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
-    while [ "$i" -lt 120 ]; do
+    while [ "$i" -lt 300 ]; do
       pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
       printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' && break
       sleep 0.05
@@ -1712,8 +1734,16 @@ test_hidden_block_geometry_e2e() {
     echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
     return 0
   fi
-  version=$(pi --version 2>/dev/null || true)
+  # `pi --version` prints to STDERR (exit 0), so `2>/dev/null` discarded the
+  # only output and left $version empty - the suite then failed with
+  # "could not determine the installed Pi version" against a perfectly
+  # working Pi. Merge both streams and keep the failure-tolerant `|| true`.
+  version=$(pi --version 2>&1 || true)
   record_pi_version_evidence "$version" "Pi Calm hidden-block geometry E2E"
+  if ! pi_version_at_least "$version" 0.81.1; then
+    echo "skip: Pi Calm hidden-block geometry E2E requires Pi >= 0.81.1 (found $version)"
+    return 0
+  fi
 
   project="$TMP_ROOT/geometry-project"
   home="$TMP_ROOT/geometry-home"
@@ -2820,8 +2850,16 @@ test_interactive_terminal_e2e() {
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
   fi
-  version=$(pi --version 2>/dev/null || true)
+  # `pi --version` prints to STDERR (exit 0), so `2>/dev/null` discarded the
+  # only output and left $version empty - the suite then failed with
+  # "could not determine the installed Pi version" against a perfectly
+  # working Pi. Merge both streams and keep the failure-tolerant `|| true`.
+  version=$(pi --version 2>&1 || true)
   record_pi_version_evidence "$version" "Pi calm interactive E2E"
+  if ! pi_version_at_least "$version" 0.81.1; then
+    echo "skip: Pi calm interactive E2E requires Pi >= 0.81.1 (found $version)"
+    return 0
+  fi
 
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"

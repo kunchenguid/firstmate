@@ -137,6 +137,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/federation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -156,8 +160,12 @@
       "path": ".agents/skills/harness-adapters/SKILL.md",
       "audience": "agent-runtime"
     },
-    {
+       {
       "path": ".agents/skills/process-event-sources/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/multi-account/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -249,12 +257,36 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/accounts.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/model-surfaces.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/quota-overrides.json",
       "audience": "operator-example"
     },
     {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/fleet-addon.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/fleet-quickstart.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/fleet-token-economy.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/fm-test-isolation-proof.md",
@@ -327,6 +359,22 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/cline-adapter.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/copilot-adapter.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/cursor-agent-adapter.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/agy-adapter.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

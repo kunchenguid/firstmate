@@ -690,6 +690,33 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_ship_and_scout_forbid_interactive_prompts_and_worker_side_polling() {
+  local home brief
+  home="$TMP_ROOT/worker-safety-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-safety-ship firstmate --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/brief-safety-ship/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "Never render it as an interactive question, confirmation, menu, or any other construct that waits on a human reply" "$brief" \
+    "ship brief did not forbid rendering a decision as an interactive prompt"
+  assert_grep "nobody reads this pane" "$brief" \
+    "ship brief did not explain why an interactive prompt is unsafe"
+  assert_grep "Never arm your own watch, poll, sleep, or retry loop to wait on a step you already handed off" "$brief" \
+    "ship brief did not forbid worker-side polling loops"
+  assert_grep "Firstmate already supervises every task centrally" "$brief" \
+    "ship brief did not explain why worker-side polling is unsafe"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-safety-scout firstmate --scout >/dev/null 2>&1
+  brief="$home/data/brief-safety-scout/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "Never render it as an interactive question, confirmation, menu, or any other construct that waits on a human reply" "$brief" \
+    "scout brief did not forbid rendering a decision as an interactive prompt"
+  assert_grep "Never arm your own watch, poll, sleep, or retry loop to wait on a step you already handed off" "$brief" \
+    "scout brief did not forbid worker-side polling loops"
+  pass "fm-brief.sh: ship and scout briefs forbid interactive-prompt decisions and worker-side polling loops"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -729,4 +756,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_and_scout_forbid_interactive_prompts_and_worker_side_polling
 test_scout_and_secondmate_scaffold

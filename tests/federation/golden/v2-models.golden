@@ -1,0 +1,5 @@
+MODEL   SURFACES (pool: status headroom)
+grok    grok: unconfigured —  |  cursor: logged_in 55%
+kimi    kimi: unconfigured —
+claude  claude: fresh 1%  |  copilot: logged_in 88%  |  cursor: logged_in 55%
+gpt     codex: fresh 90%  |  copilot: logged_in 88%  |  cursor: logged_in 55%

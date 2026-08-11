@@ -12,8 +12,8 @@ REAL_TMUX=$(command -v tmux || true)
 make_case() {  # <name>
   local dir=$1
   mkdir -p "$TMP_ROOT/$dir/home/state" "$TMP_ROOT/$dir/home/data" \
-    "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
-    "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
+    "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin"
+  fm_git_worktree "$TMP_ROOT/$dir/project" "$TMP_ROOT/$dir/worktree" "wt-$dir"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'

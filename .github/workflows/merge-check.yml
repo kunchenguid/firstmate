@@ -1,0 +1,39 @@
+name: Merge check
+
+# CI (.github/workflows/ci.yml) already owns lint and the complete behavior-test
+# partition on every pull request against main. This workflow adds only the check
+# CI cannot make from the base repository alone: whether the pull request still
+# merges cleanly into upstream kunchenguid/firstmate main. Do not re-spell lint or
+# test invocations here; keep them on their single owners in ci.yml.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-merge-probe:
+    name: Upstream main merge probe
+    runs-on: ubuntu-latest
+    # Probe is a fetch plus an in-memory merge; this cap is a hang tripwire.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Probe merge against upstream main
+        run: |
+          set -eu
+          git remote add upstream https://github.com/kunchenguid/firstmate.git
+          git fetch --no-tags upstream main
+          rc=0
+          git merge-tree --write-tree HEAD FETCH_HEAD >/dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "Merges cleanly with upstream kunchenguid/firstmate main."
+          elif [ "$rc" -eq 1 ]; then
+            echo "::warning::This branch conflicts with upstream kunchenguid/firstmate main. Merge upstream main into it and resolve the conflicts before landing."
+          else
+            echo "::error::git merge-tree exited $rc before reaching a merge verdict."
+            exit "$rc"
+          fi

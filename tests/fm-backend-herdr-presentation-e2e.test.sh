@@ -208,6 +208,14 @@ set -u
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  # Post-create abort: yield a path that exists but is NOT an isolated worktree —
+  # the invoking project checkout itself. Under the leased-acquisition flow the
+  # spawn then proceeds past acquisition with WT=<primary checkout> and must be
+  # stopped by the armed isolation validation, which is the invariant this
+  # fixture exists to pin. (A bare `exit 0` with no output now dies earlier on
+  # the leased flow's empty-path check, a different error, so the armed
+  # validation would never be reached.)
+  pwd
   exit 0
 fi
 exec "$REAL_TREEHOUSE" "$@"
@@ -252,6 +260,15 @@ chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
 chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
+# This suite deliberately races two teardowns against one herdr session and
+# asserts BOTH complete - that is what "concurrent projected cleanup is
+# serialized" means. Real herdr work by the lock holder can exceed the 5s
+# default bound on a loaded machine, and the loser then refuses with
+# "presentation lock is contended", failing whichever of fixture A or B lost the
+# race - it alternated run to run, which is what identified this as a bound and
+# not a defect. Wait up to 60s here so the assertion tests serialization rather
+# than machine speed. The product default is unchanged for real teardowns.
+export FM_HERDR_PRESENTATION_LOCK_RETRIES=600
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -481,6 +498,10 @@ touch "$HOME_DIR/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
 printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+# This real-backend suite deliberately keeps several sleeping fixture agents
+# alive at once. Disable the machine-capacity admission guard inside the
+# temporary home so host load from unrelated lanes cannot make the E2E flaky.
+printf 'mode = off\n' > "$HOME_DIR/config/spawn-capacity"
 printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
 printf 'Projection ordering fixture A.\n' > "$HOME_DIR/data/order-a/brief.md"
@@ -763,7 +784,10 @@ remember_meta_worktree "$ORDER_B_META" >/dev/null
 ORDER_LIST=$(lab workspace list) || fail "could not inspect concurrent presentation ordering"
 CREATED_LABELS=$(projection_labels_from_log "$PROJECTION_ORDER_START")
 EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECTED_LABEL" "$CREATED_LABELS")
-ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[].label')
+ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '
+  .result.workspaces[].label
+  | select(. == "firstmate" or (. | startswith("└ ")) or (. | startswith("2ndmate-")))
+')
 [ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, stable primary block, secondmates: $ACTUAL_LABELS"
 PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '
   .result.workspaces[]
@@ -774,7 +798,13 @@ MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
 [ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
   || fail "workspace.move targeted something other than each exact current projected-create id"
 MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
-[ "$MOVE_INDEXES" = $'1\n2\n3' ] \
+EXPECTED_MOVE_INDEXES=$(printf '%s' "$ORDER_LIST" | jq -r '
+  .result.workspaces as $spaces
+  | range(0; $spaces | length) as $i
+  | select(($spaces[$i].label | startswith("└ ")) or ($spaces[$i].label | startswith("firstmate/")))
+  | $i
+')
+[ "$MOVE_INDEXES" = "$EXPECTED_MOVE_INDEXES" ] \
   || fail "concurrent primary workers did not append stably to the contiguous block: $MOVE_INDEXES"
 SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
 [ "$SECOND_ORDER_AFTER" = "$SECOND_ORDER_BEFORE" ] \
@@ -836,14 +866,26 @@ grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
+ABORT_A_WS=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/workspace")
+ABORT_B_WS=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/workspace")
+# Serialization is asserted on the mutations the abort path actually emits.
+# The task pane is NOT removed with pane.close: the emptying-close plan proves a
+# lone idle shell and ends it, so Herdr removes the emptied workspace through its
+# own focus-preserving pane-death path (the raw explicit close steals focus to the
+# neighbour workspace - upstream #1328). That path emits no pane-close mutation at
+# all, so requiring one here could only ever pass on a Herdr lacking the death
+# path. What must hold is that each spawn completes its whole presentation
+# critical section - create, then its own seeded prune - before the other spawn
+# creates anything. That is exactly what the lock exists to guarantee.
+# assert_cleanup_focus_preserved below is what proves the task panes are gone.
+ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v aw="$ABORT_A_WS" -v bw="$ABORT_B_WS" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  $1 == "pane-close" { ws = $4; sub(/:.*$/, "", ws)
+                       if (ws == aw) print "prune-a"; else if (ws == bw) print "prune-b" }
 ')
 case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
+  $'create-a\nprune-a\ncreate-b\nprune-b'|$'create-b\nprune-b\ncreate-a\nprune-a') ;;
   *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
@@ -877,7 +919,7 @@ if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
 fi
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
-[ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
+[ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal: $(cat "$TMP_ROOT/on-teardown.err")"
 pass "real Herdr lab: exact task-pane close removes the projected workspace with no unrestored wrong-focus interval"
 
 teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
@@ -929,7 +971,10 @@ for ROUND in 1 2 3; do
   wait "$WAVE_A_TEARDOWN_PID" || fail "focus wave $ROUND teardown A failed"
   wait "$WAVE_B_TEARDOWN_PID" || fail "focus wave $ROUND teardown B failed"
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent teardowns"
-  WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label')
+  WAVE_REMAINING=$(lab workspace list | jq -r '
+    .result.workspaces[].label
+    | select(. == "firstmate" or (. | startswith("└ ")) or (. | startswith("2ndmate-")))
+  ')
   [ "$WAVE_REMAINING" = $'firstmate\n2ndmate-alpha\n2ndmate-bravo' ] \
     || fail "focus wave $ROUND cleanup left a projected workspace behind: $WAVE_REMAINING"
 done
@@ -945,6 +990,8 @@ mkdir -p "$SECOND_HOME_A/state" "$SECOND_HOME_A/config" "$SECOND_HOME_A/data" \
   "$SECOND_HOME_B/state" "$SECOND_HOME_B/config" "$SECOND_HOME_B/data"
 printf 'alpha\n' > "$SECOND_HOME_A/.fm-secondmate-home"
 printf 'bravo\n' > "$SECOND_HOME_B/.fm-secondmate-home"
+printf 'mode = off\n' > "$SECOND_HOME_A/config/spawn-capacity"
+printf 'mode = off\n' > "$SECOND_HOME_B/config/spawn-capacity"
 touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watcher-beat"
 # Ensure the secondmate homes look like gitignored firstmate homes so inheritance
 # may write config/herdr-presentation-spaces.

@@ -162,6 +162,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -1062,7 +1064,7 @@ teardown_treehouse_return() {
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$(fm_treehouse_return "$cd_dir" "$dir" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1087,7 +1089,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$(fm_treehouse_return "$cd_dir" "$dir" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1114,7 +1116,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$(fm_treehouse_return "$cd_dir" "$dir" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -2258,7 +2260,8 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
-      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
+      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
+      "$sub_state/$child_id.handoff-prompt"
   done
 }
 
@@ -2455,14 +2458,28 @@ if [ "$BACKEND" = herdr ] \
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
   HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_TAB=$(meta_value "$META" herdr_tab_id)
   HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
   if [ -n "$HERDR_PRESENTATION_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_TAB" ] \
      && [ -n "$HERDR_PRESENTATION_PANE" ] \
      && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
      && fm_backend_herdr_projection_endpoint_matches_journal \
        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  elif [ -n "$HERDR_PRESENTATION_SESSION" ] \
+       && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+       && [ -n "$HERDR_PRESENTATION_TAB" ] \
+       && [ -n "$HERDR_PRESENTATION_PANE" ] \
+       && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+       && fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$HERDR_PRESENTATION_SESSION" ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$HERDR_PRESENTATION_WORKSPACE" ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$HERDR_PRESENTATION_TAB" ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$HERDR_PRESENTATION_PANE" ]; then
     HERDR_PRESENTATION_RETIRE_CANDIDATE=1
   fi
 fi
@@ -2496,8 +2513,8 @@ fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+  elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    echo "warning: herdr presentation close could not be confirmed for $ID; retaining the presentation journal" >&2
   fi
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
@@ -2519,6 +2536,9 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -2539,7 +2559,8 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/.$ID.open-decisions-cursor" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
+  "$STATE/$ID.handoff-prompt"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

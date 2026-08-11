@@ -433,7 +433,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict cancel interrupt_result=not-needed
+  local state spec cmd key verdict cancel interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -462,17 +462,32 @@ do_exit() {
       esac
       ;;
   esac
-  cmd=$(fm_control_exit_command "$HARNESS")
+  spec=$(fm_control_exit_spec "$HARNESS")
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
-  [ "$verdict" != send-failed ] \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
+  case "$spec" in
+    text:*)
+      cmd=${spec#text:}
+      verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+        || die "the exit command could not be sent to task $ID on $BACKEND"
+      [ "$verdict" != send-failed ] \
+        || die "the exit command could not be sent to task $ID on $BACKEND"
+      ;;
+    key:*)
+      key=${spec#key:}
+      fm_control_backend_supports_key "$BACKEND" "$key" \
+        || die "harness $HARNESS exits with $key, which the $BACKEND backend cannot deliver; refusing to send a different exit input"
+      fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+        || die "the exit key could not be sent to task $ID on $BACKEND"
+      ;;
+    *)
+      die "harness $HARNESS has no verified exit input"
+      ;;
+  esac
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }

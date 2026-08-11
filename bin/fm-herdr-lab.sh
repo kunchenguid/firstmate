@@ -13,7 +13,8 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
-# Every Herdr call made here carries a trailing --session <session>.
+# Every Herdr call made here carries an explicit --session <session>, placed
+# before any trailing "--" separator so it is never mistaken for agent argv.
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
 # operation.
@@ -48,10 +49,50 @@ fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
+# fm_herdr_lab_raw: run `herdr <args...>` against the lab session, always with an
+# explicit --session flag in the position Herdr actually parses it.
+#
+# A subcommand that takes a trailing `--` separator (notably `herdr agent start
+# <name> [options] -- <argv...>`) hands everything after the separator to the
+# launched process. Appending --session after those arguments therefore puts the
+# only real isolation flag inside the agent's own argv, which both corrupts the
+# launched command and leaves the Herdr call itself scoped by nothing but the
+# ambient HERDR_SESSION. HERDR_SESSION alone is never isolation, so the flag is
+# inserted before the separator instead and the argv is forwarded untouched.
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
-  local name=$1
+  local name=$1 arg separator=0
+  local -a before=() after=()
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  for arg in "$@"; do
+    if [ "$separator" -eq 0 ] && [ "$arg" = "--" ]; then
+      separator=1
+      continue
+    fi
+    if [ "$separator" -eq 0 ]; then
+      before[${#before[@]}]=$arg
+    else
+      after[${#after[@]}]=$arg
+    fi
+  done
+  if [ "$separator" -eq 0 ]; then
+    HERDR_SESSION="$name" herdr "$@" --session "$name"
+    return
+  fi
+  # A separator with nothing after it is ambiguous: there is no argv to forward
+  # and no way to tell an accidental `--` from a truncated command. Fail closed
+  # rather than guess which side the caller meant.
+  [ "${#after[@]}" -gt 0 ] || {
+    fm_herdr_lab_error "refusing a trailing '--' with no arguments after it; pass the full agent argv or drop the separator"
+    return 1
+  }
+  # No subcommand before the separator means there is nowhere to put the session
+  # flag where Herdr would parse it. Refuse rather than fall back to the ambient
+  # HERDR_SESSION.
+  [ "${#before[@]}" -gt 0 ] || {
+    fm_herdr_lab_error "refusing a leading '--' with no Herdr subcommand before it; the session flag would have nowhere to go"
+    return 1
+  }
+  HERDR_SESSION="$name" herdr "${before[@]}" --session "$name" -- "${after[@]}"
 }
 
 fm_herdr_lab_session_list() { # <session>

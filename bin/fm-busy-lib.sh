@@ -39,8 +39,8 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
-#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
+#   endpoint-gone, herdr-native, native-stale, grok-regex, muse-session-log,
+#   missing, malformed, gen-mismatch, source-mismatch, kimi-unverified,
 #   codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
@@ -604,6 +604,43 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+fm_busy_native_marker() {  # <state-dir> <id>
+  local state=$1 id=$2
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  printf '%s/.busy-since-%s' "$state" "$id"
+}
+
+fm_busy_native_clear() {  # <state-dir> <id>
+  local marker
+  marker=$(fm_busy_native_marker "$1" "$2") || return 0
+  rm -f "$marker"
+}
+
+fm_busy_native_bounded() {  # <harness>
+  case "${1:-}" in
+    cline|cline\ *) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_busy_native_stale() {  # <state-dir> <id>
+  local marker max now since
+  marker=$(fm_busy_native_marker "$1" "$2") || return 0
+  max=${FM_BUSY_NATIVE_MAX_SECONDS:-120}
+  case "$max" in ''|*[!0-9]*) max=120 ;; esac
+  now=${EPOCHSECONDS:-$(date +%s)}
+  since=$(cat "$marker" 2>/dev/null || true)
+  case "$since" in
+    ''|*[!0-9]*)
+      printf '%s\n' "$now" > "$marker" 2>/dev/null || true
+      return 1
+      ;;
+  esac
+  [ $((now - since)) -ge "$max" ]
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -632,6 +669,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     r_state=${out%% *}
     out=${out#* }
     r_source=${out%% *}
+    fm_busy_native_clear "$state" "$id"
     if fm_busy_source_trusted "$harness" "$r_source"; then
       printf '%s %s' "$r_state" "$r_source"
     else
@@ -641,6 +679,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   fi
   case "$out" in
     malformed|gen-mismatch)
+      fm_busy_native_clear "$state" "$id"
       printf 'unknown %s' "$out"
       return 0
       ;;
@@ -651,10 +690,17 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # unknown here.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
-    if [ "$native" = busy ]; then
-      printf 'busy herdr-native'
-      return 0
-    fi
+    case "$native" in
+      busy)
+        if fm_busy_native_bounded "$harness" && fm_busy_native_stale "$state" "$id"; then
+          printf 'unknown native-stale'
+          return 0
+        fi
+        printf 'busy herdr-native'
+        return 0
+        ;;
+      *) fm_busy_native_clear "$state" "$id" ;;
+    esac
   fi
   case "$harness" in
     muse*)

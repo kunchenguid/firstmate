@@ -60,7 +60,11 @@
 # (secondmate homes run the same script) and would kill siblings.
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# pwd -P so the recorded watcher path and home are canonical: this script both
+# publishes the lock identity (through the watcher it forks) and re-reads it, and
+# a home reached through a symlinked ancestor would otherwise be recorded under
+# whichever route armed it. fm_lock_paths_equal is the comparison contract.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -227,8 +231,10 @@ clear_stale_recorded_watcher_lock() {
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$FM_HOME" ] || return 0
-  [ "$lock_path" = "$WATCH" ] || return 0
+  # Same comparison contract as fm_watcher_lock_matches_pid: a lock this home
+  # published through a symlinked route is still this home's lock to clear.
+  fm_lock_paths_equal "$lock_home" "$FM_HOME" || return 0
+  fm_lock_paths_equal "$lock_path" "$WATCH" || return 0
   [ -n "$lock_identity" ] || return 0
   fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
 }

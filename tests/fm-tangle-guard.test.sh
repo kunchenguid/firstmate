@@ -170,7 +170,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -249,7 +249,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -293,9 +293,13 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): the cd into the leased worktree and the wait loop target the
+  # stable id. Firstmate leases the worktree itself, so the pane is sent a cd
+  # rather than a treehouse command (bin/fm-treehouse-lib.sh owns why).
+  assert_grep "send-keys -t @spawnwid cd " "$rec" \
+    "the cd into the leased worktree must be sent to the stable window id"
+  assert_no_grep "send-keys -t @spawnwid treehouse" "$rec" \
+    "the pane must not be sent a treehouse command"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

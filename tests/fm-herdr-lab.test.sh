@@ -20,13 +20,31 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
-last=
+# Isolation must come from a --session flag Herdr actually parses, which means it
+# has to sit before any "--" separator. Anything after the separator is the
+# launched process's own argv, where a session flag both corrupts the command and
+# silently leaves the Herdr call scoped by nothing but the ambient HERDR_SESSION.
+session=
+separator=0
+session_after_separator=0
+previous=
 for arg in "$@"; do
-  previous=$last
-  last=$arg
+  if [ "$separator" -eq 0 ] && [ "$arg" = -- ]; then
+    separator=1
+    previous=$arg
+    continue
+  fi
+  if [ "$previous" = --session ]; then
+    if [ "$separator" -eq 1 ]; then
+      session_after_separator=1
+    else
+      session=$arg
+    fi
+  fi
+  previous=$arg
 done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
+[ "$session_after_separator" -eq 0 ] || { echo "fake herdr: --session landed after the -- separator" >&2; exit 94; }
+[ -n "$session" ] || { echo "fake herdr: missing --session before any -- separator" >&2; exit 90; }
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
@@ -234,8 +252,38 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_session_flag_precedes_agent_argv() {
+  local name="fm-lab-argv-$$" status=0 logged
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "argv fixture provision failed"
+  : > "$FAKE_LOG"
+
+  run_with_fake fm_herdr_lab_cli "$name" \
+    agent start worker --cwd /tmp -- claude --dangerously-skip-permissions --model opus --effort high \
+    >/dev/null || fail "agent start with a -- separator was rejected"
+  logged=$(tail -1 "$FAKE_LOG")
+  [ "$logged" = "agent start worker --cwd /tmp --session $name -- claude --dangerously-skip-permissions --model opus --effort high" ] \
+    || fail "session flag was not inserted before the separator with the argv forwarded intact: $logged"
+
+  # A session flag pushed past the separator would be swallowed into the agent's
+  # argv, leaving the Herdr call scoped only by the ambient HERDR_SESSION.
+  case "$logged" in
+    *" -- "*"--session"*) fail "session flag leaked into the agent argv: $logged" ;;
+  esac
+
+  run_with_fake fm_herdr_lab_cli "$name" agent start worker --cwd /tmp -- >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a trailing separator with no argv must fail closed"
+  status=0
+  run_with_fake fm_herdr_lab_raw "$name" -- claude --model opus >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a separator with no Herdr subcommand must fail closed"
+
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "argv fixture teardown failed"
+  pass "fm-herdr-lab: the session flag precedes agent argv and ambiguous separators fail closed"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
+test_session_flag_precedes_agent_argv
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision

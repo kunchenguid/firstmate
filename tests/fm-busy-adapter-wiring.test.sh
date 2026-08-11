@@ -35,7 +35,11 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  # Deliberately NOT treehouse: fm_fakebin already installs fm_fake_treehouse, and
+  # fm-spawn.sh now leases the worktree itself and reads the path off treehouse's
+  # stdout. An exit-0-with-no-output stub reads as treehouse failing to produce a
+  # worktree at all, which aborts the spawn before any adapter is wired.
+  fm_fake_exit0 "$fakebin" pi opencode claude codex
   printf '%s\n' "$fakebin"
 }
 

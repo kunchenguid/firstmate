@@ -50,6 +50,13 @@ PATH_MSG='no-mistakes gate worktree'
 # (<NM_HOME>/repos/<id>.git + <NM_HOME>/worktrees/<id>/<run>).
 make_gate_worktree() {
   local root=$1 id=016d88035d58 run=01KXC3SD5NZYMERGDS68Z1C8ER seed
+  # This helper RETURNS its path on stdout, so nothing else may write there.
+  # The `git push` below runs the caller's pre-push hook, and a hook that logs
+  # informationally to stdout instead of stderr lands its banner INSIDE the
+  # `GATE_WT=$(make_gate_worktree ...)` capture. Every later `cd "$GATE_WT"`
+  # then fails, which surfaced as the guard "exiting 111" - run_guard_lib's own
+  # `cd ... || exit 111` - rather than the expected refusal code 3.
+  {
   mkdir -p "$root/.no-mistakes/repos"
   git init -q --bare "$root/origin.git"
   seed=$(mktemp -d "$TMP/gate-seed.XXXXXX")
@@ -60,6 +67,7 @@ make_gate_worktree() {
   git clone -q --bare "$root/origin.git" "$root/.no-mistakes/repos/$id.git"
   git -C "$root/.no-mistakes/repos/$id.git" worktree add --detach \
     "$root/.no-mistakes/worktrees/$id/$run" main >/dev/null 2>&1
+  } >/dev/null
   printf '%s\n' "$root/.no-mistakes/worktrees/$id/$run"
 }
 
@@ -67,8 +75,11 @@ make_gate_worktree() {
 # normal primary/crew checkout: its git-common-dir is <dir>/.git, never a gate.
 make_normal_repo() {
   local dir=$1
+  # Same stdout contract as make_gate_worktree above.
+  {
   git init -q -b main "$dir"
   git -C "$dir" commit -q --allow-empty -m init
+  } >/dev/null
   printf '%s\n' "$dir"
 }
 
@@ -152,7 +163,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -283,6 +294,13 @@ test_send_refuses_and_admits() {
 # task (HEAD reachable from origin), so a normal teardown genuinely succeeds and a
 # refused one leaves the task untouched (mirrors tests/fm-teardown make_case).
 make_teardown_case() {
+  # This helper RETURNS its path on stdout, so nothing else may write there.
+  # `git push` runs the caller's pre-push hook, and a hook that logs
+  # informationally to stdout instead of stderr lands its banner INSIDE the
+  # caller's `$(...)` capture, prefixing every derived path and collapsing the
+  # fixture with "No such file or directory". `-q` silences git, never the hook.
+  # Grouping the setup makes the stdout contract explicit for ANY hook.
+  {
   local name=$1 case_dir fakebin t
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
@@ -323,6 +341,7 @@ SH
     "worktree=$case_dir/wt" "project=$case_dir/project" \
     "kind=ship" "mode=no-mistakes"
   touch "$case_dir/state/.last-watcher-beat"
+  } >/dev/null
   printf '%s\n' "$case_dir"
 }
 

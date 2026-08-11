@@ -77,6 +77,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
@@ -351,13 +352,29 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 # when the PRIMARY spawns that secondmate (its own process's FM_HOME still
 # names the primary at that point) - see fm-spawn.sh's herdr case arm.
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id berth=${FM_BERTH:-}
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
       printf '2ndmate-%s' "$id"
       return 0
     fi
+  fi
+  if [ -n "$berth" ]; then
+    case "$berth" in
+      [A-Za-z0-9]*)
+        case "$berth" in
+          *[!A-Za-z0-9_-]*) ;;
+          *)
+            if [ "${#berth}" -le 64 ]; then
+              printf 'firstmate@%s' "$berth"
+              return 0
+            fi
+            ;;
+        esac
+        ;;
+    esac
+    echo "warning: FM_BERTH '$berth' is not a valid berth name; using primary herdr workspace label" >&2
   fi
   printf 'firstmate'
 }
@@ -656,7 +673,12 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # primary home. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
 fm_backend_herdr_presentation_lock_namespace() {
-  printf '%s' '/tmp/firstmate-herdr-presentation'
+  local uid
+  uid=$(id -u 2>/dev/null) || return 1
+  case "$uid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {

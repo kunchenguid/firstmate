@@ -145,9 +145,21 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
+`fm-spawn.sh` acquires each pooled worktree itself with a durable `treehouse get --lease` and sends the pane only a plain `cd`; the lease is freed by `fm-teardown.sh` returning the worktree (or by spawn-abort cleanup), not by pane death.
+Each project's pool lands under `.fm-pools/<slug>` on the repo's own filesystem, and spawn refuses a pooled worktree that sits on a different filesystem than its object store; `bin/fm-treehouse-lib.sh` owns the placement mechanism, the per-project blast-radius rationale, and that colocation invariant.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+When a live ship or scout must change worker runtime mid-task, `bin/fm-runtime-handoff.sh` is the supported path.
+It exits the current agent with that harness's verified exit command, keeps the existing treehouse lease and worktree, relaunches a verified target harness through `fm-spawn.sh --reuse-worktree`, rewrites only the runtime and endpoint fields in `state/<id>.meta`, and re-delivers the original brief plus a progress note without regenerating the brief.
+A handoff refuses rather than guessing when the worktree, endpoint ownership, or target harness cannot be reconciled.
+It never aborts or restarts a live no-mistakes run; the replacement agent is told to re-attach with `no-mistakes axi status`.
+Firstmate decides when to invoke handoff; there is no automatic migration daemon.
+Pane statusline quota fragments are a best-effort capacity signal via `bin/fm-statusline-quota-lib.sh`, read on demand through `bin/fm-statusline-quota.sh <target>`.
+Only the statusline region of the capture is read, so transcript text carrying the same shapes cannot vote.
+Unparseable means unknown, never exhausted, and a context-window reading never counts as exhaustion.
+`quota-axi` remains best-effort and is not the sole input.
+No target-selection policy is encoded either: the scripts refuse an unverified or unreconcilable target instead of ranking harnesses, and the operating rules for choosing one belong to the [`stuck-crewmate-recovery` skill](../.agents/skills/stuck-crewmate-recovery/SKILL.md).
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -175,13 +187,16 @@ The intake and authority contract in `AGENTS.md` owns when separate scout resear
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
-The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves profile arrays itself from current quota output under the `AGENTS.md` section 4 intake boundary and the `quota-array-dispatch` selection procedure, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
+The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, filters profile arrays for comparable task fit and reasoning class under the `AGENTS.md` section 4 intake boundary, resolves them through the `quota-array-dispatch` selector contract, and passes only concrete `--harness`, `--provider`, `--model`, and `--effort` axes to `fm-spawn.sh`.
 The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit.
+After Firstmate filters a matched array for task fit and reasoning class, `fm-dispatch-select.mjs` uses fresh metered evidence, excludes provider cooldowns, and rotates eligible subscriptions through private home-local state.
+Static and explicit dispatch keep spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, muse, cline, cursor-agent, copilot, and agy, while automatic subscription arrays exclude Kimi and preserve the selected profile for later audit.
+agy is the one exception to plain omission: its ceiling is `high`, so `xhigh` and `max` are resolved against the requested model id rather than simply dropped.
+A base model id refuses to launch without `--effort`, so those tiers clamp down to `--effort high`; an id that already bakes a `-low`, `-medium`, or `-high` suffix launches on its own and rejects a non-matching `--effort`, so the flag is withheld and the baked tier stands.
 
 ## Optional secondmates
 
