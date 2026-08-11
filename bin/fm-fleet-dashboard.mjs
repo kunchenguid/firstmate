@@ -2,10 +2,11 @@
 // Render the Firstmate fleet cockpit from live state.
 //
 // The cockpit shows exactly three things, in Pedro's priority order:
-//   1. DECISIONS he must take now, most important first, with the ranking
-//      rule printed on screen.
-//   2. OUR PRS IN REVIEW, each with the status he acts on and its full link.
+//   1. DECISIONS he must take now.
+//   2. OUR PRS IN REVIEW.
 //   3. REVIEWING - colleague PR relationships recorded by the reviews domain.
+// The default is a fixed-measure one-line list; --show and watch selection own
+// full context so titles never compete with status prose during a scan.
 //
 // Sources stay read-only: fm-fleet-snapshot.sh (built on fm-crew-state.sh and
 // fm-classify-lib.sh) owns meta/status/backlog classification for this home
@@ -31,6 +32,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -45,6 +47,14 @@ const secondmatesPath = resolve(dataDirectory, "secondmates.md");
 const WATCH_LOCAL_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_LOCAL_SECONDS || "5", 10);
 const WATCH_GITHUB_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_GITHUB_SECONDS || "120", 10);
 const GITHUB_PR_LIMIT = 6;
+const MARKERS = Object.freeze({
+  yellow: { glyph: "◆", label: "needs Pedro", color: "yellow" },
+  red: { glyph: "×", label: "stuck", color: "red" },
+  blue: { glyph: "○", label: "waiting elsewhere", color: "blue" },
+  green: { glyph: "●", label: "progressing", color: "green" },
+  unknown: { glyph: "?", label: "unknown", color: "magenta" },
+});
+const MARKER_PRIORITY = Object.freeze({ yellow: 0, red: 1, blue: 2, green: 3, unknown: 4 });
 
 function usage(stream = process.stdout) {
   stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--show <row>] [--watch] [--output <path>]
@@ -52,10 +62,10 @@ function usage(stream = process.stdout) {
 Render the fleet cockpit: decisions ranked by importance, our PRs in
 review with actionable status, and the reviews domain's PR relationships.
 --width <columns>  terminal width override (default: tty width, else 80)
---all              list every item; default caps each section
+--all              compatibility flag; the compact default already lists every item
 --show <row>       print one row's full context by its rendered row number
 --watch            live redraw: local state every ${WATCH_LOCAL_SECONDS}s, GitHub state every
-                   ${WATCH_GITHUB_SECONDS}s with its age printed (needs a terminal; ctrl-c exits)
+                   ${WATCH_GITHUB_SECONDS}s; type a row number and Enter to expand, b goes back
 --output <path>    write the self-contained HTML page to <path> instead
 The HTML output may never be written under data/, state/, or config/.
 `);
@@ -438,6 +448,8 @@ function collectReviewRelationships() {
       raw: records.map((record) => record.raw).filter(Boolean).join("\n"),
       since: recordActivityDate(records[0]),
       roundCount,
+      workflowState: current.state ?? "unknown",
+      holdReason: current.hold_reason ? cleanProse(current.hold_reason) : null,
     });
   }
   return { available: true, reason: null, home: domain.home, id: domain.id, relationships };
@@ -445,6 +457,20 @@ function collectReviewRelationships() {
 
 function githubStatus(data) {
   const checks = Array.isArray(data.statusCheckRollup) ? data.statusCheckRollup : [];
+  const reviews = Array.isArray(data.reviews) ? data.reviews : null;
+  const recordedReviews = new Set();
+  for (const review of reviews ?? []) {
+    const author = review.author?.login ?? null;
+    if (author) {
+      recordedReviews.add(`${author} (${String(review.state ?? "unknown").toLowerCase().replaceAll("_", " ")})`);
+    }
+  }
+  const reviewerParts = [...recordedReviews];
+  const reviewSummary = reviews === null
+    ? "reviewers unknown (not checked)"
+    : reviewerParts.length === 0
+      ? "no reviews reported"
+      : `reviews recorded: ${reviewerParts.join(", ")}`;
   const conclusions = checks.map((check) => check.conclusion ?? check.state ?? null);
   const ciRed = conclusions.some((conclusion) =>
     ["ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE", "TIMED_OUT"].includes(conclusion),
@@ -484,7 +510,54 @@ function githubStatus(data) {
       ? `${data.state.toLowerCase()}${data.isDraft === true ? " draft" : ""}`
       : "unknown",
     terminal: data.state === "MERGED" || data.state === "CLOSED",
+    reviewSummary,
   };
+}
+
+function isStuckState(state) {
+  return ["blocked", "dead", "failed", "missing", "unhealthy"].includes(state);
+}
+
+function isProgressState(state) {
+  return ["active", "busy", "running", "working"].includes(state);
+}
+
+function ourPrMarker(state, registeredPr, githubResult) {
+  if (isStuckState(state)) return { key: "red", source: "local" };
+  if (isProgressState(state)) return { key: "green", source: "local" };
+  if (!registeredPr) return { key: "unknown", source: "local" };
+  if (!githubResult?.ok) return { key: "unknown", source: "forge" };
+  if (githubResult.terminal) return { key: "green", source: "forge" };
+  if (githubResult.readiness === "approved and ready to merge") return { key: "yellow", source: "forge" };
+  if (githubResult.ci === "CI running" || githubResult.readiness === "waiting on human review") {
+    return { key: "blue", source: "forge" };
+  }
+  return { key: "unknown", source: "forge" };
+}
+
+function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber }) {
+  if (!registeredPr) {
+    return `Register PR ${prNumber ?? "unknown"} so its CI and review readiness can be established.`;
+  }
+  if (!githubResult?.ok) {
+    return "GitHub state is unavailable; a successful status check is required before recommending an action.";
+  }
+  if (markerKey === "green") return "No action for Pedro; the task is progressing or finished cleanly.";
+  if (githubResult.readiness === "approved and ready to merge") return "Approve the guarded merge when ready.";
+  if (githubResult.readiness === "resolving conflicts") {
+    return "Current task activity is unknown; establish whether conflict resolution resumed before intervening.";
+  }
+  if (githubResult.readiness === "changes requested") {
+    return "Current task activity is unknown; establish whether work resumed before acting on requested changes.";
+  }
+  if (githubResult.ci === "CI red") {
+    return "Current task activity is unknown; establish whether CI repair resumed before intervening.";
+  }
+  if (githubResult.ci === "CI running") return "Wait for CI; no action is supported unless it fails.";
+  if (githubResult.readiness === "waiting on human review") {
+    return "Wait for the reviewer; chase the review only if it stalls.";
+  }
+  return "The recorded PR facts do not establish a safe next action; another status check is required.";
 }
 
 // GitHub state is fetched on its own slow cadence because it is expensive and
@@ -508,7 +581,7 @@ function fetchGithubStatuses(urls) {
         "view",
         url,
         "--json",
-        "state,isDraft,mergeable,reviewDecision,statusCheckRollup",
+        "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews",
       ]);
       results.set(url, { ok: true, ...githubStatus(JSON.parse(text)) });
     } catch (fetchError) {
@@ -572,6 +645,15 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         live: false,
         raw: record.raw,
         attentionClass: looksAnswered ? "answered" : aged ? "aged" : "now",
+        markerKey: looksAnswered ? "unknown" : "yellow",
+        markerSource: "local",
+        currentState: "captain hold open",
+        blocker: cleanProse(record.hold_reason),
+        recommendation: looksAnswered
+          ? "Confirm the recorded answer so decision-hold-lifecycle can reconcile the still-open hold."
+          : aged
+            ? "Re-evaluate this aged captain hold and answer it or explicitly keep it open."
+            : "Answer the recorded captain hold.",
         why: looksAnswered
           ? "the open hold's own text carries an explicit answer marker; decision lifecycle still owns closure"
           : aged
@@ -597,6 +679,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       pr: task.pr?.url ? task.pr : null,
       report: task.paths?.report?.present ? task.paths.report.path : null,
       worktree: task.paths?.worktree?.path ?? null,
+      currentState: state,
     };
     const openDecisions = task.hints?.open_decisions || [];
     for (const decision of openDecisions.filter((entry) => entry.verb === "needs-decision")) {
@@ -606,6 +689,10 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         prose: cleanProse(decision.summary) || "decision summary absent",
         note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
         attentionClass: "now",
+        markerKey: "yellow",
+        markerSource: "local",
+        blocker: cleanProse(decision.summary) || "decision summary absent",
+        recommendation: `Answer the recorded decision: ${cleanProse(decision.summary) || "the decision summary is missing"}`,
         why: "open needs-decision in the keyed decision fold, not yet resolved",
       });
     }
@@ -616,6 +703,10 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         prose: cleanProse(blocker.summary) || "blocker summary absent",
         note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
         attentionClass: "now",
+        markerKey: "red",
+        markerSource: "local",
+        blocker: cleanProse(blocker.summary) || "blocker summary absent",
+        recommendation: `Resolve the recorded blocker: ${cleanProse(blocker.summary) || "the blocker summary is missing"}`,
         why: "open blocked event in the keyed decision fold, not yet resolved",
       });
     }
@@ -626,6 +717,12 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         prose: detail || "blocked, no detail reported",
         note: null,
         attentionClass: "now",
+        markerKey: "red",
+        markerSource: "local",
+        blocker: detail || "blocked, no detail reported",
+        recommendation: detail
+          ? `Resolve the recorded blocker: ${detail}`
+          : "The task is blocked but its blocker is missing; record the blocker before choosing an action.",
         why: "reconciled current state is blocked",
       });
     }
@@ -647,11 +744,24 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           ? `${githubResult.ci} · ${githubResult.readiness}`
           : "CI unknown (not checked yet) · review readiness unknown (not checked yet)"
         : `CI unknown · readiness unknown · URL unknown · PR ${prNumber ?? "unknown"} was never registered`;
+      const marker = ourPrMarker(state, registeredPr, githubResult);
       ours.push({
         ...base,
         tag: "OURS",
         prose: status,
         note: registeredPr ? task.pr.url : null,
+        markerKey: marker.key,
+        markerSource: marker.source,
+        blocker: status,
+        review: registeredPr
+          ? githubResult?.reviewSummary ?? "reviewers unknown (not checked yet)"
+          : "reviewers unknown (PR not registered)",
+        recommendation: ourPrRecommendation({
+          markerKey: marker.key,
+          registeredPr,
+          githubResult,
+          prNumber,
+        }),
         why: registeredPr
           ? "our PR recorded in task metadata and not yet landed in the backlog"
           : `current ship backlog record names PR ${prNumber ?? "unknown"}, but task metadata never registered it; last recorded: ${recorded}`,
@@ -671,6 +781,18 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           : githubResult.readiness
         : "forge state unknown (not checked yet)"
       : "forge state unknown (PR link not recorded)";
+    const marker = !relationship.link || !githubResult?.ok
+      ? { key: "unknown", source: "forge" }
+      : relationship.holdReason || relationship.workflowState === "done"
+        ? { key: "blue", source: "forge" }
+        : relationship.workflowState === "in_flight"
+          ? { key: "green", source: "forge" }
+          : { key: "unknown", source: "forge" };
+    const recommendation = marker.key === "blue"
+      ? "Wait for the author or external party; chase them only if the review stalls."
+      : marker.key === "green"
+        ? "No action for Pedro; the review round is progressing."
+        : "Forge or workflow state is missing; a fresh status check must establish whether action is needed.";
     reviewing.push({
       tag: "THEIRS",
       name: relationship.name,
@@ -681,6 +803,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       age: sinceAge(relationship.since),
       live: false,
       raw: relationship.raw,
+      currentState: relationship.workflowState,
+      pr: relationship.link ? { url: relationship.link, source: relationship.linkSource } : null,
+      markerKey: marker.key,
+      markerSource: marker.source,
+      blocker: relationship.holdReason ?? relationship.status,
+      review: relationship.status,
+      recommendation,
       why: relationship.linkSource === "verified_project_remote"
         ? "review records grouped by PR; link established from the recorded PR number and verified project GitHub remote"
         : "review records grouped by PR; completed rounds remain until terminal PR evidence exists",
@@ -701,10 +830,20 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   ours.sort(oldestFirst);
   reviewing.sort((left, right) => (left.age.seconds ?? Number.POSITIVE_INFINITY) - (right.age.seconds ?? Number.POSITIVE_INFINITY));
 
-  const decisionCounts = decisions.reduce(
-    (counts, item) => ({ ...counts, [item.attentionClass ?? "now"]: counts[item.attentionClass ?? "now"] + 1 }),
-    { now: 0, answered: 0, aged: 0 },
-  );
+  for (const items of [decisions, ours, reviewing]) {
+    items.sort((left, right) => MARKER_PRIORITY[left.markerKey] - MARKER_PRIORITY[right.markerKey]);
+    for (const item of items) {
+      item.marker = MARKERS[item.markerKey] ?? MARKERS.unknown;
+    }
+  }
+
+  const localAttention = new Map();
+  for (const item of [...decisions, ...ours, ...reviewing]) {
+    if (item.markerSource === "local" && ["yellow", "red"].includes(item.markerKey)) {
+      const identity = `${item.project ?? ""}/${item.id ?? item.name}`;
+      if (!localAttention.has(identity)) localAttention.set(identity, item);
+    }
+  }
 
   const model = {
     generated: snapshot.generated || "observation time absent",
@@ -712,34 +851,31 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     telemetryPresent,
     reviews,
     github,
+    recap: {
+      available: backlogPresent,
+      needsPedro: [...localAttention.values()].filter((item) => item.markerKey === "yellow"),
+      stuck: [...localAttention.values()].filter((item) => item.markerKey === "red"),
+    },
     buckets: [
       {
         key: "decisions",
         name: "DECISIONS",
         htmlTitle: "Decisions",
-        tone: "attention",
         items: decisions,
-        cap: 6,
-        rule: "rule: blocking a person, then blocking delivery, then oldest",
-        summary: `needs you ${decisionCounts.now} · check ${decisionCounts.answered + decisionCounts.aged} (${decisionCounts.answered} looks answered · ${decisionCounts.aged} aged)`,
         empty: backlogPresent ? "nothing needs a decision" : "backlog absent - captain holds unknown",
       },
       {
         key: "ours-in-review",
         name: "OUR PRS IN REVIEW",
         htmlTitle: "Our PRs in review",
-        tone: "progress",
         items: ours,
-        cap: 5,
         empty: "no PR of ours recorded in review",
       },
       {
         key: "reviewing",
         name: "REVIEWING",
         htmlTitle: "Reviewing",
-        tone: "neutral",
         items: reviewing,
-        cap: 5,
         empty: reviews.available ? "no review relationships recorded" : `unavailable - ${reviews.reason}`,
       },
     ],
@@ -749,6 +885,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   for (const bucket of model.buckets) {
     for (const item of bucket.items) {
       rowNumber += 1;
+      const keyedDecision = item.note?.match(/^\[([^\]]+)\]$/)?.[1] ?? null;
+      const discriminator = keyedDecision ?? item.tag.toLowerCase();
+      item.identity = `${bucket.key}/${item.id || "unknown"}/${discriminator}`;
       item.number = rowNumber;
       item.bucketName = bucket.name;
     }
@@ -757,17 +896,20 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   return model;
 }
 
-const ANSI = { reset: "\u001b[0m", dim: "\u001b[2m", accent: "\u001b[33m", accentBold: "\u001b[1;33m" };
+const ANSI = {
+  reset: "\u001b[0m",
+  dim: "\u001b[2m",
+  bold: "\u001b[1m",
+  yellow: "\u001b[33m",
+  red: "\u001b[31m",
+  blue: "\u001b[34m",
+  green: "\u001b[32m",
+  magenta: "\u001b[35m",
+};
 const AGE_HOT_SECONDS = 7 * 86400;
 
 function clip(text, width) {
   return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
-}
-
-function ageText(item) {
-  return item.age.seconds !== null && item.age.seconds >= AGE_HOT_SECONDS
-    ? `⚠ ${item.age.label}`
-    : item.age.label;
 }
 
 function githubAgeLine(github, nowMs) {
@@ -782,88 +924,106 @@ function githubAgeLine(github, nowMs) {
   return `github status checked ${ageLabel}`;
 }
 
-function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
+function recapFeaturedItems(recap) {
+  const featured = [];
+  if (recap.needsPedro[0]) featured.push(recap.needsPedro[0]);
+  if (recap.stuck[0]) featured.push(recap.stuck[0]);
+  for (const item of [...recap.needsPedro, ...recap.stuck]) {
+    if (featured.length >= 2) break;
+    if (!featured.includes(item)) featured.push(item);
+  }
+  return featured;
+}
+
+function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
+  width = Math.min(width, 80);
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
-  lines.push(paint("dim", clip(`FIRSTMATE FLEET · observed ${model.generated}`, width)));
+  lines.push(paint("bold", "FIRSTMATE FLEET"));
   lines.push(
     paint(
       "dim",
       clip(
-        `sources: backlog ${model.backlogPresent ? "present" : "absent"} · telemetry ${model.telemetryPresent ? "present" : "absent"} · token spend not measured`,
+        `observed ${model.generated} | ${githubAgeLine(model.github, nowMs)} | backlog ${model.backlogPresent ? "present" : "absent"}`,
         width,
       ),
     ),
   );
-  let firstBucket = true;
+  lines.push(
+    paint(
+      "dim",
+      clip(
+        `sources backlog ${model.backlogPresent ? "present" : "absent"} | telemetry ${model.telemetryPresent ? "present" : "absent"} | token spend not measured`,
+        width,
+      ),
+    ),
+  );
+  lines.push("");
+  if (!model.recap.available) {
+    lines.push(paint("bold", "ATTENTION NOW"));
+    lines.push(paint("dim", "  unknown - backlog source absent"));
+  } else if (model.recap.needsPedro.length === 0 && model.recap.stuck.length === 0) {
+    lines.push(`${paint("bold", "ATTENTION NOW")} | nothing needs Pedro`);
+  } else {
+    lines.push(paint("bold", "ATTENTION NOW"));
+    const counts = [
+      model.recap.needsPedro.length > 0 ? `${model.recap.needsPedro.length} need Pedro` : null,
+      model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+    ].filter(Boolean);
+    lines.push(`  ${counts.join(" | ")}`);
+    const featured = recapFeaturedItems(model.recap);
+    for (const item of featured) {
+      lines.push(`  ${paint(item.marker.color, item.marker.glyph)} ${clip(item.name, Math.max(1, width - 4))}`);
+    }
+    const hidden = model.recap.needsPedro.length + model.recap.stuck.length - featured.length;
+    if (hidden > 0) {
+      lines.push(paint("dim", `  +${hidden} more below`));
+    }
+  }
+
   for (const bucket of model.buckets) {
     lines.push("");
-    if (!firstBucket) {
-      lines.push("");
-    }
-    firstBucket = false;
-    const isAccentBucket = bucket.key === "decisions";
-    const rule = isAccentBucket ? "━" : "─";
-    const header = `${rule}${rule} ${bucket.name} (${bucket.items.length}) `;
-    const fill = rule.repeat(Math.max(0, width - header.length));
-    lines.push(paint(isAccentBucket ? "accentBold" : "dim", clip(header + fill, width)));
-    if (bucket.summary) {
-      lines.push(paint("dim", clip(`   ${bucket.summary}`, width)));
-    }
-    if (bucket.key === "ours-in-review" || bucket.key === "reviewing") {
-      lines.push(paint("dim", clip(`   ${githubAgeLine(model.github, nowMs)}`, width)));
-    }
+    const label = `${bucket.name} (${bucket.items.length}) `;
+    const header = `── ${label}${"─".repeat(Math.max(0, width - label.length - 3))}`;
+    lines.push(paint("dim", clip(header, width)));
     if (bucket.items.length === 0) {
       lines.push(paint("dim", clip(`   ${bucket.empty}`, width)));
       continue;
     }
-    const shown = showAll ? bucket.items : bucket.items.slice(0, bucket.cap);
     const numberWidth = String(model.totalRows).length;
-    const headIndent = 2 + numberWidth + 1 + 8;
-    for (const item of shown) {
-      const tag = clip(item.tag, 7).padEnd(7);
+    for (const item of bucket.items) {
       const rowLabel = String(item.number).padStart(numberWidth);
-      const itemAge = ageText(item);
-      const mid = [item.name, item.project].filter(Boolean).join(" · ");
-      const midWidth = Math.max(8, width - headIndent - 3 - itemAge.length);
-      lines.push(
-        `  ${paint("dim", rowLabel)} ${paint(isAccentBucket ? "accent" : "dim", tag)} ${clip(mid, midWidth)} · ${paint("dim", itemAge)}`,
-      );
-      for (const detail of [item.prose, item.note].filter(Boolean)) {
-        lines.push(paint("dim", `${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`));
-      }
-    }
-    const hidden = bucket.items.length - shown.length;
-    if (hidden > 0) {
-      const ruleText = bucket.rule ? ` · ${bucket.rule}` : "";
-      lines.push(paint("dim", clip(`  … ${hidden} more${ruleText} · --all shows all`, width)));
-    } else if (bucket.rule && bucket.items.length > 1) {
-      lines.push(paint("dim", clip(`  ${bucket.rule}`, width)));
+      const prefix = `  ${rowLabel} `;
+      const marker = paint(item.marker.color, item.marker.glyph);
+      lines.push(`${paint("dim", prefix)}${marker} ${clip(item.name, Math.max(1, width - prefix.length - 2))}`);
     }
   }
+  lines.push("");
+  lines.push(paint("dim", clip("◆ needs Pedro | × stuck | ○ waiting elsewhere | ● progressing | ? unknown", width)));
   return `${lines.join("\n")}\n`;
 }
 
-// Full single-item context for --show <n>: nothing truncated, every field
-// sourced from data the cockpit already read.
-function renderShow(model, requestedNumber) {
-  const item = model.buckets
-    .flatMap((bucket) => bucket.items)
-    .find((candidate) => candidate.number === requestedNumber);
-  if (!item) {
-    throw new Error(`--show ${requestedNumber}: no such row (valid: 1..${model.totalRows})`);
-  }
+// Full single-item context: nothing truncated, every field sourced from data
+// the cockpit already read.
+function renderExpandedItem(item) {
   const lines = [];
-  lines.push(`#${item.number} · ${item.bucketName} · ${item.tag}`);
+  lines.push(`#${item.number} | ${item.bucketName} | ${item.marker.glyph} ${item.marker.label}`);
   lines.push(item.name || "(unnamed)");
   lines.push("");
+  lines.push(`identity: ${item.identity}`);
+  lines.push(`current state: ${item.currentState || "unknown"}`);
+  lines.push(`age: ${item.age.label}`);
   if (item.prose) {
     lines.push(`detail: ${item.prose}`);
   }
   if (item.note) {
     lines.push(`note: ${item.note}`);
   }
-  lines.push(`age: ${item.age.label}`);
+  if (item.review) {
+    lines.push(`review: ${item.review}`);
+  }
+  lines.push(`blocker/status: ${item.blocker || "none established"}`);
+  lines.push(`recommendation: ${item.recommendation || "Evidence is incomplete; record current state before choosing an action."}`);
   lines.push(`why here: ${item.why || "routing reason not recorded"}`);
   const identity = [item.id ? `task ${item.id}` : null, item.project ? `project ${item.project}` : null]
     .filter(Boolean)
@@ -894,6 +1054,22 @@ function renderShow(model, requestedNumber) {
   return `${lines.join("\n")}\n`;
 }
 
+// Every interactive and non-interactive expansion enters here so the later
+// newness slice has one place to record a viewed row without touching renderers.
+function expandRow(model, selection) {
+  const items = model.buckets.flatMap((bucket) => bucket.items);
+  const item = selection.identity
+    ? items.find((candidate) => candidate.identity === selection.identity)
+    : items.find((candidate) => candidate.number === selection.number);
+  if (!item) {
+    if (selection.number !== undefined) {
+      throw new Error(`--show ${selection.number}: no such row (valid: 1..${model.totalRows})`);
+    }
+    throw new Error(`selected row is no longer present: ${selection.identity}`);
+  }
+  return renderExpandedItem(item);
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -903,21 +1079,16 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function card(item, tone) {
-  const detailParts = [item.prose, item.note].filter(Boolean);
-  const detailMarkup = detailParts.length
-    ? `<span>${detailParts.map((part) => escapeHtml(part)).join(" &middot; ")}</span>`
-    : "";
-  const hot = item.age.seconds !== null && item.age.seconds >= AGE_HOT_SECONDS;
-  return `<article class="card ${escapeHtml(tone)}">
-    <p class="eyebrow">${escapeHtml([`#${item.number}`, item.tag, item.project].filter(Boolean).join(" · "))}</p>
-    <h3>${escapeHtml(item.name || "detail absent")}</h3>
-    <div class="runtime"><strong class="age-${hot ? "hot" : "calm"}">${escapeHtml((hot ? "⚠ " : "") + item.age.label)}</strong>${detailMarkup}</div>
-  </article>`;
+function htmlRow(item) {
+  return `<li class="row">
+    <span class="row-number">${item.number}</span>
+    <span class="marker marker-${escapeHtml(item.markerKey)}" aria-label="${escapeHtml(item.marker.label)}">${escapeHtml(item.marker.glyph)}</span>
+    <span class="row-title">${escapeHtml(item.name || "detail absent")}</span>
+  </li>`;
 }
 
 function emptyState(message) {
-  return `<p class="empty">${escapeHtml(message)}</p>`;
+  return `<li class="empty">${escapeHtml(message)}</li>`;
 }
 
 function sourceValue(label, value) {
@@ -925,13 +1096,25 @@ function sourceValue(label, value) {
 }
 
 function renderHtml(model) {
+  const featured = recapFeaturedItems(model.recap);
+  const hiddenRecap = model.recap.needsPedro.length + model.recap.stuck.length - featured.length;
+  const recap = !model.recap.available
+    ? '<p class="muted">Unknown - backlog source absent.</p>'
+    : model.recap.needsPedro.length === 0 && model.recap.stuck.length === 0
+      ? "<p>Nothing needs Pedro.</p>"
+      : [
+          `<p><strong>${[
+            model.recap.needsPedro.length > 0 ? `${model.recap.needsPedro.length} need Pedro` : null,
+            model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+          ].filter(Boolean).join(" | ")}</strong></p>`,
+          ...featured.map((item) => `<p><strong class="marker marker-${escapeHtml(item.markerKey)}">${escapeHtml(item.marker.glyph)}</strong> ${escapeHtml(item.name)}</p>`),
+          hiddenRecap > 0 ? `<p class="muted">+${hiddenRecap} more below</p>` : "",
+        ].filter(Boolean).join("\n    ");
   const sections = model.buckets
     .map(
       (bucket) => `<section id="${bucket.key}">
     <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2><p>${bucket.items.length} item${bucket.items.length === 1 ? "" : "s"}</p></div>
-    ${bucket.summary ? `<p class="stamp">${escapeHtml(bucket.summary)}</p>` : ""}
-    ${bucket.key === "ours-in-review" || bucket.key === "reviewing" ? `<p class="stamp">${escapeHtml(githubAgeLine(model.github, Date.now()))}</p>` : ""}
-    <div class="grid">${bucket.items.map((item) => card(item, bucket.tone)).join("") || emptyState(bucket.empty)}</div>
+    <ol class="rows">${bucket.items.map((item) => htmlRow(item)).join("") || emptyState(bucket.empty)}</ol>
   </section>`,
     )
     .join("\n\n  ");
@@ -942,33 +1125,36 @@ function renderHtml(model) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Firstmate Fleet Dashboard</title>
   <style>
-    :root { color-scheme: dark; --bg:#101214; --panel:#191c20; --line:#30343a; --text:#f2f0e8; --muted:#a6a9ad; --amber:#e2a84a; --green:#6dbb91; --red:#e36d69; }
+    :root { color-scheme: dark; --bg:#101214; --line:#30343a; --text:#f2f0e8; --muted:#a6a9ad; --yellow:#e2a84a; --green:#6dbb91; --red:#e36d69; --blue:#6da5d9; --unknown:#c797d8; }
     * { box-sizing:border-box; }
     body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    main { width:min(1120px,calc(100% - 32px)); margin:0 auto; padding:40px 0 72px; }
-    header { display:grid; gap:12px; margin-bottom:28px; }
-    h1,h2,h3,p { margin:0; }
-    h1 { font-size:clamp(2rem,5vw,4rem); line-height:1; letter-spacing:-.05em; }
-    h2 { font-size:clamp(1.35rem,3vw,2rem); letter-spacing:-.025em; }
-    h3 { font-size:1.05rem; overflow-wrap:anywhere; }
-    .lede,.stamp,.empty,.card>p { color:var(--muted); }
-    .sources { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:1px; margin:28px 0; border:1px solid var(--line); background:var(--line); }
-    .source { min-width:0; display:flex; flex-direction:column; gap:4px; padding:14px; background:var(--panel); }
-    .source span { color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; }
-    section { padding:28px 0; border-top:1px solid var(--line); }
-    .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:16px; }
+    main { width:min(760px,calc(100% - 32px)); margin:0 auto; padding:40px 0 72px; }
+    header { display:grid; gap:8px; margin-bottom:24px; }
+    h1,h2,p { margin:0; }
+    h1 { font-size:clamp(2rem,5vw,3.25rem); line-height:1; letter-spacing:-.04em; }
+    h2 { font-size:.78rem; letter-spacing:.09em; text-transform:uppercase; }
+    .lede,.stamp,.empty,.muted { color:var(--muted); }
+    .sources { display:flex; flex-wrap:wrap; gap:8px 18px; margin:18px 0 28px; color:var(--muted); font-size:.8rem; }
+    .source { display:flex; gap:6px; }
+    .source span { text-transform:uppercase; letter-spacing:.06em; }
+    .recap { display:grid; gap:6px; margin:0 0 28px; }
+    .recap h2 { color:var(--muted); }
+    section { padding:22px 0; border-top:1px solid var(--line); }
+    .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); }
     .section-head p { color:var(--muted); }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:12px; }
-    .card { min-width:0; display:grid; gap:10px; padding:18px; border:1px solid var(--line); border-top:3px solid var(--line); background:var(--panel); }
-    .card.attention { border-top-color:var(--amber); }
-    .card.progress { border-top-color:var(--green); }
-    .card.danger { border-top-color:var(--red); }
-    .eyebrow { font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; overflow-wrap:anywhere; }
-    .runtime { display:flex; flex-direction:column; gap:2px; padding-top:8px; border-top:1px solid var(--line); }
-    .runtime span { color:var(--muted); font-size:.8rem; overflow-wrap:anywhere; }
-    .age-hot { color:var(--red); }
-    .empty { padding:18px; border:1px dashed var(--line); }
-    @media (max-width:560px) { main { width:min(100% - 20px,1120px); padding-top:24px; } .section-head { display:grid; } }
+    .rows { display:grid; gap:2px; margin:0; padding:0; list-style:none; }
+    .row { min-width:0; display:grid; grid-template-columns:3ch 2ch minmax(0,1fr); gap:8px; align-items:baseline; padding:5px 0; }
+    .row-number { color:var(--muted); text-align:right; font-variant-numeric:tabular-nums; }
+    .row-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .marker { font-weight:800; }
+    .marker-yellow { color:var(--yellow); }
+    .marker-red { color:var(--red); }
+    .marker-blue { color:var(--blue); }
+    .marker-green { color:var(--green); }
+    .marker-unknown { color:var(--unknown); }
+    .legend { display:flex; flex-wrap:wrap; gap:6px 16px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.8rem; }
+    .empty { color:var(--muted); }
+    @media (max-width:560px) { main { width:min(100% - 20px,760px); padding-top:24px; } }
   </style>
 </head>
 <body>
@@ -977,7 +1163,7 @@ function renderHtml(model) {
     <p class="eyebrow">Firstmate · live state projection</p>
     <h1>Fleet Dashboard</h1>
     <p class="lede">Decisions first; everything else is review flow.</p>
-    <p class="stamp">Observed ${escapeHtml(model.generated)}</p>
+    <p class="stamp">Observed ${escapeHtml(model.generated)} | ${escapeHtml(githubAgeLine(model.github, Date.now()))}</p>
   </header>
 
   <div class="sources" aria-label="Source availability">
@@ -986,7 +1172,16 @@ function renderHtml(model) {
     ${sourceValue("Token spend", "Not measured")}
   </div>
 
+  <div class="recap">
+    <h2>Attention now</h2>
+    ${recap}
+  </div>
+
   ${sections}
+
+  <p class="legend">
+    ${Object.entries(MARKERS).map(([key, marker]) => `<span><strong class="marker marker-${key}">${escapeHtml(marker.glyph)}</strong> ${escapeHtml(marker.label)}</span>`).join("")}
+  </p>
 </main>
 </body>
 </html>
@@ -1052,34 +1247,101 @@ function writeAtomically(outputPath, html) {
 // local file-derived state stays fresh. The alternate screen buffer keeps
 // scrollback intact and home-then-erase redraws avoid flicker.
 function watchLoop(width, useColor, showAll) {
-  if (!process.stdout.isTTY) {
-    throw new Error("--watch requires a terminal");
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    throw new Error("--watch requires a terminal with interactive input");
   }
+  emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
   process.stdout.write("\u001b[?1049h\u001b[?25l");
   process.on("exit", () => {
+    if (process.stdin.isRaw) process.stdin.setRawMode(false);
     process.stdout.write("\u001b[?25h\u001b[?1049l");
   });
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
 
   let github = null;
-  const frame = () => {
+  let model = null;
+  let selectedIdentity = null;
+  let input = "";
+  let inputError = null;
+  let refreshTimer = null;
+
+  const draw = () => {
+    if (!model) return;
+    const frameWidth = width ?? process.stdout.columns ?? 80;
     let body;
+    if (selectedIdentity !== null) {
+      body = expandRow(model, { identity: selectedIdentity });
+      body += "\nb or escape: back | q: exit\n";
+    } else {
+      body = renderTerminal(model, frameWidth, useColor, showAll, Date.now());
+      const prompt = inputError ?? (input ? `select row: ${input}_ then Enter` : "select: type row number + Enter | q: exit");
+      body += `${useColor ? ANSI.dim : ""}${clip(prompt, Math.min(frameWidth, 80))}${useColor ? ANSI.reset : ""}\n`;
+    }
+    process.stdout.write(`\u001b[H${body}\u001b[J`);
+  };
+
+  const frame = () => {
     try {
       const inputs = collectLocalInputs();
       if (github === null || secondsSince(github.fetchedAtMs, Date.now()) >= WATCH_GITHUB_SECONDS) {
         github = fetchGithubStatuses(githubPrUrls(inputs));
       }
-      const model = buildModel({ ...inputs, github });
-      const frameWidth = width ?? process.stdout.columns ?? 80;
-      body = renderTerminal(model, frameWidth, useColor, showAll, Date.now());
-      body += `\n${useColor ? ANSI.dim : ""}watch: local every ${WATCH_LOCAL_SECONDS}s · github every ${WATCH_GITHUB_SECONDS}s · ctrl-c exits${useColor ? ANSI.reset : ""}\n`;
+      model = buildModel({ ...inputs, github });
+      if (
+        selectedIdentity !== null &&
+        !model.buckets.flatMap((bucket) => bucket.items).some((item) => item.identity === selectedIdentity)
+      ) {
+        selectedIdentity = null;
+      }
+      draw();
     } catch (error) {
-      body = `fm-fleet-dashboard: ${error.message}\n`;
+      process.stdout.write(`\u001b[Hfm-fleet-dashboard: ${error.message}\n\u001b[J`);
     }
-    process.stdout.write(`\u001b[H${body}\u001b[J`);
-    setTimeout(frame, WATCH_LOCAL_SECONDS * 1000);
+    refreshTimer = setTimeout(frame, WATCH_LOCAL_SECONDS * 1000);
   };
+
+  process.stdin.on("keypress", (_character, key) => {
+    if ((key?.ctrl && key.name === "c") || key?.name === "q") process.exit(0);
+    if (selectedIdentity !== null) {
+      if (key?.name === "b" || key?.name === "escape") {
+        selectedIdentity = null;
+        inputError = null;
+        draw();
+      }
+      return;
+    }
+    if (/^\d$/.test(key?.sequence ?? "")) {
+      input = `${input}${key.sequence}`.replace(/^0+/, "").slice(0, String(model?.totalRows ?? 0).length || 1);
+      inputError = null;
+      draw();
+      return;
+    }
+    if (key?.name === "backspace") {
+      input = input.slice(0, -1);
+      inputError = null;
+      draw();
+      return;
+    }
+    if (key?.name === "return") {
+      const candidate = Number.parseInt(input, 10);
+      if (Number.isInteger(candidate) && candidate >= 1 && candidate <= (model?.totalRows ?? 0)) {
+        selectedIdentity = model.buckets
+          .flatMap((bucket) => bucket.items)
+          .find((item) => item.number === candidate).identity;
+        input = "";
+        inputError = null;
+      } else {
+        inputError = `no such row: ${input || "empty"}`;
+        input = "";
+      }
+      draw();
+    }
+  });
+
+  process.on("exit", () => clearTimeout(refreshTimer));
   frame();
 }
 
@@ -1096,7 +1358,7 @@ try {
     const github = urls.length > 0 ? fetchGithubStatuses(urls) : null;
     const model = buildModel({ ...inputs, github });
     if (showRow !== null) {
-      process.stdout.write(renderShow(model, showRow));
+      process.stdout.write(expandRow(model, { number: showRow }));
     } else if (outputPath !== null) {
       writeAtomically(outputPath, renderHtml(model));
       process.stdout.write(`${outputPath}\n`);
