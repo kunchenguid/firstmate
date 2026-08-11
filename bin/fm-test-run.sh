@@ -187,7 +187,7 @@ family_for_basename() {
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
-    fm-sessionstart-hook-live-e2e.test.sh|\
+    fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -424,6 +424,7 @@ tests/fm-send-secondmate-marker-herdr-e2e.test.sh 27
 tests/fm-send-secondmate-marker.test.sh 2136
 tests/fm-session-start.test.sh 37289
 tests/fm-sessionstart-nudge.test.sh 264
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 19
 tests/fm-shared-captain-inheritance.test.sh 3506
 tests/fm-spawn-dispatch-profile.test.sh 41351
 tests/fm-spawn-worktree-settle.test.sh 4598

@@ -39,6 +39,7 @@ set -u
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
@@ -226,7 +227,8 @@ for argument in "$@"; do
 done
 case "$*" in
   *"comm="*)
-    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
       printf '/usr/local/bin/%s\n' "$harness"
     else
       printf '/bin/bash\n'
@@ -234,7 +236,8 @@ case "$*" in
     exit 0
     ;;
   *"args="*)
-    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
       printf '%s\n' "$harness"
     else
       printf 'bash\n'
@@ -517,6 +520,24 @@ run_session_start() {
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
+}
+
+run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
+  local home=$1 root=$2 path=$3
+  shift 3
+  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+    FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    "$SESSION_START" "$@"
+}
+
+run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
+  local harness=$1 home=$2 root=$3 path=$4
+  shift 4
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    "$SESSION_START" "$@"
 }
 
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
@@ -1936,6 +1957,193 @@ EOF
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
 
+test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
+  local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
+  rec=$(new_world agents-refresh)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  cat > "$root/AGENTS.md" <<'EOF'
+FIRSTMATE_TEST_INSTRUCTION=original
+Keep this original instruction.
+EOF
+
+  startup=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$startup" "SESSION START - $home" "true startup did not run the full digest"
+  assert_present "$home/state/.session-start-agents-baseline" "true startup did not record an AGENTS baseline"
+  baseline=$(cat "$home/state/.session-start-agents-baseline")
+  expected_hash=$(hash_file_for_test "$root/AGENTS.md")
+  [ "$(printf '%s\n' "$baseline" | sed -n '2p')" = "$expected_hash" ] \
+    || fail "true startup baseline did not record the original AGENTS hash: $baseline"
+
+  compact_equal=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_not_contains "$compact_equal" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "an unchanged AGENTS file was unnecessarily re-emitted"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a no-drift compact rewrote the true-start baseline"
+
+  cat > "$root/AGENTS.md" <<'EOF'
+FIRSTMATE_TEST_INSTRUCTION=updated
+The complete updated instruction must survive every stale rebuild.
+EOF
+  resume_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source resume)
+  assert_not_contains "$resume_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a context-preserving continuation emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a context-preserving continuation rebased the true-start baseline"
+
+  compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_first" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a drifted Pi compact did not emit the replacement instructions"
+  assert_contains "$compact_first" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a drifted Pi compact did not emit the complete current AGENTS content"
+  refresh_line=$(printf '%s\n' "$compact_first" | grep -n '^CURRENT AGENTS.md - INSTRUCTION REFRESH$' | head -1 | cut -d: -f1)
+  bootstrap_line=$(printf '%s\n' "$compact_first" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
+  [ -n "$refresh_line" ] && [ -n "$bootstrap_line" ] && [ "$refresh_line" -lt "$bootstrap_line" ] \
+    || fail "replacement instructions were not emitted before the bulky digest"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a drifted compact rebased the original-session baseline"
+
+  compact_second=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_second" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a second drifted compact suppressed the required replacement instructions"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a repeated compact rebased the original-session baseline"
+
+  clear_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear)
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a Pi clear, which creates a fresh runtime, unnecessarily emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a clear rebuild rebased the original-session baseline"
+
+  reset_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source reset)
+  assert_not_contains "$reset_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "an unrecognized reset source emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "reset rebased the original-session baseline"
+
+  rm -f "$home/state/.session-start-agents-baseline"
+  compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_first" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a missing baseline did not trigger first-post-fix replacement instructions"
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "a rebuild fabricated a baseline instead of preserving true-start-only ownership"
+
+  printf 'wrong-session\n%s\n' "$(hash_file_for_test "$root/AGENTS.md")" > "$home/state/.session-start-agents-baseline"
+  compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_first" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a wrong-session baseline did not trigger replacement instructions"
+  baseline_after=$(cat "$home/state/.session-start-agents-baseline")
+  [ "$baseline_after" = "wrong-session
+$(hash_file_for_test "$root/AGENTS.md")" ] \
+    || fail "a wrong-session baseline was rewritten during a rebuild"
+
+  pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
+}
+
+test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
+  local rec root home fakebin holder_pid out baseline_before completion_before
+  rec=$(new_world agents-refresh-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' 'READ_ONLY_AGENTS=current' > "$root/AGENTS.md"
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n%s\n' "$holder_pid" "$(hash_file_for_test "$root/AGENTS.md")" \
+    > "$home/state/.session-start-agents-baseline"
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  baseline_before=$(cat "$home/state/.session-start-agents-baseline")
+  completion_before=$(cat "$home/state/.session-start-complete")
+
+  out=$(FM_FAKE_HARNESS=pi FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "competing live lock owner did not force read-only mode"
+  assert_contains "$out" "READ_ONLY_AGENTS=current" \
+    "read-only compact trusted another session's equal baseline"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline_before" ] \
+    || fail "read-only compact mutated the competing session's baseline"
+  [ "$(cat "$home/state/.session-start-complete")" = "$completion_before" ] \
+    || fail "read-only compact mutated startup completion state"
+
+  pass "read-only Pi compact refreshes against the rebuilding session identity without mutation"
+}
+
+test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh() {
+  local rec root home fakebin startup baseline clear_out compact_out
+  rec=$(new_world codex-instruction-refresh)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" codex
+  printf '%s\n' 'CODEX_TEST_INSTRUCTION=original' > "$root/AGENTS.md"
+
+  startup=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$startup" "primary harness: codex" "codex fixture did not select the codex run tier"
+  baseline=$(cat "$home/state/.session-start-agents-baseline")
+  printf '%s\n' 'CODEX_TEST_INSTRUCTION=updated' > "$root/AGENTS.md"
+
+  clear_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear)
+  compact_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "Codex clear claimed an instruction-refresh channel unavailable to the tracked transport"
+  assert_not_contains "$compact_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "Codex compact claimed an instruction-refresh channel unavailable to the tracked transport"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "an unsupported Codex rebuild rewrote the true-start baseline"
+
+  pass "Codex reset sources do not claim an unavailable instruction-refresh channel"
+}
+
+test_agents_baseline_requires_sha256_and_successful_completion() {
+  local rec root home fakebin compact_out
+  rec=$(new_world agents-baseline-failures)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' 'AGENTS_SHA_TEST=original' > "$root/AGENTS.md"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/shasum"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/sha256sum"
+  chmod +x "$fakebin/shasum" "$fakebin/sha256sum"
+
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "startup recorded a non-SHA-256 instruction baseline when both SHA-256 tools failed"
+  printf '%s\n' 'AGENTS_SHA_TEST=updated' > "$root/AGENTS.md"
+  compact_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_out" "AGENTS_SHA_TEST=updated" \
+    "a missing SHA-256 baseline did not conservatively refresh a supported rebuild"
+
+  rm -f "$fakebin/shasum" "$fakebin/sha256sum" "$home/state/.session-start-complete"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\${*: -1}" in
+  "$home/state/.session-start-complete") exit 1 ;;
+esac
+exec /bin/mv "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  assert_absent "$home/state/.session-start-complete" \
+    "startup published completion despite the atomic completion write failure"
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "startup recorded an instruction baseline after completion publication failed"
+
+  pass "instruction baselines require SHA-256 and successful startup completion"
+}
+
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
   local rec root home fakebin reemit readonly_out holder_pid
   rec=$(new_world reemit-tangle)
@@ -2231,6 +2439,10 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_read_only_pi_compact_refreshes_against_its_own_session_identity
+test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
+test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
 echo "# fm-session-start.test.sh: all assertions passed"
