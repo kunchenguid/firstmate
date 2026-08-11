@@ -27,6 +27,13 @@ COUNT_FILE="$RESP/.count"
 } >> "$LOG"
 
 if [ "${1:-}" = status ]; then
+  if [ -f "$RESP/status.exit" ]; then
+    exit "$(cat "$RESP/status.exit")"
+  fi
+  if [ -f "$RESP/status.out" ]; then
+    cat "$RESP/status.out"
+    exit 0
+  fi
   printf '{"localDaemon":"running","connectedDaemon":"reachable"}\n'
   exit 0
 fi
@@ -153,6 +160,22 @@ EOF
   else
     fail "unexpected task creation output or call log: '$out'"
   fi
+
+  reset_responses
+
+  sm_dir="$TMP_ROOT/sm-home"
+  mkdir -p "$sm_dir"
+  touch "$sm_dir/.fm-secondmate-home"
+  printf '{"id":"paseo-agent-sm-1"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  out_sm=$(fm_backend_paseo_create_task "fm-sm-task" "$sm_dir" "$brief_file" "$task_tmp" "traceparent-123" "secondmate")
+  read -r agent_id_sm wt_sm <<EOF
+$out_sm
+EOF
+  if [ "$agent_id_sm" = "paseo-agent-sm-1" ] && [ "$wt_sm" = "$sm_dir" ]; then
+    pass "fm_backend_paseo_create_task used secondmate home directly as worktree"
+  else
+    fail "unexpected secondmate task creation output: '$out_sm'"
+  fi
 )
 
 reset_responses
@@ -255,10 +278,16 @@ reset_responses
   ast3=$(fm_backend_paseo_agent_state "paseo-nonexistent")
   reset_responses
 
-  if [ "$ast1" = "alive" ] && [ "$ast2" = "dead" ] && [ "$ast3" = "missing" ]; then
+  # Exit 1 + daemon offline -> unreadable
+  echo "1" > "$FM_PASEO_RESPONSES/1.exit"
+  echo "1" > "$FM_PASEO_RESPONSES/status.exit"
+  ast4=$(fm_backend_paseo_agent_state "paseo-unreachable")
+  reset_responses
+
+  if [ "$ast1" = "alive" ] && [ "$ast2" = "dead" ] && [ "$ast3" = "missing" ] && [ "$ast4" = "unreadable" ]; then
     pass "fm_backend_paseo_agent_state returned recovery-grade states"
   else
-    fail "unexpected agent states: ast1=$ast1 ast2=$ast2 ast3=$ast3"
+    fail "unexpected agent states: ast1=$ast1 ast2=$ast2 ast3=$ast3 ast4=$ast4"
   fi
 )
 

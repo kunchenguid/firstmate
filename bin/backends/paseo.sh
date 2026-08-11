@@ -39,19 +39,24 @@ fm_backend_paseo_tool_check() {
   return 0
 }
 
-fm_backend_paseo_readiness_check() {
-  fm_backend_paseo_tool_check || return 1
-  local status_out
-  status_out=$(paseo status --json 2>/dev/null) || {
-    echo "error: 'paseo status' failed; is the Paseo daemon running?" >&2
-    return 1
-  }
-  local daemon_state
+fm_backend_paseo_daemon_reachable() {
+  local status_out daemon_state
+  status_out=$(paseo status --json 2>/dev/null) || return 1
   daemon_state=$(printf '%s' "$status_out" | jq -r '.localDaemon // .connectedDaemon // empty' 2>/dev/null)
   case "$daemon_state" in
     running|reachable|ok) return 0 ;;
   esac
-  echo "error: Paseo daemon is not running or reachable ($status_out)" >&2
+  return 1
+}
+
+fm_backend_paseo_readiness_check() {
+  fm_backend_paseo_tool_check || return 1
+  if fm_backend_paseo_daemon_reachable; then
+    return 0
+  fi
+  local status_out
+  status_out=$(paseo status --json 2>/dev/null || true)
+  echo "error: Paseo daemon is not running or reachable (${status_out:-failed})" >&2
   return 1
 }
 
@@ -79,16 +84,20 @@ fm_backend_paseo_parent_id() {
 # 2. fm_backend_paseo_create_task: Allocates treehouse worktree, spawns Paseo subagent
 # (paseo run --background --cwd <wt> ...), passes brief, GOTMPDIR, trace context, and
 # operational instructions.
-fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [traceparent]
-  local label=$1 proj_dir=$2 brief_path=${3:-} task_tmp=${4:-} traceparent=${5:-}
+fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [traceparent] [kind]
+  local label=$1 proj_dir=$2 brief_path=${3:-} task_tmp=${4:-} traceparent=${5:-} kind=${6:-}
   local wt prompt out agent_id
 
-  wt=$(cd "$proj_dir" && treehouse get --lease 2>/dev/null) || {
-    echo "error: treehouse get --lease failed for $proj_dir" >&2
-    return 1
-  }
-  # Strip banners and trim trailing whitespace to ensure clean path
-  wt=$(printf '%s\n' "$wt" | tail -1 | tr -d '\r\n')
+  if [ "$kind" = "secondmate" ] || [ -f "$proj_dir/.fm-secondmate-home" ]; then
+    wt="$proj_dir"
+  else
+    wt=$(cd "$proj_dir" && treehouse get --lease 2>/dev/null) || {
+      echo "error: treehouse get --lease failed for $proj_dir" >&2
+      return 1
+    }
+    # Strip banners and trim trailing whitespace to ensure clean path
+    wt=$(printf '%s\n' "$wt" | tail -1 | tr -d '\r\n')
+  fi
   [ -d "$wt" ] || {
     echo "error: allocated worktree path '$wt' does not exist" >&2
     return 1
@@ -212,7 +221,14 @@ fm_backend_paseo_target_exists() {  # <target> [expected-label]
 fm_backend_paseo_agent_state() {  # <target>
   local target=$1 info status
   [ -n "$target" ] || { printf 'missing'; return 0; }
-  info=$(paseo inspect "$target" --json 2>/dev/null) || { printf 'missing'; return 0; }
+  info=$(paseo inspect "$target" --json 2>/dev/null) || {
+    if fm_backend_paseo_daemon_reachable; then
+      printf 'missing'
+    else
+      printf 'unreadable'
+    fi
+    return 0
+  }
   status=$(printf '%s' "$info" | jq -r '.status // .agent.status // empty' 2>/dev/null)
   case "$status" in
     running|initializing|idle) printf 'alive' ;;

@@ -2055,7 +2055,7 @@ EOF
     ;;
   paseo)
     fm_backend_paseo_container_ensure || exit 1
-    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$PROJ_ABS" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}") || exit 1
+    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$PROJ_ABS" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND") || exit 1
     read -r PASEO_AGENT_ID WT <<EOF
 $PASEO_SPAWN_OUT
 EOF
@@ -2065,7 +2065,7 @@ EOF
     fi
     T="$PASEO_AGENT_ID"
     WT_TARGET="$T"
-    validate_spawn_worktree "treehouse get --lease" "$W"
+    [ "$KIND" = secondmate ] || validate_spawn_worktree "treehouse get --lease" "$W"
     ;;
 esac
 fi
