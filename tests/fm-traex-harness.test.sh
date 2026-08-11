@@ -45,7 +45,10 @@ cmd=${1:-}
 sub=${2:-}
 case "$cmd $sub" in
   "status --json")
-    printf '%s\n' '{"client":{"version":"0.8.0","protocol":19},"server":{"running":true,"version":"0.8.0","protocol":19}}'
+    client_version=${FM_FAKE_HERDR_CLIENT_VERSION:-0.8.0}
+    server_version=${FM_FAKE_HERDR_SERVER_VERSION:-0.8.0}
+    printf '{"client":{"version":"%s","protocol":19},"server":{"running":true,"version":"%s","protocol":19}}\n' \
+      "$client_version" "$server_version"
     ;;
   "api schema")
     printf '%s\n' '{"methods":["events.subscribe"],"events":["pane.agent_status_changed"]}'
@@ -101,7 +104,11 @@ case "$cmd $sub" in
     fi
     ;;
   "pane process-info")
-    pane=${3:-}
+    if [ "${3:-}" != --pane ] || [ -z "${4:-}" ]; then
+      printf '%s\n' '{"error":{"code":"invalid_arguments"}}'
+      exit 64
+    fi
+    pane=$4
     native_session=${FM_FAKE_NATIVE_SESSION_ID:-$(cat "$native_session_file" 2>/dev/null || true)}
     if [ -n "$native_session" ] && [ "$phase" != shell ] && [ "$phase" != dead ]; then
       if [ -s "$launch.resume" ]; then
@@ -360,6 +367,19 @@ run_traex_observe() {  # <reported-status> <reported-agent>
       _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2 "$1" "$2"
 }
 
+run_traex_exact_working_observe() {
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; rec=$(fm_backend_herdr_normalize_event "$4" "" working traex); fm_backend_herdr_traex_observe_transition "$2" "$3" "$rec" exact-working' \
+      _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2
+}
+
 run_traex_stream_observe() {  # <reported-status> <reported-agent>
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
@@ -403,13 +423,16 @@ test_marker_detection_is_scoped() {
 }
 
 test_spawn_accepts_only_exact_trust_then_observes_working() {
-  local rec out status launch meta verdict lifecycle native_session
+  local rec out status launch meta verdict lifecycle native_session calls
   rec=$(make_spawn_case launch)
   read_spawn_case "$rec"
   out=$(run_traex_spawn)
   status=$?
   expect_code 0 "$status" "TraeX Herdr spawn should succeed after exact trust acceptance: $out"
   assert_contains "$out" "spawned $TASK_ID harness=traex kind=ship" "spawn did not report TraeX success"
+  calls=$(cat "$CASE_DIR/herdr.log")
+  assert_contains "$calls" $'\x1fpane\x1fprocess-info\x1f--pane\x1fw1:p2' \
+    "TraeX launch did not use Herdr 0.8's supported process-info CLI shape"
   [ "$(cat "$CASE_DIR/trust-count")" = 1 ] || fail "the trust chooser was not accepted exactly once"
   [ "$(cat "$CASE_DIR/phase")" = working ] || fail "spawn returned before native working"
   launch=$(cat "$CASE_DIR/launch.log")
@@ -526,6 +549,33 @@ test_max_effort_refuses_before_endpoint() {
   [ ! -s "$CASE_DIR/herdr.log" ] || fail "max effort queried or created a Herdr endpoint"
   assert_absent "$HOME_DIR/state/$TASK_ID.meta" "max effort published task metadata"
   pass "traex refuses max effort before endpoint creation"
+}
+
+test_herdr_version_floor_refuses_before_endpoint() {
+  local rec out status calls side
+  for side in client server; do
+    rec=$(make_spawn_case "herdr-floor-$side")
+    read_spawn_case "$rec"
+    if [ "$side" = client ]; then
+      out=$(FM_FAKE_HERDR_CLIENT_VERSION=0.7.5 run_traex_spawn)
+    else
+      out=$(FM_FAKE_HERDR_SERVER_VERSION=0.7.5 run_traex_spawn)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "TraeX accepted a below-floor Herdr $side"
+    assert_contains "$out" 'both the selected Herdr client and running server to report version 0.8.0 or newer' \
+      "below-floor Herdr $side refusal did not identify the verified release boundary"
+    calls=$(cat "$CASE_DIR/herdr.log")
+    assert_contains "$calls" $'\x1fstatus\x1f--json' \
+      "TraeX did not inspect selected Herdr $side release evidence"
+    assert_not_contains "$calls" $'\x1fworkspace\x1f' \
+      "below-floor Herdr $side reached workspace endpoint operations"
+    assert_not_contains "$calls" $'\x1ftab\x1f' \
+      "below-floor Herdr $side reached tab endpoint operations"
+    assert_absent "$HOME_DIR/state/$TASK_ID.meta" \
+      "below-floor Herdr $side published task metadata"
+  done
+  pass "traex requires both selected Herdr releases at the 0.8.0 floor"
 }
 
 test_unsupported_tmux_refuses_before_endpoint() {
@@ -966,6 +1016,53 @@ test_blocked_ready_and_resumed_screens_refuse_steer() {
   pass "traex ordinary steering refuses blocked ready and resumed screens"
 }
 
+test_replaced_native_session_refuses_controls_and_transitions() {
+  local rec out status before after wrong_session verdict
+  rec=$(make_spawn_case replaced-native-session)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for native-session replacement should succeed: $out"
+  wrong_session=00000000-0000-4000-8000-000000000000
+  [ "$(recorded_traex_session)" != "$wrong_session" ] \
+    || wrong_session=11111111-1111-4111-8111-111111111111
+  before=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  out=$(FM_FAKE_NATIVE_SESSION_ID="$wrong_session" run_traex_send 'must not reach a replacement session')
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX steering accepted a different native session in the bound pane"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "TraeX steering mutated a different native session"
+
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf idle > "$CASE_DIR/phase"
+  if FM_FAKE_NATIVE_SESSION_ID="$wrong_session" run_traex_reconcile >/dev/null 2>&1; then
+    fail "a different native TraeX session mutated the recorded lifecycle"
+  fi
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "a different native TraeX session completed the recorded turn: $verdict"
+  assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "a different native TraeX session emitted a completion notification"
+  run_traex_reconcile || fail "the restored recorded native session could not reconcile"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "the restored recorded native session did not complete its lifecycle: $verdict"
+
+  printf working > "$CASE_DIR/phase"
+  if FM_FAKE_NATIVE_SESSION_ID="$wrong_session" run_traex_exact_working_observe >/dev/null 2>&1; then
+    fail "exact working confirmation accepted a different native TraeX session"
+  fi
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "a different exact-working session reopened the recorded lifecycle: $verdict"
+  run_traex_exact_working_observe \
+    || fail "the restored recorded session could not persist exact working"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "the restored recorded native session did not reopen its lifecycle: $verdict"
+  pass "traex controls and transitions revalidate the recorded native session"
+}
+
 test_stale_idle_cannot_close_a_new_working_turn() {
   local rec out status verdict
   rec=$(make_spawn_case stale-idle)
@@ -1290,6 +1387,7 @@ test_unrecognized_dialog_sends_no_key_and_fails_launch
 test_key_send_without_working_is_not_launch_success
 test_post_ready_reconciliation_failure_preserves_bound_lifecycle
 test_max_effort_refuses_before_endpoint
+test_herdr_version_floor_refuses_before_endpoint
 test_unsupported_tmux_refuses_before_endpoint
 test_secondmate_and_raw_launch_refuse
 test_non_traex_raw_shell_launch_remains_supported
@@ -1305,6 +1403,7 @@ test_start_observation_persists_lifecycle_before_return
 test_active_send_requires_post_submit_composer_clearance
 test_send_persists_working_before_delivery_ack
 test_blocked_ready_and_resumed_screens_refuse_steer
+test_replaced_native_session_refuses_controls_and_transitions
 test_stale_idle_cannot_close_a_new_working_turn
 test_failed_and_orphaned_pending_launches_reconcile_terminal_level
 test_interrupted_spawn_clears_pending_readiness

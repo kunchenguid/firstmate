@@ -121,6 +121,7 @@ FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
 # both fixes reaches 19, and the pre-fix builds top out at 17.
 FM_BACKEND_HERDR_MIN_PRESENTATION_PROTOCOL=19
 FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
+FM_BACKEND_HERDR_MIN_TRAEX_VERSION=0.8.0
 # One-warning-per-release dedupe marker prefix, under the state dir. The
 # projection decision is remade on every spawn, so an undeduplicated
 # below-floor warning would repeat on every crewmate; the key is the detected
@@ -278,6 +279,22 @@ fm_backend_herdr_presentation_release_supported() {  # [<session>]
       ;;
     *) return 2 ;;
   esac
+}
+
+fm_backend_herdr_traex_release_supported() {  # [<session>]
+  local session=${1:-} status running client_version server_version
+  fm_backend_herdr_tool_check || return 1
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
+  running=$(printf '%s' "$status" | jq -r '
+    if .server.running == true then "true" else "false" end
+  ' 2>/dev/null) || return 1
+  [ "$running" = true ] || return 1
+  client_version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null) || return 1
+  server_version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null) || return 1
+  fm_backend_herdr_version_at_least "$client_version" "$FM_BACKEND_HERDR_MIN_TRAEX_VERSION" \
+    || return 1
+  fm_backend_herdr_version_at_least "$server_version" "$FM_BACKEND_HERDR_MIN_TRAEX_VERSION"
 }
 
 # fm_backend_herdr_presentation_floor_warn <state-dir> <verdict>: emit the one
@@ -2909,8 +2926,41 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_traex_identity_probe() {  # <session> <pane>
-  local session=$1 pane=$2 out code agent status observed_pane presence
+fm_backend_herdr_traex_native_session_id_valid() {  # <session-id>
+  [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+}
+
+fm_backend_herdr_traex_native_session_matches() {  # <session> <pane> <session-id> <launch|resume|bound>
+  local session=$1 pane=$2 native_session=$3 mode=$4 out
+  fm_backend_herdr_traex_native_session_id_valid "$native_session" || return 1
+  case "$mode" in launch|resume|bound) ;; *) return 1 ;; esac
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg id "$native_session" --arg mode "$mode" --arg pane "$pane" '
+    def executable($argv):
+      (($argv[0] // "") | split("/") | last) as $name
+      | ($name == "traex" or $name == "traecli");
+    def launch_match($argv):
+      any(range(0; (($argv | length) - 1));
+        $argv[.] == "--session-id" and $argv[. + 1] == $id);
+    def resume_match($argv):
+      (($argv | length) == 4)
+      and $argv[1] == "resume"
+      and $argv[2] == "-y"
+      and $argv[3] == $id;
+    ((.result.process_info.pane_id // "") == $pane)
+    and any(.result.process_info.foreground_processes[]?;
+      (.argv // []) as $argv
+      | executable($argv)
+        and (if $mode == "launch" then launch_match($argv)
+             elif $mode == "resume" then resume_match($argv)
+             else (launch_match($argv) or resume_match($argv))
+             end))
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_traex_identity_probe() {  # <session> <pane> [native-session] [launch|resume|bound]
+  local session=$1 pane=$2 native_session=${3:-} native_mode=${4:-bound}
+  local out code agent status observed_pane presence
   FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=unknown
   FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT=
   FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS=
@@ -2934,6 +2984,14 @@ fm_backend_herdr_traex_identity_probe() {  # <session> <pane>
   observed_pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || observed_pane=
   case "$status" in working|idle|done|blocked) ;; *) status= ;; esac
   if [ -n "$agent" ] && [ -n "$status" ] && [ "$observed_pane" = "$pane" ]; then
+    if [ "$agent" = traex ] && [ -n "$native_session" ] \
+       && ! fm_backend_herdr_traex_native_session_matches \
+         "$session" "$pane" "$native_session" "$native_mode"; then
+      FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=native-mismatch
+      FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT=$agent
+      FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS=$status
+      return 0
+    fi
     FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=live
     FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT=$agent
     FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS=$status
@@ -2943,43 +3001,14 @@ fm_backend_herdr_traex_identity_probe() {  # <session> <pane>
   [ "$presence" != dead ] || FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=dead
 }
 
-fm_backend_herdr_traex_native_session_id_valid() {  # <session-id>
-  [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
-}
-
-fm_backend_herdr_traex_native_session_matches() {  # <session> <pane> <session-id> <launch|resume>
-  local session=$1 pane=$2 native_session=$3 mode=$4 out
-  fm_backend_herdr_traex_native_session_id_valid "$native_session" || return 1
-  case "$mode" in launch|resume) ;; *) return 1 ;; esac
-  out=$(fm_backend_herdr_cli "$session" pane process-info "$pane" 2>/dev/null) || return 1
-  printf '%s' "$out" | jq -e --arg id "$native_session" --arg mode "$mode" '
-    def executable($argv):
-      (($argv[0] // "") | split("/") | last) as $name
-      | ($name == "traex" or $name == "traecli");
-    def launch_match($argv):
-      any(range(0; (($argv | length) - 1));
-        $argv[.] == "--session-id" and $argv[. + 1] == $id);
-    def resume_match($argv):
-      (($argv | length) == 4)
-      and $argv[1] == "resume"
-      and $argv[2] == "-y"
-      and $argv[3] == $id;
-    any(.result.process_info.foreground_processes[]?;
-      (.argv // []) as $argv
-      | executable($argv)
-        and (if $mode == "launch" then launch_match($argv)
-             else resume_match($argv)
-             end))
-  ' >/dev/null 2>&1
-}
-
 fm_backend_herdr_traex_control_ready() {  # <state-dir> <target>
-  local state=$1 target=$2 session pane
+  local state=$1 target=$2 session pane native_session
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   fm_backend_herdr_traex_ready_lifecycle "$state" "$session" "$pane" || return 1
-  fm_backend_herdr_traex_identity_probe "$session" "$pane"
+  native_session=$FM_BACKEND_HERDR_TRAEX_NATIVE_SESSION
+  fm_backend_herdr_traex_identity_probe "$session" "$pane" "$native_session" bound
   case "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" in
     live)
       [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT" = traex ]
@@ -3996,7 +4025,7 @@ fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pa
 fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> [mode]
   local state=$1 session=$2 record=$3 observation_mode=${4:-current}
   local pane to= reported_to agent native_agent= current current_gen identity_state= absence=
-  local current_state current_rest current_source event event_override= id initial_id gen rc=0 intent
+  local current_state current_rest current_source event event_override= id initial_id gen native_session rc=0 intent
   local strict=0 recovery=0 recovered=0
   case "$observation_mode" in
     current|stream|stream-baseline) ;;
@@ -4030,6 +4059,7 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
   fi
   id=$FM_BACKEND_HERDR_TRAEX_ID
   gen=$FM_BACKEND_HERDR_TRAEX_GEN
+  native_session=$FM_BACKEND_HERDR_TRAEX_NATIVE_SESSION
   current_gen=$(fm_busy_current_gen "$state" "$id" 2>/dev/null || true)
   current=$(fm_busy_record_read "$state" "$id" 2>/dev/null) || {
     fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
@@ -4108,12 +4138,21 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       ;;
   esac
   case "$observation_mode" in
-    exact-working|launch-working)
+    launch-working)
       native_agent=$agent
       to=$reported_to
       ;;
+    exact-working)
+      fm_backend_herdr_traex_identity_probe "$session" "$pane" "$native_session" bound
+      identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
+      if [ "$identity_state" = live ] \
+         && [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT" = traex ]; then
+        native_agent=$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT
+        to=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS
+      fi
+      ;;
     current|submit-baseline|stream-baseline)
-      fm_backend_herdr_traex_identity_probe "$session" "$pane"
+      fm_backend_herdr_traex_identity_probe "$session" "$pane" "$native_session" bound
       identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
       case "$identity_state" in
         live)
@@ -4124,7 +4163,7 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
       esac
       ;;
     stream)
-      fm_backend_herdr_traex_identity_probe "$session" "$pane"
+      fm_backend_herdr_traex_identity_probe "$session" "$pane" "$native_session" bound
       identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
       case "$identity_state" in
         live)
@@ -4361,7 +4400,7 @@ fm_backend_herdr_traex_resume() {  # <state-dir> <task-id> <session-id>
     echo "error: TraeX resume requires the exact inactive bound lifecycle for task $id" >&2
     return 1
   fi
-  fm_backend_herdr_traex_identity_probe "$session" "$pane"
+  fm_backend_herdr_traex_identity_probe "$session" "$pane" "$native_session" bound
   if [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" != no-agent ]; then
     identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
     fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
@@ -4386,14 +4425,13 @@ fm_backend_herdr_traex_resume() {  # <state-dir> <task-id> <session-id>
   interval=$FM_BACKEND_HERDR_TRAEX_RESUME_INTERVAL
   case "$polls" in ''|*[!0-9]*|0) polls=40 ;; esac
   while [ "$i" -lt "$polls" ]; do
-    fm_backend_herdr_traex_identity_probe "$session" "$pane"
+    fm_backend_herdr_traex_identity_probe "$session" "$pane" "$native_session" resume
+    if [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" = native-mismatch ]; then
+      echo "error: resumed TraeX native session identity does not match task $id" >&2
+      return 1
+    fi
     if [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" = live ] \
        && [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT" = traex ]; then
-      if ! fm_backend_herdr_traex_native_session_matches \
-           "$session" "$pane" "$native_session" resume; then
-        echo "error: resumed TraeX native session identity does not match task $id" >&2
-        return 1
-      fi
       pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null || true)
       foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null || true)
       foreground_real=$(CDPATH='' cd -- "$foreground" 2>/dev/null && pwd -P) || foreground_real=

@@ -1022,11 +1022,16 @@ if [ "$HARNESS" = traex ]; then
     echo "error: traex executable not found on PATH; install TraeX or select a different verified harness" >&2
     exit 1
   fi
+  TRAEX_HERDR_SESSION=$(fm_backend_herdr_session)
+  if ! fm_backend_herdr_traex_release_supported "$TRAEX_HERDR_SESSION"; then
+    echo "error: traex requires both the selected Herdr client and running server to report version $FM_BACKEND_HERDR_MIN_TRAEX_VERSION or newer before endpoint creation" >&2
+    exit 1
+  fi
   TRAEX_SESSION_ID=$(traex_session_id_generate) || {
     echo "error: TraeX task-private native session identity could not be generated safely" >&2
     exit 1
   }
-  if ! fm_backend_herdr_events_capable "$(fm_backend_herdr_session)"; then
+  if ! fm_backend_herdr_events_capable "$TRAEX_HERDR_SESSION"; then
     echo "error: traex requires Herdr's pane.agent_status_changed event surface for durable worker lifecycle; update Herdr and ensure python3 is available" >&2
     exit 1
   fi

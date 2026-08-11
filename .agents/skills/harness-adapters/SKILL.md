@@ -406,7 +406,7 @@ It is not a primary, secondmate, watcher owner, away-mode supervisor, remote coo
 | Fact | Value |
 |---|---|
 | Binary | `traex`; its own version banner identifies `traecli 0.200.19(internal edition)`. |
-| Launch | `FM_TRAEX_HARNESS=traex traex -y --model <model> -c 'model_reasoning_effort="<level>"' <one positional launch brief>`. The marker is Firstmate-private and intentionally outranks ancestry so unrelated TraeX processes are never detected as workers. |
+| Launch | `FM_TRAEX_HARNESS=traex traex -y --session-id <generated-task-private-UUID> --model <model> -c 'model_reasoning_effort="<level>"' <one positional launch brief>`. The generated ID is persisted as task-private `traex_session_id`; the marker is Firstmate-private and intentionally outranks ancestry so unrelated TraeX processes are never detected as workers. |
 | Busy state | Herdr's native TraeX `pane.agent_status_changed` stream, persisted as source `herdr-traex` through `bin/fm-busy-event.sh`. `working` is busy; `blocked`, `idle`, and `done` are inactive; only a busy-to-idle/done fold touches the ordinary turn-ended notification. |
 | Exit command | `/exit` or `/quit`; use `/exit` as the canonical form. |
 | Interrupt | Single Escape. TraeX restores the interrupted prompt as real composer input, so `fm-send.sh` immediately follows with `C-u`; Herdr's following native transition settles the semantic lifecycle. |
@@ -414,7 +414,7 @@ It is not a primary, secondmate, watcher owner, away-mode supervisor, remote coo
 | Autonomy | `-y` / `--dangerously-bypass-approvals-and-sandbox`. This does not suppress the separate fresh-directory trust chooser. |
 | Trust dialog | Herdr manifest rule `directory_trust_prompt`, with `1. Yes, continue` preselected. Firstmate requires the live `foreground_cwd` to equal the isolated task root; Herdr's immutable pane-creation `cwd` must equal either that root or the exact source project from which ordinary `treehouse get` entered it. Only when those identities and the rule/default text agree does Firstmate send one Enter, then require native `working`; a key-send result alone is never success. |
 | Composer | Bare `❯` row, already covered by Herdr's shared structural composer owner. |
-| Resume | Read the task-private `traex_session_id` from the recorded metadata, then run `FM_HOME=<this-firstmate-home> bin/fm-traex-resume.sh <task-id> <traex-session-id>`. The owner refuses `--last`, thread names, and every selector other than that exact ID; it requires the inactive lifecycle binding and agent-less recorded Herdr pane in the same isolated task worktree, launches `traex resume -y` with `FM_TRAEX_HARNESS=traex`, and revalidates the native session, pane, worktree, and lifecycle before success. |
+| Resume | Read the task-private `traex_session_id` from the recorded metadata, then run `FM_HOME=<this-firstmate-home> bin/fm-traex-resume.sh <task-id> <traex-session-id>`. The owner refuses `--last`, thread names, and every selector other than that exact ID; it requires the inactive lifecycle binding and agent-less recorded Herdr pane in the same isolated task worktree, launches exactly `FM_TRAEX_HARNESS=traex traex resume -y <recorded-traex-session-id>`, and revalidates the native session, pane, worktree, and lifecycle before success. |
 
 A fresh worktree may show directory trust even with `-y`.
 Do not hand-edit TraeX's global trust/config store and do not send Enter merely because the pane is blocked.
@@ -423,7 +423,7 @@ Any other blocked screen is an actionable worker blocker.
 
 The completion callback is the already-required Herdr event stream, not a TraeX project hook.
 Project hooks require separate trust/review and a broad hook-trust bypass would enlarge the accepted project surface, so this adapter does not install one.
-The spawn preflight requires Herdr's event capability, arms one ordinary semantic-state generation, and publishes lifecycle readiness only after the launch prompt is observed working.
+The spawn preflight requires the selected Herdr client and running server both to report version 0.8.0 or newer plus Herdr's event capability, arms one ordinary semantic-state generation, and publishes lifecycle readiness only after the launch prompt is observed working.
 Reconnect level reconciliation closes a missed working-to-idle transition once, while the state record prevents repeated idle levels from generating duplicate turn notifications.
 
 For stopped-worker recovery, keep the existing isolated task worktree and exact Herdr endpoint ownership rules.
