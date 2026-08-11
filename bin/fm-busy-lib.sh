@@ -839,40 +839,17 @@ fm_busy_grok_tail_busy() {
 # process state. <tail40> is optional pre-captured plain output used only by
 # the Grok arm; when absent the Grok arm captures through fm_backend_capture
 # if available, else reports unknown capture-failed.
-fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [raw-launch] [raw-owner]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} raw_launch=${7-} raw_owner=${8:-${FM_RAW_LAUNCH_OWNER:-}}
-  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
-  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [raw-launch]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} raw_launch=${7-}
   local out rc r_state r_source native log endpoint_checked=0
-  [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ] && raw_launch=1
-  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  if [ "$raw_launch" = 1 ] && [ -z "$raw_owner" ]; then
-    printf 'unknown raw-unverified'
-    return 0
-  fi
-  if command -v fm_backend_omp_endpoint_allows >/dev/null 2>&1 \
+  if [ "$harness" = omp ] && [ "$raw_launch" != 1 ] \
     && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
-    && { [ -n "$harness" ] && [ "$harness" != unknown ] || [ "$raw_launch" = 1 ] \
-      || [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; then
-    if ! fm_backend_omp_endpoint_allows "$backend" "$target" "$harness" "$raw_launch" "$raw_owner"; then
-      case "$harness:$raw_launch" in
-        raw-omp:*|omp:*|*:1)
-          printf 'unknown raw-unverified'
-          ;;
-        *)
-          printf 'unknown identity-mismatch'
-          ;;
-      esac
+    && command -v fm_backend_omp_endpoint_allows >/dev/null 2>&1; then
+    if ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
+      printf 'unknown identity-mismatch'
       return 0
     fi
     endpoint_checked=1
-  elif [ "$harness" = raw-omp ] \
-    || { [ "$harness" = omp ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; } \
-    || { [ "$raw_launch" = 1 ] \
-      && command -v fm_backend_raw_omp_identity >/dev/null 2>&1 \
-      && fm_backend_raw_omp_identity "$backend" "$target" "$harness" "$raw_launch" "$raw_owner"; }; then
-    printf 'unknown raw-unverified'
-    return 0
   fi
   case "$harness" in
     kimi*)
@@ -928,22 +905,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
-  if [ "$backend" = herdr ] \
-    && { [ -z "${FM_HARNESS_UNVERIFIED:-}" ] || [ "$raw_launch" = 1 ]; } \
-    && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" "$endpoint_checked" "$raw_owner" 2>/dev/null || true)
+  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" "$endpoint_checked" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
       return 0
     fi
-  fi
-  if [ "$backend" = herdr ] \
-    && [ -n "${FM_HARNESS_UNVERIFIED:-}" ] \
-    && [ "$raw_launch" != 1 ]; then
-    case "$harness" in
-      grok*|muse*) : ;;
-      *) printf 'unknown raw-unverified'; return 0 ;;
-    esac
   fi
   case "$harness" in
     muse*)
@@ -988,14 +955,8 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
 # fm_busy_classify_live: fm_busy_classify behind the one process-level
 # override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
 # be sourced for fm_backend_target_exists.
-fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label] [raw-launch] [raw-owner]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-} raw_launch=${7-} raw_owner=${8:-${FM_RAW_LAUNCH_OWNER:-}}
-  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
-  local FM_HARNESS_UNVERIFIED=$inherited_unverified
-  if [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ]; then
-    raw_launch=1
-  fi
-  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
+fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label] [raw-launch]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-} raw_launch=${7-}
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
@@ -1004,7 +965,7 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
     printf 'dead endpoint-gone'
     return 0
   fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" '' "$raw_launch" "$raw_owner"
+  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" '' "$raw_launch"
 }
 
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
@@ -1012,18 +973,17 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
 # optional pre-captured plain output reused by the Grok arm.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
-  local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness raw_launch raw_owner
+  local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness raw_launch
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   harness=$(fm_meta_get "$meta" harness)
   raw_launch=$(fm_meta_get "$meta" raw_launch)
-  raw_owner=$(fm_meta_get "$meta" raw_owner)
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
   fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40" "$raw_launch" "$raw_owner"
+  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40" "$raw_launch"
 }
 
 # fm_busy_is_busy: boolean view for callers that only gate on provable

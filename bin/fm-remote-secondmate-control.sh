@@ -97,7 +97,7 @@ remote_endpoint_require() {
 }
 
 state_value() { # <id>; prints recovery-grade state
-  local id=$1 meta harness raw_launch raw_owner
+  local id=$1 meta harness raw_launch
   meta=$(meta_path "$id")
   [ -f "$meta" ] && [ ! -L "$meta" ] || { printf 'missing\n'; return 0; }
   if ! remote_endpoint_load "$id"; then
@@ -107,8 +107,7 @@ state_value() { # <id>; prints recovery-grade state
   fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   raw_launch=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_launch)
-  raw_owner=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_owner)
-  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null || printf 'unreadable\n'
+  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$harness" "$raw_launch" 2>/dev/null || printf 'unreadable\n'
 }
 
 print_route() { # <id>
@@ -137,7 +136,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session recorded_harness raw_launch raw_owner
+  local current meta out herdr_session
 
   validate_id "$id"
   validate_home "$id"
@@ -154,10 +153,9 @@ cmd_launch() {
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     remote_endpoint_require "$id"
-    recorded_harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-    raw_launch=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_launch)
-    raw_owner=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_owner)
-    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$recorded_harness" "$raw_launch" "$raw_owner" 2>/dev/null || printf 'unreadable\n')
+    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" \
+      "$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)" \
+      "$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_launch)" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
         print_route "$id"
@@ -218,14 +216,13 @@ cmd_capture() {
 }
 
 cmd_observe() {
-  local id=$1 harness raw_launch raw_owner
+  local id=$1 harness raw_launch
   validate_id "$id"
   validate_home "$id"
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   raw_launch=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_launch)
-  raw_owner=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_owner)
-  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness" "$raw_launch" "$raw_owner"
+  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness" "$raw_launch"
   printf '\n'
 }
 

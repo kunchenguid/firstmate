@@ -401,7 +401,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch raw_owner
+  local rec id out status launch
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -413,11 +413,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
-  assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" "raw launch metadata did not retain the unverified process-tree marker"
-  raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
-  [ -n "$raw_owner" ] || fail "raw launch metadata did not retain its ownership marker"
+  assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" "raw launch metadata did not retain its raw-launch provenance"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch FM_RAW_LAUNCH_OWNER='$raw_owner'; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

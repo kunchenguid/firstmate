@@ -51,17 +51,15 @@ detect_own() {
   # outrank an inherited foreign Claude marker.
   case "${FM_PRIMARY_HARNESS:-}" in
     pi|pi-signed) echo "$FM_PRIMARY_HARNESS"; return ;;
-    omp)
-      [ -z "${FM_HARNESS_UNVERIFIED:-}" ] && { echo omp; return; }
-      ;;
+    omp) echo omp; return ;;
   esac
   case "${FM_PI_HARNESS:-}" in
     pi|pi-signed)
       [ "${PI_CODING_AGENT:-}" = "true" ] && { echo "$FM_PI_HARNESS"; return; }
       ;;
   esac
-  [ "${OMPCODE:-}" = "1" ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] && { echo omp; return; }
-  if [ "${CLAUDECODE:-}" = "1" ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] && fm_harness_omp_ancestry_matches; then
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
+  if [ "${CLAUDECODE:-}" = "1" ] && fm_harness_omp_ancestry_matches; then
     echo omp
     return
   fi

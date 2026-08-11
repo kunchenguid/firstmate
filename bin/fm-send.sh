@@ -128,11 +128,11 @@ fm_send_id_from_meta() {  # <meta-file>
 fm_send_clear_after_interrupt() {  # <key>
   local key=$1 family clear
   [ "$key" = Escape ] || return 0
-  family=$(fm_control_harness_family "$TARGET_HARNESS") || return 0
+  family=$(fm_control_harness_family "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH") || return 0
   clear=$(fm_control_interrupt_clear_key "$family") || return 0
   [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH" "$TARGET_RAW_OWNER"; then
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"; then
     echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
@@ -189,12 +189,11 @@ fm_send_resolve_target() {  # <raw-target>
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
   TARGET_HARNESS=""
-  TARGET_RAW_LAUNCH=""
-  TARGET_RAW_OWNER=""
   EXPECTED_LABEL=""
   TARGET_META=""
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
+  TARGET_RAW_LAUNCH=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -291,8 +290,7 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 if [ -n "$TARGET_META" ]; then
-  TARGET_RAW_LAUNCH=$(fm_meta_get "$TARGET_META" raw_launch 2>/dev/null || true)
-  TARGET_RAW_OWNER=$(fm_meta_get "$TARGET_META" raw_owner 2>/dev/null || true)
+  TARGET_RAW_LAUNCH=$(fm_meta_get "$TARGET_META" raw_launch)
 fi
 shift
 
@@ -431,7 +429,7 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH" "$TARGET_RAW_OWNER"; then
+  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
@@ -494,7 +492,7 @@ else
       send_rc=$?
       verdict=send-failed
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH" "$TARGET_RAW_OWNER"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"); then
     :
   else
     send_rc=$?

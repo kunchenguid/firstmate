@@ -47,10 +47,6 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
-fm_harness_omp_attribution_allowed() {
-  [ -z "${FM_HARNESS_UNVERIFIED:-}" ]
-}
-
 fm_harness_omp_resolve_path() {  # <path>
   local path=$1 target dir base
   [ -n "$path" ] || return 1
@@ -87,7 +83,6 @@ fm_harness_omp_command_path() {
 
 fm_harness_omp_script_matches() {  # <path>
   local path=$1 expected actual
-  fm_harness_omp_attribution_allowed || return 1
   expected=$(fm_harness_omp_command_path) || return 1
   actual=$(fm_harness_omp_resolve_path "$path") || return 1
   [ "$actual" = "$expected" ]
@@ -95,7 +90,6 @@ fm_harness_omp_script_matches() {  # <path>
 
 fm_harness_omp_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 script
-  fm_harness_omp_attribution_allowed || return 1
   case "$(basename -- "$comm")" in
     omp) return 0 ;;
     bun)
@@ -116,12 +110,8 @@ fm_harness_identity_supported() {  # <identity>
   esac
 }
 
-fm_harness_identity_matches() {  # <expected> <actual> [raw-launch]
-  local expected=$1 actual=$2 raw_launch=${3:-}
-  if [ "$raw_launch" = 1 ]; then
-    [ "$actual" != omp ] && fm_harness_identity_supported "$actual"
-    return
-  fi
+fm_harness_identity_matches() {  # <expected> <actual>
+  local expected=$1 actual=$2
   case "$expected" in
     omp) [ "$actual" = omp ] ;;
     pi|pi-signed) case "$actual" in pi|pi-signed) return 0 ;; *) return 1 ;; esac ;;

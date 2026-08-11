@@ -162,22 +162,6 @@ wait_for_state "$SESSION:omp" alive \
   || fail "a running exact OMP process must classify alive"
 pass "tmux liveness: an exact OMP process classifies alive"
 
-new_window raw-omp env FM_HARNESS_UNVERIFIED=raw-omp "$LAB/bin/omp" 900
-out=unreadable
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  out=$(FM_HARNESS_UNVERIFIED=raw-omp bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1"' \
-    "$ROOT" "$SESSION:raw-omp")
-  [ "$out" = unverified ] && break
-  sleep 0.1
-done
-[ "$out" = unverified ] \
-  || fail "a raw OMP process must not classify as a verified live agent, got '$out'"
-[ "$(fm_backend_agent_state tmux "$SESSION:raw-omp" raw-omp)" = unverified ] \
-  || fail "recorded raw-omp metadata must stop the shared liveness dispatcher"
-[ "$(FM_HARNESS_UNVERIFIED=raw-omp fm_backend_tmux_classify_process_name omp)" = other ] \
-  || fail "the raw-omp marker must stop exact omp process attribution"
-pass "tmux liveness: raw OMP endpoints remain unverified"
-
 # --- OMP's real shape: a Bun runtime whose script argument is the identity ----
 # The installed OMP is a Bun script, so nothing in the process NAME says omp -
 # the only identity is argv[1]. A pane misread here reads as a dead endpoint,

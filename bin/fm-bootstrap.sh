@@ -611,12 +611,11 @@ secondmate_liveness_sweep() {
 # unchanged.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
-  local window harness raw_launch raw_owner backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local window harness raw_launch backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
   harness=$(fm_meta_get "$meta" harness)
   raw_launch=$(fm_meta_get "$meta" raw_launch)
-  raw_owner=$(fm_meta_get "$meta" raw_owner)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     remote_rc=0
@@ -688,11 +687,7 @@ secondmate_liveness_one() {  # <meta> <id>
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
-  if [ "$harness" = raw-omp ]; then
-    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
-    return 0
-  fi
-  agent_state=$(fm_backend_agent_state "$backend" "$target" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null) || agent_state=unreadable
+  agent_state=$(fm_backend_agent_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
     *)

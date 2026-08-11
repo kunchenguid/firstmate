@@ -365,7 +365,15 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [exp
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
+  if ! fm_tmux_submit_endpoint_allows "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
+    printf 'unknown'
+    return 0
+  fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  if ! fm_tmux_submit_endpoint_allows "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
+    printf 'unknown'
+    return 0
+  fi
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$recorded_harness" "$raw_launch" "$raw_owner" "$baseline_idle"
 }

@@ -676,7 +676,6 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 RAW_LAUNCH=0
-RAW_LAUNCH_OWNER=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -754,7 +753,6 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             [ "$RAW_LAUNCH" -eq 1 ] && echo "raw_launch=1"
-            [ "$RAW_LAUNCH" -eq 1 ] && echo "raw_owner=$RAW_LAUNCH_OWNER"
             echo "kind=$KIND"
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
@@ -818,8 +816,7 @@ clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
-  # adapter name, except raw `omp`, which is recorded as `raw-omp`. The
-  # retirement tables are keyed by the exact adapter, so the
+  # adapter name. The retirement tables are keyed by the exact adapter, so the
   # recorded value is resolved to its adapter first; otherwise a task recorded
   # as, say, `grok-2` would have wiring armed and never retired. An
   # unrecognized value resolves to no adapter, which is also the case in which
@@ -989,7 +986,6 @@ FIRSTMATE_HOME=
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
 RELAUNCH_PRIOR_RAW_LAUNCH=
-RELAUNCH_PRIOR_RAW_OWNER=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1013,8 +1009,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_RAW_LAUNCH=$(fm_meta_get "$RELAUNCH_META" raw_launch)
-  RELAUNCH_PRIOR_RAW_OWNER=$(fm_meta_get "$RELAUNCH_META" raw_owner)
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$(fm_meta_get "$RELAUNCH_META" harness)" "$RELAUNCH_PRIOR_RAW_LAUNCH" "$RELAUNCH_PRIOR_RAW_OWNER")
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$(fm_meta_get "$RELAUNCH_META" harness)" "$RELAUNCH_PRIOR_RAW_LAUNCH")
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
@@ -1208,7 +1203,6 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    [ "$HARNESS" = omp ] && HARNESS=raw-omp
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1237,10 +1231,6 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
-
-if [ "$RAW_LAUNCH" -eq 1 ]; then
-  RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
-fi
 
 # FM_PI_HARNESS is the identity the WORKER reports back through
 # bin/fm-harness.sh detect_own, which cannot tell pi-signed from pi without it.
@@ -1837,7 +1827,7 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state old_harness old_raw_launch old_raw_owner target_session target_pane
+  local meta=$1 old_backend old_target old_session old_pane old_state old_harness old_raw_launch target_session target_pane
   HERDR_RECOVERY_BACKEND=""
   HERDR_RECOVERY_HARNESS=""
   HERDR_RECOVERY_RAW_LAUNCH=""
@@ -1847,10 +1837,8 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   old_backend=$(fm_backend_of_meta "$meta")
   old_harness=$(fm_meta_get "$meta" harness)
   old_raw_launch=$(fm_meta_get "$meta" raw_launch)
-  old_raw_owner=$(fm_meta_get "$meta" raw_owner)
   HERDR_RECOVERY_HARNESS=$old_harness
   HERDR_RECOVERY_RAW_LAUNCH=$old_raw_launch
-  HERDR_RECOVERY_RAW_OWNER=$old_raw_owner
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
@@ -1889,7 +1877,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
       return 1
     }
-    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane" "$old_harness" "$old_raw_launch" "$old_raw_owner")
+    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane" "$old_harness" "$old_raw_launch")
     case "$old_state" in
       dead|no-agent) return 0 ;;
       live|unknown)
@@ -1898,7 +1886,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
         ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "$old_harness" "$old_raw_launch" "$old_raw_owner")
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "$old_harness" "$old_raw_launch")
   case "$old_state" in
     dead) return 0 ;;
     alive|unknown)
@@ -1963,7 +1951,6 @@ case "$BACKEND" in
     HERDR_PROJECTED=0
     HERDR_RECOVERY_HARNESS=""
     HERDR_RECOVERY_RAW_LAUNCH=""
-    HERDR_RECOVERY_RAW_OWNER=""
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -1980,13 +1967,13 @@ case "$BACKEND" in
           herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
-          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_RECOVERY_HARNESS" "$HERDR_RECOVERY_RAW_LAUNCH" "$HERDR_RECOVERY_RAW_OWNER" || exit 1
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_RECOVERY_HARNESS" "$HERDR_RECOVERY_RAW_LAUNCH" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS" "$HERDR_RECOVERY_HARNESS" "$HERDR_RECOVERY_RAW_LAUNCH" "$HERDR_RECOVERY_RAW_OWNER"
+            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS" "$HERDR_RECOVERY_HARNESS" "$HERDR_RECOVERY_RAW_LAUNCH"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2745,7 +2732,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness raw_launch raw_owner kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness raw_launch kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2758,7 +2745,6 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   [ "$RAW_LAUNCH" -eq 1 ] && echo "raw_launch=1"
-  [ "$RAW_LAUNCH" -eq 1 ] && echo "raw_owner=$RAW_LAUNCH_OWNER"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -2883,26 +2869,20 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # The resolved harness owns the worker's identity at this shared pane-shell
-# boundary. Keep the shell statement so raw escape-hatch forms remain runnable.
+# boundary. Raw escape-hatch commands retain their ordinary unverified launch
+# behavior and do not receive verified-harness identity wiring.
 if [ "$RAW_LAUNCH" -eq 1 ]; then
-  case "$HARNESS" in
-    pi|pi-signed)
-      LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch FM_RAW_LAUNCH_OWNER='$RAW_LAUNCH_OWNER' FM_PI_HARNESS='$HARNESS' PI_CODING_AGENT=true; $LAUNCH"
-      ;;
-    *)
-      LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch FM_RAW_LAUNCH_OWNER='$RAW_LAUNCH_OWNER'; $LAUNCH"
-      ;;
-  esac
+  :
 else
   case "$HARNESS" in
     omp)
-      LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
+      LAUNCH="unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
       ;;
     pi|pi-signed)
-      LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+      LAUNCH="unset OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
       ;;
     *)
-      LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+      LAUNCH="unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
       ;;
   esac
 fi
@@ -2969,7 +2949,7 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W" "$HARNESS" "$RAW_LAUNCH" "$RAW_LAUNCH_OWNER") || {
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W" "$HARNESS" "$RAW_LAUNCH") || {
     kimi_spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   }

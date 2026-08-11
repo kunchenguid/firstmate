@@ -68,12 +68,6 @@ set -u
 case "\$*" in
   "-axo pid=,ppid=") printf '1 0\\n4242 1\\n' ;;
   *"-o pid=,pgid=,tpgid=,comm="*) printf '4242 4242 4242 %s\\n' '$comm' ;;
-  *"eww"*"-o command="*)
-    case "\$*" in
-      *"-p \${FM_FAKE_PS_NO_OWNER_PID:-__none__}"*) printf 'OTHER=1\\n' ;;
-      *) printf 'FM_RAW_LAUNCH_OWNER=%s\\n' "\${FM_RAW_LAUNCH_OWNER:-}" ;;
-    esac
-    ;;
   *"-o comm="*) printf '%s\\n' '$comm' ;;
   *"-o args="*) printf '%s\\n' '$comm' ;;
   *) exit 1 ;;
@@ -115,12 +109,6 @@ set -u
     fi
     ;;
   *"-o pid=,pgid=,tpgid=,comm="*) printf '4242 4242 4242 %s\\n' '$root_comm' ;;
-  *"eww"*"-o command="*)
-    case "\$*" in
-      *"-p \${FM_FAKE_PS_NO_OWNER_PID:-__none__}"*) printf 'OTHER=1\\n' ;;
-      *) printf 'FM_RAW_LAUNCH_OWNER=%s\\n' "\${FM_RAW_LAUNCH_OWNER:-}" ;;
-    esac
-    ;;
   *"-o comm="*)
     case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf 'bun\\n' ;; *) printf '%s\\n' '$root_comm' ;; esac
     ;;
@@ -246,79 +234,19 @@ test_tmux_canonical_omp_accepts_current_endpoint() {
   pass "tmux liveness: current canonical OMP identity remains live"
 }
 
-test_tmux_non_omp_record_rejects_current_omp() {
-  local fb out status
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-reverse-omp-mismatch" omp)
-  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win claude' "$ROOT")
-  [ "$out" = ambiguous ] || fail "a recorded non-OMP tmux task over current OMP must not remain alive, got '$out'"
-  PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label claude' "$ROOT" >/dev/null 2>&1
-  status=$?
-  [ "$status" -ne 0 ] || fail "a recorded non-OMP tmux task over current OMP must reject control input"
-  pass "tmux identity: recorded non-OMP rejects a current OMP endpoint"
-}
-
-test_tmux_non_omp_requires_positive_current_identity() {
-  local fb out status current
-  for current in bash codex; do
-    fb=$(make_probe_tmux "$TMP_ROOT/tmux-non-omp-current-$current" "$current")
-    out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win claude' "$ROOT")
-    [ "$out" = ambiguous ] || fail "a recorded Claude task over current $current must remain ambiguous, got '$out'"
-    PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label claude' "$ROOT" >/dev/null 2>&1
-    status=$?
-    [ "$status" -ne 0 ] || fail "a recorded Claude task over current $current must reject control input"
-    out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify tmux sess:win claude current "$1"' "$ROOT" "$TMP_ROOT/tmux-non-omp-current-$current/state")
-    [ "$out" = "unknown identity-mismatch" ] || fail "busy must reject current $current for recorded Claude, got '$out'"
-  done
-  pass "tmux identity: shell and cross-harness relaunches require positive equality"
-}
-
-test_tmux_raw_background_omp_is_quarantined() {
-  local fb out status owner=raw-tmux-background-omp
-  fb=$(make_tree_probe_tmux "$TMP_ROOT/tmux-raw-background-omp" bash "$TMP_ROOT/tmux-raw-background-omp/omp")
-  out=$(PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_FAKE_PS_OMP_PID=6161 \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1 "$1"' "$ROOT" "$owner")
-  [ "$out" = unverified ] || fail "a raw tmux wrapper with an OMP descendant must be unverified, got '$out'"
-  PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_FAKE_PS_OMP_PID=6161 \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label bash 1 "$1"' "$ROOT" "$owner" >/dev/null 2>&1
-  status=$?
-  [ "$status" -ne 0 ] || fail "a raw tmux wrapper with an OMP descendant must reject control input"
-  out=$(PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_FAKE_PS_OMP_PID=6161 FM_FAKE_PS_BAD=1 \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1 "$1"' "$ROOT" "$owner")
-  [ "$out" = unverified ] || fail "an unreadable raw tmux process tree must remain unverified, got '$out'"
-  out=$(PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_FAKE_PS_REPARENTED=1 FM_FAKE_PS_OMP_PID=6161 \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1 "$1"' "$ROOT" "$owner")
-  [ "$out" = unverified ] || fail "a reparented raw OMP process must remain unverified, got '$out'"
-  pass "tmux identity: background raw OMP descendants are quarantined"
-}
-
-test_tmux_busy_rejects_reverse_omp_identity() {
+test_tmux_canonical_omp_accepts_proven_clean_shell_exit() {
   local fb out
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-busy-reverse-omp" omp)
-  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify tmux sess:win claude reverse-omp "$1"' "$ROOT" "$TMP_ROOT/tmux-busy-reverse-omp/state")
-  [ "$out" = "unknown identity-mismatch" ] \
-    || fail "tmux busy must reject a recorded non-OMP task over current OMP, got '$out'"
-  pass "tmux busy: recorded non-OMP identity cannot trust current OMP"
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-canonical-omp-shell-exit" zsh)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp' "$ROOT")
+  [ "$out" = dead ] || fail "a canonical OMP endpoint over a lone shell must classify as cleanly stopped, got '$out'"
+  pass "tmux liveness: canonical OMP accepts only the strict lone-shell stop shape"
 }
 
-test_tmux_raw_non_omp_preserves_liveness() {
-  local fb out owner=raw-tmux-non-omp
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-non-omp" claude)
-  out=$(PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1 "$1"' "$ROOT" "$owner")
-  [ "$out" = alive ] || fail "positively corroborated raw Claude endpoints must remain alive, got '$out'"
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-shell" bash)
-  out=$(PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1 "$1"' "$ROOT" "$owner")
-  [ "$out" = unverified ] || fail "raw shell endpoints must remain unverified, got '$out'"
-  pass "tmux liveness: positively corroborated raw non-OMP endpoints remain live"
-}
 
-test_tmux_raw_requires_marker_on_current_foreground() {
-  local fb out owner=raw-tmux-stripped-marker
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-stripped-marker" claude)
-  out=$(PATH="$fb:$BASE_PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_FAKE_PS_NO_OWNER_PID=4242 \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1 "$1"' "$ROOT" "$owner")
-  [ "$out" = unverified ] || fail "a raw tmux endpoint with a stripped foreground marker must be unverified, got '$out'"
-  pass "tmux identity: raw ownership requires the current foreground marker"
-}
+
+
+
+
 
 test_tmux_control_rejects_stale_canonical_omp() {
   local fb status
@@ -363,26 +291,12 @@ test_agent_state_dispatcher_and_compatibility() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_state herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_agent_state herdr sess:p1 bash 1' "$ROOT")
-  [ "$out" = dead ] || fail "raw non-OMP metadata must preserve Herdr no-agent recovery, got '$out'"
-
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_raw_omp_process_state() { printf omp; }; fm_backend_agent_state herdr sess:p1 bash 1 raw-dispatch-owner' "$ROOT")
-  [ "$out" = unverified ] || fail "corroborated wrapped raw OMP metadata must stop Herdr recovery, got '$out'"
-
-  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win raw-omp' "$ROOT")
-  [ "$out" = unverified ] || fail "raw-omp metadata should stop the shared liveness dispatcher, got '$out'"
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-launch-omp" omp)
-  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp 1' "$ROOT")
-  [ "$out" != alive ] || fail "raw-launch metadata must stop exact OMP process attribution, got '$out'"
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; FM_HARNESS_UNVERIFIED=raw-omp fm_backend_herdr_pane_agent_state sess:p1' "$ROOT")
-  [ "$out" = unknown ] || fail "raw-omp marker should stop direct Herdr attribution, got '$out'"
-
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7' "$ROOT")
   [ "$out" = unverified ] || fail "Zellij should remain unverified, got '$out'"
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:7' "$ROOT")
   [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
 
-  pass "fm_backend_agent_state: gates raw-omp and routes tmux/Herdr safely"
+  pass "fm_backend_agent_state: routes tmux/Herdr and preserves unsupported backends"
 }
 
 test_shared_input_dispatch_preserves_unproved_backends() {
@@ -421,24 +335,32 @@ test_tmux_submit_rechecks_endpoint_before_each_enter() {
       esac
     }
     calls=0
-    verdict=$(fm_backend_send_text_submit tmux sess:win hello 1 0 0 label claude)
+    verdict=$(fm_tmux_submit_core sess:win hello 1 0 0 label omp)
     printf "%s\t%s" "$verdict" "$(cat "$FM_TEST_LOG")"
   ' "$ROOT")
   [ "$out" = $'unknown\tliteral' ] || fail "tmux must recheck before Enter and stop on endpoint drift, got '$out'"
   pass "tmux submit: endpoint identity is rechecked before every Enter"
 }
 
-test_raw_marker_gates_busy_and_control() {
-  local meta="$TMP_ROOT/raw-marker-meta" state="$TMP_ROOT/raw-marker-state" out
-  mkdir -p "$state"
-  printf '%s\n' 'window=sess:win' 'harness=omp' 'raw_launch=1' > "$meta"
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify_meta "$1" raw-marker "$2"' "$ROOT" "$meta" "$state")
-  [ "$out" = "unknown raw-unverified" ] || fail "raw-launch metadata must gate OMP busy classification, got '$out'"
-  if bash -c '. "$0/bin/fm-control-lib.sh"; fm_control_harness_family omp 1' "$ROOT"; then
-    fail "raw-launch metadata must reject OMP control mechanics"
-  fi
-  pass "raw-launch metadata gates OMP busy and control mechanics"
+test_tmux_submit_rechecks_endpoint_before_literal() {
+  local log out
+  log="$TMP_ROOT/tmux-submit-literal-recheck.log"; : > "$log"
+  out=$(FM_TEST_LOG="$log" bash -c '
+    . "$0/bin/fm-backend.sh"
+    . "$0/bin/fm-tmux-lib.sh"
+    fm_backend_omp_endpoint_allows() { return 1; }
+    tmux() {
+      case "${1:-}" in
+        send-keys) printf "%s\n" "$*" >> "$FM_TEST_LOG" ;;
+      esac
+    }
+    verdict=$(fm_tmux_submit_core sess:win hello 1 0 0 label omp)
+    printf "%s\t%s" "$verdict" "$(cat "$FM_TEST_LOG")"
+  ' "$ROOT")
+  [ "$out" = $'unknown\t' ] || fail "tmux must reject literal input when canonical OMP identity is not authorized, got '$out'"
+  pass "tmux submit: canonical OMP identity is checked before literal text"
 }
+
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
 
@@ -734,20 +656,6 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   pass "sweep: an unverified harness blocks recovery with a concrete diagnostic"
 }
 
-test_sweep_never_uses_raw_omp_liveness() {
-  local w fb tmuxfb log out
-  w=$(new_world sweep-raw-omp)
-  add_sm_home "$w" sm1 firstmate:fm-sm1 raw-omp
-  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
-  log="$w/calls.log"; : > "$log"
-
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" omp "$log")
-
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded harness 'raw-omp' is unverified for recovery" \
-    "a raw OMP harness must not enter verified liveness handling"
-  [ ! -s "$log" ] || fail "a raw OMP harness must never trigger kill or relaunch: $(cat "$log")"
-  pass "sweep: a raw OMP harness is excluded from verified liveness handling"
-}
 
 test_sweep_converges_no_retouch_once_alive() {
   local w fb tmuxfb log out1 out2
@@ -810,18 +718,13 @@ test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_tmux_canonical_omp_rejects_stale_endpoint
 test_tmux_canonical_omp_accepts_current_endpoint
-test_tmux_non_omp_record_rejects_current_omp
-test_tmux_non_omp_requires_positive_current_identity
-test_tmux_raw_background_omp_is_quarantined
-test_tmux_busy_rejects_reverse_omp_identity
-test_tmux_raw_non_omp_preserves_liveness
-test_tmux_raw_requires_marker_on_current_foreground
+test_tmux_canonical_omp_accepts_proven_clean_shell_exit
 test_tmux_control_rejects_stale_canonical_omp
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_shared_input_dispatch_preserves_unproved_backends
 test_tmux_submit_rechecks_endpoint_before_each_enter
-test_raw_marker_gates_busy_and_control
+test_tmux_submit_rechecks_endpoint_before_literal
 test_sweep_skips_shell_without_positive_identity
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
@@ -830,7 +733,6 @@ test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
-test_sweep_never_uses_raw_omp_liveness
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
