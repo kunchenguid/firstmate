@@ -78,6 +78,10 @@ build_remote_root() {
   git -C "$root" commit -qm 'remote job fixture'
 }
 
+pid_is_numeric() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 # start_worker <remote-root> <account-home> <state-root>: start the worker
 # through the shared library start path and echo the supervisor pid.
 start_worker() {
@@ -92,7 +96,10 @@ start_worker() {
     deadline=$(( $(date +%s) + 10 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
       pid=$(pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1)
-      case "$pid" in ''|*[!0-9]*) ;; *) printf '%s\n' "$pid"; exit 0 ;; esac
+      if pid_is_numeric "$pid"; then
+        printf '%s\n' "$pid"
+        exit 0
+      fi
       sleep 0.1
     done
     exit 1
