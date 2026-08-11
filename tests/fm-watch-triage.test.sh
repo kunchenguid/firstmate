@@ -126,19 +126,25 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_afk_unchanged_stale_hash_rearms_wedge_timer() {
-  local dir state current surfaced decision new_decision
+  local dir state current surfaced decision new_decision paused_decision held_decision
   dir="$TMP_ROOT/afk-unchanged-stale"; state="$dir/state"
   mkdir -p "$state"
   printf '%s\n' frozen-hash > "$state/current-hash"
   printf '%s\n' frozen-hash > "$state/surfaced-hash"
   current=$(cat "$state/current-hash")
   surfaced=$(cat "$state/surfaced-hash")
-  decision=$(afk_stale_decision "$current" "$surfaced")
+  decision=$(afk_stale_decision "$current" "$surfaced" 'working: stalled')
   [ "$decision" = wedge-timer ] \
     || fail "unchanged AFK stale hash returned $decision instead of rearming the wedge timer"
-  new_decision=$(afk_stale_decision new-hash "$surfaced")
+  new_decision=$(afk_stale_decision new-hash "$surfaced" 'paused: waiting upstream')
   [ "$new_decision" = surface ] \
     || fail "distinct AFK stale hash returned $new_decision instead of preserving the immediate wake"
+  paused_decision=$(afk_stale_decision "$current" "$surfaced" 'paused: waiting upstream')
+  [ "$paused_decision" = daemon-owned ] \
+    || fail "unchanged paused AFK stale hash returned $paused_decision instead of remaining daemon-owned"
+  held_decision=$(afk_stale_decision "$current" "$surfaced" 'captain-held [key=route]: transferred')
+  [ "$held_decision" = wedge-timer ] \
+    || fail "unchanged captain-held AFK stale hash returned $held_decision instead of preserving wedge escalation"
   pass "unchanged AFK stale hashes rearm the bounded wedge-escalation timer"
 }
 

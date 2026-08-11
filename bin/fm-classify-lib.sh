@@ -79,9 +79,11 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
 # Pure decision seam: a new hash keeps the immediate handoff, while an unchanged
 # hash enters the existing bounded timer instead of disappearing after one wake.
-afk_stale_decision() {  # <current-hash> <surfaced-hash>
+afk_stale_decision() {  # <current-hash> <surfaced-hash> <status-line>
   if [ "$1" != "$2" ]; then
     printf 'surface\n'
+  elif status_is_paused "$3"; then
+    printf 'daemon-owned\n'
   else
     printf 'wedge-timer\n'
   fi
