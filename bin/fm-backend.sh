@@ -543,7 +543,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       }
       recorded_agent_id=$(fm_backend_meta_exact_value "$meta" paseo_agent_id) || recorded_agent_id=
-      if [ -z "$recorded_agent_id" ] \
+      if [ -z "$recorded_agent_id" ] || [ "$window" != "$recorded_agent_id" ] \
         || ! fm_backend_endpoint_atom_valid "$recorded_agent_id"; then
         echo "REFUSED: Paseo endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
