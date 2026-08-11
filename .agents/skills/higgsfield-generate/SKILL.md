@@ -13,7 +13,7 @@ Never call `higgsfield generate create` directly.
 
 ## Boundaries
 
-- Support one image or video generation per approved run.
+- Support one image or video generation per approved run; the wrapper rejects batch and variant parameters.
 - Do not install or update software, execute remote installers, reveal authentication tokens, or open a login flow.
 - Do not create websites, deploy, publish, import marketing data, train identities, create Soul IDs, or generate audio or 3D assets.
 - Do not fetch a remote reference URL.
@@ -63,7 +63,6 @@ Discard such a capability and obtain a fresh approval instead of retrying it.
 For prompt-only work without step 3, use `/absolute/temporary/directory/request.json` in steps 5 and 8.
 Do not combine upload approval with cost approval unless the captain explicitly approves both after seeing both disclosures.
 Treat every retry, variation, edit, or additional output as a new generation; discard any earlier capability and repeat the cost and approval steps.
-For a multi-job request, stop and obtain separate bulk approval for an enumerated job count and total estimated credits, then execute each job through its own cost receipt.
 
 ## Report the result
 
