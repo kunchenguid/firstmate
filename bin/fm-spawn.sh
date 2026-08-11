@@ -98,6 +98,15 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   That same task-set lock serializes isolated-copy allocation through metadata
+#   publication across different task ids. Immediately after an allocator yields
+#   a canonical ship/scout worktree, and before fetch, checkout, reset, hook, or
+#   other spawn-owned mutation in it, spawn compares the path with every ordinary
+#   task record still present in this home's state directory. Any matching owner
+#   is refused by task id without consulting endpoint activity or status. Missing,
+#   duplicate, non-regular, non-canonical, or otherwise ambiguous ordinary-task
+#   ownership metadata also refuses allocation. Only absence after the existing
+#   teardown owner removes a task record proves that ownership retired.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1685,6 +1694,62 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Called only for a fresh ordinary task while SPAWN_TASK_SET_LOCK is held.
+# The task-set lock starts before allocation and remains held until this task's
+# metadata is published, so no competing spawn can pass this scan and publish
+# the same candidate in the check-to-publication interval. The existing teardown
+# path is the sole cleanup owner that removes retired task records; presence here
+# therefore means ownership, never merely an endpoint-liveness hint.
+assert_spawn_worktree_unowned() {  # <candidate-worktree>
+  local candidate=$1 candidate_real meta owner_id kind_count kind owner_worktree owner_real
+  candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || {
+    echo "error: candidate worktree '$candidate' cannot be canonicalized; refusing allocation" >&2
+    return 1
+  }
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    owner_id=${meta##*/}
+    owner_id=${owner_id%.meta}
+    [ "$owner_id" != "$ID" ] || continue
+    if [ ! -f "$meta" ] || [ -L "$meta" ] || ! fm_task_id_path_safe "$owner_id"; then
+      echo "error: ownership record '$meta' is not a regular, unambiguous task record; refusing worktree allocation" >&2
+      return 1
+    fi
+    kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
+    case "$kind_count" in
+      0) kind=ship ;;
+      1) kind=$(fm_backend_meta_exact_value "$meta" kind) || kind= ;;
+      *) kind= ;;
+    esac
+    case "$kind" in
+      secondmate) continue ;;
+      ship|scout) ;;
+      *)
+        echo "error: ownership record for task $owner_id has a missing, duplicate, or unknown kind; refusing worktree allocation" >&2
+        return 1
+        ;;
+    esac
+    owner_worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      echo "error: ownership record for task $owner_id has a missing, empty, or ambiguous worktree; refusing worktree allocation" >&2
+      return 1
+    }
+    case "$owner_worktree" in
+      *$'\n'*|*$'\r'*|*$'\t'*)
+        echo "error: ownership record for task $owner_id has a malformed worktree; refusing worktree allocation" >&2
+        return 1
+        ;;
+    esac
+    owner_real=$(cd "$owner_worktree" 2>/dev/null && pwd -P) || {
+      echo "error: ownership record for task $owner_id names unavailable worktree '$owner_worktree'; refusing worktree allocation" >&2
+      return 1
+    }
+    if [ "$owner_real" = "$candidate_real" ]; then
+      echo "error: isolated worktree '$candidate_real' is already owned by live task $owner_id; refusing allocation for task $ID" >&2
+      return 1
+    fi
+  done
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2219,6 +2284,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  if ! assert_spawn_worktree_unowned "$WT"; then
+    # An Orca allocator may have returned a pre-existing worktree identity.
+    # Once ownership is uncertain, abort cleanup must not remove that copy.
+    [ "$BACKEND" != orca ] || ORCA_ABORT_CLEANUP=0
+    exit 1
+  fi
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 

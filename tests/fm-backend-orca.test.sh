@@ -526,6 +526,52 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 
+test_spawn_refuses_orca_owned_worktree_without_removing_it() {
+  local proj wt data state config owner_id id out status
+  owner_id="orcaownerz7"
+  id="orcacontenderz8"
+  proj="$TMP_ROOT/owned-spawn-project"
+  wt="$TMP_ROOT/owned-spawn-wt"
+  data="$TMP_ROOT/owned-spawn-data"
+  state="$TMP_ROOT/owned-spawn-state"
+  config="$TMP_ROOT/owned-spawn-config"
+  fm_git_worktree "$proj" "$wt" "fm/$owner_id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$owner_id.meta" \
+    "window=fm-$owner_id" \
+    "endpoint_task_id=$owner_id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "harness=claude" \
+    "kind=ship" \
+    "backend=orca" \
+    "orca_worktree_id=wt-owned" \
+    "terminal=term-owned"
+  orca_case owned-spawn
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-owned"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-returned-owned","path":"%s"},"terminal":{"handle":"term-returned-owned"}}}\n' "$wt" > "$RESP/3.out"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Orca spawn reused a worktree owned by $owner_id"
+  assert_contains "$out" "$owner_id" "Orca ownership refusal did not identify the owner"
+  assert_absent "$state/$id.meta" "Orca ownership refusal published contender metadata"
+  assert_present "$state/$owner_id.meta" "Orca ownership refusal removed owner metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca abort cleanup removed a candidate that another task owns"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "Orca abort cleanup closed a terminal returned with another task's copy"
+  pass "fm-spawn.sh --backend orca: refuses an owned candidate without removing it"
+}
+
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
   local home subhome data state config id out status
   id="orcasmz1"
@@ -1325,6 +1371,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_refuses_orca_owned_worktree_without_removing_it
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
