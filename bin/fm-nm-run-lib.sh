@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared no-mistakes axi run attribution primitives.
+# Shared no-mistakes run attribution and snapshot-local query primitives.
 #
 # ONE owner for the branch+code-identity matching rule that decides whether a
 # no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
