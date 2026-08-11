@@ -281,21 +281,27 @@ probe_one_harness() {  # <harness>
   for kv in "${HOSTILE_ENV[@]}"; do
     send_line_confirmed "export ${kv%%=*}=\"${kv#*=}\"" '$ ' >/dev/null 2>&1 || true
   done
-  # The count has to be read from the line the probe printed, not matched
-  # anywhere in the pane: the pane also carries this lab's mktemp suffix, the
-  # socket name's PID, and the export lines above, so a bare digit there would
-  # let a half-armed attack pass. The probe prints the count behind a marker the
-  # typed command line itself does not contain, so the exact expected string can
-  # be the proof that the probe ran AND that every hostile value landed.
-  local expected_armed="hostile-armed=${#HOSTILE_ENV[@]}" armed_line
-  if ! send_line_confirmed \
-      "printf 'hostile-armed=%s\\n' \"\$(env | grep -c '^CHROME_DEVTOOLS_AXI')\"" \
-      "$expected_armed"; then
-    armed_line=$(tmux -L "$SOCKET" capture-pane -p -t live 2>/dev/null | grep '^hostile-armed=' | tail -1)
-    [ -n "$armed_line" ] \
-      || fail "$harness: could not arm the hostile environment in the lab pane; the count probe never reported, so the attack would not have been a real attack"
-    fail "$harness: the hostile environment did not take in the lab pane (pane reported $armed_line, expected $expected_armed); the attack would have been a no-op"
-  fi
+  # An export whose keystrokes were dropped leaves the attack half armed, which
+  # would make everything below pass against a pin that does nothing, so the
+  # armed environment is read back out of the pane before the agent starts.
+  # Read back by identity, never by counting the CHROME_DEVTOOLS_AXI_ namespace:
+  # the operator may legitimately have exported one of the variables this pin
+  # deliberately leaves alone (see bin/fm-spawn.sh's browser_isolation_env), and
+  # a total cannot tell that apart from a hostile value that failed to land.
+  # The pane writes the values to a file rather than the terminal so a long
+  # profile path cannot be broken up by the pane's own line wrapping, and the
+  # confirmation marker is one the typed command line does not itself contain.
+  local missing="" probe_env="$dir/hostile-env.txt"
+  rm -f "$probe_env"
+  send_line_confirmed \
+    "env | grep '^CHROME_DEVTOOLS_AXI' > '$probe_env'; printf 'hostile-probe-%s\\n' done" \
+    hostile-probe-done \
+    || fail "$harness: could not arm the hostile environment in the lab pane; the read-back probe never reported, so the attack would not have been a real attack"
+  for kv in "${HOSTILE_ENV[@]}"; do
+    grep -Fxq -- "$kv" "$probe_env" 2>/dev/null || missing="$missing ${kv%%=*}"
+  done
+  [ -z "$missing" ] \
+    || fail "$harness: the hostile environment did not take in the lab pane; these did not land with the attack's value:$missing; the attack would have been a no-op"
 
   tmux -L "$SOCKET" send-keys -l "$launch"
   tmux -L "$SOCKET" send-keys Enter
