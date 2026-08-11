@@ -1021,7 +1021,40 @@ set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
-  chmod +x "$fb/tmux" "$fb/treehouse"
+  # Teardown runs a scout's unresolved-decision completion gate, which refuses
+  # without a tasks-axi that meets the floor bin/fm-tasks-axi-lib.sh owns. This
+  # case is about teardown conformance, not about the machine's toolchain, so the
+  # fixture supplies a compatible stub instead of inheriting whatever is
+  # installed. Answers only the three capability probes that floor consults.
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '0.2.4\n'
+    exit 0
+    ;;
+  update)
+    if [ "${2:-}" = --help ]; then
+      printf 'usage: tasks-axi update <id> [flags]\n  --body-file <path>\n  --archive-body\n'
+      exit 0
+    fi
+    ;;
+  mv)
+    if [ "${2:-}" = --help ]; then
+      printf 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>\n'
+      exit 0
+    fi
+    ;;
+  hold)
+    if [ "${2:-}" = --help ]; then
+      printf 'usage: tasks-axi hold <id> [flags]\n  --reason string\n  --kind captain\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/tasks-axi"
   printf '%s\n' "$fb"
 }
 
