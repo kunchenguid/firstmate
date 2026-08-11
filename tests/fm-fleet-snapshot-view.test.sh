@@ -151,6 +151,26 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_large_backlog_crosses_argv_limit_via_public_interface() {
+  local home out payload payload_bytes
+  home=$(make_home large-backlog)
+  payload=$(LC_ALL=C awk 'BEGIN { for (i = 0; i < 196608; i++) printf "x" }')
+  payload_bytes=$(printf '%s' "$payload" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$payload_bytes" -gt 131072 ] \
+    || fail "large-backlog fixture must exceed the ordinary Linux per-argument limit"
+  printf '## Done\n%s\n' "$payload" > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --argjson payload_bytes "$payload_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 0
+      and (.backlog.records | length) == 1
+      and .backlog.records[0].structured == false
+      and (.backlog.records[0].raw | length) == $payload_bytes
+  ' >/dev/null || fail "public snapshot must return valid complete JSON above argv limits"
+  pass "public snapshot transports a backlog larger than ordinary Linux argv limits"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -780,6 +800,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_large_backlog_crosses_argv_limit_via_public_interface
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
