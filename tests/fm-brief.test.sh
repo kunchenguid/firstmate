@@ -550,7 +550,7 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost declared external waits"
   assert_grep 'a captain decision, a real blocker, a failure, or work ready for review' "$brief" \
     "secondmate charter lost decisions, blockers, failures, or ready outcomes"
-  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
+  assert_grep 'Non-decision states: working, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
@@ -684,8 +684,16 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    assert_grep "Non-decision states: working, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
+    # shellcheck disable=SC2016 # Literal braces must remain unexpanded.
+    assert_grep 'echo "{non-decision-state}: {one short line}"' "$brief" \
+      "$kind brief did not exclude decisions from the generic status form"
+    # shellcheck disable=SC2016 # Literal braces must remain unexpanded.
+    assert_no_grep 'echo "{state}: {one short line}"' "$brief" \
+      "$kind brief retained the generic decision-capable status form"
+    assert_no_grep 'States: working, needs-decision' "$brief" \
+      "$kind brief retained needs-decision in the generic states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
       "$kind brief did not instruct the configured pause status"

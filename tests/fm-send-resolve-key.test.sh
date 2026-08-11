@@ -147,6 +147,14 @@ test_generated_brief_key_round_trip() {
   # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
   assert_no_grep 'append `needs-decision: {summary of options}`' "$brief" \
     "generated brief retained the key-losing needs-decision form"
+  # shellcheck disable=SC2016 # Literal braces must remain unexpanded.
+  assert_grep 'echo "{non-decision-state}: {one short line}"' "$brief" \
+    "generated brief did not exclude decisions from the generic status form"
+  # shellcheck disable=SC2016 # Literal braces must remain unexpanded.
+  assert_no_grep 'echo "{state}: {one short line}"' "$brief" \
+    "generated brief retained the generic decision-capable status form"
+  assert_no_grep 'States: working, needs-decision' "$brief" \
+    "generated brief retained needs-decision in the generic states list"
 
   fm_write_meta "$home/state/generated-brief.meta" "window=sess:fm-generated-brief" "kind=ship"
   status_file="$home/state/generated-brief.status"
