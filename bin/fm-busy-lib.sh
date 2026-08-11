@@ -155,6 +155,10 @@ fm_busy_gen_path() {  # <state-dir> <id>
   printf '%s/%s.busy-gen' "$1" "$2"
 }
 
+fm_busy_run_path() {  # <state-dir> <id>
+  printf '%s/%s.omp-session-run' "$1" "$2"
+}
+
 # fm_busy_token_valid: conservative token charset shared by gen, source, and
 # event fields. Anything else is malformed.
 fm_busy_token_valid() {  # <value>
@@ -173,6 +177,15 @@ fm_busy_current_gen() {  # <state-dir> <id>
   IFS= read -r gen < "$gen_file" 2>/dev/null || gen=
   fm_busy_token_valid "$gen" || return 1
   printf '%s' "$gen"
+}
+
+fm_busy_current_run_token() {  # <state-dir> <id>
+  local run_file run_token
+  run_file=$(fm_busy_run_path "$1" "$2")
+  [ -f "$run_file" ] && [ ! -L "$run_file" ] || return 1
+  IFS= read -r run_token < "$run_file" 2>/dev/null || run_token=
+  fm_busy_token_valid "$run_token" || return 1
+  printf '%s' "$run_token"
 }
 
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
@@ -846,15 +859,27 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
     printf 'unknown raw-unverified'
     return 0
   fi
-  if [ "$harness" = omp ] && [ "$raw_launch" != 1 ] \
-    && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
-    && command -v fm_backend_omp_endpoint_allows >/dev/null 2>&1; then
-    if ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
-      printf 'unknown identity-mismatch'
-      return 0
-    fi
-    endpoint_checked=1
-  fi
+  case "$harness" in
+    claude*|codex*|opencode*|grok*|kimi*|muse*|pi|pi-signed|omp)
+      if [ "$raw_launch" != 1 ] \
+        && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; }; then
+        if command -v fm_backend_endpoint_allows >/dev/null 2>&1; then
+          if ! fm_backend_endpoint_allows "$backend" "$target" "$harness" "$raw_launch"; then
+            printf 'unknown identity-mismatch'
+            return 0
+          fi
+          endpoint_checked=1
+        elif [ "$harness" = omp ] \
+          && command -v fm_backend_omp_endpoint_allows >/dev/null 2>&1; then
+          if ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
+            printf 'unknown identity-mismatch'
+            return 0
+          fi
+          endpoint_checked=1
+        fi
+      fi
+      ;;
+  esac
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then

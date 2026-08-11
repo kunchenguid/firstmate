@@ -229,7 +229,7 @@ This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
-OMP 17.2.12 also leaves its native agent registration at `idle` after `/exit` returns to the pane's nested worktree shell, so the backend recognizes stopped OMP only when the generation-matching `state/<id>.omp-session-stop` marker and Herdr process metadata and the OS process table prove the same lone idle shell with no child.
+OMP 17.2.12 also leaves its native agent registration at `idle` after `/exit` returns to the pane's nested worktree shell, so the backend recognizes stopped OMP only when the current per-run token and matching `state/<id>.omp-session-stop` marker, together with Herdr process metadata and the OS process table, prove the same lone idle shell with no child.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety

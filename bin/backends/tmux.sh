@@ -45,9 +45,15 @@ fm_backend_tmux_capture() {  # <target> <lines>
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
-fm_backend_tmux_send_key() {  # <target> <key>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
-  tmux send-keys -t "$1" "$2"
+fm_backend_tmux_send_key() {  # <target> <key> [expected-label] [recorded-harness] [raw-launch] [explicit-target]
+  local target=$1 key=$2 recorded_harness=${4:-} raw_launch=${5:-}
+  tmux display-message -p -t "$target" '#{pane_id}' >/dev/null || return 1
+  if [ -n "$recorded_harness" ] && [ "$raw_launch" != 1 ] \
+    && command -v fm_backend_endpoint_allows >/dev/null 2>&1 \
+    && ! fm_backend_endpoint_allows tmux "$target" "$recorded_harness" "$raw_launch"; then
+    return 1
+  fi
+  tmux send-keys -t "$target" "$key"
 }
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
@@ -263,26 +269,11 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 }
 
 fm_backend_tmux_foreground_omp_identity() {  # <target>
-  local target=$1 name
-  (
-    while IFS= read -r name; do
-      case "$name" in
-        omp) exit 0 ;;
-        */*) fm_harness_omp_script_matches "$name" && exit 0 ;;
-      esac
-    done < <(fm_backend_tmux_foreground_comms "$target")
-    while IFS= read -r name; do
-      case "$name" in
-        omp) exit 0 ;;
-        */*) fm_harness_omp_script_matches "$name" && exit 0 ;;
-      esac
-    done < <(fm_backend_tmux_foreground_argv0s "$target")
-    [ "$(fm_backend_tmux_current_command "$target")" = omp ]
-  )
+  [ "$(fm_backend_tmux_process_identity "$1")" = omp ]
 }
 
 fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|other|unknown
-  local target=$1 name identity current_identity= shell_seen=0 omp_seen=0
+  local target=$1 name identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     identity=$(fm_harness_process_identity "$name" "$name")
@@ -297,6 +288,11 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
             printf 'unknown'
             return 0
           fi
+        else
+          case "${name##*/}" in
+            bun) : ;;
+            *) other_seen=1 ;;
+          esac
         fi
         ;;
     esac
@@ -315,6 +311,11 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
             printf 'unknown'
             return 0
           fi
+        else
+          case "${name##*/}" in
+            bun) : ;;
+            *) other_seen=1 ;;
+          esac
         fi
         ;;
     esac
@@ -335,11 +336,20 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
           printf 'unknown'
           return 0
         fi
+      else
+        case "${name##*/}" in
+          bun) : ;;
+          *) other_seen=1 ;;
+        esac
       fi
       ;;
   esac
   if [ "$omp_seen" -eq 1 ]; then
-    [ -z "$current_identity" ] && printf 'omp' || printf 'unknown'
+    if [ -n "$current_identity" ] || [ "$shell_seen" -eq 1 ] || [ "$other_seen" -eq 1 ]; then
+      printf 'unknown'
+    else
+      printf 'omp'
+    fi
   elif [ -n "$current_identity" ]; then
     printf '%s' "$current_identity"
   elif [ "$shell_seen" -eq 1 ]; then
@@ -394,7 +404,7 @@ fm_backend_tmux_classify_process_name_raw() {  # <path> [argv0] -> agent|shell|o
 }
 
 fm_backend_tmux_omp_terminal_stop_observed() {  # <target>
-  local target=${1:-} window id state generation marker
+  local target=${1:-} window id state generation run_token marker
   case "$target" in
     *:fm-*) ;;
     *) return 1 ;;
@@ -404,11 +414,16 @@ fm_backend_tmux_omp_terminal_stop_observed() {  # <target>
   [ -n "$id" ] || return 1
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   generation=$(cat "$state/$id.busy-gen" 2>/dev/null) || return 1
+  run_token=$(cat "$state/$id.omp-session-run" 2>/dev/null) || return 1
   marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null) || return 1
-  case "$generation:$marker" in
+  case "$generation:$run_token:$marker" in
     *[!A-Za-z0-9._:-]*|:*) return 1 ;;
   esac
-  [ "$generation" = "$marker" ]
+  case "$run_token" in
+    "$generation".*) ;;
+    *) return 1 ;;
+  esac
+  [ "$run_token" = "$marker" ]
 }
 
 fm_backend_tmux_omp_exited_to_shell() {

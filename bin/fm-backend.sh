@@ -650,10 +650,65 @@ fm_backend_current_omp_identity() {  # <backend> <target>
       ;;
     tmux)
       [ "$(fm_backend_tmux_target_inventory_state "$target")" = present ] || return 1
-      fm_backend_tmux_foreground_omp_identity "$target"
+      [ "$(fm_backend_tmux_process_identity "$target")" = omp ]
       ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_recorded_harness_is_canonical() {  # <recorded-harness>
+  case "${1:-}" in
+    claude*|codex*|opencode*|grok*|kimi*|muse*|pi|pi-signed|omp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_endpoint_identity() {  # <backend> <target>
+  local backend=$1 target=$2 state
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux)
+      state=$(fm_backend_tmux_target_inventory_state "$target")
+      [ "$state" = present ] || { printf '%s' "$state"; return 0; }
+      fm_backend_tmux_process_identity "$target"
+      ;;
+    herdr)
+      fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+      fm_backend_herdr_process_identity \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+      ;;
+    *) printf 'other' ;;
+  esac
+}
+
+fm_backend_endpoint_allows() {  # <backend> <target> <recorded-harness> [raw-launch]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-}
+  local identity registered agent agent_status
+  [ "$raw_launch" != 1 ] || return 0
+  [ -n "$recorded_harness" ] && [ "$recorded_harness" != unknown ] || return 0
+  fm_backend_recorded_harness_is_canonical "$recorded_harness" || return 0
+  case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
+  fm_backend_source "$backend" || return 1
+  identity=$(fm_backend_endpoint_identity "$backend" "$target")
+  case "$identity" in
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed|omp) ;;
+    *) return 1 ;;
+  esac
+  fm_harness_identity_matches "$recorded_harness" "$identity" || return 1
+  if [ "$backend" = herdr ]; then
+    fm_backend_source herdr || return 1
+    fm_backend_herdr_parse_target "$target" || return 1
+    registered=$(fm_backend_herdr_agent_identity_raw \
+      "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+    IFS=$'\t' read -r agent agent_status <<EOF
+$registered
+EOF
+    fm_harness_identity_matches "$recorded_harness" "$agent" || return 1
+    case "$agent_status" in
+      working|idle|done|blocked) ;;
+      *) return 1 ;;
+    esac
+  fi
 }
 
 fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness]
@@ -680,8 +735,7 @@ fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw
   local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state identity agent agent_status
   [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ] || return 0
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
-  state=$(fm_backend_omp_endpoint_state "$backend" "$target" omp)
-  [ "$state" = omp ] || return 1
+  fm_backend_endpoint_allows "$backend" "$target" omp "$raw_launch" || return 1
   if [ "$backend" = herdr ]; then
     fm_backend_source herdr || return 1
     fm_backend_herdr_parse_target "$target" || return 1
@@ -775,9 +829,9 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
   local backend=$1 target=${2:-} key=${3:-} recorded_harness=${5-} raw_launch=${6-} explicit_target=${7-}
   shift
   fm_backend_source "$backend" || return 1
-  if [ "$backend" = tmux ] && [ "$recorded_harness" = omp ] \
-    && [ "$raw_launch" != 1 ] \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
+  if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
+    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
+    && ! fm_backend_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     return 1
   fi
   case "$backend" in
@@ -800,9 +854,9 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-}
   shift
   fm_backend_source "$backend" || return 1
-  if [ "$backend" = tmux ] && [ "$recorded_harness" = omp ] \
-    && [ "$raw_launch" != 1 ] \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
+  if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
+    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
+    && ! fm_backend_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     printf 'unknown'
     return 0
   fi
@@ -864,10 +918,11 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] [endpoint-checked]
   local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} endpoint_checked=${5-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
-  if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ] \
+  if [ "$raw_launch" != 1 ] \
+    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
     && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
     && [ "$endpoint_checked" != 1 ] \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
+    && ! fm_backend_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     printf 'unknown'
     return 0
   fi
@@ -893,9 +948,9 @@ fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-laun
   local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-}
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
-  if [ "$backend" = tmux ] && [ "$recorded_harness" = omp ] \
-    && [ "$raw_launch" != 1 ] \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" omp "$raw_launch"; then
+  if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
+    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
+    && ! fm_backend_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     printf 'unknown'
     return 0
   fi

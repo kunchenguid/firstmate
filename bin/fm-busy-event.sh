@@ -14,7 +14,7 @@
 #       the old gen are rejected as stale from then on.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--run-token T]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
@@ -38,7 +38,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--run-token T]
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -67,6 +67,7 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+RUN_TOKEN=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -82,6 +83,7 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --run-token) RUN_TOKEN=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -89,6 +91,9 @@ if [ "$CMD" != retire ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+  if [ -n "$RUN_TOKEN" ]; then
+    fm_busy_token_valid "$RUN_TOKEN" || { echo "error: invalid --run-token" >&2; exit 1; }
+  fi
 fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
@@ -191,6 +196,20 @@ if [ "$CMD" = retire ]; then
   lock_release
   umask "$old_umask"
   exit 0
+fi
+if [ -n "$RUN_TOKEN" ]; then
+  CURRENT_RUN=$(fm_busy_current_run_token "$STATE" "$ID") || {
+    lock_release
+    umask "$old_umask"
+    echo "error: no current OMP run token for $ID" >&2
+    exit 1
+  }
+  if [ "$RUN_TOKEN" != "$CURRENT_RUN" ]; then
+    lock_release
+    umask "$old_umask"
+    echo "error: stale OMP run token for $ID (event rejected)" >&2
+    exit 1
+  fi
 fi
 OLD_SEQ=0
 if [ -f "$REC" ]; then

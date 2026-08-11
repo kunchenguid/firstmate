@@ -292,11 +292,14 @@ fm_pane_is_busy() {  # <target> [harness]
 fm_tmux_submit_endpoint_allows() {  # <target> [recorded-harness] [raw-launch] [raw-owner]
   local target=$1 recorded_harness=${2:-} raw_launch=${3:-} raw_owner=${4:-${FM_RAW_LAUNCH_OWNER:-}}
   [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
-  if [ -z "$recorded_harness" ] && [ "$raw_launch" != 1 ]; then
+  [ -n "$recorded_harness" ] && [ "$raw_launch" != 1 ] || return 0
+  if [ "$recorded_harness" = omp ] && declare -F fm_backend_omp_endpoint_allows >/dev/null 2>&1; then
+    fm_backend_omp_endpoint_allows tmux "$target" omp "$raw_launch" "$raw_owner"
+  elif declare -F fm_backend_endpoint_allows >/dev/null 2>&1; then
+    fm_backend_endpoint_allows tmux "$target" "$recorded_harness" "$raw_launch"
+  else
     return 0
   fi
-  declare -F fm_backend_omp_endpoint_allows >/dev/null 2>&1 || return 1
-  fm_backend_omp_endpoint_allows tmux "$target" "$recorded_harness" "$raw_launch" "$raw_owner"
 }
 
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harness] [raw-launch] [raw-owner]
@@ -351,7 +354,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harn
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
+  if fm_pane_is_busy "$target" "$recorded_harness"; then
     printf 'empty'
   else
     printf 'pending'

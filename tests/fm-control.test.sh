@@ -98,9 +98,9 @@ case "${1:-}" in
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         if [ "$(cat "$D/command" 2>/dev/null)" = omp ] \
           && [ -n "${FM_FAKE_TASK_ID:-}" ]; then
-          gen=$(cat "$FM_HOME/state/$FM_FAKE_TASK_ID.busy-gen" 2>/dev/null || true)
-          [ -n "$gen" ] \
-            && printf '%s\n' "$gen" > "$FM_HOME/state/$FM_FAKE_TASK_ID.omp-session-stop"
+          run_token=$(cat "$FM_HOME/state/$FM_FAKE_TASK_ID.omp-session-run" 2>/dev/null || true)
+          [ -n "$run_token" ] \
+            && printf '%s\n' "$run_token" > "$FM_HOME/state/$FM_FAKE_TASK_ID.omp-session-stop"
         fi
         printf 'zsh' > "$D/command"
       fi
@@ -205,7 +205,10 @@ add_task() {
     echo "effort=default"
     [ "$backend" = tmux ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
-  [ "$harness" = omp ] && printf 'control-test-gen\n' > "$home/state/$id.busy-gen"
+  if [ "$harness" = omp ]; then
+    printf 'control-test-gen\n' > "$home/state/$id.busy-gen"
+    printf 'control-test-gen.test\n' > "$home/state/$id.omp-session-run"
+  fi
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
 }
@@ -892,6 +895,7 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   local dir log out rc
   dir=$(new_case sm-send)
   add_task "$dir" domain claude secondmate
+  alive_as "$dir" claude
   log="$dir/fake/sendlog"
   : > "$log"
   out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \

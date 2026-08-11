@@ -52,6 +52,10 @@ make_probe_tmux() {
 #!/usr/bin/env bash
 set -u
   case "\${1:-}" in
+  send-keys)
+    [ -z "\${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "\$*" >> "\$FM_FAKE_SEND_LOG"
+    exit 0
+    ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
     for a in "\$@"; do case "\$a" in *pane_pid*) printf '4242\n'; exit 0 ;; esac; done
@@ -234,13 +238,56 @@ test_tmux_canonical_omp_accepts_current_endpoint() {
   pass "tmux liveness: current canonical OMP identity remains live"
 }
 
+test_tmux_canonical_non_omp_rejects_omp_input_and_busy() {
+  local dir fb log state out status
+  dir="$TMP_ROOT/tmux-canonical-non-omp-omp-relaunch"
+  log="$dir/send.log"
+  state="$dir/state"
+  mkdir -p "$state"
+  fb=$(make_probe_tmux "$dir" omp)
+  PATH="$fb:$BASE_PATH" FM_FAKE_SEND_LOG="$log" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label claude' "$ROOT" \
+    >/dev/null 2>&1 || status=$?
+  [ "${status:-0}" -ne 0 ] || fail "canonical Claude control must reject a same-pane OMP relaunch"
+  [ ! -s "$log" ] || fail "canonical Claude control must not send a key to the OMP relaunch"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" task >/dev/null \
+    || fail "could not seed canonical non-OMP busy state"
+  out=$(PATH="$fb:$BASE_PATH" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify tmux sess:win claude task "$1"' \
+    "$ROOT" "$state")
+  [ "$out" = "unknown identity-mismatch" ] \
+    || fail "canonical Claude busy state must reject a same-pane OMP relaunch, got '$out'"
+  pass "tmux canonical non-OMP input and busy state reject an OMP relaunch"
+}
+
+test_tmux_key_rechecks_after_target_resolution() {
+  local log out status
+  log="$TMP_ROOT/tmux-key-toctou.log"
+  out=$(FM_TEST_LOG="$log" bash -c '
+    . "$0/bin/fm-backend.sh"
+    fm_backend_endpoint_allows() { calls=$((calls + 1)); [ "$calls" -eq 1 ]; }
+    tmux() {
+      case "${1:-}" in
+        display-message) return 0 ;;
+        send-keys) printf "%s\n" "$*" >> "$FM_TEST_LOG" ;;
+      esac
+    }
+    calls=0
+    fm_backend_send_key tmux sess:win Escape label omp
+  ' "$ROOT" 2>&1) || status=$?
+  [ "${status:-0}" -ne 0 ] || fail "tmux key delivery must refuse endpoint drift after target resolution"
+  [ ! -s "$log" ] || fail "tmux key delivery sent after the just-in-time identity check failed"
+  pass "tmux key delivery reauthorizes immediately before transport"
+}
+
 test_tmux_canonical_omp_accepts_proven_clean_shell_exit() {
   local dir fb out state target id
   dir="$TMP_ROOT/tmux-canonical-omp-shell-exit"
   state="$dir/state"; id=canonical-omp-shell-exit; target="sess:fm-$id"
   mkdir -p "$state"
   printf '%s\n' g123 > "$state/$id.busy-gen"
-  printf '%s\n' g123 > "$state/$id.omp-session-stop"
+  printf '%s\n' g123.test > "$state/$id.omp-session-run"
+  printf '%s\n' g123.test > "$state/$id.omp-session-stop"
   fb=$(make_probe_tmux "$dir" zsh "fm-$id")
   out=$(PATH="$fb:$BASE_PATH" FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1" omp' "$ROOT" "$target")
   [ "$out" = dead ] || fail "a canonical OMP endpoint over a lone shell must classify as cleanly stopped, got '$out'"
@@ -742,6 +789,8 @@ test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_tmux_canonical_omp_rejects_stale_endpoint
 test_tmux_canonical_omp_accepts_current_endpoint
+test_tmux_canonical_non_omp_rejects_omp_input_and_busy
+test_tmux_key_rechecks_after_target_resolution
 test_tmux_canonical_omp_accepts_proven_clean_shell_exit
 test_tmux_raw_omp_is_not_verified
 test_tmux_omp_endpoint_requires_target_inventory

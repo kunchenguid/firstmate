@@ -1336,6 +1336,7 @@ test_teardown_removes_per_task_adapter_extensions() {
   printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
   printf '// generated pi extension\n' > "$case_dir/state/task-x1.pi-ext.ts"
   printf '// generated omp extension\n' > "$case_dir/state/task-x1.omp-ext.ts"
+  printf 'g1.test\n' > "$case_dir/state/task-x1.omp-session-run"
   printf 'g1\n' > "$case_dir/state/task-x1.omp-session-stop"
 
   set +e
@@ -1350,6 +1351,8 @@ test_teardown_removes_per_task_adapter_extensions() {
     "adapter-extensions: teardown left the generated OMP extension behind"
   assert_absent "$case_dir/state/task-x1.omp-session-stop" \
     "adapter-extensions: teardown left the observed OMP stop marker behind"
+  assert_absent "$case_dir/state/task-x1.omp-session-run" \
+    "adapter-extensions: teardown left the OMP run token behind"
   pass "teardown removes the generated per-task adapter extensions from state"
 }
 

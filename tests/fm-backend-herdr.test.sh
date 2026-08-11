@@ -3120,6 +3120,25 @@ test_busy_state_quarantines_raw_omp() {
   pass "Herdr busy: raw OMP suppresses native semantic handling"
 }
 
+test_busy_state_rejects_canonical_non_omp_omp_relaunch() {
+  local dir log resp fb out script
+  dir="$TMP_ROOT/busy-canonical-non-omp-omp-relaunch"
+  mkdir -p "$dir/responses" "$dir/fakebin"
+  log="$dir/log"
+  resp="$dir/responses"
+  script="$dir/fakebin/omp"
+  printf '#!/bin/sh\nexit 0\n' > "$script"
+  chmod +x "$script"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/identity.out"
+  herdr_bun_process_info "$script" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state herdr lab:w1:p2 claude' "$ROOT")
+  [ "$out" = unknown ] \
+    || fail "canonical Claude busy state must reject a same-pane OMP relaunch, got '$out'"
+  pass "Herdr busy: canonical non-OMP state rejects an OMP relaunch"
+}
+
 
 
 
@@ -3585,8 +3604,9 @@ omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows] [
   if [ "$recorded_harness" = omp ]; then
     printf '%s\n' 'window=lab:w1:p1' 'backend=herdr' 'harness=omp' > "$state/task.meta"
     printf '%s\n' g123 > "$state/task.busy-gen"
+    printf '%s\n' g123.test > "$state/task.omp-session-run"
     case "$stop_marker" in
-      observed) printf '%s\n' g123 > "$state/task.omp-session-stop" ;;
+      observed) printf '%s\n' g123.test > "$state/task.omp-session-stop" ;;
       stale) printf '%s\n' stale > "$state/task.omp-session-stop" ;;
     esac
   fi
@@ -3640,6 +3660,24 @@ herdr_bun_process_info() {
 herdr_other_process_info() {
   local pane=${1:-w1:p2}
   printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"claude","argv0":"claude"}]}}}'
+}
+
+herdr_mixed_omp_other_process_info() {
+  local pane=${1:-w1:p2} script=$2
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"node","argv0":"node"},{"pid":5151,"name":"bun","argv0":"bun","argv":["bun","'"$script"'"]}]}}}'
+}
+
+test_herdr_process_identity_rejects_mixed_omp_group() {
+  local dir out script
+  dir="$TMP_ROOT/mixed-omp-group"
+  mkdir -p "$dir/fakebin"
+  script="$dir/fakebin/omp"
+  printf '#!/bin/sh\nexit 0\n' > "$script"
+  chmod +x "$script"
+  out=$(omp_agent_state_verdict "$dir" omp working \
+    "$(herdr_mixed_omp_other_process_info w1:p1 "$script")")
+  [ "$out" = unknown ] || fail "a mixed OMP and unrelated foreground group must remain unknown, got '$out'"
+  pass "Herdr identity: mixed OMP and unrelated foreground groups stay unknown"
 }
 
 herdr_pi_process_info() {
@@ -5126,6 +5164,7 @@ test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_busy_state_quarantines_raw_omp
+test_busy_state_rejects_canonical_non_omp_omp_relaunch
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
@@ -5150,6 +5189,7 @@ test_herdr_liveness_quarantines_raw_omp
 test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp
 test_herdr_presence_is_checked_before_process_identity
 test_herdr_no_metadata_omp_requires_current_identity
+test_herdr_process_identity_rejects_mixed_omp_group
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_without_stop_evidence_stays_unknown
 test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent

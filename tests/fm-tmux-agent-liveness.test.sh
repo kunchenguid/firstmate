@@ -180,6 +180,8 @@ cat > "$LAB/decoyroot/omp/compiler.js" <<SH
 "$SLEEP_BIN" 900
 SH
 chmod +x "$LAB/bunroot/omp" "$LAB/decoyroot/omp/compiler.js"
+[ "$(command -v omp)" = "$LAB/bunroot/omp" ] \
+  || fail "the Bun fixture must resolve omp to its canonical launched script"
 
 new_window ompbun "$LAB/bin/bun" "$LAB/bunroot/omp"
 wait_for_state "$SESSION:ompbun" alive \

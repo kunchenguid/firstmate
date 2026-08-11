@@ -2358,7 +2358,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
-  rm -f "$STATE_REAL/$ID.omp-session-stop"
+  rm -f "$STATE_REAL/$ID.omp-session-run" "$STATE_REAL/$ID.omp-session-stop"
 fi
 if [ "$KIND" != secondmate ] || { [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; }; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -2522,49 +2522,84 @@ EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { execFile } from "node:child_process";
-const busyEvent = (state: string, event: string) =>
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
+const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
+let runToken = "";
+let runSettledToken = "";
+let runSequence = 0;
+let tempSequence = 0;
+const atomicWrite = (path: string, value: string) => {
+  const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
+  try {
+    writeFileSync(temp, value, { encoding: "utf8", mode: 0o600 });
+    renameSync(temp, path);
+  } catch (error) {
+    try { unlinkSync(temp); } catch {}
+    throw error;
+  }
+};
+const busyEvent = (token: string, state: string, event: string) =>
   new Promise<void>((resolve) => {
+    if (!token || token !== runToken) {
+      resolve();
+      return;
+    }
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", state,
-      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+      "--gen", "$BUSY_GEN", "--run-token", token,
+      "--source", "omp-ext", "--event", event,
     ], () => resolve());
   });
-const touchTurnEnd = () =>
+const touchTurnEnd = (token: string) =>
   new Promise<void>((resolve) => {
+    if (token !== runToken) {
+      resolve();
+      return;
+    }
     execFile("touch", ["$TURNEND"], () => resolve());
   });
-const recordSessionStop = () =>
-  new Promise<void>((resolve) => {
-    execFile("sh", [
-      "-c", "printf '%s\\n' \"\$1\" > \"\$2\"",
-      "fm-omp-session-stop", "$BUSY_GEN", "$STATE_REAL/$ID.omp-session-stop",
-    ], () => resolve());
-  });
-const invalidateSessionStop = () =>
-  new Promise<void>((resolve) => {
-    execFile("sh", [
-      "-c", "tmp=\"\$1.pending.\$\$\"; printf '%s\\n' pending > \"\$tmp\" && mv -f \"\$tmp\" \"\$1\" || { rm -f \"\$tmp\" \"\$1\"; exit 1; }",
-      "fm-omp-session-pending", "$STATE_REAL/$ID.omp-session-stop",
-    ], () => resolve());
-  });
-let runSettled = false;
-const settleRun = async (event: string) => {
-  if (runSettled) return;
-  runSettled = true;
-  await busyEvent("idle", event);
-  await touchTurnEnd();
+const rotateRun = () => {
+  const token = "$BUSY_GEN" + "." + process.pid + "." + Date.now() + "." + String(++runSequence);
+  runToken = token;
+  runSettledToken = "";
+  atomicWrite(SESSION_RUN, token + "\\n");
+  atomicWrite(SESSION_STOP, "pending\\n");
+  return token;
+};
+const adoptCurrentRun = () => {
+  if (runToken) return runToken;
+  try {
+    const current = readFileSync(SESSION_RUN, "utf8").split(/\r?\n/, 1)[0].trim();
+    if (current) {
+      runToken = current;
+      runSettledToken = "";
+    }
+  } catch {}
+  return runToken;
+};
+const pendingRunTokens: string[] = [];
+const nextRunToken = () => pendingRunTokens.shift() || "";
+const settleRun = async (token: string, event: string) => {
+  if (!token || token !== runToken || runSettledToken === token) return;
+  runSettledToken = token;
+  await busyEvent(token, "idle", event);
+  if (token === runToken) await touchTurnEnd(token);
 };
 export default function (omp: any) {
   omp.on("agent_start", () => {
-    runSettled = false;
-    return invalidateSessionStop().then(() => busyEvent("busy", "agent-start"));
+    const token = rotateRun();
+    pendingRunTokens.push(token);
+    return busyEvent(token, "busy", "agent-start");
   });
   omp.on("session_stop", async () => {
-    await recordSessionStop();
-    await settleRun("session-stop");
+    const token = nextRunToken() || adoptCurrentRun();
+    if (!token || token !== runToken) return;
+    atomicWrite(SESSION_STOP, token + "\\n");
+    await settleRun(token, "session-stop");
   });
-  omp.on("agent_end", () => settleRun("agent-end"));
-  omp.on("session_shutdown", () => settleRun("session-shutdown"));
+  omp.on("agent_end", () => settleRun(nextRunToken() || adoptCurrentRun(), "agent-end"));
+  omp.on("session_shutdown", () => settleRun(nextRunToken() || adoptCurrentRun(), "session-shutdown"));
 }
 EOF
       ;;

@@ -180,8 +180,9 @@ test_pi_extension_stale_incarnation_rejected() {
 # drive_omp_ext <ext-path> <mode>: load the generated OMP extension in a plain
 # Node host and fire one lifecycle handler or one terminal event sequence.
 drive_omp_ext() {
-  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+  EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
@@ -200,13 +201,22 @@ switch (process.env.MODE) {
     await fire("agent_end");
     await fire("session_shutdown");
     break;
+  case "late-session-stop":
+    await fire("agent_start");
+    await fire("agent_start");
+    await fire("session_stop");
+    if (readFileSync(process.env.STATE_DIR + "/busy-omp-2.omp-session-stop", "utf8").trim() !== "pending") {
+      throw new Error("late prior-run session_stop settled the current run");
+    }
+    await fire("session_stop");
+    break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 EOF
 }
 
 test_omp_extension_semantic_lifecycle() {
-  local rec id=busy-omp-1 out state ext record gen marker
+  local rec id=busy-omp-1 out state ext record gen run_token marker
   rec=$(make_spawn_case omp-lifecycle omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -231,10 +241,17 @@ test_omp_extension_semantic_lifecycle() {
     || fail "session_stop/agent_end/shutdown must settle exactly once, got '$record'"
   [ -f "$state/$id.turn-ended" ] || fail "session_stop no longer publishes the turn-end notification marker"
   gen=$(cat "$state/$id.busy-gen")
+  run_token=$(cat "$state/$id.omp-session-run")
   marker=$(cat "$state/$id.omp-session-stop")
-  [ "$marker" = "$gen" ] || fail "session_stop must publish the current busy generation"
+  case "$run_token" in
+    "$gen".*) ;;
+    *) fail "agent_start must publish a run token bound to the current busy generation" ;;
+  esac
+  [ "$marker" = "$run_token" ] || fail "session_stop must publish the current run token"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "second agent_start drive failed: $out"
+  new_run_token=$(cat "$state/$id.omp-session-run")
+  [ "$new_run_token" != "$run_token" ] || fail "each agent_start must rotate the OMP run token"
   marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null || true)
   [ "$marker" = pending ] || fail "a fresh agent_start must invalidate prior terminal evidence atomically, got '$marker'"
   out=$(classify omp "$id" "$state")
@@ -246,6 +263,23 @@ test_omp_extension_semantic_lifecycle() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "session_shutdown must settle the worker idle, got '$out'"
   pass "omp extension settles on observed session_stop with idempotent lifecycle fallbacks"
+}
+
+test_omp_extension_rejects_late_prior_run_stop() {
+  local rec id=busy-omp-2 out state ext marker run_token
+  rec=$(make_spawn_case omp-late-stop omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" late-session-stop "$state") || fail "late session_stop drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  marker=$(cat "$state/$id.omp-session-stop")
+  [ "$marker" = "$run_token" ] || fail "the current run must publish only its own terminal evidence"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "the current run must settle after a late prior stop, got '$out'"
+  pass "omp extension rejects a late prior-run stop before settling the replacement"
 }
 
 test_omp_extension_stale_incarnation_rejected() {
@@ -432,6 +466,7 @@ test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_omp_extension_semantic_lifecycle
+test_omp_extension_rejects_late_prior_run_stop
 test_omp_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle

@@ -1892,7 +1892,7 @@ fm_backend_herdr_meta_value() {
 
 fm_backend_herdr_omp_stop_evidence() {
   local session=$1 pane=$2 state target meta id='' matched=0
-  local window backend harness raw_launch generation marker
+  local window backend harness raw_launch generation run_token marker
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   target="$session:$pane"
   [ -d "$state" ] && [ ! -L "$state" ] || return 2
@@ -1916,13 +1916,19 @@ fm_backend_herdr_omp_stop_evidence() {
   done
   [ "$matched" -eq 1 ] || return 2
   [ -f "$state/$id.busy-gen" ] && [ ! -L "$state/$id.busy-gen" ] || return 2
+  [ -f "$state/$id.omp-session-run" ] && [ ! -L "$state/$id.omp-session-run" ] || return 2
   [ -f "$state/$id.omp-session-stop" ] && [ ! -L "$state/$id.omp-session-stop" ] || return 2
   generation=$(cat "$state/$id.busy-gen" 2>/dev/null) || return 2
+  run_token=$(cat "$state/$id.omp-session-run" 2>/dev/null) || return 2
   marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null) || return 2
-  case "$generation:$marker" in
+  case "$generation:$run_token:$marker" in
     *[!A-Za-z0-9._:-]*|:*) return 2 ;;
   esac
-  [ "$generation" = "$marker" ] || return 2
+  case "$run_token" in
+    "$generation".*) ;;
+    *) return 2 ;;
+  esac
+  [ "$run_token" = "$marker" ] || return 2
 }
 
 fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
@@ -2863,7 +2869,7 @@ fm_backend_herdr_omp_process_identity() {  # <session> <pane> [any] -> omp|other
 }
 
 fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other|unknown
-  local session=$1 pane=$2 info rows name args identity current_identity= shell_seen=0 omp_seen=0
+  local session=$1 pane=$2 info rows name args identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2915,13 +2921,17 @@ fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other
           return 0
         fi
         ;;
-      *) : ;;
+      *) other_seen=1 ;;
     esac
   done <<EOF
 $rows
 EOF
   if [ "$omp_seen" -eq 1 ]; then
-    [ -z "$current_identity" ] && printf 'omp' || printf 'unknown'
+    if [ -n "$current_identity" ] || [ "$shell_seen" -eq 1 ] || [ "$other_seen" -eq 1 ]; then
+      printf 'unknown'
+    else
+      printf 'omp'
+    fi
   elif [ -n "$current_identity" ]; then
     printf '%s' "$current_identity"
   elif [ "$shell_seen" -eq 1 ]; then
@@ -3393,17 +3403,21 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
 fm_backend_herdr_busy_state() {  # <target> [recorded-harness] [raw-launch]
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} identity agent agent_status
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} identity agent agent_status canonical=0
   fm_backend_herdr_target_ready "$target" || { printf 'unknown'; return 0; }
-  if [ "$raw_launch" = 1 ] || [ "$recorded_harness" = omp ]; then
+  case "$recorded_harness" in
+    claude*|codex*|opencode*|grok*|kimi*|muse*|pi|pi-signed|omp) canonical=1 ;;
+  esac
+  if [ "$raw_launch" = 1 ] || [ "$canonical" = 1 ]; then
     identity=$(fm_backend_herdr_agent_identity_raw \
       "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
-    if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ]; then
-      [ "$agent" = omp ] || { printf 'unknown'; return 0; }
-      [ "$(fm_backend_herdr_process_identity "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = omp ] \
+    if [ "$canonical" = 1 ] && [ "$raw_launch" != 1 ]; then
+      fm_harness_identity_matches "$recorded_harness" "$agent" || { printf 'unknown'; return 0; }
+      fm_harness_identity_matches "$recorded_harness" \
+        "$(fm_backend_herdr_process_identity "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" \
         || { printf 'unknown'; return 0; }
     else
       [ "$agent" = omp ] && { printf 'unknown'; return 0; }

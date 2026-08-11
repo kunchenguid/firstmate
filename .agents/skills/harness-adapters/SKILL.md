@@ -339,7 +339,7 @@ A Firstmate-launched OMP worker inherited `CLAUDECODE`, so `OMPCODE=1` must prec
 The shared `fm-spawn.sh` launch boundary clears the known primary markers before the resolved canonical worker starts, then restores only the selected OMP or Pi-family marker where that adapter requires one; `RAW_LAUNCH=1` remains an unverified escape hatch with no marker restoration or OMP wiring.
 Launch keeps the encoded brief as one positional message, loads one per-task extension from `state/`, and starts with no observed trust or permission dialog.
 Herdr reports native `working` and `idle` states for OMP.
-OMP 17.2.12 leaves its Herdr registration at `idle` after `/exit` returns to the nested worktree shell, so the Herdr backend treats only a generation-matching `state/<id>.omp-session-stop` marker plus the separately proven one-process shell shape as agent-free.
+OMP 17.2.12 leaves its Herdr registration at `idle` after `/exit` returns to the nested worktree shell, so the Herdr backend treats only a current per-run token matching `state/<id>.omp-session-stop` plus the separately proven one-process shell shape as agent-free.
 Relaunch uses Firstmate's deterministic brief-based replacement; no private-session resume contract is required.
 
 **Primary-session guard fact.**
