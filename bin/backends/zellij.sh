@@ -388,23 +388,25 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get`.
+# `treehouse get --lease`.
 #
 # Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
-# `cd` run directly in the pane's own top-level shell, but stays FROZEN at
-# whatever directory the pane's shell was in when it launched `treehouse get`
-# as a foreground command - it never follows that command's own internal `cd`
-# into the acquired worktree, even after the subshell is fully interactive and
-# a `pwd` typed into it prints the correct live path on screen. Zellij's CLI
-# exposes no per-pane pid and no live-process cwd field to read instead
-# (unlike herdr's `foreground_cwd`), so passive JSON polling cannot solve
-# this. Active probe instead: print the pane's `$PWD` with a unique marker
-# (atomically submitted, mirroring send_text_line), briefly settle, then capture
-# and read only that marker line. Scoped to fm-spawn.sh's own worktree-discovery
-# poll loop (the only caller of this op), where injecting a harmless extra
-# command before the harness ever launches is an acceptable trade for a reliable
-# answer.
+# `cd` run directly in the pane's own top-level shell, but stays FROZEN when an
+# interactive subshell is held open in the foreground instead - verified
+# against a bare `treehouse get`, which opens exactly such a subshell. The
+# worktree-acquisition line fm-spawn.sh actually sends,
+# `cd "$(treehouse get --lease --lease-holder <id>)"`, avoids that: `--lease`
+# prints the path and exits without opening a subshell, so the `cd` itself is
+# a plain top-level command. Zellij's CLI exposes no per-pane pid and no
+# live-process cwd field to fall back on if that assumption ever breaks
+# (unlike herdr's `foreground_cwd`), so this probe stays in place as the
+# already-proven mechanism rather than passive polling. Active probe:
+# print the pane's `$PWD` with a unique marker (atomically submitted,
+# mirroring send_text_line), briefly settle, then capture and read only that
+# marker line. Scoped to fm-spawn.sh's own worktree-discovery poll loop (the
+# only caller of this op), where injecting a harmless extra command before the
+# harness ever launches is an acceptable trade for a reliable answer.
 fm_backend_zellij_current_path() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} out line marker_begin="__FM_ZELLIJ_CWD_BEGIN__" marker_end="__FM_ZELLIJ_CWD_END__" in_block=0 chunk="" last=""
   fm_backend_zellij_target_ready "$target" "$expected_label" || return 0

@@ -437,14 +437,17 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
 #
 # Verified pitfall (finding #2 above): cmux's `current_directory` field DOES
 # reflect a `cd` run directly in the surface's own top-level shell, but stays
-# FROZEN at whatever directory that shell was in when it launched `treehouse
-# get` as a foreground command - it never follows that command's own internal
-# `cd` into the acquired worktree. cmux's control socket exposes no
-# live-process cwd field either (unlike herdr's `foreground_cwd`), so passive
-# polling cannot solve this here any more than it could for zellij. Active
-# probe instead: print the surface's `$PWD` with a unique marker (atomically
-# submitted via send_text_line), briefly settle, then capture and read only
-# that marker line. Scoped to fm-spawn.sh's own worktree-discovery poll loop.
+# FROZEN when an interactive subshell is held open in the foreground instead.
+# The worktree-acquisition line fm-spawn.sh actually sends,
+# `cd "$(treehouse get --lease --lease-holder <id>)"`, avoids that: `--lease`
+# prints the path and exits without opening a subshell, so the `cd` itself is
+# a plain top-level command. cmux's control socket exposes no live-process cwd
+# field to fall back on if that assumption ever breaks (unlike herdr's
+# `foreground_cwd`), so this probe stays in place as the already-proven
+# mechanism rather than passive polling. Active probe instead: print the
+# surface's `$PWD` with a unique marker (atomically submitted via
+# send_text_line), briefly settle, then capture and read only that marker
+# line. Scoped to fm-spawn.sh's own worktree-discovery poll loop.
 fm_backend_cmux_current_path() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} out line marker_begin="__FM_CMUX_CWD_BEGIN__" marker_end="__FM_CMUX_CWD_END__" in_block=0 chunk="" last=""
   fm_backend_cmux_target_ready "$target" "$expected_label" || return 0
