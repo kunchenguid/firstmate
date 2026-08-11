@@ -379,6 +379,7 @@ test_claude_threads_model_and_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
+  assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
 }
 
@@ -500,8 +501,8 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not thread the requested model and max thinking level"
+  assert_contains "$launch" "FM_PI_HARNESS=pi pi --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -522,8 +523,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not share Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -582,8 +583,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
-    "pi-signed secondmate did not share Pi's primary extension launch shape"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 

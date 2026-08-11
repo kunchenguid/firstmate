@@ -160,7 +160,8 @@ family_for_basename() {
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
-    fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
+    fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
+    fm-control-herdr-smoke.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
     fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
@@ -179,6 +180,8 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-cmux-claude-composer-live-e2e.test.sh|\
+    fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
@@ -190,6 +193,7 @@ family_for_basename() {
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
+    fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
@@ -928,6 +932,14 @@ families_for_changed_path() {
       # pre-teardown run abort (pr-forge).
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-composer-lib.sh)
+      # The shared shape catalogue is vendor-rendered signal; a change to it
+      # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the
+      # portable families.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
