@@ -99,9 +99,8 @@
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
 #                                   for delivery guards and Grok's fallback
-#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
-#                                   and structural border stripping (default:
-#                                   bare prompt glyphs plus busy footers)
+#          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
+#                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
@@ -557,9 +556,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 #
 # pane_input_pending returns 0 unless the composer is positively proven empty.
 # This includes real unsubmitted text, ambiguous structure, unreadable state,
-# and future verdicts. The detector drops dim/faint ghost text and strips the
-# harness's composer box borders, so an aligned ghost-only or idle bordered
-# claude composer ("│ > … │") is correctly proven empty.
+# blank or otherwise unidentified rows (the strict container-proof rule owned
+# by bin/fm-composer-lib.sh), and future verdicts. The detector drops
+# dim/faint ghost text and strips the harness's composer box borders, so an
+# aligned ghost-only or idle bordered claude composer ("│ > … │") is correctly
+# proven empty while a modal dialog or dead shell never is.
 # pane_is_busy / pane_input_pending: BACKEND-AWARE (dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives rather than a hand-rolled
 # case statement here). <backend> defaults to tmux when omitted, so every

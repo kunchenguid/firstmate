@@ -1,53 +1,27 @@
 #!/usr/bin/env bash
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
-# ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, and a verify-and-retry-Enter submit. Sourced by both the away-mode
-# daemon (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit
-# logic cannot drift between the two.
+# ONE tmux source for delivery-busy detection, composer capture primitives,
+# and verified submit.
+# Both the away-mode daemon and bin/fm-send.sh reach these primitives through
+# backend dispatch, while bin/fm-composer-lib.sh owns the shared verdict.
 #
-# Why this exists (incident afk-invx-i5): the daemon's old composer check only
-# recognized a BARE prompt glyph ("> ") as an empty composer. claude draws its
-# input box with box-drawing borders ("│ > … │"), so every idle claude pane read
-# as "pending input" and the away-mode daemon deferred 100% of escalations for
-# 9.5 hours with no escape. The detector below strips the box borders before
-# deciding, so a bordered-but-empty composer is correctly seen as empty. The same
-# corrected detector backs the submit acknowledgement (a submit "landed" iff the
-# composer is empty afterward), fixing the parallel false "Enter swallowed".
+# Composer shapes and verdicts are owned by bin/fm-composer-lib.sh.
+# This file owns only tmux's styled capture, cursor and Pi identity primitives,
+# delivery busy read, and submit conversions that consume the shared verdict.
+# Styled captures remain internal; fm-peek and every human-facing capture stay
+# plain.
 #
-# Ghost text (incident composer-robust): claude renders a predicted-next-prompt
-# "suggestion" as dim/faint text inside an otherwise-empty composer. A plain
-# capture cannot tell it apart from text a human typed, so the old reader saw an
-# idle pane as holding pending input and the daemon deferred injection / firstmate
-# misjudged the pane. The composer reader now captures the visible pane WITH ANSI
-# styling (tmux capture-pane -e), locates a bordered composer structurally, and
-# extracts the real typed content from every row with the shared, fleet-wide
-# fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops every
-# de-emphasised run - dim/faint (SGR 2) AND a dark/muted truecolor foreground -
-# so ghost/placeholder text never counts as real input. The styled capture is
-# consumed internally and parsed into a boolean here; it is NEVER surfaced
-# (fm-peek and every human/LLM-facing path stay plain). This is harness-generic:
-# any harness that de-emphasises placeholder/ghost text
-# benefits, and the herdr adapter routes through the same owner (task
-# afk-herdr-false-pending), so the two backends cannot drift.
+# OpenCode's busy-queued Enter conversion accepts only structurally proven
+# pending text after retries, while the separate turn-started conversion accepts
+# an unknown post-Enter composer only after this submit observed an idle baseline
+# become busy.
+# Herdr's OpenCode busy-queue limitation remains documented in
+# docs/herdr-backend.md.
 #
-# Busy-queued Enter (opencode 1.18.4, on the tmux backend only for now): when
-# the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
-# keystroke but does NOT clear the composer until then, so the composer keeps
-# showing the typed text the whole time. The plain "empty iff composer cleared"
-# acknowledgement above false-positives on a swallowed Enter for every steer
-# sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
-# the Enter-retry budget is spent: a busy pane means the harness accepted and
-# queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
-#
-# Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
-# structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
-# matching used here.
+# FM_COMPOSER_IDLE_RE is interpreted by the shared classifier with its structural
+# and styling safety gates.
+# FM_BUSY_REGEX overrides the rendered delivery-busy matching used here.
 #
 # NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
 # semantic contract. The matching below serves only delivery guards: the submit
@@ -58,10 +32,14 @@
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 #
-# Composer-content classification (empty|pending|unknown, and the fleet-wide
-# rule that a BARE shell prompt glyph is a dead shell, not an empty agent
-# composer) is NOT owned here: it is the shared bin/fm-composer-lib.sh, sourced
-# below and reused by every backend adapter so the decision cannot drift.
+# Composer classification is NOT owned here: every shape, glyph, border
+# family, geometry rule, and verdict decision lives in the shared
+# bin/fm-composer-lib.sh (fm_composer_classify_screen), sourced below and
+# reused by every backend adapter so the decision cannot drift. This file
+# keeps only tmux's genuine capture-side primitives - the styled pane
+# capture, the #{cursor_y} cursor read, the pi foreground-process identity
+# probe, and the capability descriptor - plus the busy detection and submit
+# cores that consume the shared verdict.
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
@@ -123,245 +101,101 @@ fm_busy_lines_match() {  # [harness]
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
-# fm_tmux_composer_row_state: classify one raw styled candidate row.
-# A structural caller forces bordered=1; the compatibility fallback passes 0
-# and may recognize a busy footer.
-fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy] -> empty|pending|unknown
-  local raw=$1 bordered=${2:-0} allow_busy=${3:-1} plain stripped
-  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
-  plain="${plain#"${plain%%[![:space:]]*}"}"
-  plain="${plain%"${plain##*[![:space:]]}"}"
-  stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  case "$stripped" in
-    '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
-    '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
-    '║'*'║') stripped=${stripped#║}; stripped=${stripped%║} ;;
-    '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  if [ "$allow_busy" = 1 ] && [ -n "$stripped" ] \
-     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
-    printf 'empty'; return 0
-  fi
-  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
+# --- tmux composer capture and capability primitives ------------------------
+#
+# These four functions are the ONLY tmux-specific composer knowledge left:
+# how to capture a styled screen, how to read the cursor row, how to probe a
+# live pi agent, and the static capability facts. Every shape, glyph, border
+# family, and verdict decision lives in the shared owner
+# (bin/fm-composer-lib.sh, fm_composer_classify_screen), so a new harness
+# shape is taught there once and never here.
+
+# fm_tmux_composer_capture: the visible pane WITH ANSI styling. The styled
+# capture is consumed internally by the classifier and is NEVER surfaced
+# (fm-peek and every human/LLM-facing path stay plain).
+fm_tmux_composer_capture() {  # <target>
+  tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
 }
 
-fm_tmux_row_has_composer_edge() {  # <plain-row>
-  local row=$1
-  row="${row#"${row%%[![:space:]]*}"}"
-  row="${row%"${row##*[![:space:]]}"}"
-  case "$row" in
-    '│'*|*'│'|'┃'*|*'┃'|'║'*|*'║'|'╭'*|*'╭'|'╮'*|*'╮'|\
-    '┌'*|*'┌'|'┐'*|*'┐'|'╔'*|*'╔'|'╗'*|*'╗'|'┏'*|*'┏'|'┓'*|*'┓'|\
-    '╰'*|*'╰'|'╯'*|*'╯'|'└'*|*'└'|'┘'*|*'┘'|'╚'*|*'╚'|'╝'*|*'╝'|\
-    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|'|'+'*|*'+')
-      return 0
+# fm_tmux_composer_cursor_row: the pane's cursor row, zero-based, relative to
+# the visible pane - tmux's genuine primitive that no other backend has.
+fm_tmux_composer_cursor_row() {  # <target>
+  tmux display-message -p -t "$1" '#{cursor_y}' 2>/dev/null
+}
+
+# fm_tmux_composer_caps: the tmux capability descriptor - static data, not
+# logic (see the capability model in bin/fm-composer-lib.sh).
+fm_tmux_composer_caps() {
+  printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n'
+}
+
+# fm_tmux_composer_identity: the tmux agent-identity probe backing the
+# separated (pi) composer shape, tmux's analogue of herdr's native
+# `agent get`. It answers only for pi, from two live signals:
+#   - identity: the pane tty's FOREGROUND process group (pgid = tpgid, the
+#     same scoping as fm_backend_tmux_foreground_comms) contains a pi-family
+#     process (pi, pi-signed, pi-launcher - docs/verification/
+#     runtime-backends.md "Agent liveness name sources"), falling back to
+#     tmux's own foreground-derived #{pane_current_command}. A pane whose
+#     agent died to a shell has no pi foreground process and gets NO identity,
+#     which is exactly what keeps the strict blank-row rule honest: a blank
+#     row between two stale rules stays unknown.
+#   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
+#     idle/working vocabulary herdr's probe reports natively.
+# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
+# live pi.
+fm_tmux_composer_identity() {  # <target>
+  local target=$1 tty pgid tpgid comm found=0 status
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
+  case "$tty" in
+    /dev/*)
+      while read -r _ pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        case "${comm##*/}" in
+          pi|pi-signed|pi-launcher|Pi) found=1 ;;
+        esac
+      done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
       ;;
   esac
-  return 1
-}
-
-fm_tmux_composer_geometry_spaces() {  # <content-inner> -> spaces
-  local content=$1 probe
-  probe="${content#"${content%%[![:space:]]*}"}"
-  case "$probe" in
-    '>'*) content=${content/>/ } ;;
-    '❯'*) content=${content/❯/ } ;;
-    '›'*) content=${content/›/ } ;;
-  esac
-  content=$(printf '%s' "$content" | LC_ALL=C sed 's/[!-~]/ /g')
-  case "$content" in
-    *[![:space:]]*) return 1 ;;
-  esac
-  printf '%s' "$content"
-}
-
-# fm_tmux_find_composer_box: print the zero-based top and bottom rows of the
-# complete bordered box that structurally contains the cursor, plus whether its
-# geometry is ambiguous. The cursor may be on any content row or on the bottom
-# border; no fixed cursor offset is used.
-fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom> <ambiguous>"
-  local cy=$1 pane=$2 line indent left_stripped trimmed kind family current_family=
-  local side_family top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
-  local content_inner content_spaces bottom_inner bottom_spaces
-  local current_indent=
-  local row=0 top=-1 valid=0 content_rows=0 unsafe=0 cursor_structural=0
-  while IFS= read -r line; do
-    indent=${line%%[![:space:]]*}
-    left_stripped="${line#"${line%%[![:space:]]*}"}"
-    trimmed="${left_stripped%"${left_stripped##*[![:space:]]}"}"
-    kind=
-    family=
-    case "$trimmed" in
-      '╭'*'╮') kind=top; family=rounded ;;
-      '┌'*'┐') kind=top; family=light ;;
-      '╔'*'╗') kind=top; family=double ;;
-      '┏'*'┓') kind=top; family=heavy ;;
-      '╰'*'╯') kind=bottom; family=rounded ;;
-      '└'*'┘') kind=bottom; family=light ;;
-      '╚'*'╝') kind=bottom; family=double ;;
-      '┗'*'┛') kind=bottom; family=heavy ;;
-      '+'*'+') kind=ascii; family=ascii ;;
+  if [ "$found" -ne 1 ]; then
+    comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
+    case "${comm##*/}" in
+      pi|pi-signed|pi-launcher) found=1 ;;
     esac
-    if [ "$row" -eq "$cy" ] && fm_tmux_row_has_composer_edge "$trimmed"; then
-      cursor_structural=1
-    fi
-    if [ "$kind" = top ] || { [ "$kind" = ascii ] && [ "$top" -lt 0 ]; }; then
-      if [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
-        unsafe=1
-      fi
-      top=$row
-      current_family=$family
-      current_indent=$indent
-      valid=1
-      content_rows=0
-      geometry_ambiguous=0
-      geometry_check=1
-      top_inner=$trimmed
-      case "$family" in
-        rounded) top_inner=${top_inner#╭}; top_inner=${top_inner%╮}; top_spaces=${top_inner//─/ } ;;
-        light) top_inner=${top_inner#┌}; top_inner=${top_inner%┐}; top_spaces=${top_inner//─/ } ;;
-        double) top_inner=${top_inner#╔}; top_inner=${top_inner%╗}; top_spaces=${top_inner//═/ } ;;
-        heavy) top_inner=${top_inner#┏}; top_inner=${top_inner%┓}; top_spaces=${top_inner//━/ } ;;
-        ascii) top_inner=${top_inner#+}; top_inner=${top_inner%+}; top_spaces=${top_inner//-/ } ;;
-      esac
-      case "$top_spaces" in
-        *[![:space:]]*) geometry_check=0; geometry_ambiguous=1 ;;
-      esac
-    elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
-      if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
-         && [ "$valid" = 1 ] && [ "$content_rows" -gt 0 ] \
-         && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
-        [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
-        if [ "$geometry_check" = 1 ]; then
-          bottom_inner=$trimmed
-          case "$family" in
-            rounded) bottom_inner=${bottom_inner#╰}; bottom_inner=${bottom_inner%╯}; bottom_spaces=${bottom_inner//─/ } ;;
-            light) bottom_inner=${bottom_inner#└}; bottom_inner=${bottom_inner%┘}; bottom_spaces=${bottom_inner//─/ } ;;
-            double) bottom_inner=${bottom_inner#╚}; bottom_inner=${bottom_inner%╝}; bottom_spaces=${bottom_inner//═/ } ;;
-            heavy) bottom_inner=${bottom_inner#┗}; bottom_inner=${bottom_inner%┛}; bottom_spaces=${bottom_inner//━/ } ;;
-            ascii) bottom_inner=${bottom_inner#+}; bottom_inner=${bottom_inner%+}; bottom_spaces=${bottom_inner//-/ } ;;
-          esac
-          [ "$bottom_spaces" = "$top_spaces" ] || geometry_ambiguous=1
-        fi
-        printf '%s %s %s' "$top" "$row" "$geometry_ambiguous"
-        return 0
-      fi
-      if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
-         || [ "$row" -eq "$cy" ]; then
-        unsafe=1
-      fi
-      top=-1
-      current_family=
-      current_indent=
-      valid=0
-      content_rows=0
-    elif [ "$top" -ge 0 ]; then
-      side_family=
-      case "$trimmed" in
-        '│'*'│') side_family=single ;;
-        '┃'*'┃') side_family=heavy ;;
-        '║'*'║') side_family=double ;;
-        '|'*'|') side_family=ascii ;;
-      esac
-      case "$current_family:$side_family" in
-        rounded:single|light:single|heavy:heavy|double:double|ascii:ascii)
-          content_rows=$((content_rows + 1))
-          [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
-          if [ "$geometry_check" = 1 ]; then
-            content_inner=$trimmed
-            case "$side_family" in
-              single) content_inner=${content_inner#│}; content_inner=${content_inner%│} ;;
-              heavy) content_inner=${content_inner#┃}; content_inner=${content_inner%┃} ;;
-              double) content_inner=${content_inner#║}; content_inner=${content_inner%║} ;;
-              ascii) content_inner=${content_inner#|}; content_inner=${content_inner%|} ;;
-            esac
-            if content_spaces=$(fm_tmux_composer_geometry_spaces "$content_inner"); then
-              [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1
-            else
-              geometry_ambiguous=1
-            fi
-          fi
-          ;;
-        *) valid=0 ;;
-      esac
-    fi
-    row=$((row + 1))
-  done <<EOF
-$pane
-EOF
-  if [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
-    unsafe=1
   fi
-  if [ "$unsafe" = 1 ] || [ "$cursor_structural" = 1 ]; then
-    return 2
-  fi
-  return 1
+  [ "$found" -eq 1 ] || return 1
+  status=$(fm_pane_busy_state "$target" pi)
+  case "$status" in
+    busy) printf 'pi\tworking' ;;
+    idle) printf 'pi\tidle' ;;
+    *) return 1 ;;
+  esac
 }
 
-# fm_tmux_composer_state classification contract:
-# A row is structural only when its first or last non-whitespace character is a
-# composer edge. A complete box has matching border families and bounded top and
-# bottom rows. The proof-carrying verdict is empty for proven emptiness, pending
-# for proven text in established structure, pending-unproven for text in
-# ambiguous structure, and unknown for unreadable state. Consumers that can
-# overwrite input or confirm delivery must accept only the exact positive proof
-# they require, so unrecognized future verdicts fail safe by default. Empty
-# requires positive proof: a genuinely empty composer, an all-empty unambiguous
-# box, an empty non-bordered fallback row, or the submit core's proven
-# busy-queued Enter conversion.
+# fm_tmux_composer_state: the tmux composer verdict - a thin adapter over the
+# shared screen classifier. The verdict contract (empty | pending |
+# pending-unproven | unknown, positive proof required for empty, unrecognized
+# future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
+# is fetched lazily, only when the classifier reports the verdict depends on
+# it (a pi separator pair under the cursor), so the common read never pays
+# for the process probe.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
-  local row row_raw state unknown_seen=0
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
+  local target=$1 cy pane verdict identity
+  cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
-  plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
-  if box=$(fm_tmux_find_composer_box "$cy" "$plain"); then
-    top=${box%% *}
-    box=${box#* }
-    bottom=${box%% *}
-    geometry_ambiguous=${box#* }
-    row=$((top + 1))
-    while [ "$row" -lt "$bottom" ]; do
-      row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
-      state=$(fm_tmux_composer_row_state "$row_raw" 1 0)
-      case "$state" in
-        pending)
-          if [ "$geometry_ambiguous" = 1 ]; then
-            printf 'pending-unproven'
-          else
-            printf 'pending'
-          fi
-          return 0
-          ;;
-        unknown) unknown_seen=1 ;;
-      esac
-      row=$((row + 1))
-    done
-    if [ "$unknown_seen" = 1 ] || [ "$geometry_ambiguous" = 1 ]; then
-      printf 'unknown'
-    else
-      printf 'empty'
+  pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
+  if [ "$verdict" = need-identity ]; then
+    if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
+      identity=probe-absent
     fi
-    return 0
-  else
-    box_status=$?
-    if [ "$box_status" -eq 2 ]; then
-      printf 'unknown'
-      return 0
-    fi
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
-  if fm_tmux_row_has_composer_edge "$(printf '%s\n' "$raw" | fm_composer_strip_ansi)"; then
-    printf 'unknown'
-    return 0
-  fi
-  fm_tmux_composer_row_state "$raw" 0
+  printf '%s' "$verdict"
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending
@@ -372,11 +206,21 @@ fm_pane_input_pending() {  # <target>
 
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
+fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
+  local win=$1 harness=${2:-} tail40 visible
+  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  visible=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+  [ -n "$visible" ] || { printf 'unknown'; return 0; }
+  if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
+    printf 'busy'
+  else
+    printf 'idle'
+  fi
+}
+
 fm_pane_is_busy() {  # <target> [harness]
-  local win=$1 harness=${2:-} tail40
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  [ "$(fm_pane_busy_state "$1" "${2:-}")" = busy ]
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
@@ -392,14 +236,41 @@ fm_pane_is_busy() {  # <target> [harness]
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+# Turn-started confirmation (the strict blank-row posture's counterpart): a
+# harness whose mid-turn screen the classifier cannot positively identify (pi
+# replaces its separated composer while working) reads `unknown` right after a
+# successful submit. When and only when the pane was IDLE before the text was
+# typed, an idle-to-busy transition across our Enter is proof the harness
+# accepted the submission - the same semantic signal herdr's native
+# agent-state confirmation uses, read from the pane's verified busy footer.
+# The busy read is polled across the remaining retry budget because the turn
+# takes a beat to render. Without the baseline (a direct
+# fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
+# `unknown` verdict is preserved untouched: busy conversion without the
+# transition evidence could mark an undelivered message delivered.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     case "$state" in
       pending|pending-unproven) ;;
+      unknown)
+        if [ "$baseline_idle" = 1 ]; then
+          j=0
+          while [ "$j" -lt "$retries" ]; do
+            if fm_pane_is_busy "$target"; then
+              printf 'empty'
+              return 0
+            fi
+            j=$((j + 1))
+            [ "$j" -ge "$retries" ] || sleep "$sleep_s"
+          done
+        fi
+        printf 'unknown'
+        return 0
+        ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
@@ -422,8 +293,13 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+  # The turn-started baseline must predate our own typing: a pane already
+  # busy before the text lands can turn "busy" for reasons unrelated to our
+  # Enter, so only a clean idle-to-busy transition may confirm a submit.
+  baseline_state=$(fm_pane_busy_state "$target")
+  [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
