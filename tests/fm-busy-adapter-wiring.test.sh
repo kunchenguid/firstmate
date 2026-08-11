@@ -206,7 +206,7 @@ EOF
 }
 
 test_omp_extension_semantic_lifecycle() {
-  local rec id=busy-omp-1 out state ext record
+  local rec id=busy-omp-1 out state ext record gen marker
   rec=$(make_spawn_case omp-lifecycle omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -230,12 +230,19 @@ test_omp_extension_semantic_lifecycle() {
   [ "$record" = "idle omp-ext session-stop 3" ] \
     || fail "session_stop/agent_end/shutdown must settle exactly once, got '$record'"
   [ -f "$state/$id.turn-ended" ] || fail "session_stop no longer publishes the turn-end notification marker"
+  gen=$(cat "$state/$id.busy-gen")
+  marker=$(cat "$state/$id.omp-session-stop")
+  [ "$marker" = "$gen" ] || fail "session_stop must publish the current busy generation"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "second agent_start drive failed: $out"
+  marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null || true)
+  [ "$marker" = pending ] || fail "a fresh agent_start must invalidate prior terminal evidence atomically, got '$marker'"
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy omp-ext" ] || fail "a fresh run must reopen busy, got '$out'"
 
   out=$(drive_omp_ext "$ext" session-shutdown) || fail "session_shutdown drive failed: $out"
+  marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null || true)
+  [ "$marker" = pending ] || fail "a fallback shutdown must not restore terminal evidence for the fresh run"
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "session_shutdown must settle the worker idle, got '$out'"
   pass "omp extension settles on observed session_stop with idempotent lifecycle fallbacks"

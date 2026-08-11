@@ -2702,15 +2702,15 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
-fm_backend_herdr_send_literal() {  # <target> <text> [recorded-harness] [raw-launch]
-  local target=$1 text=$2 recorded_harness=${3-} raw_launch=${4-} has_context=0
+fm_backend_herdr_send_literal() {  # <target> <text> [recorded-harness] [raw-launch] [explicit-target]
+  local target=$1 text=$2 recorded_harness=${3-} raw_launch=${4-} explicit_target=${5-} has_context=0
   fm_backend_herdr_target_ready "$target" || return 1
-  if [ "$#" -ge 3 ]; then
+  if [ "$#" -ge 3 ] && { [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ]; }; then
     has_context=1
   fi
   if [ "$has_context" -eq 1 ]; then
     fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      "$recorded_harness" "$raw_launch" || return 1
+      "$recorded_harness" "$raw_launch" "" "" "$explicit_target" || return 1
   fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1
 }
@@ -2734,28 +2734,28 @@ fm_backend_herdr_normalize_key() {  # <key>
 
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
-fm_backend_herdr_send_key() {  # <target> <key> [recorded-harness] [raw-launch]
-  local target=$1 key_name=$2 recorded_harness=${3-} raw_launch=${4-} has_context=0 key
+fm_backend_herdr_send_key() {  # <target> <key> [recorded-harness] [raw-launch] [explicit-target]
+  local target=$1 key_name=$2 recorded_harness=${3-} raw_launch=${4-} explicit_target=${5-} has_context=0 key
   fm_backend_herdr_target_ready "$target" || return 1
-  if [ "$#" -ge 3 ]; then
+  if [ "$#" -ge 3 ] && { [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ]; }; then
     has_context=1
   fi
   key=$(fm_backend_herdr_normalize_key "$key_name")
   if [ "$has_context" -eq 1 ]; then
     fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      "$recorded_harness" "$raw_launch" || return 1
+      "$recorded_harness" "$raw_launch" "" "" "$explicit_target" || return 1
   fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
-fm_backend_herdr_send_key_checked() {  # <target> <key> [recorded-harness] [raw-launch]
-  local target=$1 key=$2 recorded_harness=${3:-} raw_launch=${4:-}
-  fm_backend_herdr_send_key "$target" "$key" "$recorded_harness" "$raw_launch"
+fm_backend_herdr_send_key_checked() {  # <target> <key> [recorded-harness] [raw-launch] [explicit-target]
+  local target=$1 key=$2 recorded_harness=${3:-} raw_launch=${4:-} explicit_target=${5:-}
+  fm_backend_herdr_send_key "$target" "$key" "$recorded_harness" "$raw_launch" "$explicit_target"
 }
 
-fm_backend_herdr_send_literal_checked() {  # <target> <text> [recorded-harness] [raw-launch]
-  local target=$1 text=$2 recorded_harness=${3:-} raw_launch=${4:-}
-  fm_backend_herdr_send_literal "$target" "$text" "$recorded_harness" "$raw_launch"
+fm_backend_herdr_send_literal_checked() {  # <target> <text> [recorded-harness] [raw-launch] [explicit-target]
+  local target=$1 text=$2 recorded_harness=${3:-} raw_launch=${4:-} explicit_target=${5:-}
+  fm_backend_herdr_send_literal "$target" "$text" "$recorded_harness" "$raw_launch" "$explicit_target"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
@@ -2939,21 +2939,19 @@ fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
 # current-endpoint evidence is unknown. Raw launches additionally require the
 # process-tree owner marker; an unregistered raw worker is allowed only when
 # that independent process evidence identifies a known non-OMP harness.
-fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch] [raw-owner] [identity]
-  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}} identity agent agent_status process_identity
-  local identity_supplied=${6+x}
+fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch] [raw-owner] [identity] [explicit-target]
+  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}} identity=${6:-} explicit_target=${7:-} agent agent_status process_identity
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ -n "$inherited_unverified" ] && raw_launch=1
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
+  [ "$explicit_target" = 1 ] && [ -z "$recorded_harness" ] && [ -z "$raw_launch" ] && return 0
   [ "$recorded_harness" = raw-omp ] && return 1
   if [ "$recorded_harness" = omp ] && ! fm_harness_omp_attribution_allowed; then
     return 1
   fi
   if [ "$raw_launch" = 1 ]; then
-    if [ -n "$identity_supplied" ]; then
-      identity=$6
-    else
+    if [ -z "$identity" ]; then
       identity=$(fm_backend_herdr_agent_registration_raw "$session" "$pane" 2>/dev/null) || return 2
     fi
     IFS=$'\t' read -r agent agent_status <<EOF
@@ -2984,9 +2982,7 @@ EOF
     esac
     return 0
   fi
-  if [ -n "$identity_supplied" ]; then
-    identity=$6
-  else
+  if [ -z "$identity" ]; then
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 2
   fi
   IFS=$'\t' read -r agent agent_status <<EOF
@@ -3033,8 +3029,17 @@ EOF
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] [raw-owner] -> empty|pending|pending-unproven|unknown
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} raw_owner=${4:-${FM_RAW_LAUNCH_OWNER:-}} session pane cap caps verdict identity input_checked=0
+fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] [raw-owner|explicit-target] [explicit-target] -> empty|pending|pending-unproven|unknown
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} context4=${4-} explicit_target=${5-} raw_owner session pane cap caps verdict identity input_checked=0
+  case "$context4" in
+    0|1)
+      explicit_target=$context4
+      raw_owner=${FM_RAW_LAUNCH_OWNER:-}
+      ;;
+    *)
+      raw_owner=${context4:-${FM_RAW_LAUNCH_OWNER:-}}
+      ;;
+  esac
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ] && raw_launch=1
   [ "$recorded_harness" = raw-omp ] && { printf 'unknown'; return 0; }
@@ -3043,14 +3048,14 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
   pane=$FM_BACKEND_HERDR_PANE
   if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
     && [ "$recorded_harness" != unknown ] && [ "$raw_launch" != 1 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner"; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
       printf 'unknown'
       return 0
     fi
     input_checked=1
   fi
   if [ "$raw_launch" = 1 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner"; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
       printf 'unknown'
       return 0
     fi
@@ -3069,7 +3074,7 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity=probe-absent
     fi
-    if fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "$identity"; then
+    if fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "$identity" "$explicit_target"; then
       input_checked=1
       case "$identity" in
         omp$'\t'*) identity="pi${identity#omp}" ;;
@@ -3081,7 +3086,7 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   if [ "$verdict" != unknown ] && [ "$input_checked" -eq 0 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner"; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
       verdict=unknown
     fi
   fi
@@ -3186,18 +3191,28 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [raw-owner]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-} raw_owner=${9:-${FM_RAW_LAUNCH_OWNER:-}}
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [raw-owner|explicit-target] [explicit-target]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-} context9=${9-} explicit_target=${10-} raw_owner=${FM_RAW_LAUNCH_OWNER:-}
+  case "$context9" in
+    0|1)
+      [ -n "$explicit_target" ] || explicit_target=$context9
+      ;;
+    *)
+      [ -z "$context9" ] || raw_owner=$context9
+      ;;
+  esac
   local i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-    "$recorded_harness" "$raw_launch" "$raw_owner"; then
-    printf 'unknown'
-    return 0
+  if [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ]; then
+    if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+      "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
+      printf 'unknown'
+      return 0
+    fi
   fi
   fm_backend_herdr_send_literal_checked "$target" "$text" \
-    "$recorded_harness" "$raw_launch" "$raw_owner" || { printf 'send-failed'; return 0; }
+    "$recorded_harness" "$raw_launch" "$explicit_target" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
@@ -3207,7 +3222,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   [ "$baseline" = idle ] || footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   while :; do
     if ! fm_backend_herdr_send_key_checked "$target" Enter \
-      "$recorded_harness" "$raw_launch" "$raw_owner"; then
+      "$recorded_harness" "$raw_launch" "$explicit_target"; then
       printf 'unknown'
       return 0
     fi
@@ -3216,7 +3231,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target" "$recorded_harness" "$raw_launch" "$raw_owner")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$recorded_harness" "$raw_launch" "$raw_owner" "$explicit_target")
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
         && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then

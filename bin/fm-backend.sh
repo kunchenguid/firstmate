@@ -771,8 +771,8 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 # fm_backend_send_key: one backend-supported named special key.
-fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch]
-  local backend=$1 target=${2:-} key=${3:-} recorded_harness=${5-} raw_launch=${6-}
+fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch] [explicit-target]
+  local backend=$1 target=${2:-} key=${3:-} recorded_harness=${5-} raw_launch=${6-} explicit_target=${7-}
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" = tmux ] && [ "$recorded_harness" = omp ] \
@@ -784,7 +784,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr)
       fm_backend_herdr_send_key_checked "$target" "$key" \
-        "$recorded_harness" "$raw_launch"
+        "$recorded_harness" "$raw_launch" "$explicit_target"
       ;;
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
@@ -796,7 +796,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch]
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [explicit-target]
   local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-}
   shift
   fm_backend_source "$backend" || return 1

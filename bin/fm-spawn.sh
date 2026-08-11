@@ -2540,6 +2540,13 @@ const recordSessionStop = () =>
       "fm-omp-session-stop", "$BUSY_GEN", "$STATE_REAL/$ID.omp-session-stop",
     ], () => resolve());
   });
+const invalidateSessionStop = () =>
+  new Promise<void>((resolve) => {
+    execFile("sh", [
+      "-c", "tmp=\"\$1.pending.\$\$\"; printf '%s\\n' pending > \"\$tmp\" && mv -f \"\$tmp\" \"\$1\" || { rm -f \"\$tmp\" \"\$1\"; exit 1; }",
+      "fm-omp-session-pending", "$STATE_REAL/$ID.omp-session-stop",
+    ], () => resolve());
+  });
 let runSettled = false;
 const settleRun = async (event: string) => {
   if (runSettled) return;
@@ -2550,7 +2557,7 @@ const settleRun = async (event: string) => {
 export default function (omp: any) {
   omp.on("agent_start", () => {
     runSettled = false;
-    return busyEvent("busy", "agent-start");
+    return invalidateSessionStop().then(() => busyEvent("busy", "agent-start"));
   });
   omp.on("session_stop", async () => {
     await recordSessionStop();

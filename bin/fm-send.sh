@@ -132,7 +132,7 @@ fm_send_clear_after_interrupt() {  # <key>
   clear=$(fm_control_interrupt_clear_key "$family") || return 0
   [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"; then
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH" "$TARGET_EXPLICIT"; then
     echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
@@ -194,6 +194,7 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
   TARGET_RAW_LAUNCH=""
+  TARGET_EXPLICIT=0
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -277,6 +278,7 @@ fm_send_resolve_target() {  # <raw-target>
       fi
       RESOLVED_TARGET=$raw
       TARGET_BACKEND=$assumed
+      TARGET_EXPLICIT=1
       RESOLUTION_TRIED="meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed; endpoint=verified"
       return 0
       ;;
@@ -429,7 +431,7 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"; then
+  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH" "$TARGET_EXPLICIT"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
@@ -492,7 +494,7 @@ else
       send_rc=$?
       verdict=send-failed
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH" "$TARGET_EXPLICIT"); then
     :
   else
     send_rc=$?

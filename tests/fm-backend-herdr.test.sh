@@ -3281,6 +3281,45 @@ SH
   pass "fm_backend_send_text_submit: no-metadata input rejects an exited OMP husk before typing"
 }
 
+test_fm_send_explicit_herdr_target_preserves_metadata_free_input() {
+  local mode dir home state log resp fb out status
+  for mode in key text; do
+    dir="$TMP_ROOT/fm-send-explicit-$mode"
+    home="$dir/home"
+    state="$home/state"
+    log="$dir/log"
+    resp="$dir/responses"
+    mkdir -p "$state" "$resp"
+    : > "$log"
+    if [ "$mode" = text ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/3.out"
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/5.out"
+    fi
+    fb=$(make_herdr_fakebin "$dir")
+    if [ "$mode" = key ]; then
+      out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+        "$ROOT/bin/fm-send.sh" lab:w1:p2 --key Escape 2>&1 )
+      status=$?
+      [ "$status" -eq 0 ] || fail "an explicit Herdr key target should succeed without metadata: $out"
+      grep -q $'\x1f''pane\x1f''send-keys\x1f''w1:p2\x1f''escape' "$log" \
+        || fail "an explicit Herdr key target was refused before transport"
+    else
+      out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+        FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+        "$ROOT/bin/fm-send.sh" lab:w1:p2 hello 2>&1 )
+      status=$?
+      [ "$status" -eq 0 ] || fail "an explicit Herdr text target should succeed without metadata: $out"
+      grep -q $'\x1f''pane\x1f''send-text\x1f''w1:p2\x1f''hello' "$log" \
+        || fail "an explicit Herdr text target was refused before literal transport"
+      grep -q $'\x1f''pane\x1f''send-keys\x1f''w1:p2\x1f''enter' "$log" \
+        || fail "an explicit Herdr text target was refused before submission"
+    fi
+  done
+  pass "fm-send: metadata-free explicit Herdr text and key targets retain native delivery"
+}
+
 test_herdr_input_rejects_canonical_omp_identity_read_failure_before_text() {
   local dir log resp fb out
   dir="$TMP_ROOT/input-identity-read-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5096,6 +5135,7 @@ test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_omp_separator_idle_is_empty
 test_send_text_submit_rejects_no_metadata_exited_omp_husk
+test_fm_send_explicit_herdr_target_preserves_metadata_free_input
 test_herdr_input_rejects_canonical_omp_identity_read_failure_before_text
 test_herdr_input_rejects_ambiguous_omp_process_before_text
 test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch
