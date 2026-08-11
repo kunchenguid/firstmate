@@ -243,7 +243,7 @@ test_ship_branch_is_configurable_with_legacy_default() {
     fi
   done
 
-  id=branch-default
+  id="branch-default"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 \
     || fail "default-branch brief should scaffold"
   brief="$home/data/$id/brief.md"
