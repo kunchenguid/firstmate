@@ -227,7 +227,8 @@ for argument in "$@"; do
 done
 case "$*" in
   *"comm="*)
-    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
       printf '/usr/local/bin/%s\n' "$harness"
     else
       printf '/bin/bash\n'
@@ -235,7 +236,8 @@ case "$*" in
     exit 0
     ;;
   *"args="*)
-    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
       printf '%s\n' "$harness"
     else
       printf 'bash\n'
@@ -2041,6 +2043,41 @@ $(hash_file_for_test "$root/AGENTS.md")" ] \
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
+test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
+  local rec root home fakebin holder_pid out baseline_before completion_before
+  rec=$(new_world agents-refresh-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' 'READ_ONLY_AGENTS=current' > "$root/AGENTS.md"
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n%s\n' "$holder_pid" "$(hash_file_for_test "$root/AGENTS.md")" \
+    > "$home/state/.session-start-agents-baseline"
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  baseline_before=$(cat "$home/state/.session-start-agents-baseline")
+  completion_before=$(cat "$home/state/.session-start-complete")
+
+  out=$(FM_FAKE_HARNESS=pi FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "competing live lock owner did not force read-only mode"
+  assert_contains "$out" "READ_ONLY_AGENTS=current" \
+    "read-only compact trusted another session's equal baseline"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline_before" ] \
+    || fail "read-only compact mutated the competing session's baseline"
+  [ "$(cat "$home/state/.session-start-complete")" = "$completion_before" ] \
+    || fail "read-only compact mutated startup completion state"
+
+  pass "read-only Pi compact refreshes against the rebuilding session identity without mutation"
+}
+
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh() {
   local rec root home fakebin startup baseline clear_out compact_out
   rec=$(new_world codex-instruction-refresh)
@@ -2403,6 +2440,7 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder

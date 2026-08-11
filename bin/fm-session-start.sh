@@ -256,6 +256,8 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
@@ -563,7 +565,7 @@ write_agents_baseline() {  # <lock-pid> <agents-hash>
   return 1
 }
 
-agents_baseline_drifted() {  # <active-lock-pid>
+agents_baseline_drifted() {  # <rebuilding-session-pid>
   local lock_pid=$1 baseline_pid baseline_hash current_hash
   [ -f "$AGENTS_BASELINE_FILE" ] && [ ! -L "$AGENTS_BASELINE_FILE" ] || return 0
   baseline_pid=$(sed -n '1p' "$AGENTS_BASELINE_FILE" 2>/dev/null || true)
@@ -577,7 +579,7 @@ agents_baseline_drifted() {  # <active-lock-pid>
 # Only run-tier source pairs with both a stale native instruction cache and a
 # working Firstmate delivery path arrive here. Claude fresh-reads on reset, and
 # Codex has no tracked interactive reset delivery path.
-agents_refresh_required() {  # <active-lock-pid>
+agents_refresh_required() {  # <rebuilding-session-pid>
   local lock_pid=$1
   case "$PRIMARY_HARNESS:$SESSION_SOURCE" in
     pi:compact|pi-signed:compact) ;;
@@ -586,7 +588,7 @@ agents_refresh_required() {  # <active-lock-pid>
   agents_baseline_drifted "$lock_pid"
 }
 
-print_agents_refresh_if_required() {  # <active-lock-pid>
+print_agents_refresh_if_required() {  # <rebuilding-session-pid>
   local lock_pid=$1
   agents_refresh_required "$lock_pid" || return 0
   section "CURRENT AGENTS.md - INSTRUCTION REFRESH"
@@ -651,12 +653,13 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
+
 if [ "$READ_ONLY" -eq 0 ]; then
   if [ "$REEMIT" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
-  ACTIVE_LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  print_agents_refresh_if_required "$ACTIVE_LOCK_PID"
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
   # Every network call this session start owes is launched HERE, detached and
   # bounded, so it runs concurrently with the whole digest below instead of in

@@ -352,17 +352,20 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?continuation=${Date.now()}`);
 extension.default(pi);
-const fire = async (args, entries = []) => {
+const fire = async (args, entries = [], timestamp = new Date().toISOString()) => {
   process.argv.splice(1, process.argv.length, "pi", ...args);
   await handlers.get("session_start")(
     { reason: "startup" },
-    { sessionManager: { getEntries: () => entries } },
+    { sessionManager: { getEntries: () => entries, getHeader: () => ({ timestamp }) } },
   );
 };
 await fire([]);
 await fire(["-c"]);
 await fire(["--continue"]);
 await fire(["--session", "session-id"]);
+await fire(["--session-id", "new-id"]);
+await fire(["--session-id=existing-id"], [{ type: "message" }]);
+await fire(["--session-id", "empty-existing-id"], [], "2000-01-01T00:00:00.000Z");
 await fire(["--fork=session-id"]);
 await fire([], [{ type: "message" }]);
 JS
@@ -372,6 +375,9 @@ JS
   expected=$(printf '%s\n' \
     '--source startup' \
     '--source resume' \
+    '--source resume' \
+    '--source resume' \
+    '--source startup' \
     '--source resume' \
     '--source resume' \
     '--source fork' \
