@@ -21,22 +21,30 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   ackIngress,
+  bindAssistantOutboundIntentDecision,
   bindPendingDecisionToOutbound,
   claimLiveSession,
   claimNextIngress,
   claimPendingDecisionForOutbound,
+  completeAssistantOutboundIntent,
   enqueueLocalIngress,
   findInboundByDeliveryRef,
+  findPendingDecisionForOutbound,
+  finishPendingDecisionForOutbound,
   markIngressAccepted,
+  persistAssistantOutboundIntent,
   readActiveBinding,
+  readAssistantOutboundIntents,
   readPairing,
   readTransportHealth,
   repairInboundLedgers,
+  repairOutboundState,
   reconcileIngressFromSession,
   registerAssistantOutbound,
   releaseIngressClaim,
   reserveInteractiveIngress,
   releaseLiveSession,
+  transportHealthAllowsDispatch,
   type BindingRecord,
   type InboundEvent,
   type IngressClaim,
@@ -77,6 +85,7 @@ interface ActiveRuntime {
   waitingForTransport: boolean;
   timer: ReturnType<typeof setInterval> | null;
   latestProvenance: Provenance | null;
+  activeFeishuProvenance: Provenance | null;
   lastAssistantProvenance: Provenance | null;
   directUnmarkedIngress: { deliveryRef: string } | null;
   pendingPersistence: Map<string, string>;
@@ -85,8 +94,7 @@ interface ActiveRuntime {
   lastAssistantText: string;
   lastAssistantOrdinal: number;
   lastOutboundOrdinal: number;
-  lastRegistrationAlertOrdinal: number;
-  lastRepairMs: number;
+  registrationAlerts: Set<string>;
   lastStatus: string;
 }
 
@@ -278,10 +286,9 @@ function startTransport(): void {
   child.unref();
 }
 
-function transportAllowsFeishuDispatch(): boolean {
+function transportAllowsFeishuDispatch(runtime: ActiveRuntime): boolean {
   try {
-    const health = readTransportHealth(fmHome);
-    return health?.healthy === true && health.phase === "healthy";
+    return transportHealthAllowsDispatch(fmHome, runtime.binding);
   } catch {
     return false;
   }
@@ -293,14 +300,10 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
     return;
   }
   updateStatus(runtime);
-  if (Date.now() - runtime.lastRepairMs >= 60000) {
-    repairInboundLedgers(fmHome);
-    runtime.lastRepairMs = Date.now();
-  }
   flushAssistantOutbound(runtime);
   if (runtime.inFlight) return;
   if (runtime.waitingForTransport) {
-    if (!transportAllowsFeishuDispatch()) return;
+    if (!transportAllowsFeishuDispatch(runtime)) return;
     runtime.waitingForTransport = false;
   }
   const claim = claimNextIngress(fmHome, {
@@ -309,7 +312,7 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
     bindingGeneration: runtime.binding.generation,
   });
   if (!claim) return;
-  if (claim.event.source === "feishu" && !transportAllowsFeishuDispatch()) {
+  if (claim.event.source === "feishu" && !transportAllowsFeishuDispatch(runtime)) {
     releaseIngressClaim(fmHome, claim.event.delivery_ref, "waiting for startup/reconnect history reconciliation");
     runtime.waitingForTransport = true;
     return;
@@ -372,6 +375,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     waitingForTransport: false,
     timer: null,
     latestProvenance: null,
+    activeFeishuProvenance: null,
     lastAssistantProvenance: null,
     directUnmarkedIngress: null,
     pendingPersistence: new Map(),
@@ -380,12 +384,12 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     lastAssistantText: "",
     lastAssistantOrdinal: 0,
     lastOutboundOrdinal: 0,
-    lastRegistrationAlertOrdinal: 0,
-    lastRepairMs: Date.now(),
+    registrationAlerts: new Set(),
     lastStatus: "",
   };
   activeRuntime = runtime;
   repairInboundLedgers(fmHome);
+  repairOutboundState(fmHome);
   reconcileIngressFromSession(fmHome, sessionMarkers(ctx, identity).map((marker) => ({
     deliveryRef: marker.deliveryRef,
     bindingGeneration: marker.bindingGeneration,
@@ -481,6 +485,7 @@ function onUserStart(event: MessageStartEvent, token: string): void {
   markIngressAccepted(fmHome, deliveryRef, { sessionId: runtime.identity.sessionId, bindingGeneration: runtime.binding.generation });
   runtime.pendingPersistence.set(deliveryRef, text);
   runtime.latestProvenance = provenance;
+  if (provenance.source === "feishu") runtime.activeFeishuProvenance = { ...provenance };
   runtime.lastAssistantText = "";
   if (runtime.inFlight?.event.delivery_ref === deliveryRef) runtime.inFlight = null;
   schedulePump(runtime);
@@ -534,40 +539,70 @@ function onTurnEnd(event: TurnEndEvent, token: string): void {
   runtime.lastAssistantOrdinal = ++assistantOrdinal;
 }
 
-function flushAssistantOutbound(runtime: ActiveRuntime): void {
+function persistSettledAssistant(runtime: ActiveRuntime): void {
   if (!runtime.lastAssistantProvenance || runtime.lastAssistantOrdinal <= runtime.lastOutboundOrdinal) return;
-  try {
-    const decision = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation);
-    const provenance = runtime.lastAssistantProvenance;
-    const result = registerAssistantOutbound(fmHome, {
-      text: runtime.lastAssistantText,
-      source: provenance.source,
-      sourceRef: provenance.deliveryRef,
-      sessionId: runtime.identity.sessionId,
-      bindingGeneration: runtime.binding.generation,
-      replyTo: provenance.source === "feishu" ? provenance.replyTo : null,
-      decisionRef: decision?.record.decision_ref ?? null,
-      decisionKey: decision?.record.decision_key ?? null,
-    });
-    if ((result.status === "registered" || result.status === "duplicate") && result.eventId) bindPendingDecisionToOutbound(fmHome, decision, result.eventId);
-    const terminal = ["registered", "duplicate", "skipped", "secret-refused", "chunk-refused", "resource-refused"].includes(result.status);
-    if (!terminal) throw new Error(`outbound registration refused with status ${result.status}`);
-    runtime.lastOutboundOrdinal = runtime.lastAssistantOrdinal;
-    if (["secret-refused", "chunk-refused", "resource-refused"].includes(result.status) && result.alert?.created) {
-      const message = result.status === "secret-refused"
-        ? "Feishu send refused: the entire final response matched a fixed credential pattern and stayed private."
-        : result.status === "chunk-refused"
-          ? "Feishu send refused: deterministic chunking could not preserve a complete URL within the platform limit."
-          : "Feishu send refused: the final response exceeded the local output or free-space safety threshold and stayed private.";
-      runtime.ctx.ui.notify(message, "error");
-      runtime.pi.appendEntry("fm-feishu-local-alert", { kind: result.status, message, alertId: result.alert.id, createdAt: new Date().toISOString() });
-    }
-  } catch (error) {
-    if (runtime.lastRegistrationAlertOrdinal !== runtime.lastAssistantOrdinal) {
-      runtime.lastRegistrationAlertOrdinal = runtime.lastAssistantOrdinal;
-      const message = "Feishu output registration is degraded; the exact final response remains pending for durable retry.";
-      runtime.ctx.ui.notify(`${message} ${String(error)}`, "error");
-      runtime.pi.appendEntry("fm-feishu-local-alert", { kind: "outbound-registration-degraded", message, createdAt: new Date().toISOString() });
+  const provenance = runtime.lastAssistantProvenance;
+  persistAssistantOutboundIntent(fmHome, {
+    text: runtime.lastAssistantText,
+    source: provenance.source,
+    sourceRef: provenance.deliveryRef,
+    sessionId: runtime.identity.sessionId,
+    bindingGeneration: runtime.binding.generation,
+    replyTo: provenance.source === "feishu" ? provenance.replyTo : null,
+  });
+  runtime.lastOutboundOrdinal = runtime.lastAssistantOrdinal;
+}
+
+function flushAssistantOutbound(runtime: ActiveRuntime): void {
+  const intents = readAssistantOutboundIntents(fmHome, {
+    sessionId: runtime.identity.sessionId,
+    bindingId: runtime.binding.binding_id,
+    bindingGeneration: runtime.binding.generation,
+  });
+  for (const pendingIntent of intents) {
+    try {
+      let intent = pendingIntent;
+      if (!intent.record.decision_captured) {
+        const snapshot = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation);
+        intent = bindAssistantOutboundIntentDecision(fmHome, intent, snapshot);
+      }
+      const record = intent.record;
+      const decision = record.decision_ref && record.decision_key
+        ? findPendingDecisionForOutbound(fmHome, record.decision_ref, record.decision_key, runtime.identity.sessionId, runtime.binding.generation)
+        : undefined;
+      const result = registerAssistantOutbound(fmHome, {
+        text: record.text,
+        source: record.source,
+        sourceRef: record.source_ref,
+        sessionId: record.session_id,
+        bindingGeneration: record.binding_generation,
+        replyTo: record.reply_to_message_id,
+        decisionRef: decision?.record.decision_ref ?? null,
+        decisionKey: decision?.record.decision_key ?? null,
+      });
+      if ((result.status === "registered" || result.status === "duplicate") && result.eventId) bindPendingDecisionToOutbound(fmHome, decision, result.eventId);
+      const terminal = ["registered", "duplicate", "skipped", "secret-refused", "chunk-refused", "resource-refused"].includes(result.status);
+      if (!terminal) throw new Error(`outbound registration refused with status ${result.status}`);
+      if (result.status === "skipped" || ["secret-refused", "chunk-refused", "resource-refused"].includes(result.status)) finishPendingDecisionForOutbound(fmHome, decision, result.status);
+      completeAssistantOutboundIntent(fmHome, intent);
+      runtime.registrationAlerts.delete(record.intent_id);
+      if (["secret-refused", "chunk-refused", "resource-refused"].includes(result.status) && result.alert?.created) {
+        const message = result.status === "secret-refused"
+          ? "Feishu send refused: the entire final response matched a fixed credential pattern and stayed private."
+          : result.status === "chunk-refused"
+            ? "Feishu send refused: deterministic chunking could not preserve a complete URL within the platform limit."
+            : "Feishu send refused: the final response exceeded the local output or free-space safety threshold and stayed private.";
+        runtime.ctx.ui.notify(message, "error");
+        runtime.pi.appendEntry("fm-feishu-local-alert", { kind: result.status, message, alertId: result.alert.id, createdAt: new Date().toISOString() });
+      }
+    } catch (error) {
+      if (!runtime.registrationAlerts.has(pendingIntent.record.intent_id)) {
+        runtime.registrationAlerts.add(pendingIntent.record.intent_id);
+        const message = "Feishu output registration is degraded; the exact final response and provenance are durably pending for retry.";
+        runtime.ctx.ui.notify(`${message} ${String(error)}`, "error");
+        runtime.pi.appendEntry("fm-feishu-local-alert", { kind: "outbound-registration-degraded", message, intentId: pendingIntent.record.intent_id, createdAt: new Date().toISOString() });
+      }
+      break;
     }
   }
 }
@@ -575,18 +610,23 @@ function flushAssistantOutbound(runtime: ActiveRuntime): void {
 function onAgentSettled(_ctx: ExtensionContext, token: string): void {
   const runtime = activeRuntime;
   if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
-  flushAssistantOutbound(runtime);
+  try {
+    persistSettledAssistant(runtime);
+    flushAssistantOutbound(runtime);
+  } catch (error) {
+    const message = "Feishu output registration intent could not be persisted; outbound delivery is suspended.";
+    runtime.ctx.ui.notify(`${message} ${String(error)}`, "error");
+    runtime.pi.appendEntry("fm-feishu-local-alert", { kind: "outbound-registration-persistence-failed", message, createdAt: new Date().toISOString() });
+  } finally {
+    runtime.activeFeishuProvenance = null;
+  }
 }
 
-const sensitiveBash = /(?:^|[;&|]\s*)(?:[^\n;]*\/)?fm-(?:pr-merge|merge-local|teardown)\.sh\b|\b(?:gh|gh-axi)\s+pr\s+merge\b|\bglab\s+mr\s+merge\b|\bgit\s+(?:merge\b|rebase\b|reset\b|restore\b|checkout\b|clean\b|push\b[^\n]*--force|branch\s+-[dD]\b|worktree\s+(?:remove|prune)\b)|(?:^|[;&|]\s*)(?:rm|unlink|rmdir|mv|dd|truncate|shred|chmod|chown|kill|pkill)\b|\b(?:python(?:3)?|node|perl|ruby|php|bash|sh|zsh)\b|(?:^|[^<])(?:>>?|2>)\s*[^&]|\bsed\s+[^\n]*\s-i\b|\blark-cli\b[^\n]*(?:\s--yes\b|\s(?:auth|config)\s+)|\b(?:auth|config)\s+(?:login|logout|init|set|delete)\b/i;
 const sensitivePath = /(?:^|\/)(?:\.env(?:\.|$)|\.git(?:\/|$)|\.ssh(?:\/|$)|\.pi(?:\/|$)|\.agents(?:\/|$)|[^/]*(?:credential|secret|token|password|config|settings)[^/]*)/i;
 const safeRemoteTools = new Set(["read", "grep", "find", "ls"]);
 
 function protectedEffectReason(toolName: string, input: unknown): string | undefined {
-  if (toolName === "bash") {
-    const command = String((input as { command?: unknown })?.command ?? "");
-    return sensitiveBash.test(command) ? "protected shell effect" : undefined;
-  }
+  if (toolName === "bash") return "protected shell effect";
   if (toolName === "write" || toolName === "edit") {
     const path = String((input as { path?: unknown })?.path ?? "");
     return sensitivePath.test(path) ? "protected configuration or credential path" : undefined;
@@ -641,7 +681,7 @@ export function registerFirstmateIngressCoordinator(pi: ExtensionAPI): void {
       runtime.pendingSensitiveEffects.delete(fingerprint);
       return {};
     }
-    if (runtime.latestProvenance?.source !== "feishu" && runtime.pendingSensitiveEffects.size === 0) return {};
+    if (!runtime.activeFeishuProvenance && runtime.pendingSensitiveEffects.size === 0) return {};
     const effect = pending ?? { code: randomBytes(6).toString("hex"), confirmed: false, announced: false };
     runtime.pendingSensitiveEffects.set(fingerprint, effect);
     if (!effect.announced) {

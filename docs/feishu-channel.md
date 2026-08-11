@@ -20,7 +20,7 @@ A Feishu request to merge, discard, perform a destructive or irreversible action
 
 Use a supported Pi version and a current `lark-cli` installation.
 Configure the Feishu app and bot through the normal `lark-cli` setup outside Firstmate before pairing.
-The minimum bot scopes are the P2P receive scope reported by `lark-cli event schema im.message.receive_v1 --json`, message history read access for overlap reconciliation, and `im:message:send_as_bot` for replies.
+The minimum bot scopes are the P2P receive scope reported by `lark-cli event schema im.message.receive_v1 --json`, `im:chat:read` for independent P2P verification, message history read access for overlap reconciliation, and `im:message:send_as_bot` for replies.
 Enable the `im.message.receive_v1` event for the bot in the Feishu developer console.
 Do not run `lark-cli auth login` for bot identity.
 Use the installed `lark-shared`, `lark-contact`, `lark-event`, and `lark-im` skill contracts when resolving identities or diagnosing scopes.
@@ -57,11 +57,11 @@ Disable never force-kills the transport.
 `bin/fm-feishu-transport.sh status` prints a body-free and identifier-free JSON health summary.
 
 The transport executes fixed `lark-cli` argv arrays directly and never interpolates message text into a shell command.
-It first verifies `lark-cli whoami --as bot` against the paired app profile, bot open ID, and optional app-ID fingerprint, then waits for the documented `[event] ready event_key=im.message.receive_v1` stderr marker.
-It preserves body-free drop and backpressure diagnostics privately, reconnects with a bound, and runs overlapping bot-history reconciliation before marking live dispatch healthy.
+It pins every child to the paired `LARKSUITE_CLI_PROFILE`, verifies `lark-cli whoami --as bot` against that profile, bot open ID, and optional app-ID fingerprint, and independently verifies that the bound chat reports `chat_mode=p2p` before waiting for the documented `[event] ready event_key=im.message.receive_v1` stderr marker.
+It preserves body-free drop and backpressure diagnostics privately, reconnects with a bound, and runs overlapping bot-history reconciliation before marking owner- and binding-generation-scoped live dispatch healthy.
 The pre-reconciliation live buffer is capped at 1,000 events and 8 MiB, each consumer line is capped at 256 KiB, durable pending ingress is capped at 10,000 items, and publishing stops when the state filesystem has less than 64 MiB free.
 `FM_FEISHU_MAX_BUFFERED_EVENTS`, `FM_FEISHU_MAX_LIVE_BUFFER_BYTES`, `FM_FEISHU_MAX_CONSUMER_LINE_BYTES`, `FM_FEISHU_MAX_PENDING_INBOUND`, and `FM_FEISHU_MIN_FREE_BYTES` may lower or raise those local operator thresholds.
-Buffer overflow publishes the already buffered events durably, records a body-free diagnostic, and forces overlap reconciliation before resuming; a queue or free-space refusal records one local alert.
+Buffer overflow stages buffered events without assigning ingress order, records a body-free diagnostic, and combines them with ascending overlap history before durable publication; a queue or free-space refusal records one local alert.
 It does not use `--quiet`, download resources, run an Agent, inspect the Pi session, or choose a different session.
 
 The Pi extension starts the transport best-effort when an exact active binding resumes.

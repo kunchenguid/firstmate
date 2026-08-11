@@ -39,20 +39,25 @@ import {
   ackIngress,
   bindPendingDecisionToOutbound,
   bindSession,
+  claimNextIngress,
   claimNextOutbound,
   claimPendingDecisionForOutbound,
+  claimTransportOwner,
   createPairing,
   deterministicChunks,
   disablePairing,
   findInboundByDeliveryRef,
   failOutboundAttempt,
   ingressCounts,
+  markIngressAccepted,
   pathsForHome,
   publishFeishuInbound,
+  readAssistantOutboundIntents,
   receiptOutbound,
   registerAssistantOutbound,
   repairOutboundState,
   registerPendingDecision,
+  reserveInteractiveIngress,
   statusSummary,
   writeTransportHealth,
 } from "./bin/fm-feishu-state.mjs";
@@ -81,7 +86,22 @@ const binding = bindSession(home, {
   headerId: sessionId,
   headerCwd: sessionCwd,
 });
-writeTransportHealth(home, { phase: "healthy", healthy: true });
+const procStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+const processStartToken = procStat.slice(procStat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+const transportNonce = "a".repeat(48);
+assert.equal(claimTransportOwner(home, { nonce: transportNonce, moduleFile: join(process.cwd(), "bin/fm-feishu-transport.mjs"), processStartToken }).ok, true);
+function markHealthy(activeBinding) {
+  writeTransportHealth(home, {
+    phase: "healthy",
+    healthy: true,
+    ownerPid: process.pid,
+    ownerNonce: transportNonce,
+    ownerProcessStartToken: processStartToken,
+    bindingId: activeBinding.binding_id,
+    bindingGeneration: activeBinding.generation,
+  });
+}
+markHealthy(binding);
 
 function context(id = sessionId, file = sessionFile, cwd = sessionCwd) {
   const entries = [];
@@ -181,7 +201,7 @@ async function settle(pi, session, text) {
 }
 
 const session = context();
-const pi = fakePi();
+let pi = fakePi();
 registerFirstmateIngressCoordinator(pi);
 await emit(pi, "session_start", { reason: "startup" }, session.ctx);
 assert.equal(pi.transforms.length, 1, "source badge transformer was not registered");
@@ -286,14 +306,26 @@ const activeOutboxDir = pathsForHome(home).outbox;
 const activeOutboxBackup = `${activeOutboxDir}.registration-retry`;
 renameSync(activeOutboxDir, activeOutboxBackup);
 symlinkSync(activeOutboxBackup, activeOutboxDir);
-await settle(pi, session, "Final response survives registration failure");
-assert(pi.entries.some((entry) => entry.data?.kind === "outbound-registration-degraded"), "outbound registration failure was memory-only");
+await settle(pi, session, "First final response survives registration failure");
+await settle(pi, session, "Second final response survives a later turn");
+assert(pi.entries.some((entry) => entry.data?.kind === "outbound-registration-degraded"), "outbound registration failure did not surface locally");
+assert.equal(readAssistantOutboundIntents(home, { sessionId, bindingId: binding.binding_id, bindingGeneration: binding.generation }).length, 2, "exact failed outbound intents were not durable before reload");
+await emit(pi, "session_shutdown", { reason: "reload" }, session.ctx);
 unlinkSync(activeOutboxDir);
 renameSync(activeOutboxBackup, activeOutboxDir);
+pi = fakePi();
+registerFirstmateIngressCoordinator(pi);
+await emit(pi, "session_start", { reason: "reload" }, session.ctx);
 await new Promise((resolve) => setTimeout(resolve, 320));
-claim = claimNextOutbound(home);
-assert.equal(claim?.outbox.text, "Final response survives registration failure", "settled output was not durably retried after registration recovered");
-receiptOutbound(home, claim, { messageId: "om_retryOut1234", chatId: "oc_chat1234" });
+const recoveredTexts = [];
+for (const messageId of ["om_retryOne1234", "om_retryTwo1234"]) {
+  claim = claimNextOutbound(home);
+  assert(claim, "durable outbound registration intent was not recovered after activation");
+  recoveredTexts.push(claim.outbox.text);
+  receiptOutbound(home, claim, { messageId, chatId: "oc_chat1234" });
+}
+assert.deepEqual(new Set(recoveredTexts), new Set(["First final response survives registration failure", "Second final response survives a later turn"]), "activation recovery lost or replaced an exact settled output");
+assert.equal(readAssistantOutboundIntents(home, { sessionId, bindingId: binding.binding_id, bindingGeneration: binding.generation }).length, 0, "completed registration intents remained pending");
 
 const remoteB = { ...remoteA, event_id: "evt_b", message_id: "om_remoteB1234", content: "remote request", create_time: "2" };
 publishFeishuInbound(home, remoteB);
@@ -302,10 +334,19 @@ const remoteSend = pi.sends.at(-1);
 assert.equal(parseFirstmateIngressMarker(remoteSend.content)?.source, "feishu");
 assert.equal(remoteSend.options?.deliverAs, "followUp", "busy Feishu input did not default to followUp");
 await accept(pi, session, remoteSend);
+const unrelatedLocal = await emit(pi, "input", {
+  text: "unrelated local follow-up must not clear remote authority",
+  images: [],
+  source: "interactive",
+  streamingBehavior: "followUp",
+}, session.ctx);
+const unrelatedTransform = unrelatedLocal.find((result) => result?.action === "transform");
+assert(unrelatedTransform, "unrelated local input was not admitted through the shared coordinator");
+await accept(pi, session, { content: unrelatedTransform.text, options: { deliverAs: "followUp" } });
 const blockedEffect = await emit(pi, "tool_call", {
   toolName: "bash",
   toolCallId: "tool-sensitive-1",
-  input: { command: "rm ordinary-file" },
+  input: { command: "command rm ordinary-file" },
 }, session.ctx);
 assert(blockedEffect.some((result) => result?.block === true), "Feishu protected effect was not blocked");
 const confirmationAlert = pi.entries.findLast((entry) => entry.customType === "fm-feishu-local-alert" && entry.data?.kind === "sensitive-effect-confirmation");
@@ -315,32 +356,40 @@ await pi.commands.get("fm-feishu-confirm").handler("wrong-code", session.ctx);
 const stillBlocked = await emit(pi, "tool_call", {
   toolName: "bash",
   toolCallId: "tool-sensitive-2",
-  input: { command: "rm ordinary-file" },
+  input: { command: "command rm ordinary-file" },
 }, session.ctx);
-assert(stillBlocked.some((result) => result?.block === true), "an unrelated local confirmation unlocked the protected effect");
+assert(stillBlocked.some((result) => result?.block === true), "an unrelated local input or confirmation unlocked the protected effect");
 await pi.commands.get("fm-feishu-confirm").handler(confirmationCode, session.ctx);
 const exactAllowed = await emit(pi, "tool_call", {
   toolName: "bash",
   toolCallId: "tool-sensitive-3",
-  input: { command: "rm ordinary-file" },
+  input: { command: "command rm ordinary-file" },
 }, session.ctx);
 assert(exactAllowed.every((result) => result?.block !== true), "the exact one-time local confirmation did not unlock its matching effect");
 const blockedAgain = await emit(pi, "tool_call", {
   toolName: "bash",
   toolCallId: "tool-sensitive-4",
-  input: { command: "rm ordinary-file" },
+  input: { command: "command rm ordinary-file" },
 }, session.ctx);
 assert(blockedAgain.some((result) => result?.block === true), "exact local confirmation was reusable");
+const remoteC = { ...remoteA, event_id: "evt_c", message_id: "om_remoteC1234", content: "remote response target", create_time: "3" };
+publishFeishuInbound(home, remoteC);
+await new Promise((resolve) => setTimeout(resolve, 320));
+const remoteResponseTarget = pi.sends.at(-1);
+assert.equal(parseFirstmateIngressMarker(remoteResponseTarget.content)?.source, "feishu");
+await accept(pi, session, remoteResponseTarget);
 await settle(pi, session, "Direct final Feishu answer https://example.test/full");
 claim = claimNextOutbound(home);
-assert.equal(claim.outbox.reply_to_message_id, "om_remoteB1234", "Feishu-originated turn did not reply to its exact triggering message");
+assert.equal(claim.outbox.reply_to_message_id, "om_remoteC1234", "Feishu-originated turn did not reply to its exact triggering message");
 assert.equal(claim.outbox.text, "Direct final Feishu answer https://example.test/full", "direct Assistant output was summarized or rewritten");
 receiptOutbound(home, claim, { messageId: "om_remoteOut1234", chatId: "oc_chat1234" });
 
 const pendingBeforeSkips = statusSummary(home).outbound_pending;
 await settle(pi, session, "Captain, shipshape.");
 assert.equal(statusSummary(home).outbound_pending, pendingBeforeSkips, "exact routine response entered the outbox");
+registerPendingDecision(home, { decisionRef: "dec-refused", decisionKey: "private-choice", sessionId });
 await settle(pi, session, "Authorization: Bearer fixed-secret-value-123456");
+assert.equal(claimPendingDecisionForOutbound(home, sessionId, binding.generation), undefined, "refused output left its exact decision available to a later turn");
 assert.equal(statusSummary(home).outbound_pending, pendingBeforeSkips, "secret-like final response was partially transmitted");
 assert(pi.entries.some((entry) => entry.customType === "fm-feishu-local-alert"), "whole-message secret refusal did not raise one local durable alert");
 const alertCount = pi.entries.length;
@@ -358,9 +407,12 @@ assert.equal(statusSummary(home).outbound_pending, pendingBeforeSkips, "purely i
 assert(feishuSensitiveToolReason("bash", { command: "bin/fm-pr-merge.sh task https://example.test/pr/1" }, "feishu")?.includes("local TUI"));
 assert(feishuSensitiveToolReason("bash", { command: "rm ordinary-file" }, "feishu")?.includes("local TUI"));
 assert(feishuSensitiveToolReason("bash", { command: "python3 -c 'import os; os.unlink(\"file\")'" }, "feishu")?.includes("local TUI"));
+assert(feishuSensitiveToolReason("bash", { command: "command rm file" }, "feishu")?.includes("local TUI"));
+assert(feishuSensitiveToolReason("bash", { command: "git push origin --delete branch" }, "feishu")?.includes("local TUI"));
+assert(feishuSensitiveToolReason("bash", { command: "find . -delete" }, "feishu")?.includes("local TUI"));
 assert(feishuSensitiveToolReason("edit", { path: ".pi/settings.json", edits: [] }, "feishu")?.includes("local TUI"));
 assert(feishuSensitiveToolReason("custom_mutator", {}, "feishu")?.includes("local TUI"));
-assert.equal(feishuSensitiveToolReason("bash", { command: "printf safe" }, "feishu"), undefined);
+assert(feishuSensitiveToolReason("bash", { command: "printf safe" }, "feishu")?.includes("local TUI"));
 assert.equal(feishuSensitiveToolReason("bash", { command: "bin/fm-pr-merge.sh x y" }, "tui"), undefined);
 
 const chunks = deterministicChunks("alpha\n\nhttps://example.test/a/complete/url\n\nomega", 36);
@@ -474,9 +526,11 @@ assert.equal(rebound.generation, binding.generation + 1, "explicit rebind did no
 const reboundPi = fakePi();
 registerFirstmateIngressCoordinator(reboundPi);
 await emit(reboundPi, "session_start", { reason: "reload" }, wrongSession.ctx);
-writeTransportHealth(home, { phase: "healthy", healthy: true });
 await new Promise((resolve) => setTimeout(resolve, 80));
-assert(reboundPi.sends.length >= 1, "explicit local rebind did not retarget pending Feishu input");
+assert.equal(reboundPi.sends.length, 0, "stale transport health crossed a new binding generation");
+markHealthy(rebound);
+await new Promise((resolve) => setTimeout(resolve, 320));
+assert(reboundPi.sends.length >= 1, "explicit local rebind did not retarget pending Feishu input after current-owner reconciliation");
 
 // Lock loss fences callbacks and leaves newly received work durable.
 writeFileSync(join(home, "lock-mode"), "other\n");
@@ -532,6 +586,22 @@ malformedRecord.destination_chat_id = "oc_other1234";
 writeFileSync(malformedOutPath, `${JSON.stringify(malformedRecord)}\n`);
 assert.throws(() => claimNextOutbound(malformedHome), /active binding/);
 
+const raceHome = join(home, "direct-reservation-race");
+mkdirSync(join(raceHome, "data"), { recursive: true });
+mkdirSync(join(raceHome, "state"), { recursive: true });
+createPairing(raceHome, { botOpenId: "ou_bot1234", allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
+const raceSessionDir = join(raceHome, "session");
+mkdirSync(raceSessionDir);
+const raceSessionFile = join(raceSessionDir, "s.jsonl");
+writeFileSync(raceSessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: raceSessionDir })}\n`);
+const raceBinding = bindSession(raceHome, { sessionId, sessionFile: raceSessionFile, sessionCwd: raceSessionDir, headerId: sessionId, headerCwd: raceSessionDir });
+const directReservation = reserveInteractiveIngress(raceHome, { text: "/skill:demo direct reservation", sessionId, bindingId: raceBinding.binding_id, bindingGeneration: raceBinding.generation });
+assert.equal(directReservation.status, "reserved");
+publishFeishuInbound(raceHome, { ...remoteA, event_id: "evt_race_remote", message_id: "om_raceRemote1234", content: "later remote", create_time: "9" });
+assert.equal(claimNextIngress(raceHome, { sessionId, bindingId: raceBinding.binding_id, bindingGeneration: raceBinding.generation }), undefined, "later remote ingress overtook an unaccepted direct local reservation");
+markIngressAccepted(raceHome, directReservation.event.delivery_ref, { sessionId, bindingGeneration: raceBinding.generation });
+assert.equal(claimNextIngress(raceHome, { sessionId, bindingId: raceBinding.binding_id, bindingGeneration: raceBinding.generation })?.event.message_id, "om_raceRemote1234", "accepted direct reservation did not release the shared coordinator");
+
 const retryHome = join(home, "retry-window");
 mkdirSync(join(retryHome, "data"), { recursive: true });
 mkdirSync(join(retryHome, "state"), { recursive: true });
@@ -572,6 +642,43 @@ assert.equal(repairOutboundState(repairHome), 1, "receipt correlation-map crash 
 
 console.log("ok - current-Pi Feishu ingress, persistence ordering, fences, egress recovery, and private-state validation");
 JS
+
+CONCURRENT_HOME="$HOME_DIR/direct-reservation-race"
+WORKER_PIDS=()
+for worker in 1 2 3 4; do
+  FM_HOME="$CONCURRENT_HOME" WORKER="$worker" node --input-type=module <<'JS' &
+import { publishFeishuInbound } from "./bin/fm-feishu-state.mjs";
+for (let index = 0; index < 10; index += 1) {
+  const suffix = `${process.env.WORKER}${String(index).padStart(3, "0")}`;
+  const result = publishFeishuInbound(process.env.FM_HOME, {
+    type: "im.message.receive_v1",
+    event_id: `evt_concurrent_${suffix}`,
+    message_id: `om_concurrent${suffix}`,
+    sender_id: "ou_captain1234",
+    sender_type: "user",
+    chat_id: "oc_chat1234",
+    chat_type: "p2p",
+    message_type: "text",
+    content: `concurrent ${suffix}`,
+    create_time: String(1000 + index),
+  });
+  if (result.status !== "published") throw new Error(JSON.stringify(result));
+}
+JS
+  WORKER_PIDS+=("$!")
+done
+(
+  for _ in $(seq 1 20); do
+    FM_HOME="$CONCURRENT_HOME" node bin/fm-feishu-state.mjs status --public >/dev/null
+  done
+) &
+READER_PID=$!
+wait "$READER_PID" || fail "concurrent atomic publication exposed a temporary artifact to state readers"
+for worker_pid in "${WORKER_PIDS[@]}"; do
+  wait "$worker_pid" || fail "concurrent atomic publication failed"
+done
+FM_HOME="$CONCURRENT_HOME" node bin/fm-feishu-state.mjs status --public >/dev/null \
+  || fail "concurrent atomic publication left invalid durable state"
 
 DISABLED_BOOTSTRAP=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 bash bin/fm-bootstrap.sh)
 printf '%s\n' "$DISABLED_BOOTSTRAP" | grep -q '^FEISHU:' \
@@ -636,11 +743,14 @@ set -u
 {
   printf 'ARGV'
   for arg in "$@"; do printf '\t%s' "$arg"; done
-  printf '\n'
+  printf '\nPROFILE\t%s\n' "${LARKSUITE_CLI_PROFILE:-missing}"
 } >> "${FM_FAKE_LOG:?}"
 case "${1:-} ${2:-}" in
   'whoami --as')
-    printf '{"ok":true,"data":{"profile":"%s","open_id":"ou_bot1234","app_id":"cli_fake_app"}}\n' "${FM_FAKE_PROFILE:-default}"
+    printf '{"ok":true,"data":{"profile":"%s","open_id":"ou_bot1234","app_id":"cli_fake_app"}}\n' "${FM_FAKE_PROFILE:-${LARKSUITE_CLI_PROFILE}}"
+    ;;
+  'im chats')
+    printf '{"ok":true,"data":{"chat_id":"oc_chat1234","chat_mode":"%s","chat_status":"normal"}}\n' "${FM_FAKE_CHAT_MODE:-p2p}"
     ;;
   'event consume')
     count=0
@@ -670,13 +780,24 @@ case "${1:-} ${2:-}" in
         printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_later1234","sender":{"id":"ou_captain1234","type":"user"},"chat_id":"oc_chat1234","chat_type":"p2p","msg_type":"text","content":"later","create_time":"20","deleted":false},{"message_id":"om_earlier1234","sender":{"id":"ou_captain1234","type":"user"},"chat_id":"oc_chat1234","chat_type":"p2p","msg_type":"text","content":"earlier","create_time":"10","deleted":false}],"has_more":false},"meta":{"pagination":{"complete":true}}}'
         ;;
       *)
-        printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_history1234","sender":{"id":"ou_captain1234","type":"user"},"chat_id":"oc_chat1234","chat_type":"p2p","msg_type":"text","content":"history","create_time":"10","deleted":false},{"message_id":"om_liveOne1234","sender":{"id":"ou_captain1234","type":"user"},"chat_id":"oc_chat1234","chat_type":"p2p","msg_type":"text","content":"live one recovered","create_time":"20","deleted":false}],"has_more":false},"meta":{"pagination":{"complete":true}}}'
+        printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_history1234","sender":{"id":"ou_captain1234","type":"user"},"chat_id":"oc_chat1234","msg_type":"text","content":"history","create_time":"10","deleted":false},{"message_id":"om_liveOne1234","sender":{"id":"ou_captain1234","type":"user"},"chat_id":"oc_chat1234","msg_type":"text","content":"live one recovered","create_time":"20","deleted":false}],"has_more":false},"meta":{"pagination":{"complete":true}}}'
         ;;
     esac
     ;;
   'im +messages-send'|'im +messages-reply')
     if ! mkdir "${FM_FAKE_SEND_LOCK:-${FM_FAKE_LOG}.send-lock}" 2>/dev/null; then
       : > "${FM_FAKE_OVERLAP_MARK:-${FM_FAKE_LOG}.overlap}"
+    fi
+    if [ "${FM_FAKE_RATE_LIMIT_ONCE:-0}" = 1 ] && [ ! -f "${FM_FAKE_RATE_LIMIT_MARK:?}" ]; then
+      node -e 'require("fs").writeFileSync(process.argv[1],String(Date.now()))' "$FM_FAKE_RATE_LIMIT_MARK"
+      rmdir "${FM_FAKE_SEND_LOCK:-${FM_FAKE_LOG}.send-lock}" 2>/dev/null || true
+      printf '%s\n' '{"ok":false,"error":{"type":"rate_limit","subtype":"limited","retry_after_seconds":1}}' >&2
+      exit 2
+    fi
+    if [ "${FM_FAKE_RATE_LIMIT_ONCE:-0}" = 1 ]; then
+      now=$(node -e 'process.stdout.write(String(Date.now()))')
+      started=$(cat "$FM_FAKE_RATE_LIMIT_MARK")
+      [ $((now - started)) -ge 900 ] || : > "${FM_FAKE_EARLY_RETRY_MARK:?}"
     fi
     if [ "${FM_FAKE_AMBIGUOUS_ONCE:-0}" = 1 ] && [ ! -f "${FM_FAKE_AMBIGUOUS_MARK:?}" ]; then
       : > "$FM_FAKE_AMBIGUOUS_MARK"
@@ -704,7 +825,7 @@ chmod +x "$FAKE_LARK"
 FM_HOME="$TRANSPORT_HOME" SESSION_FILE="$TRANSPORT_FILE" SESSION_DIR="$TRANSPORT_SESSION" SID="$SID" TOUCH_SENTINEL="$TOUCH_SENTINEL" node --input-type=module <<'JS'
 import { bindSession, createPairing, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const home = process.env.FM_HOME;
-createPairing(home, { botOpenId: "ou_bot1234", allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
+createPairing(home, { appProfile: "fixture-profile", botOpenId: "ou_bot1234", allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
 const binding = bindSession(home, { sessionId: process.env.SID, sessionFile: process.env.SESSION_FILE, sessionCwd: process.env.SESSION_DIR, headerId: process.env.SID, headerCwd: process.env.SESSION_DIR });
 const result = registerAssistantOutbound(home, {
   text: `literal $(touch ${process.env.TOUCH_SENTINEL}) https://example.test/kept`,
@@ -744,6 +865,16 @@ fi
 [ "$mismatch_status" -ne 0 ] || fail "transport accepted a bot app/profile mismatch"
 grep -Fq $'ARGV\tevent\tconsume' "$FAKE_LOG" \
   && fail "transport opened an event consumer before exact bot identity verification"
+: > "$FAKE_LOG"
+if FM_HOME="$TRANSPORT_HOME" \
+  FM_FEISHU_LARK_CLI="$FAKE_LARK" \
+  FM_FAKE_LOG="$FAKE_LOG" \
+  FM_FAKE_CHAT_MODE=group \
+  node bin/fm-feishu-transport.mjs run --once >"$TMP_ROOT/group-chat.out" 2>"$TMP_ROOT/group-chat.err"; then
+  fail "transport accepted a configured group chat"
+fi
+grep -Fq $'ARGV\tevent\tconsume' "$FAKE_LOG" \
+  && fail "transport consumed events before independently verifying P2P chat mode"
 
 HISTORY_HOME="$TMP_ROOT/history-home"
 HISTORY_SESSION="$TMP_ROOT/history-session"
@@ -793,6 +924,16 @@ bash bin/fm-feishu-transport.sh run --max-cycles 3
 [ ! -e "$TOUCH_SENTINEL" ] || fail "transport interpolated Assistant text into a shell"
 [ "$(find "$TRANSPORT_HOME/state/feishu/inbox" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 3 ] \
   || fail "history overlap, reconnect, and message_id dedupe did not converge to three unique events"
+FM_HOME="$TRANSPORT_HOME" node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+const dir = join(process.env.FM_HOME, "state", "feishu", "inbox");
+const events = readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))).sort((a, b) => a.ingress_seq - b.ingress_seq);
+assert.deepEqual(events.map((event) => event.message_id), ["om_history1234", "om_liveOne1234", "om_liveTwo1234"], "staged live events overtook recovered history");
+JS
+[ "$(awk -F '\t' '$1=="PROFILE" && $2!="fixture-profile" { bad++ } END { print bad+0 }' "$FAKE_LOG")" -eq 0 ] \
+  || fail "a lark-cli child escaped the paired app profile"
 [ -n "$(find "$TRANSPORT_HOME/state/feishu/transport/diagnostics" -type f -name '*.json' -print -quit)" ] \
   || fail "drop/backpressure diagnostic was not preserved"
 SEND_KEYS=$(awk -F '\t' '$2=="im" && ($3=="+messages-send" || $3=="+messages-reply") { for(i=1;i<=NF;i++) if($i=="--idempotency-key") print $(i+1) }' "$FAKE_LOG")
@@ -802,6 +943,27 @@ SEND_KEYS=$(awk -F '\t' '$2=="im" && ($3=="+messages-send" || $3=="+messages-rep
 grep -Fq 'literal $(touch ' "$FAKE_LOG" || fail "transport did not preserve literal Assistant text in argv"
 [ "$(FM_HOME="$TRANSPORT_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).outbound_pending)))')" -eq 0 ] \
   || fail "successful retry did not publish a durable outbound receipt"
+
+FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
+import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
+const binding = readActiveBinding(process.env.FM_HOME);
+const result = registerAssistantOutbound(process.env.FM_HOME, { text: "server delayed retry", source: "tui", sourceRef: `in_${"2".repeat(24)}`, sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
+if (result.status !== "registered") throw new Error(JSON.stringify(result));
+JS
+rm -f "$FAKE_COUNT" "$TMP_ROOT/rate-limit-mark" "$TMP_ROOT/early-retry"
+FM_HOME="$TRANSPORT_HOME" \
+FM_FEISHU_LARK_CLI="$FAKE_LARK" \
+FM_FAKE_LOG="$FAKE_LOG" \
+FM_FAKE_COUNT="$FAKE_COUNT" \
+FM_FAKE_HOLD_SECONDS=1.4 \
+FM_FAKE_RATE_LIMIT_ONCE=1 \
+FM_FAKE_RATE_LIMIT_MARK="$TMP_ROOT/rate-limit-mark" \
+FM_FAKE_EARLY_RETRY_MARK="$TMP_ROOT/early-retry" \
+FM_FEISHU_OUTBOX_POLL_MS=20 \
+bash bin/fm-feishu-transport.sh run --once
+[ ! -e "$TMP_ROOT/early-retry" ] || fail "retry_after_seconds was shortened before retry"
+[ "$(FM_HOME="$TRANSPORT_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).outbound_pending)))')" -eq 0 ] \
+  || fail "server-delayed retry did not settle"
 
 rm -f "$FAKE_COUNT" "${FAKE_LOG}.overlap" "${FAKE_LOG}.send-lock"
 FM_HOME="$TRANSPORT_HOME" \

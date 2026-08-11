@@ -6,6 +6,7 @@ export const INBOUND_ACK_SCHEMA: string;
 export const OUTBOUND_SCHEMA: string;
 export const OUTBOUND_LEDGER_SCHEMA: string;
 export const OUTBOUND_RECEIPT_SCHEMA: string;
+export const OUTBOUND_INTENT_SCHEMA: string;
 export const TRANSPORT_HEALTH_SCHEMA: string;
 export const DECISION_SCHEMA: string;
 export const DEFAULT_MAX_INBOUND_BYTES: number;
@@ -94,11 +95,16 @@ export interface StatePaths {
   stateRoot: string;
   inbox: string;
   inboundLedger: string;
+  inboundEventIds: string;
   inboundAcks: string;
+  inboundPending: string;
+  inboundPendingCount: string;
   outbox: string;
   outboundLedger: string;
   outboundReceipts: string;
   outboundMessageMap: string;
+  outboundPending: string;
+  outboundRegistrationIntents: string;
   pendingDecisions: string;
   attemptsIn: string;
   attemptsOut: string;
@@ -107,6 +113,7 @@ export interface StatePaths {
   transport: string;
   health: string;
   owner: string;
+  stagedEvents: string;
   liveSession: string;
   sequence: string;
 }
@@ -228,6 +235,41 @@ export interface OutboundClaim {
   ledger: Record<string, unknown> & { attempt_id: string };
   chunk: { index: number; count: number; chunk: string; chunk_hash: string; idempotency_key: string };
 }
+export interface OutboundRegistrationIntent {
+  schema: string;
+  intent_id: string;
+  source: "feishu" | "tui" | "internal";
+  source_ref: string;
+  session_id: string;
+  binding_id: string;
+  binding_generation: number;
+  reply_to_message_id: string | null;
+  decision_captured: boolean;
+  decision_ref: string | null;
+  decision_key: string | null;
+  text: string;
+  text_hash: string;
+  created_at: string;
+}
+export interface OutboundRegistrationIntentCandidate {
+  name: string;
+  record: OutboundRegistrationIntent;
+}
+export function persistAssistantOutboundIntent(home: string, input: {
+  text: string;
+  source: "feishu" | "tui" | "internal";
+  sourceRef: string;
+  sessionId: string;
+  bindingGeneration: number;
+  replyTo?: string | null;
+}): OutboundRegistrationIntent;
+export function readAssistantOutboundIntents(home: string, fence: {
+  sessionId: string;
+  bindingId: string;
+  bindingGeneration: number;
+}): OutboundRegistrationIntentCandidate[];
+export function bindAssistantOutboundIntentDecision(home: string, candidate: OutboundRegistrationIntentCandidate, decision: PendingDecisionCandidate | undefined): OutboundRegistrationIntentCandidate;
+export function completeAssistantOutboundIntent(home: string, candidate: OutboundRegistrationIntentCandidate): boolean;
 export function repairOutboundState(home: string): number;
 export function claimNextOutbound(home: string, options?: { nowMs?: number }): OutboundClaim | undefined;
 export function failOutboundAttempt(home: string, claim: OutboundClaim, error: unknown, options?: {
@@ -248,8 +290,10 @@ export function registerPendingDecision(home: string, input: {
   decisionKey: string;
   sessionId: string;
 }): Record<string, unknown>;
+export function findPendingDecisionForOutbound(home: string, decisionRef: string, decisionKey: string, sessionId: string, bindingGeneration: number): PendingDecisionCandidate;
 export function claimPendingDecisionForOutbound(home: string, sessionId: string, bindingGeneration: number): PendingDecisionCandidate | undefined;
 export function bindPendingDecisionToOutbound(home: string, candidate: PendingDecisionCandidate | undefined, eventId: string): void;
+export function finishPendingDecisionForOutbound(home: string, candidate: PendingDecisionCandidate | undefined, outcome: string): void;
 export function claimTransportOwner(home: string, owner: {
   nonce: string;
   moduleFile: string;
@@ -258,7 +302,11 @@ export function claimTransportOwner(home: string, owner: {
 export function readTransportOwner(home: string): Record<string, unknown> | undefined;
 export function releaseTransportOwner(home: string, nonce: string): boolean;
 export function recordTransportDiagnostic(home: string, kind: string, line: string): string;
+export function stageTransportEvents(home: string, events: Array<Record<string, unknown>>, options?: { maxEvents?: number; maxBytes?: number }): number;
+export function readStagedTransportEvents(home: string): Array<{ name: string; event: Record<string, unknown> }>;
+export function clearStagedTransportEvents(home: string, records: Array<{ name: string }>): number;
 export function writeTransportHealth(home: string, patch: Record<string, unknown>): Record<string, unknown>;
 export function readTransportHealth(home: string): Record<string, unknown> | undefined;
+export function transportHealthAllowsDispatch(home: string, binding: BindingRecord): boolean;
 export function statusSummary(home: string): Record<string, unknown>;
 export function publicStatusSummary(home: string): Record<string, unknown>;

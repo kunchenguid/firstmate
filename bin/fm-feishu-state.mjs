@@ -36,6 +36,7 @@ export const INBOUND_ACK_SCHEMA = "fm-feishu-pi-ack.v1";
 export const OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound.v1";
 export const OUTBOUND_LEDGER_SCHEMA = "fm-feishu-outbound-ledger.v1";
 export const OUTBOUND_RECEIPT_SCHEMA = "fm-feishu-outbound-receipt.v1";
+export const OUTBOUND_INTENT_SCHEMA = "fm-feishu-outbound-registration-intent.v1";
 export const TRANSPORT_HEALTH_SCHEMA = "fm-feishu-transport-health.v1";
 export const DECISION_SCHEMA = "fm-feishu-pending-decision.v1";
 export const DEFAULT_MAX_INBOUND_BYTES = 64 * 1024;
@@ -113,7 +114,9 @@ function fsyncDirectory(path) {
 function atomicWrite(path, bytes, mode = 0o600) {
   privateDir(dirname(path));
   if (existsSync(path)) safeFile(path);
-  const temp = join(dirname(path), `.${sha(path).slice(0, 10)}.${process.pid}.${randomBytes(5).toString("hex")}.tmp`);
+  const tempDir = join(dirname(dirname(path)), ".fm-feishu-atomic");
+  privateDir(tempDir);
+  const temp = join(tempDir, `.${sha(path).slice(0, 10)}.${process.pid}.${randomBytes(5).toString("hex")}.tmp`);
   let fd;
   try {
     fd = openSync(temp, "wx", mode);
@@ -217,11 +220,14 @@ export function pathsForHome(home) {
     inboundLedger: join(stateRoot, "inbound-ledger"),
     inboundEventIds: join(stateRoot, "inbound-event-ids"),
     inboundAcks: join(stateRoot, "inbound-acks"),
+    inboundPending: join(stateRoot, "inbound-pending"),
     inboundPendingCount: join(stateRoot, "inbound-pending-count"),
     outbox: join(stateRoot, "outbox"),
     outboundLedger: join(stateRoot, "outbound-ledger"),
     outboundReceipts: join(stateRoot, "outbound-receipts"),
     outboundMessageMap: join(stateRoot, "outbound-message-map"),
+    outboundPending: join(stateRoot, "outbound-pending"),
+    outboundRegistrationIntents: join(stateRoot, "outbound-registration-intents"),
     pendingDecisions: join(stateRoot, "pending-decisions"),
     attemptsIn: join(stateRoot, "attempts", "in"),
     attemptsOut: join(stateRoot, "attempts", "out"),
@@ -230,6 +236,7 @@ export function pathsForHome(home) {
     transport: join(stateRoot, "transport"),
     health: join(stateRoot, "transport", "health.json"),
     owner: join(stateRoot, "transport", "owner.json"),
+    stagedEvents: join(stateRoot, "transport", "staged-events"),
     liveSession: join(stateRoot, "live-session"),
     sequence: join(stateRoot, "sequence"),
   };
@@ -247,10 +254,13 @@ export function ensurePrivateLayout(home) {
     paths.inboundLedger,
     paths.inboundEventIds,
     paths.inboundAcks,
+    paths.inboundPending,
     paths.outbox,
     paths.outboundLedger,
     paths.outboundReceipts,
     paths.outboundMessageMap,
+    paths.outboundPending,
+    paths.outboundRegistrationIntents,
     paths.pendingDecisions,
     join(paths.stateRoot, "attempts"),
     paths.attemptsIn,
@@ -258,6 +268,7 @@ export function ensurePrivateLayout(home) {
     paths.quarantine,
     paths.alerts,
     paths.transport,
+    paths.stagedEvents,
     paths.liveSession,
   ]) privateDir(path);
   if (!existsSync(paths.sequence)) atomicWrite(paths.sequence, "0\n");
@@ -265,7 +276,10 @@ export function ensurePrivateLayout(home) {
     let pending = 0;
     for (const name of safeJsonNames(paths.inboundLedger)) {
       const ledger = readJson(join(paths.inboundLedger, name));
-      if (ledger.state === "pending" || ledger.state === "dispatching") pending += 1;
+      if (ledger.state === "pending" || ledger.state === "dispatching") {
+        writeInboundPendingIndex(paths, name, ledger);
+        pending += 1;
+      }
     }
     atomicWrite(paths.inboundPendingCount, `${pending}\n`);
   }
@@ -451,15 +465,34 @@ function validateOutboundReceipt(receipt) {
   return receipt;
 }
 
+function validateOutboundIntent(intent) {
+  if (intent.schema !== OUTBOUND_INTENT_SCHEMA || !new Set(["feishu", "tui", "internal"]).has(intent.source)) throw new Error("invalid Feishu outbound registration intent");
+  requireString(intent.intent_id, "outbound intent id", /^reg_[a-f0-9]{40}$/);
+  requireString(intent.source_ref, "outbound intent source ref", DELIVERY_REF);
+  requireString(intent.session_id, "outbound intent session", SESSION_ID);
+  requireString(intent.binding_id, "outbound intent binding", /^bind_[a-f0-9]{24}$/);
+  requireSafeInteger(intent.binding_generation, "outbound intent generation", { min: 1 });
+  requireNullableString(intent.reply_to_message_id, "outbound intent reply", MESSAGE_ID);
+  if (typeof intent.decision_captured !== "boolean") throw new Error("invalid Feishu outbound intent decision snapshot");
+  requireNullableString(intent.decision_ref, "outbound intent decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
+  requireNullableString(intent.decision_key, "outbound intent decision key", /^[A-Za-z0-9._:-]{1,160}$/);
+  if ((intent.decision_ref === null) !== (intent.decision_key === null) || (!intent.decision_captured && intent.decision_ref !== null)) throw new Error("partial Feishu outbound intent decision identity");
+  if (typeof intent.text !== "string" || intent.text_hash !== `sha256:${sha(intent.text)}`) throw new Error("invalid Feishu outbound intent text");
+  requireIso(intent.created_at, "outbound intent creation time");
+  return intent;
+}
+
 function validateDecision(record) {
   if (record.schema !== DECISION_SCHEMA) throw new Error("invalid Feishu pending decision schema");
   requireString(record.decision_ref, "decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
   requireString(record.decision_key, "decision key", /^[A-Za-z0-9._:-]{1,160}$/);
   requireString(record.session_id, "decision session", SESSION_ID);
   requireSafeInteger(record.binding_generation, "decision generation", { min: 1 });
-  if (!new Set(["awaiting-outbound", "sent-to-outbox", "reply-received"]).has(record.state)) throw new Error("invalid Feishu decision state");
+  if (!new Set(["awaiting-outbound", "sent-to-outbox", "reply-received", "outbound-skipped", "outbound-refused"]).has(record.state)) throw new Error("invalid Feishu decision state");
   requireIso(record.registered_at, "decision registration time");
   requireNullableString(record.outbound_event_id, "decision outbound event", OUTBOUND_EVENT_ID);
+  if (record.terminal_at !== undefined) requireIso(record.terminal_at, "decision terminal time");
+  if (record.outbound_outcome !== undefined) requireString(record.outbound_outcome, "decision outbound outcome", /^[a-z-]{1,80}$/);
   return record;
 }
 
@@ -488,7 +521,28 @@ function validateRecordAtPath(path, record) {
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbound receipt filename identity mismatch");
   }
   else if (parent === "pending-decisions") validateDecision(record);
-  else if (parent === "outbound-message-map") {
+  else if (parent === "outbound-registration-intents") {
+    validateOutboundIntent(record);
+    if (path.split(/[\\/]/).pop() !== `${sha(record.intent_id)}.json`) throw new Error("Feishu outbound intent filename identity mismatch");
+  } else if (parent === "inbound-pending") {
+    if (record.schema !== "fm-feishu-inbound-pending.v1") throw new Error("invalid Feishu inbound pending index");
+    requireString(record.message_id, "inbound pending message", /^(?:om_|local_|internal_)[A-Za-z0-9_-]{4,128}$/);
+    requireString(record.delivery_ref, "inbound pending delivery", DELIVERY_REF);
+    requireSafeInteger(record.ingress_seq, "inbound pending sequence", { min: 1 });
+    requireIso(record.created_at, "inbound pending creation time");
+    if (path.split(/[\\/]/).pop() !== inboundFilename(record.message_id)) throw new Error("Feishu inbound pending filename identity mismatch");
+  } else if (parent === "outbound-pending") {
+    if (record.schema !== "fm-feishu-outbound-pending.v1") throw new Error("invalid Feishu outbound pending index");
+    requireString(record.event_id, "outbound pending event", OUTBOUND_EVENT_ID);
+    requireIso(record.created_at, "outbound pending creation time");
+    if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbound pending filename identity mismatch");
+  } else if (parent === "staged-events") {
+    if (record.schema !== "fm-feishu-staged-event.v1" || !record.event || typeof record.event !== "object" || Array.isArray(record.event)) throw new Error("invalid Feishu staged event");
+    requireString(record.event_hash, "staged event hash", RECORD_HASH);
+    if (record.event_hash !== `sha256:${sha(JSON.stringify(record.event))}`) throw new Error("Feishu staged event hash mismatch");
+    requireIso(record.recorded_at, "staged event time");
+    if (path.split(/[\\/]/).pop() !== `${record.event_hash.slice(7)}.json`) throw new Error("Feishu staged event filename identity mismatch");
+  } else if (parent === "outbound-message-map") {
     if (record.schema !== "fm-feishu-outbound-message-map.v1") throw new Error("invalid Feishu outbound message map schema");
     requireString(record.message_id, "outbound map message", MESSAGE_ID);
     if (path.split(/[\\/]/).pop() !== `${sha(record.message_id)}.json`) throw new Error("Feishu outbound map filename identity mismatch");
@@ -528,6 +582,14 @@ function validateRecordAtPath(path, record) {
   } else if (path.endsWith("/transport/health.json")) {
     if (record.schema !== TRANSPORT_HEALTH_SCHEMA || !new Set(["starting", "reconciling", "healthy", "degraded", "stopped"]).has(record.phase) || typeof record.healthy !== "boolean") throw new Error("invalid Feishu transport health");
     if (record.owner_pid !== null) requireSafeInteger(record.owner_pid, "transport health owner", { min: 2 });
+    requireNullableString(record.owner_nonce, "transport health nonce", /^[a-f0-9]{24,128}$/);
+    requireNullableString(record.owner_process_start_token, "transport health process start", /^[0-9]+$/, 64);
+    requireNullableString(record.binding_id, "transport health binding", /^bind_[a-f0-9]{24}$/);
+    if (record.binding_generation !== null) requireSafeInteger(record.binding_generation, "transport health generation", { min: 1 });
+    const ownerPartial = [record.owner_pid, record.owner_nonce, record.owner_process_start_token].filter((value) => value !== null).length;
+    const bindingPartial = [record.binding_id, record.binding_generation].filter((value) => value !== null).length;
+    if ((ownerPartial !== 0 && ownerPartial !== 3) || (bindingPartial !== 0 && bindingPartial !== 2)) throw new Error("partial Feishu transport health identity");
+    if (record.healthy && (record.phase !== "healthy" || ownerPartial !== 3 || bindingPartial !== 2)) throw new Error("unfenced healthy Feishu transport state");
     requireSafeInteger(record.reconnects, "transport reconnect count");
     requireSafeInteger(record.drop_diagnostics, "transport drop count");
     for (const [key, label] of [["last_ready_at", "ready"], ["last_reconcile_at", "reconcile"]]) if (record[key] !== null) requireIso(record[key], `transport ${label} time`);
@@ -741,6 +803,7 @@ function retargetPendingIngressLocked(paths, binding) {
         superseded_at: nowIso(),
         last_error: "local or internal input belongs to the previous Pi session",
       });
+      removeInboundPendingIndex(paths, name);
       adjustInboundPendingCount(paths, -1);
       continue;
     }
@@ -765,6 +828,40 @@ function safeJsonNames(path) {
     safeFile(join(path, name));
   }
   return names.sort();
+}
+
+function removeIndexedFile(path) {
+  if (!existsSync(path)) return false;
+  safeFile(path);
+  unlinkSync(path);
+  fsyncDirectory(dirname(path));
+  return true;
+}
+
+function writeInboundPendingIndex(paths, name, ledger) {
+  atomicJson(join(paths.inboundPending, name), {
+    schema: "fm-feishu-inbound-pending.v1",
+    message_id: ledger.message_id,
+    delivery_ref: ledger.delivery_ref,
+    ingress_seq: ledger.ingress_seq,
+    created_at: ledger.created_at,
+  });
+}
+
+function removeInboundPendingIndex(paths, name) {
+  return removeIndexedFile(join(paths.inboundPending, name));
+}
+
+function writeOutboundPendingIndex(paths, name, outbox) {
+  atomicJson(join(paths.outboundPending, name), {
+    schema: "fm-feishu-outbound-pending.v1",
+    event_id: outbox.event_id,
+    created_at: outbox.created_at,
+  });
+}
+
+function removeOutboundPendingIndex(paths, name) {
+  return removeIndexedFile(join(paths.outboundPending, name));
 }
 
 function quarantine(paths, kind, identity, data) {
@@ -1030,6 +1127,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
     };
     atomicJson(join(paths.inbox, filename), event);
     atomicJson(join(paths.inboundLedger, filename), ledger);
+    writeInboundPendingIndex(paths, filename, ledger);
     adjustInboundPendingCount(paths, 1);
     recordInboundEventId(paths, raw.event_id, messageId, deliveryRef);
     if (decision) {
@@ -1104,6 +1202,7 @@ function enqueueLocalIngressLocked(paths, input, { direct = false } = {}) {
   };
   atomicJson(join(paths.inbox, filename), event);
   atomicJson(join(paths.inboundLedger, filename), ledger);
+  writeInboundPendingIndex(paths, filename, ledger);
   adjustInboundPendingCount(paths, 1);
   if (direct) {
     const attemptDir = join(paths.attemptsIn, filename.replace(/\.json$/, ""));
@@ -1129,7 +1228,7 @@ export function enqueueLocalIngress(home, input) {
 export function reserveInteractiveIngress(home, input) {
   const paths = ensurePrivateLayout(home);
   return withLock(paths, "inbound-state", () => {
-    for (const name of safeJsonNames(paths.inboundLedger)) {
+    for (const name of safeJsonNames(paths.inboundPending)) {
       const ledger = readJson(join(paths.inboundLedger, name));
       if ((ledger.state === "pending" || ledger.state === "dispatching") && ledger.accepted_at === undefined) {
         return { status: "blocked" };
@@ -1184,6 +1283,7 @@ export function repairInboundLedgers(home) {
       repaired += 1;
     }
     let pending = 0;
+    const indexed = new Set(safeJsonNames(paths.inboundPending));
     for (const name of safeJsonNames(paths.inboundLedger)) {
       const ledgerPath = join(paths.inboundLedger, name);
       let ledger = requireSchema(readJson(ledgerPath), INBOUND_LEDGER_SCHEMA, "inbound ledger");
@@ -1196,7 +1296,18 @@ export function repairInboundLedgers(home) {
         atomicJson(ledgerPath, ledger);
         repaired += 1;
       }
-      if (ledger.state === "pending" || ledger.state === "dispatching") pending += 1;
+      if (ledger.state === "pending" || ledger.state === "dispatching") {
+        writeInboundPendingIndex(paths, name, ledger);
+        indexed.delete(name);
+        pending += 1;
+      } else if (removeInboundPendingIndex(paths, name)) {
+        indexed.delete(name);
+        repaired += 1;
+      }
+    }
+    for (const name of indexed) {
+      removeInboundPendingIndex(paths, name);
+      repaired += 1;
     }
     atomicWrite(paths.inboundPendingCount, `${pending}\n`);
     return repaired;
@@ -1213,24 +1324,39 @@ export function claimNextIngress(home, fence, options = {}) {
     assertConfigurationIdentity(paths, pairing, binding);
     const now = Date.now();
     const candidates = [];
-    for (const name of safeJsonNames(paths.inboundLedger)) {
+    let unacceptedDispatch = false;
+    for (const name of safeJsonNames(paths.inboundPending)) {
+      const marker = readJson(join(paths.inboundPending, name));
       const path = join(paths.inboundLedger, name);
       let ledger = requireSchema(readJson(path), INBOUND_LEDGER_SCHEMA, "inbound ledger");
+      if (marker.message_id !== ledger.message_id || marker.delivery_ref !== ledger.delivery_ref || marker.ingress_seq !== ledger.ingress_seq) throw new Error("Feishu inbound pending index mismatch");
       const ackRaw = readJson(join(paths.inboundAcks, name), { optional: true });
       const ack = ackRaw ? requireSchema(ackRaw, INBOUND_ACK_SCHEMA, "inbound ACK") : undefined;
       if (ack) {
-        if (ledger.state !== "delivered") atomicJson(path, { ...ledger, state: "delivered", claim_generation: null, lease_until_ms: null, delivered_at: ack.persisted_at });
+        if (ledger.state !== "delivered") {
+          atomicJson(path, { ...ledger, state: "delivered", claim_generation: null, lease_until_ms: null, delivered_at: ack.persisted_at });
+          adjustInboundPendingCount(paths, -1);
+        }
+        removeInboundPendingIndex(paths, name);
         continue;
       }
       if (ledger.state === "dispatching" && Number(ledger.lease_until_ms ?? 0) <= now) {
         ledger = { ...ledger, state: "pending", claim_generation: null, lease_until_ms: null, last_error: "expired dispatch lease recovered" };
         atomicJson(path, ledger);
       }
-      if (ledger.state !== "pending") continue;
+      if (ledger.state === "dispatching") {
+        if (ledger.accepted_at === undefined) unacceptedDispatch = true;
+        continue;
+      }
+      if (ledger.state !== "pending") {
+        removeInboundPendingIndex(paths, name);
+        continue;
+      }
       if (ledger.target_session_id && ledger.target_session_id !== fence.sessionId) continue;
       if (ledger.binding_generation !== fence.bindingGeneration || ledger.binding_id !== fence.bindingId) continue;
       candidates.push({ name, path, ledger });
     }
+    if (unacceptedDispatch) return undefined;
     candidates.sort((a, b) => Number(a.ledger.ingress_seq) - Number(b.ledger.ingress_seq) || a.name.localeCompare(b.name));
     const candidate = candidates[0];
     if (!candidate) return undefined;
@@ -1316,6 +1442,7 @@ export function ackIngress(home, deliveryRef, session) {
       };
       atomicJson(join(paths.inboundAcks, name), ack);
       atomicJson(ledgerPath, { ...ledger, state: "delivered", claim_generation: null, lease_until_ms: null, delivered_at: ack.persisted_at });
+      removeInboundPendingIndex(paths, name);
       if (ledger.state !== "delivered") adjustInboundPendingCount(paths, -1);
       return ack;
     }
@@ -1373,7 +1500,8 @@ export function claimLiveSession(home, binding, session, ownerToken) {
 }
 
 export function releaseLiveSession(home, bindingId, ownerToken) {
-  const paths = ensurePrivateLayout(home);
+  const paths = pathsForHome(home);
+  privateDir(paths.liveSession);
   const path = join(paths.liveSession, `${sha(bindingId)}.json`);
   return withLock(paths, "live-session", () => {
     const record = readJson(path, { optional: true });
@@ -1572,6 +1700,14 @@ function repairOutboundStateLocked(paths, binding) {
       atomicJson(ledgerPath, ledger);
       repaired += 1;
     }
+    if (["pending", "retryable", "sending"].includes(ledger.state)) writeOutboundPendingIndex(paths, name, outbox);
+    else if (removeOutboundPendingIndex(paths, name)) repaired += 1;
+  }
+  const outboxPendingSet = new Set(outboxNames);
+  for (const name of safeJsonNames(paths.outboundPending)) {
+    if (outboxPendingSet.has(name)) continue;
+    removeOutboundPendingIndex(paths, name);
+    repaired += 1;
   }
   for (const name of safeJsonNames(paths.outboundMessageMap)) if (!validMapNames.has(name)) throw new Error("orphan Feishu outbound correlation map");
   return repaired;
@@ -1583,6 +1719,91 @@ export function repairOutboundState(home) {
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     return repairOutboundStateLocked(paths, binding);
+  });
+}
+
+export function persistAssistantOutboundIntent(home, input) {
+  const paths = pathsForHome(home);
+  privateDir(paths.outboundRegistrationIntents);
+  const bindingRaw = readJson(paths.activeBinding, { optional: true });
+  const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
+  if (!binding || binding.status !== "active" || binding.session_id !== input.sessionId || binding.generation !== input.bindingGeneration) throw new Error("outbound registration intent does not match the active binding");
+  const source = requireString(input.source, "outbound intent source", /^(?:feishu|tui|internal)$/);
+  const sourceRef = requireString(input.sourceRef, "outbound intent source ref", DELIVERY_REF);
+  const text = typeof input.text === "string" ? input.text : "";
+  const replyTo = input.replyTo ?? null;
+  requireNullableString(replyTo, "outbound intent reply", MESSAGE_ID);
+  const intentId = stableId("reg_", `${binding.binding_id}\0${binding.generation}\0${input.sessionId}\0${source}\0${sourceRef}\0${sha(text)}\0${replyTo ?? "chat"}`, 40);
+  const record = {
+    schema: OUTBOUND_INTENT_SCHEMA,
+    intent_id: intentId,
+    source,
+    source_ref: sourceRef,
+    session_id: input.sessionId,
+    binding_id: binding.binding_id,
+    binding_generation: binding.generation,
+    reply_to_message_id: replyTo,
+    decision_captured: false,
+    decision_ref: null,
+    decision_key: null,
+    text,
+    text_hash: `sha256:${sha(text)}`,
+    created_at: nowIso(),
+  };
+  validateOutboundIntent(record);
+  const path = join(paths.outboundRegistrationIntents, `${sha(intentId)}.json`);
+  return withLock(paths, "outbound-registration", () => {
+    const prior = readJson(path, { optional: true });
+    if (prior) {
+      if (JSON.stringify({ ...prior, created_at: record.created_at }) !== JSON.stringify(record)) throw new Error("conflicting Feishu outbound registration intent");
+      return prior;
+    }
+    atomicJson(path, record);
+    return record;
+  });
+}
+
+export function readAssistantOutboundIntents(home, fence) {
+  const paths = pathsForHome(home);
+  privateDir(paths.outboundRegistrationIntents);
+  const records = [];
+  for (const name of safeJsonNames(paths.outboundRegistrationIntents)) {
+    const record = readJson(join(paths.outboundRegistrationIntents, name));
+    if (record.session_id !== fence.sessionId || record.binding_generation !== fence.bindingGeneration || record.binding_id !== fence.bindingId) continue;
+    records.push({ name, record });
+  }
+  records.sort((a, b) => a.record.created_at.localeCompare(b.record.created_at) || a.name.localeCompare(b.name));
+  return records;
+}
+
+export function bindAssistantOutboundIntentDecision(home, candidate, decision) {
+  const paths = pathsForHome(home);
+  privateDir(paths.outboundRegistrationIntents);
+  return withLock(paths, "outbound-registration", () => {
+    const path = join(paths.outboundRegistrationIntents, candidate.name);
+    const current = readJson(path);
+    const decisionRef = decision?.record.decision_ref ?? null;
+    const decisionKey = decision?.record.decision_key ?? null;
+    if (current.decision_captured) {
+      if (current.decision_ref !== decisionRef || current.decision_key !== decisionKey) throw new Error("conflicting Feishu outbound intent decision snapshot");
+      return { name: candidate.name, record: current };
+    }
+    const updated = { ...current, decision_captured: true, decision_ref: decisionRef, decision_key: decisionKey };
+    atomicJson(path, updated);
+    return { name: candidate.name, record: updated };
+  });
+}
+
+export function completeAssistantOutboundIntent(home, candidate) {
+  const paths = pathsForHome(home);
+  privateDir(paths.outboundRegistrationIntents);
+  if (!candidate || !/^[a-f0-9]{64}\.json$/.test(candidate.name)) throw new Error("invalid Feishu outbound intent completion");
+  return withLock(paths, "outbound-registration", () => {
+    const path = join(paths.outboundRegistrationIntents, candidate.name);
+    const current = readJson(path, { optional: true });
+    if (!current) return false;
+    if (current.intent_id !== candidate.record.intent_id || current.text_hash !== candidate.record.text_hash) throw new Error("Feishu outbound intent completion mismatch");
+    return removeIndexedFile(path);
   });
 }
 
@@ -1647,6 +1868,7 @@ export function registerAssistantOutbound(home, input) {
     validateOutboundLedger(ledger);
     atomicJson(join(paths.outbox, filename), outbox);
     atomicJson(join(paths.outboundLedger, filename), ledger);
+    writeOutboundPendingIndex(paths, filename, outbox);
     return { status: "registered", eventId, chunks: chunks.length };
   });
 }
@@ -1657,20 +1879,30 @@ export function claimNextOutbound(home, options = {}) {
   const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
   const now = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   return withLock(paths, "outbound-state", () => {
-    repairOutboundStateLocked(paths, binding);
     const candidates = [];
-    for (const name of safeJsonNames(paths.outboundLedger)) {
+    for (const name of safeJsonNames(paths.outboundPending)) {
+      const marker = readJson(join(paths.outboundPending, name));
       const path = join(paths.outboundLedger, name);
-      const ledger = readJson(path);
-      if (!["pending", "retryable", "sending"].includes(ledger.state)) continue;
       const outbox = readJson(join(paths.outbox, name));
+      let ledger = readJson(path, { optional: true });
+      if (!ledger) {
+        ledger = newOutboundLedger(outbox, { last_error: "ledger repaired from the bounded pending index" });
+        atomicJson(path, ledger);
+      }
+      if (!["pending", "retryable", "sending"].includes(ledger.state)) {
+        removeOutboundPendingIndex(paths, name);
+        continue;
+      }
+      if (marker.event_id !== outbox.event_id) throw new Error("Feishu outbound pending index mismatch");
       assertOutboundPair(name, outbox, ledger, binding);
       if (!binding || binding.status !== "active" || outbox.binding_generation !== binding.generation || outbox.binding_id !== binding.binding_id) {
         atomicJson(path, { ...ledger, state: "superseded", superseded_at: nowIso(), last_error: "binding generation changed before send" });
+        removeOutboundPendingIndex(paths, name);
         continue;
       }
       if (ledger.idempotency_expires_ms !== null && now >= ledger.idempotency_expires_ms) {
         atomicJson(path, { ...ledger, state: "delivery_uncertain", uncertain_at: nowIso(), last_error: "send exceeded the fixed Feishu idempotency window" });
+        removeOutboundPendingIndex(paths, name);
         createLocalAlert(paths, "outbound-delivery-uncertain", outbox.event_id, "A Feishu send may have succeeded, but no receipt was recorded before the idempotency window ended. Automatic resend stopped.");
         continue;
       }
@@ -1683,6 +1915,7 @@ export function claimNextOutbound(home, options = {}) {
     const chunk = candidate.outbox.chunks[candidate.ledger.next_chunk];
     if (!chunk) {
       atomicJson(candidate.path, { ...candidate.ledger, state: "posted", posted_at: nowIso() });
+      removeOutboundPendingIndex(paths, candidate.name);
       return undefined;
     }
     const attempt = candidate.ledger.attempts + 1;
@@ -1721,7 +1954,6 @@ export function failOutboundAttempt(home, claim, error, { ambiguous = false, ret
   return withLock(paths, "outbound-state", () => {
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
-    repairOutboundStateLocked(paths, binding);
     const path = join(paths.outboundLedger, claim.filename);
     const ledger = readJson(path);
     const outbox = readJson(join(paths.outbox, claim.filename));
@@ -1731,6 +1963,7 @@ export function failOutboundAttempt(home, claim, error, { ambiguous = false, ret
     if (expiry === null) throw new Error("Feishu outbound attempt has no fixed idempotency window");
     if (now >= expiry) {
       atomicJson(path, { ...ledger, state: "delivery_uncertain", uncertain_at: nowIso(), last_error: String(error).slice(0, 500) });
+      removeOutboundPendingIndex(paths, claim.filename);
       createLocalAlert(paths, "outbound-delivery-uncertain", claim.outbox.event_id, "A Feishu send may have succeeded, but its result is uncertain. Automatic resend stopped.");
       return true;
     }
@@ -1754,7 +1987,6 @@ export function receiptOutbound(home, claim, receipt) {
   return withLock(paths, "outbound-state", () => {
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
-    repairOutboundStateLocked(paths, binding);
     const ledgerPath = join(paths.outboundLedger, claim.filename);
     const ledger = readJson(ledgerPath);
     const outbox = readJson(join(paths.outbox, claim.filename));
@@ -1789,6 +2021,7 @@ export function receiptOutbound(home, claim, receipt) {
       idempotency_expires_ms: null,
       posted_at: nextChunk >= outbox.chunks.length ? nowIso() : null,
     });
+    if (nextChunk >= outbox.chunks.length) removeOutboundPendingIndex(paths, claim.filename);
     return true;
   });
 }
@@ -1822,6 +2055,14 @@ export function registerPendingDecision(home, input) {
   return record;
 }
 
+export function findPendingDecisionForOutbound(home, decisionRef, decisionKey, sessionId, bindingGeneration) {
+  const paths = ensurePrivateLayout(home);
+  const name = `${sha(decisionRef)}.json`;
+  const record = readJson(join(paths.pendingDecisions, name), { optional: true });
+  if (!record || record.decision_ref !== decisionRef || record.decision_key !== decisionKey || record.session_id !== sessionId || record.binding_generation !== bindingGeneration) throw new Error("Feishu outbound intent decision snapshot is unavailable");
+  return { name, record };
+}
+
 export function claimPendingDecisionForOutbound(home, sessionId, bindingGeneration) {
   const paths = ensurePrivateLayout(home);
   const candidates = [];
@@ -1846,6 +2087,21 @@ export function bindPendingDecisionToOutbound(home, candidate, eventId) {
   const current = readJson(path);
   if (current.state !== "awaiting-outbound") return;
   atomicJson(path, { ...current, state: "sent-to-outbox", outbound_event_id: eventId, outbound_registered_at: nowIso() });
+}
+
+export function finishPendingDecisionForOutbound(home, candidate, outcome) {
+  if (!candidate) return;
+  const paths = ensurePrivateLayout(home);
+  const path = join(paths.pendingDecisions, candidate.name);
+  const current = readJson(path);
+  if (current.state !== "awaiting-outbound") return;
+  const refused = new Set(["secret-refused", "chunk-refused", "resource-refused"]).has(outcome);
+  atomicJson(path, {
+    ...current,
+    state: refused ? "outbound-refused" : "outbound-skipped",
+    outbound_outcome: requireString(outcome, "decision outbound outcome", /^[a-z-]{1,80}$/),
+    terminal_at: nowIso(),
+  });
 }
 
 export function claimTransportOwner(home, owner) {
@@ -1906,6 +2162,55 @@ export function recordTransportDiagnostic(home, kind, line) {
   return path;
 }
 
+export function stageTransportEvents(home, events, options = {}) {
+  if (!Array.isArray(events)) throw new Error("invalid Feishu staged event batch");
+  const paths = ensurePrivateLayout(home);
+  const maxEvents = positiveInteger(options.maxEvents, DEFAULT_MAX_PENDING_INBOUND);
+  const maxBytes = positiveInteger(options.maxBytes, 64 * 1024 * 1024);
+  return withLock(paths, "transport-stage", () => {
+    const existing = safeJsonNames(paths.stagedEvents);
+    let totalBytes = existing.reduce((total, name) => total + statSync(join(paths.stagedEvents, name)).size, 0);
+    let created = 0;
+    for (const event of events) {
+      if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("invalid Feishu staged event object");
+      const raw = JSON.stringify(event);
+      const eventHash = sha(raw);
+      const path = join(paths.stagedEvents, `${eventHash}.json`);
+      if (existsSync(path)) continue;
+      const record = {
+        schema: "fm-feishu-staged-event.v1",
+        event_hash: `sha256:${eventHash}`,
+        event,
+        recorded_at: nowIso(),
+      };
+      const serialized = `${JSON.stringify(record)}\n`;
+      const recordBytes = Buffer.byteLength(serialized, "utf8");
+      if (existing.length + created >= maxEvents || totalBytes + recordBytes > maxBytes) throw new Error("Feishu staged event safety bound reached");
+      atomicWrite(path, serialized);
+      totalBytes += recordBytes;
+      created += 1;
+    }
+    return created;
+  });
+}
+
+export function readStagedTransportEvents(home) {
+  const paths = ensurePrivateLayout(home);
+  return safeJsonNames(paths.stagedEvents).map((name) => ({ name, event: readJson(join(paths.stagedEvents, name)).event }));
+}
+
+export function clearStagedTransportEvents(home, records) {
+  const paths = ensurePrivateLayout(home);
+  return withLock(paths, "transport-stage", () => {
+    let removed = 0;
+    for (const record of records) {
+      if (!record || !/^[a-f0-9]{64}\.json$/.test(record.name)) throw new Error("invalid Feishu staged event completion");
+      if (removeIndexedFile(join(paths.stagedEvents, record.name))) removed += 1;
+    }
+    return removed;
+  });
+}
+
 export function writeTransportHealth(home, patch) {
   const paths = ensurePrivateLayout(home);
   const prior = readJson(paths.health, { optional: true });
@@ -1913,7 +2218,11 @@ export function writeTransportHealth(home, patch) {
     schema: TRANSPORT_HEALTH_SCHEMA,
     phase: patch.phase ?? prior?.phase ?? "stopped",
     healthy: patch.healthy ?? prior?.healthy ?? false,
-    owner_pid: patch.ownerPid ?? prior?.owner_pid ?? null,
+    owner_pid: patch.ownerPid !== undefined ? patch.ownerPid : prior?.owner_pid ?? null,
+    owner_nonce: patch.ownerNonce !== undefined ? patch.ownerNonce : prior?.owner_nonce ?? null,
+    owner_process_start_token: patch.ownerProcessStartToken !== undefined ? patch.ownerProcessStartToken : prior?.owner_process_start_token ?? null,
+    binding_id: patch.bindingId !== undefined ? patch.bindingId : prior?.binding_id ?? null,
+    binding_generation: patch.bindingGeneration !== undefined ? patch.bindingGeneration : prior?.binding_generation ?? null,
     reconnects: patch.reconnects ?? prior?.reconnects ?? 0,
     drop_diagnostics: patch.dropDiagnostics ?? prior?.drop_diagnostics ?? 0,
     last_ready_at: patch.lastReadyAt ?? prior?.last_ready_at ?? null,
@@ -1921,6 +2230,7 @@ export function writeTransportHealth(home, patch) {
     last_error_type: patch.lastErrorType ?? null,
     updated_at: nowIso(),
   };
+  validateRecordAtPath(paths.health, health);
   atomicJson(paths.health, health);
   return health;
 }
@@ -1931,6 +2241,26 @@ export function readTransportHealth(home) {
   if (!health) return undefined;
   if (health.schema !== TRANSPORT_HEALTH_SCHEMA) throw new Error("unsupported Feishu transport health schema");
   return health;
+}
+
+function readProcessStartToken(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    return /^[0-9]+$/.test(suffix[19] ?? "") ? suffix[19] : "";
+  } catch {
+    return "";
+  }
+}
+
+export function transportHealthAllowsDispatch(home, binding) {
+  const paths = pathsForHome(home);
+  const health = readJson(paths.health, { optional: true });
+  const owner = readJson(paths.owner, { optional: true });
+  if (!health || !owner || health.phase !== "healthy" || health.healthy !== true) return false;
+  if (health.binding_id !== binding.binding_id || health.binding_generation !== binding.generation) return false;
+  if (owner.home_realpath !== paths.home || owner.pid !== health.owner_pid || owner.nonce !== health.owner_nonce || owner.process_start_token !== health.owner_process_start_token) return false;
+  return pidAlive(owner.pid) && readProcessStartToken(owner.pid) === owner.process_start_token;
 }
 
 export function statusSummary(home) {
@@ -1964,7 +2294,7 @@ export function statusSummary(home) {
     chat_id: binding?.chat_id ?? pairing?.allowed_chats?.[0] ?? null,
     allowed_user: pairing?.allowed_users?.[0] ?? null,
     transport_phase: health?.phase ?? "stopped",
-    transport_healthy: health?.healthy === true,
+    transport_healthy: binding ? transportHealthAllowsDispatch(home, binding) : false,
     inbound,
     outbound_pending: outboundPending,
     outbound_uncertain: outboundUncertain,
