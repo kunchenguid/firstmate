@@ -17,6 +17,7 @@
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
 #   fm-test-run.sh --list --family <name>
+#   fm-test-run.sh --list --family unclassified  (healthy suite prints nothing)
 #   fm-test-run.sh --list --lane portable-parallel-1
 #   fm-test-run.sh --list-families
 #   fm-test-run.sh --list-lanes
@@ -454,8 +455,8 @@ journal_mark_interrupted_workers() {
   done
 }
 
-# Primary family for one tests/*.test.sh basename. Unmapped scripts are
-# unclassified so new tests are still runnable and visible in summaries.
+# Primary family for one tests/*.test.sh basename. Unmapped scripts remain
+# runnable as unclassified, while the committed suite must keep that family empty.
 family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\

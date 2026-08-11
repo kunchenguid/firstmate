@@ -75,6 +75,7 @@ while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-li
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
+bin/fm-test-run.sh --list --family unclassified   # healthy committed suite prints nothing
 bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
 bin/fm-test-run.sh --proven-isolated --jobs 4   # explicit local parallel of the proven set only (default is serial)
 bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher/AFK/tmux/stateful)
@@ -90,6 +91,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 `bin/fm-test-run.sh` is the single owner of behavior-suite selection, portable CI lane composition, declarative runtime-gate evidence, optional local `--jobs` for the proven-isolated set only, per-script timing markers, family totals, the coverage guard, the optional JSON timing artifact, and opt-in durable progress journals.
 Its header and `--help` own the flags, family labels, lanes, and changed-file map; this section only documents the entry points.
+When adding a committed `tests/*.test.sh`, update that script's authoritative family map with the narrowest existing semantic owner and keep the `unclassified` query empty.
+`tests/fm-test-run.test.sh` fails when a committed test silently falls through that map.
 `bin/fm-test-isolation-proof.sh` remains the single owner of the Phase 2 concurrent isolation proof and the exact proven candidate set; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
