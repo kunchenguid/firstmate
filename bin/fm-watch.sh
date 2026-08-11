@@ -198,15 +198,16 @@ hash_pane() {
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict raw_launch
+  local w=$1 tail40=$2 task meta verdict raw_launch raw_owner
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
   raw_launch=$(fm_meta_get "$meta" raw_launch 2>/dev/null || true)
+  raw_owner=$(fm_meta_get "$meta" raw_owner 2>/dev/null || true)
   if [ -n "$task" ] && [ -f "$meta" ]; then
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
   else
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40" "$raw_launch")
+      "${task:-unknown}" "$STATE" "$tail40" "$raw_launch" "$raw_owner")
   fi
   [ "${verdict%% *}" = busy ]
 }
@@ -376,7 +377,7 @@ clear_pause_tracking() {  # <window>
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive harness meta raw_launch
+  local win=$1 task=$2 key last recheck_file class agent_alive harness meta raw_launch raw_owner
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -384,6 +385,7 @@ pause_state_class() {  # <window> <task>
   harness=$(window_harness "$win")
   meta="$STATE/$task.meta"
   raw_launch=$(fm_meta_get "$meta" raw_launch 2>/dev/null || true)
+  raw_owner=$(fm_meta_get "$meta" raw_owner 2>/dev/null || true)
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
@@ -392,7 +394,7 @@ pause_state_class() {  # <window> <task>
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" "$raw_launch" 2>/dev/null) || agent_alive=unknown
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
@@ -409,7 +411,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" "$raw_launch" 2>/dev/null) || agent_alive=unknown
+    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
       printf 'none'

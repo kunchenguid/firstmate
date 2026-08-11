@@ -645,9 +645,9 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # global OR of every vendor signature), so one harness's output cannot make
 # another read busy, and a weak rendered idle degrades to `fallback-idle`,
 # which the caller accepts as idle only after its grace window.
-fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness] [raw-launch]
-  local backend=$1 target=$2 expected_label=${3-} harness=${4-} raw_launch=${5-} native tail40
-  native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null || printf 'unknown')
+fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness] [raw-launch] [raw-owner]
+  local backend=$1 target=$2 expected_label=${3-} harness=${4-} raw_launch=${5-} raw_owner=${6-} native tail40
+  native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" "" "$raw_owner" 2>/dev/null || printf 'unknown')
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
@@ -1129,7 +1129,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness raw_launch remote_host
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness raw_launch raw_owner remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
@@ -1197,6 +1197,7 @@ fm_pending_reply_tick() {  # <state-dir>
     sm_home=
     harness=
     raw_launch=
+    raw_owner=
     if [ -f "$meta" ]; then
       remote_host=$(fm_meta_get "$meta" remote_host)
       backend=$(fm_backend_of_meta "$meta")
@@ -1204,6 +1205,7 @@ fm_pending_reply_tick() {  # <state-dir>
       sm_home=$(fm_meta_get "$meta" home)
       harness=$(fm_meta_get "$meta" harness)
       raw_launch=$(fm_meta_get "$meta" raw_launch)
+      raw_owner=$(fm_meta_get "$meta" raw_owner)
       if [ -n "$remote_host" ]; then
         target="remote:$task_id"
         sm_home=
@@ -1225,7 +1227,7 @@ fm_pending_reply_tick() {  # <state-dir>
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
-            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness" "$raw_launch")
+            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness" "$raw_launch" "$raw_owner")
           fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")

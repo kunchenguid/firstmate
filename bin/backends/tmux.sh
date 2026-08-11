@@ -231,7 +231,7 @@ fm_backend_tmux_foreground_comms() {  # <target>
   local target=$1 tty pid pgid tpgid comm
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -239,15 +239,27 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+fm_backend_tmux_foreground_pids() {
+  local target=$1 tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$pid" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        printf '%s\n' "$pid"
+      done
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0 rest script
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        args=$(LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -p "$pid" -o args= 2>/dev/null) || continue
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
@@ -287,12 +299,12 @@ fm_backend_tmux_foreground_omp_identity() {  # <target>
 }
 
 fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|other|unknown
-  local target=$1 name identity current_identity= shell_seen=0
+  local target=$1 name identity current_identity= shell_seen=0 omp_seen=0
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     identity=$(fm_harness_process_identity "$name" "$name")
     case "$identity" in
-      omp) printf 'omp'; return 0 ;;
+      omp) omp_seen=1 ;;
       shell) shell_seen=1 ;;
       *)
         if fm_harness_identity_supported "$identity"; then
@@ -310,7 +322,7 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
     [ -n "$name" ] || continue
     identity=$(fm_harness_process_identity "$name" "$name")
     case "$identity" in
-      omp) printf 'omp'; return 0 ;;
+      omp) omp_seen=1 ;;
       shell) shell_seen=1 ;;
       *)
         if fm_harness_identity_supported "$identity"; then
@@ -330,58 +342,32 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
   }
   identity=$(fm_harness_process_identity "$name" "$name")
   case "$identity" in
-    omp) printf 'omp' ;;
-    shell) [ -n "$current_identity" ] && printf '%s' "$current_identity" || printf 'shell' ;;
+    omp) omp_seen=1 ;;
+    shell) shell_seen=1 ;;
     *)
-      if [ -n "$current_identity" ]; then
-        printf '%s' "$current_identity"
-      elif fm_harness_identity_supported "$identity"; then
-        printf '%s' "$identity"
-      elif [ "$shell_seen" -eq 1 ]; then
-        printf 'shell'
-      else
-        printf 'other'
+      if fm_harness_identity_supported "$identity"; then
+        if [ -z "$current_identity" ]; then
+          current_identity=$identity
+        elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+          printf 'unknown'
+          return 0
+        fi
       fi
       ;;
   esac
+  if [ "$omp_seen" -eq 1 ]; then
+    [ -z "$current_identity" ] && printf 'omp' || printf 'unknown'
+  elif [ -n "$current_identity" ]; then
+    printf '%s' "$current_identity"
+  elif [ "$shell_seen" -eq 1 ]; then
+    printf 'shell'
+  else
+    printf 'other'
+  fi
 }
 
 fm_backend_tmux_process_identity() {  # <target> -> harness|shell|other|unknown
-  local target=$1 pane_pid tree foreground
-  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || {
-    printf 'unknown'
-    return 0
-  }
-  case "$pane_pid" in
-    ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
-  esac
-  tree=$(fm_harness_process_tree_identity "$pane_pid" "${FM_TMUX_PS_BIN:-ps}")
-  foreground=$(fm_backend_tmux_foreground_process_identity "$target")
-  case "$tree" in
-    omp) printf 'omp' ;;
-    unknown)
-      [ "$foreground" = omp ] && printf 'omp' || printf 'unknown'
-      ;;
-    shell|other)
-      case "$foreground" in
-        omp) printf 'omp' ;;
-        claude|codex|opencode|grok|kimi|muse|pi|pi-signed) printf '%s' "$foreground" ;;
-        unknown) printf 'unknown' ;;
-        *) printf '%s' "$tree" ;;
-      esac
-      ;;
-    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
-      case "$foreground" in
-        omp) printf 'omp' ;;
-        claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
-          fm_harness_identity_matches "$tree" "$foreground" && printf '%s' "$tree" || printf 'unknown'
-          ;;
-        unknown) printf 'unknown' ;;
-        *) printf '%s' "$tree" ;;
-      esac
-      ;;
-    *) printf 'unknown' ;;
-  esac
+  fm_backend_tmux_foreground_process_identity "$1"
 }
 
 fm_backend_tmux_omp_process_tree_state() {  # <target> -> omp|other|unknown
@@ -392,13 +378,22 @@ fm_backend_tmux_omp_process_tree_state() {  # <target> -> omp|other|unknown
   esac
 }
 
-fm_backend_tmux_raw_omp_process_state() {  # <target> -> harness|shell|other|unknown
-  local FM_HARNESS_UNVERIFIED=
-  fm_backend_tmux_process_identity "$1"
+fm_backend_tmux_raw_omp_process_state() {  # <target> [raw-owner] -> harness|unknown
+  local target=$1 raw_owner=${2:-${FM_RAW_LAUNCH_OWNER:-}} pane_pid current_identity foreground_pids
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  case "$pane_pid" in
+    ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
+  esac
+  current_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_foreground_process_identity "$target")
+  foreground_pids=$(fm_backend_tmux_foreground_pids "$target")
+  fm_harness_raw_owner_state "$pane_pid" "$raw_owner" "${FM_TMUX_PS_BIN:-ps}" "$foreground_pids" "$current_identity"
 }
 
-fm_backend_tmux_raw_omp_identity() {  # <target>
-  FM_BACKEND_TMUX_RAW_OMP_STATE=$(fm_backend_tmux_raw_omp_process_state "$1")
+fm_backend_tmux_raw_omp_identity() {  # <target> [raw-owner]
+  FM_BACKEND_TMUX_RAW_OMP_STATE=$(fm_backend_tmux_raw_omp_process_state "$1" "${2:-${FM_RAW_LAUNCH_OWNER:-}}")
   [ "$FM_BACKEND_TMUX_RAW_OMP_STATE" = omp ]
 }
 
@@ -418,8 +413,8 @@ fm_backend_tmux_raw_omp_identity() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} comm session window windows inventory_status process_identity
+fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} raw_owner=${4:-${FM_RAW_LAUNCH_OWNER:-}} comm session window windows inventory_status process_identity
   if [ "$recorded_harness" = 1 ] && [ -z "$raw_launch" ]; then
     raw_launch=1
     recorded_harness=
@@ -461,7 +456,7 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
     return 0
   fi
   if [ "$raw_launch" = 1 ]; then
-    process_identity=$(fm_backend_tmux_raw_omp_process_state "$target")
+    process_identity=$(fm_backend_tmux_raw_omp_process_state "$target" "$raw_owner")
     case "$process_identity" in
       claude|codex|opencode|grok|kimi|muse|pi|pi-signed) : ;;
       *)
@@ -545,8 +540,8 @@ EOF
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_tmux_agent_alive() {  # <target> [recorded-harness] [raw-launch]
-  case "$(fm_backend_tmux_agent_state "$1" "${2:-}" "${3:-}")" in
+fm_backend_tmux_agent_alive() {  # <target> [recorded-harness] [raw-launch] [raw-owner]
+  case "$(fm_backend_tmux_agent_state "$1" "${2:-}" "${3:-}" "${4:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

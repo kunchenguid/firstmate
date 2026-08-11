@@ -839,8 +839,8 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # pane-death path. The exact-tab restore below remains the backstop, and any
 # ambiguity falls back to the plain explicit close, which the backstop masks
 # exactly as before this hardening.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [recorded-harness] [raw-launch]
-  local session=$1 pane_id=$2 required_agent_state=${3:-} recorded_harness=${4:-} raw_launch=${5:-}
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [recorded-harness] [raw-launch] [raw-owner]
+  local session=$1 pane_id=$2 required_agent_state=${3:-} recorded_harness=${4:-} raw_launch=${5:-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -868,7 +868,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ -n "$required_agent_state" ]; then
-    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id" "$recorded_harness" "$raw_launch")
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id" "$recorded_harness" "$raw_launch" "$raw_owner")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
@@ -1922,8 +1922,8 @@ fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
-fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] [raw-launch]
-  local session=$1 pane_id=$2 recorded_harness=${3:-} raw_launch=${4:-} out code presence status agent process_identity
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] [raw-launch] [raw-owner]
+  local session=$1 pane_id=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}} out code presence status agent process_identity husk_status
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -1933,7 +1933,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
     return 0
   fi
   if [ "$raw_launch" = 1 ]; then
-    process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane_id")
+    process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane_id" "$raw_owner")
     case "$process_identity" in
       claude|codex|opencode|grok|kimi|muse|pi|pi-signed) : ;;
       *)
@@ -1967,15 +1967,6 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
     esac
     return 0
   fi
-  if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ]; then
-    process_identity=$(fm_backend_herdr_omp_process_identity "$session" "$pane_id")
-    [ "$process_identity" = omp ] || {
-      printf 'unknown'
-      return 0
-    }
-    printf 'live'
-    return 0
-  fi
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
@@ -1993,6 +1984,26 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
       || { [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] && [ "$recorded_harness" != unknown ]; }; }; then
     printf 'unknown'
     return 0
+  fi
+  if [ "$agent" = omp ]; then
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane_id")
+    case "$process_identity:$status" in
+      omp:working|omp:idle|omp:done|omp:blocked) : ;;
+      shell:idle|shell:done)
+        if fm_backend_herdr_omp_exited_to_shell "$session" "$pane_id"; then
+          printf 'no-agent'
+          return 0
+        else
+          husk_status=$?
+        fi
+        [ "$husk_status" -eq 1 ] && printf 'live' || printf 'unknown'
+        return 0
+        ;;
+      *)
+        printf 'unknown'
+        return 0
+        ;;
+    esac
   fi
   if [ "$agent" != omp ]; then
     if [ -z "$process_identity" ]; then
@@ -2034,8 +2045,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
 # confirm; live and unknown both refuse (1), so an inconclusive read never
 # licenses closing anything. Restored-layout recovery depends on this
 # fail-safe-toward-refusal behavior.
-fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness] [raw-launch]
-  case "$(fm_backend_herdr_pane_agent_state "$1" "$2" "${3:-}" "${4:-}")" in
+fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness] [raw-launch] [raw-owner]
+  case "$(fm_backend_herdr_pane_agent_state "$1" "$2" "${3:-}" "${4:-}" "${5:-}")" in
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
@@ -2046,8 +2057,8 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness] [raw-
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
-fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch]
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-}
+fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} raw_owner=${4:-${FM_RAW_LAUNCH_OWNER:-}}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -2057,7 +2068,7 @@ fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch]
     return 0
   fi
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
-  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$recorded_harness" "$raw_launch")" in
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$recorded_harness" "$raw_launch" "$raw_owner")" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
@@ -2069,8 +2080,8 @@ fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch]
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_herdr_agent_alive() {  # <target> [recorded-harness] [raw-launch]
-  case "$(fm_backend_herdr_agent_state "$1" "${2:-}" "${3:-}")" in
+fm_backend_herdr_agent_alive() {  # <target> [recorded-harness] [raw-launch] [raw-owner]
+  case "$(fm_backend_herdr_agent_state "$1" "${2:-}" "${3:-}" "${4:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
@@ -2404,9 +2415,9 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
-fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd> [recorded-harness] [raw-launch]
+fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd> [recorded-harness] [raw-launch] [raw-owner]
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} recorded_harness=${11:-} raw_launch=${12:-}
+  local parent_label=$8 task_label=$9 cwd=${10} recorded_harness=${11:-} raw_launch=${12:-} raw_owner=${13:-${FM_RAW_LAUNCH_OWNER:-}}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -2440,7 +2451,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch")
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch" "$raw_owner")
   case "$state" in
     no-agent) ;;
     dead)
@@ -2493,7 +2504,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not verify its replacement pane; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch")
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch" "$raw_owner")
   case "$state" in
     no-agent) ;;
     live|unknown)
@@ -2507,7 +2518,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
       return 2
       ;;
   esac
-  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent "$recorded_harness" "$raw_launch"; then
+  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent "$recorded_harness" "$raw_launch" "$raw_owner"; then
     close_status=0
   else
     close_status=$?
@@ -2527,7 +2538,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not close the exact old husk; spawning flat" >&2
     return 2
   fi
-  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch")" != dead ]; then
+  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch" "$raw_owner")" != dead ]; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     return 1
   fi
@@ -2557,8 +2568,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
-fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id> [recorded-harness] [raw-launch]
-  local session=$1 journal=$2 id=$3 recorded_harness=${4:-} raw_launch=${5:-}
+fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id> [recorded-harness] [raw-launch] [raw-owner]
+  local session=$1 journal=$2 id=$3 recorded_harness=${4:-} raw_launch=${5:-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -2602,7 +2613,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
     while IFS= read -r pane; do
       [ -n "$pane" ] || continue
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane" "$recorded_harness" "$raw_launch")
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner")
       case "$state" in
         dead|no-agent) : ;;
         live|unknown)
@@ -2771,11 +2782,11 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
-fm_backend_herdr_raw_omp_identity() {  # <target>
-  local target=$1
+fm_backend_herdr_raw_omp_identity() {  # <target> [raw-owner]
+  local target=$1 raw_owner=${2:-${FM_RAW_LAUNCH_OWNER:-}}
   fm_backend_herdr_parse_target "$target" || return 1
   FM_BACKEND_HERDR_RAW_OMP_STATE=$(fm_backend_herdr_raw_omp_process_state \
-    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$raw_owner")
   [ "$FM_BACKEND_HERDR_RAW_OMP_STATE" = omp ]
 }
 
@@ -2794,65 +2805,11 @@ fm_backend_herdr_omp_process_state() {  # <session> <pane> -> stale|live|unknown
 }
 
 fm_backend_herdr_omp_process_identity() {  # <session> <pane> [any] -> omp|other|unknown
-  local session=$1 pane=$2 info rows name args omp_count=0 other_count=0
-  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
-    printf 'unknown'
-    return 0
-  }
-  printf '%s' "$info" | jq -e --arg pane "$pane" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-    and (.result.process_info.shell_pid | type == "number" and . > 1)
-    and (.result.process_info.foreground_process_group_id | type == "number" and . > 1)
-    and (.result.process_info.foreground_processes | type == "array" and length > 0)
-    and all(.result.process_info.foreground_processes[];
-      (.pid | type) == "number"
-      and (.name | type) == "string" and (.name | length) > 0
-      and ((.argv0 // .argv[0]) | type) == "string"
-      and ((.argv0 // .argv[0]) | length) > 0
-    )
-  ' >/dev/null 2>&1 || {
-    printf 'unknown'
-    return 0
-  }
-  rows=$(printf '%s' "$info" | jq -r '
-    .result.process_info.foreground_processes[]
-    | [
-        .name,
-        (if ((.argv | type) == "array" and (.argv | length) > 0)
-         then (.argv | join(" "))
-         else (.argv0 // .argv[0])
-         end)
-      ]
-    | @tsv
-  ' 2>/dev/null) || {
-    printf 'unknown'
-    return 0
-  }
-  [ -n "$rows" ] || {
-    printf 'unknown'
-    return 0
-  }
-  while IFS=$'\t' read -r name args; do
-    if fm_harness_omp_process_matches "$name" "$args"; then
-      omp_count=$((omp_count + 1))
-    else
-      other_count=$((other_count + 1))
-    fi
-  done <<EOF
-$rows
-EOF
-  if [ "$omp_count" -gt 0 ] && { [ "$other_count" -eq 0 ] || [ "${3:-}" = any ]; }; then
-    printf 'omp'
-  elif [ "$omp_count" -eq 0 ] && [ "$other_count" -gt 0 ]; then
-    printf 'other'
-  else
-    printf 'unknown'
-  fi
+  fm_backend_herdr_process_identity "$1" "$2"
 }
 
 fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other|unknown
-  local session=$1 pane=$2 info shell_pid rows name args identity current_identity= tree
+  local session=$1 pane=$2 info rows name args identity current_identity= shell_seen=0 omp_seen=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2891,8 +2848,10 @@ fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other
     identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$name" "$args")
     case "$identity" in
       omp)
-        printf 'omp'
-        return 0
+        omp_seen=1
+        ;;
+      shell)
+        shell_seen=1
         ;;
       claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
         if [ -z "$current_identity" ]; then
@@ -2902,36 +2861,19 @@ fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other
           return 0
         fi
         ;;
+      *) : ;;
     esac
   done <<EOF
 $rows
 EOF
-  shell_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || {
-    printf 'unknown'
-    return 0
-  }
-  tree=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_tree_identity "$shell_pid" "${FM_HERDR_PS_BIN:-ps}")
-  case "$tree" in
-    omp|unknown)
-      printf '%s' "$tree"
-      return 0
-      ;;
-    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
-      if [ -z "$current_identity" ]; then
-        current_identity=$tree
-      elif ! fm_harness_identity_matches "$current_identity" "$tree"; then
-        printf 'unknown'
-        return 0
-      fi
-      ;;
-    shell|other) : ;;
-    *) printf 'unknown'; return 0 ;;
-  esac
-  if [ -n "$current_identity" ]; then
+  if [ "$omp_seen" -eq 1 ]; then
+    [ -z "$current_identity" ] && printf 'omp' || printf 'unknown'
+  elif [ -n "$current_identity" ]; then
     printf '%s' "$current_identity"
+  elif [ "$shell_seen" -eq 1 ]; then
+    printf 'shell'
   else
-    printf '%s' "$tree"
+    printf 'other'
   fi
 }
 
@@ -2943,13 +2885,89 @@ fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unk
   esac
 }
 
-fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> -> harness|shell|other|unknown
-  local FM_HARNESS_UNVERIFIED=
-  fm_backend_herdr_process_identity "$1" "$2"
+fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> harness|unknown
+  local session=$1 pane=$2 raw_owner=${3:-${FM_RAW_LAUNCH_OWNER:-}}
+  local info shell_pid foreground_pids rows name args identity current_identity= shell_seen=0 omp_seen=0
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid | type == "number" and . > 1)
+    and (.result.process_info.foreground_process_group_id | type == "number" and . > 1)
+    and (.result.process_info.foreground_processes | type == "array" and length > 0)
+    and all(.result.process_info.foreground_processes[];
+      (.pid | type) == "number"
+      and (.name | type) == "string" and (.name | length) > 0
+      and ((.argv0 // .argv[0]) | type) == "string"
+      and ((.argv0 // .argv[0]) | length) > 0
+    )
+  ' >/dev/null 2>&1 || {
+    printf 'unknown'
+    return 0
+  }
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  foreground_pids=$(printf '%s' "$info" | jq -r \
+    '.result.process_info.foreground_processes[] | .pid | floor' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  rows=$(printf '%s' "$info" | jq -r '
+    .result.process_info.foreground_processes[]
+    | [
+        .name,
+        (if ((.argv | type) == "array" and (.argv | length) > 0)
+         then (.argv | join(" "))
+         else (.argv0 // .argv[0])
+         end)
+      ]
+    | @tsv
+  ' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  [ -n "$rows" ] || {
+    printf 'unknown'
+    return 0
+  }
+  while IFS=$'\t' read -r name args; do
+    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$name" "$args")
+    case "$identity" in
+      omp) omp_seen=1 ;;
+      shell) shell_seen=1 ;;
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        if [ -z "$current_identity" ]; then
+          current_identity=$identity
+        elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+          printf 'unknown'
+          return 0
+        fi
+        ;;
+      *) : ;;
+    esac
+  done <<EOF
+$rows
+EOF
+  if [ "$omp_seen" -eq 1 ]; then
+    [ -z "$current_identity" ] && current_identity=omp || current_identity=unknown
+  elif [ -n "$current_identity" ]; then
+    :
+  elif [ "$shell_seen" -eq 1 ]; then
+    current_identity=shell
+  else
+    current_identity=other
+  fi
+  fm_harness_raw_owner_state "$shell_pid" "$raw_owner" "${FM_HERDR_PS_BIN:-ps}" "$foreground_pids" "$current_identity"
 }
 
-fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> -> true for OMP
-  [ "$(fm_backend_herdr_raw_omp_process_state "$1" "$2")" = omp ]
+fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> [raw-owner] -> true for OMP
+  [ "$(fm_backend_herdr_raw_omp_process_state "$1" "$2" "${3:-${FM_RAW_LAUNCH_OWNER:-}}")" = omp ]
 }
 
 fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
@@ -2958,9 +2976,9 @@ fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
 
 # Return 0 for an authorized endpoint, 1 for a confirmed refusal, and 2 when
 # current-endpoint evidence is unknown.
-fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch]
-  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} identity agent agent_status process_state process_identity
-  local identity_supplied=${5+x}
+fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch] [raw-owner] [identity]
+  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}} identity agent agent_status process_identity
+  local identity_supplied=${6+x}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ -n "$inherited_unverified" ] && raw_launch=1
@@ -2970,7 +2988,7 @@ fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-
     return 1
   fi
   if [ -n "$identity_supplied" ]; then
-    identity=$5
+    identity=$6
   else
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 2
   fi
@@ -2982,6 +3000,14 @@ EOF
     working|idle|done|blocked) ;;
     *) return 2 ;;
   esac
+  if [ "$raw_launch" = 1 ]; then
+    process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane" "$raw_owner")
+    case "$process_identity" in
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) ;;
+      omp) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
   if [ "$agent" = omp ] && [ "$raw_launch" = 1 ]; then
     return 1
   fi
@@ -2992,19 +3018,18 @@ EOF
   fi
   if [ "$agent" = omp ]; then
     fm_harness_omp_attribution_allowed || return 1
-    process_state=$(fm_backend_herdr_omp_process_state "$session" "$pane")
-    case "$process_state" in
-      stale) return 1 ;;
-      live)
-        process_identity=$(fm_backend_herdr_omp_process_identity "$session" "$pane")
-        [ "$process_identity" = omp ] || return 2
-        return 0
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane")
+    case "$process_identity:$agent_status" in
+      omp:working|omp:idle|omp:done|omp:blocked) return 0 ;;
+      shell:idle|shell:done)
+        fm_backend_herdr_omp_exited_to_shell "$session" "$pane" && return 1
+        return 2
         ;;
       *) return 2 ;;
     esac
   fi
   if [ "$agent" != omp ]; then
-    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane")
+    [ -n "$process_identity" ] || process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane")
     case "$process_identity" in
       omp) return 1 ;;
       claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
@@ -3026,8 +3051,8 @@ EOF
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} session pane cap caps verdict identity input_checked=0
+fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] [raw-owner] -> empty|pending|pending-unproven|unknown
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} raw_owner=${4:-${FM_RAW_LAUNCH_OWNER:-}} session pane cap caps verdict identity input_checked=0
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ] && raw_launch=1
   [ "$recorded_harness" = raw-omp ] && { printf 'unknown'; return 0; }
@@ -3036,14 +3061,14 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
   pane=$FM_BACKEND_HERDR_PANE
   if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
     && [ "$recorded_harness" != unknown ] && [ "$raw_launch" != 1 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner"; then
       printf 'unknown'
       return 0
     fi
     input_checked=1
   fi
   if [ "$raw_launch" = 1 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner"; then
       printf 'unknown'
       return 0
     fi
@@ -3062,7 +3087,7 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity=probe-absent
     fi
-    if fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$identity"; then
+    if fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "$identity"; then
       input_checked=1
       case "$identity" in
         omp$'\t'*) identity="pi${identity#omp}" ;;
@@ -3074,7 +3099,7 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   if [ "$verdict" != unknown ] && [ "$input_checked" -eq 0 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner"; then
       verdict=unknown
     fi
   fi
@@ -3179,13 +3204,13 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-}
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [raw-owner]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-} raw_owner=${9:-${FM_RAW_LAUNCH_OWNER:-}}
   local i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-    "$recorded_harness" "$raw_launch"; then
+    "$recorded_harness" "$raw_launch" "$raw_owner"; then
     printf 'unknown'
     return 0
   fi
@@ -3199,7 +3224,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   [ "$baseline" = idle ] || footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   while :; do
     if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      "$recorded_harness" "$raw_launch"; then
+      "$recorded_harness" "$raw_launch" "$raw_owner"; then
       printf 'unknown'
       return 0
     fi
@@ -3209,7 +3234,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target" "$recorded_harness" "$raw_launch")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$recorded_harness" "$raw_launch" "$raw_owner")
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
         && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then

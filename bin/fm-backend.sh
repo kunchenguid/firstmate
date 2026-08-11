@@ -639,16 +639,19 @@ fm_backend_source() {  # <name>
   esac
 }
 
-fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-launch]
-  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-}
-  if [ "$recorded_harness" = raw-omp ] \
-    || { [ "$recorded_harness" = omp ] \
-      && { [ "$raw_launch" = 1 ] || [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; }; then
-    FM_BACKEND_RAW_OMP_STATE=omp
-    return 0
+fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}}
+  [ "$recorded_harness" = raw-omp ] && raw_launch=1
+  if [ "$recorded_harness" = omp ] \
+    && { [ "$raw_launch" = 1 ] || [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; then
+    raw_launch=1
   fi
   [ "$raw_launch" = 1 ] || {
     FM_BACKEND_RAW_OMP_STATE=other
+    return 1
+  }
+  [ -n "$raw_owner" ] || {
+    FM_BACKEND_RAW_OMP_STATE=unknown
     return 1
   }
   FM_BACKEND_RAW_OMP_STATE=unknown
@@ -656,7 +659,7 @@ fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-la
     herdr)
       fm_backend_source herdr || return 1
       FM_BACKEND_HERDR_RAW_OMP_STATE=
-      if fm_backend_herdr_raw_omp_identity "$target"; then
+      if fm_backend_herdr_raw_omp_identity "$target" "$raw_owner"; then
         FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_HERDR_RAW_OMP_STATE:-omp}
       else
         FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_HERDR_RAW_OMP_STATE:-unknown}
@@ -665,7 +668,7 @@ fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-la
     tmux)
       fm_backend_source tmux || return 1
       FM_BACKEND_TMUX_RAW_OMP_STATE=
-      if fm_backend_tmux_raw_omp_identity "$target"; then
+      if fm_backend_tmux_raw_omp_identity "$target" "$raw_owner"; then
         FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_TMUX_RAW_OMP_STATE:-omp}
       else
         FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_TMUX_RAW_OMP_STATE:-unknown}
@@ -693,16 +696,13 @@ fm_backend_current_omp_identity() {  # <backend> <target>
   esac
 }
 
-fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-launch]
-  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state
+fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}} state
   [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  [ "$recorded_harness" = raw-omp ] && raw_launch=1
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
-  if [ "$recorded_harness" = raw-omp ]; then
-    printf 'omp'
-    return 0
-  fi
   if [ "$raw_launch" = 1 ]; then
-    fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch" >/dev/null 2>&1 || true
+    fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner" >/dev/null 2>&1 || true
     printf '%s' "${FM_BACKEND_RAW_OMP_STATE:-unknown}"
     return 0
   fi
@@ -749,9 +749,10 @@ fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-
   printf '%s' "$state"
 }
 
-fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw-launch]
-  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state identity agent agent_status
+fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}} state identity agent agent_status
   [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  [ "$recorded_harness" = raw-omp ] && raw_launch=1
   fm_backend_source "$backend" || return 1
   case "$recorded_harness:$raw_launch" in
     raw-omp:*|omp:1)
@@ -760,18 +761,18 @@ fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw
   esac
   case "$recorded_harness:$raw_launch" in
     *:1)
-      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
+      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner")
       fm_harness_identity_matches '' "$state" 1 || return 1
       ;;
     omp:)
-      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
+      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner")
       [ "$state" = omp ] || return 1
       ;;
     :|unknown:)
       return 0
       ;;
     *)
-      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
+      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner")
       fm_harness_identity_matches "$recorded_harness" "$state" || return 1
       ;;
   esac
@@ -864,13 +865,13 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 # fm_backend_send_key: one backend-supported named special key.
-fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch]
-  local backend=$1 target=${2:-} recorded_harness=${5-} raw_launch=${6-}
+fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch] [raw-owner]
+  local backend=$1 target=${2:-} recorded_harness=${5-} raw_launch=${6-} raw_owner=${7:-${FM_RAW_LAUNCH_OWNER:-}}
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" != herdr ] \
     && { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
     return 1
   fi
   case "$backend" in
@@ -879,7 +880,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
       fm_backend_herdr_parse_target "$target" || return 1
       fm_backend_herdr_omp_input_safe \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$recorded_harness" "$raw_launch" || return 1
+        "$recorded_harness" "$raw_launch" "$raw_owner" || return 1
       fm_backend_herdr_send_key "$@"
       ;;
     zellij) fm_backend_zellij_send_key "$@" ;;
@@ -892,13 +893,13 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch]
-  local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-}
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [raw-owner]
+  local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-} raw_owner=${10:-${FM_RAW_LAUNCH_OWNER:-}}
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" != herdr ] \
     && { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
     printf 'unknown'
     return 0
   fi
@@ -957,14 +958,19 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # uses unknown as the cue for harness-scoped pane-tail detection, while
 # fm-crew-state.sh also corroborates native idle verdicts with the recorded
 # harness's signature before treating a no-run crew as not busy.
-fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] [endpoint-checked]
-  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} endpoint_checked=${5-}
+fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] [endpoint-checked] [raw-owner]
+  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} endpoint_checked=${5-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}}
   [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  [ "$recorded_harness" = raw-omp ] && raw_launch=1
+  if [ "$raw_launch" = 1 ] && [ -z "$raw_owner" ]; then
+    printf 'unknown'
+    return 0
+  fi
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
     && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
     && [ "$endpoint_checked" != 1 ] \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
     printf 'unknown'
     return 0
   fi
@@ -976,23 +982,24 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] 
 
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
-# input guard, a submit acknowledgement, or a launch-readiness check. It is
-# exposed so a caller other than the send path (the away-mode daemon's
-# supervisor-pane pending-input guard in bin/fm-supervise-daemon.sh, and
-# fm-spawn.sh's kimi readiness/delivery checks) can ask the same question
-# without duplicating per-backend composer reading. Every adapter's named
-# classifier is a THIN wrapper - capture plus a capability descriptor fed to
-# the one shared shape owner (bin/fm-composer-lib.sh,
-# fm_composer_classify_screen) - so no backend can hold a private shape
-# assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
-# its old no-classifier content-diff reporting.
-fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
-  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-}
+# input guard or an adapter's conservative submit fallback. It is exposed so a
+# caller other than the send path (the away-mode daemon's supervisor-pane
+# pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
+# without duplicating per-backend composer-reading logic. tmux and herdr both
+# expose a named classifier already (fm_tmux_composer_state,
+# fm_backend_herdr_composer_state), as do orca and cmux
+# (fm_backend_orca_composer_state, fm_backend_cmux_composer_state); zellij's
+# submit path uses an internal content-diff approach with no separately named
+# classifier, so it reports unknown here - callers fall back to their own
+# policy, exactly as an unknown fm_backend_busy_state already does.
+fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner] -> empty|pending|pending-unproven|unknown
+  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}}
   shift
+  [ "$recorded_harness" = raw-omp ] && raw_launch=1
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if [ "$backend" != herdr ] \
     && { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
-    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
     printf 'unknown'
     return 0
   fi
@@ -1072,15 +1079,15 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
-  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-}
+fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} raw_owner=${5:-${FM_RAW_LAUNCH_OWNER:-}}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
-    herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$recorded_harness" "$raw_launch" "$raw_owner" ;;
+    herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" "$raw_owner" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -1088,8 +1095,8 @@ fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
-fm_backend_agent_alive() {  # <backend> <target> [recorded-harness] [raw-launch]
-  case "$(fm_backend_agent_state "$1" "$2" "${3:-}" "${4:-}")" in
+fm_backend_agent_alive() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner]
+  case "$(fm_backend_agent_state "$1" "$2" "${3:-}" "${4:-}" "${5:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

@@ -401,7 +401,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness raw_launch mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness raw_launch raw_owner mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -414,6 +414,7 @@ task_json_lines() {
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
     raw_launch=$(meta_value "$meta" raw_launch)
+    raw_owner=$(meta_value "$meta" raw_owner)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -512,7 +513,7 @@ task_json_lines() {
         fi
       fi
       if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null || printf unknown)
+        agent_alive=$(fm_backend_agent_alive "$backend" "$target" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null || printf unknown)
       fi
     fi
 

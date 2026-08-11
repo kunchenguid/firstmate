@@ -142,9 +142,28 @@ SH
 set -u
 rows=${FM_FAKE_PS_ROWS:-'1 0
 4242 1'}
+if [ -n "${FM_FAKE_PS_OMP_PID:-}" ] \
+  && ! printf '%s\n' "$rows" | awk -v pid="$FM_FAKE_PS_OMP_PID" '$1 == pid { found=1 } END { exit(found ? 0 : 1) }'; then
+  rows="$rows
+$FM_FAKE_PS_OMP_PID 4242"
+fi
+root_comm=${FM_FAKE_PS_ROOT_COMM:--zsh}
+root_args=${FM_FAKE_PS_ROOT_ARGS:-zsh}
+if [ -n "${FM_RAW_LAUNCH_OWNER:-}" ] \
+  && [ -z "${FM_FAKE_PS_ROOT_COMM+x}" ] \
+  && [ -z "${FM_FAKE_PS_ROOT_ARGS+x}" ]; then
+  root_comm=claude
+  root_args=claude
+fi
 case "$*" in
   "-axo pid=,ppid=")
     printf '%s\n' "$rows"
+    ;;
+  *"eww"*"-o command="*)
+    case "$*" in
+      *"-p ${FM_FAKE_PS_NO_OWNER_PID:-__none__}"*) printf 'OTHER=1\n' ;;
+      *) printf 'FM_RAW_LAUNCH_OWNER=%s\n' "${FM_RAW_LAUNCH_OWNER:-}" ;;
+    esac
     ;;
   *"-o comm="*)
     pid=
@@ -157,7 +176,7 @@ case "$*" in
     printf '%s\n' "$rows" | awk -v pid="$pid" '$1 == pid { found=1 } END { exit(found ? 0 : 1) }' || exit 1
     case "$pid" in
       "${FM_FAKE_PS_OMP_PID:-__none__}") printf '%s\n' "${FM_FAKE_PS_OMP_COMM:-bun}" ;;
-      *) printf '%s\n' "${FM_FAKE_PS_ROOT_COMM:--zsh}" ;;
+      *) printf '%s\n' "$root_comm" ;;
     esac
     ;;
   *"-o args="*)
@@ -171,7 +190,7 @@ case "$*" in
     printf '%s\n' "$rows" | awk -v pid="$pid" '$1 == pid { found=1 } END { exit(found ? 0 : 1) }' || exit 1
     case "$pid" in
       "${FM_FAKE_PS_OMP_PID:-__none__}") printf '%s\n' "${FM_FAKE_PS_OMP_ARGS:-bun}" ;;
-      *) printf '%s\n' "${FM_FAKE_PS_ROOT_ARGS:-zsh}" ;;
+      *) printf '%s\n' "$root_args" ;;
     esac
     ;;
   *"-o stat="*) printf '%s\n' "${FM_FAKE_PS_STAT:-S+}" ;;
@@ -3102,14 +3121,14 @@ test_busy_state_unknown_on_no_agent() {
 }
 
 test_raw_non_omp_agent_state_preserves_liveness_and_recovery() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-non-omp
   dir="$TMP_ROOT/raw-non-omp-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   herdr_other_process_info > "$resp/1.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state lab:w1:p2 bash 1' "$ROOT" )
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = alive ] || fail "raw non-OMP live Herdr agents must remain recoverable as alive, got '$out'"
 
   dir="$TMP_ROOT/raw-non-omp-no-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3117,8 +3136,8 @@ test_raw_non_omp_agent_state_preserves_liveness_and_recovery() {
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state lab:w1:p2 bash 1' "$ROOT" )
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = dead ] || fail "raw non-OMP Herdr no-agent state must remain recoverable as dead, got '$out'"
   pass "Herdr liveness: raw non-OMP agents retain live and no-agent recovery"
 }
@@ -3170,32 +3189,32 @@ test_herdr_non_omp_requires_positive_current_identity() {
 }
 
 test_herdr_raw_background_omp_is_quarantined() {
-  local dir log resp fb out process_state
+  local dir log resp fb out process_state owner=raw-herdr-background-omp
   dir="$TMP_ROOT/raw-background-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
   chmod +x "$fb/omp"
   herdr_other_process_info > "$resp/1.out"
-  process_state=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  process_state=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_PS_ROWS=$'1 0\n4242 1\n5151 4242\n6161 5151' FM_FAKE_PS_OMP_PID=6161 \
     FM_FAKE_PS_OMP_COMM=omp FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_parse_target lab:w1:p2; fm_backend_herdr_raw_omp_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_parse_target lab:w1:p2; fm_backend_herdr_raw_omp_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$1"' "$ROOT" "$owner" )
   [ "$process_state" = omp ] || fail "the full Herdr process tree should identify the background OMP descendant, got '$process_state'"
   printf '0\n' > "$resp/.count"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_PS_ROWS=$'1 0\n4242 1\n5151 4242\n6161 5151' FM_FAKE_PS_OMP_PID=6161 \
     FM_FAKE_PS_OMP_COMM=omp FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = unverified ] || fail "a raw Herdr wrapper with a background OMP descendant must be unverified, got '$out'"
   if grep -q $'\x1fagent\x1fget' "$log"; then
     fail "a background raw OMP descendant must be rejected before registered-agent recovery reads"
   fi
   : > "$log"
   printf '0\n' > "$resp/.count"
-  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_PS_ROWS=$'1 0\n4242 1\n5151 4242\n6161 5151' FM_FAKE_PS_OMP_PID=6161 \
     FM_FAKE_PS_OMP_COMM=omp FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key herdr lab:w1:p2 Escape label bash 1' "$ROOT" >/dev/null 2>&1
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key herdr lab:w1:p2 Escape label bash 1 "$1"' "$ROOT" "$owner" >/dev/null 2>&1
   [ "$?" -ne 0 ] || fail "a background raw OMP descendant must reject Herdr control input"
   if grep -q $'\x1fpane\x1fsend-keys' "$log"; then
     fail "a background raw OMP descendant must be rejected before Herdr control input"
@@ -3204,13 +3223,13 @@ test_herdr_raw_background_omp_is_quarantined() {
 }
 
 test_herdr_raw_unreadable_process_tree_is_quarantined() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-unreadable
   dir="$TMP_ROOT/raw-unreadable-tree"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   herdr_other_process_info > "$resp/1.out"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_PS_ROWS='not-a-process-row' \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = unverified ] || fail "an unreadable raw Herdr process tree must remain unverified, got '$out'"
   if grep -q $'\x1fagent\x1fget' "$log" || grep -q $'\x1fpane\x1fget' "$log"; then
     fail "an unreadable raw process tree must be rejected before Herdr recovery reads"
@@ -3218,15 +3237,29 @@ test_herdr_raw_unreadable_process_tree_is_quarantined() {
   pass "Herdr identity: unreadable raw process trees are quarantined"
 }
 
+test_herdr_raw_requires_marker_on_current_foreground() {
+  local dir log resp fb out owner=raw-herdr-stripped-marker
+  dir="$TMP_ROOT/raw-stripped-marker"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_other_process_info > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_FAKE_PS_NO_OWNER_PID=5150 FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
+  [ "$out" = unverified ] || fail "a raw Herdr endpoint with a stripped foreground marker must be unverified, got '$out'"
+  if grep -q $'\x1fagent\x1fget' "$log"; then
+    fail "a stripped raw ownership marker must be rejected before agent recovery reads"
+  fi
+  pass "Herdr identity: raw ownership requires the current foreground marker"
+}
+
 test_herdr_raw_reparented_omp_is_unverified() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-reparented-omp
   dir="$TMP_ROOT/raw-reparented-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   herdr_shell_process_info > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_PS_ROWS=$'1 0\n4242 1\n6161 1' FM_FAKE_PS_OMP_PID=6161 \
     FM_FAKE_PS_OMP_COMM=omp FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = unverified ] || fail "a reparented raw OMP process must remain unverified, got '$out'"
   if grep -q $'\x1fagent\x1fget' "$log" || grep -q $'\x1fpane\x1fget' "$log"; then
     fail "a reparented raw OMP process must be rejected before recovery reads"
@@ -3235,14 +3268,15 @@ test_herdr_raw_reparented_omp_is_unverified() {
 }
 
 test_dispatch_rejects_unregistered_raw_omp_before_recovery() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-unregistered-omp
   dir="$TMP_ROOT/raw-omp-dispatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
   chmod +x "$fb/omp"
   herdr_bun_process_info "$fb/omp" > "$resp/1.out"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_PS_OMP_PID=5150 FM_FAKE_PS_OMP_COMM=bun FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = unverified ] || fail "an unregistered wrapped raw OMP must stop recovery before state mapping, got '$out'"
   [ "$(grep -c $'\x1fpane\x1fprocess-info' "$log")" -eq 1 ] \
     || fail "raw OMP dispatch should inspect current process identity once"
@@ -3253,14 +3287,15 @@ test_dispatch_rejects_unregistered_raw_omp_before_recovery() {
 }
 
 test_dispatch_rejects_raw_omp_descendant_before_recovery() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-mixed-omp
   dir="$TMP_ROOT/raw-omp-descendant"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
   chmod +x "$fb/omp"
   printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bash","argv0":"bash"},{"pid":5151,"name":"omp","argv0":"omp"}]}}}' > "$resp/1.out"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_PS_OMP_PID=5151 FM_FAKE_PS_OMP_COMM=omp FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = unverified ] || fail "a raw wrapper process group containing OMP must stop recovery, got '$out'"
   if grep -q $'\x1fagent\x1fget' "$log"; then
     fail "a raw OMP descendant must be rejected before registered-agent recovery reads"
@@ -3269,14 +3304,14 @@ test_dispatch_rejects_raw_omp_descendant_before_recovery() {
 }
 
 test_dispatch_preserves_unrelated_raw_bun_recovery() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-unrelated-bun
   dir="$TMP_ROOT/raw-unrelated-bun"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
   chmod +x "$fb/omp"
   herdr_bun_process_info /tmp/omp > "$resp/1.out"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = unverified ] || fail "an unrelated Bun /tmp/omp raw process must remain unverified, got '$out'"
   [ "$(grep -c $'\x1fpane\x1fprocess-info' "$log")" -eq 1 ] \
     || fail "unrelated raw Bun quarantine should inspect process identity once"
@@ -3287,13 +3322,15 @@ test_dispatch_preserves_unrelated_raw_bun_recovery() {
 }
 
 test_raw_omp_busy_gate_preserves_non_omp_native_busy() {
-  local dir log resp fb out
+  local dir log resp fb out owner
+  owner=raw-herdr-busy-omp
   dir="$TMP_ROOT/raw-omp-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
   chmod +x "$fb/omp"
   herdr_bun_process_info "$fb/omp" > "$resp/1.out"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_PS_OMP_PID=5150 FM_FAKE_PS_OMP_COMM=bun FM_FAKE_PS_OMP_ARGS="bun $fb/omp" \
     bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify herdr lab:w1:p2 bash raw-omp-busy "$1" "" 1' "$ROOT" "$dir/state" )
   [ "$out" = "unknown raw-unverified" ] \
     || fail "an unregistered wrapped raw OMP must not use Herdr native busy, got '$out'"
@@ -3304,13 +3341,14 @@ test_raw_omp_busy_gate_preserves_non_omp_native_busy() {
   fi
 
   dir="$TMP_ROOT/raw-non-omp-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  owner=raw-herdr-busy-non-omp
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
   chmod +x "$fb/omp"
   herdr_other_process_info > "$resp/1.out"
   printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/3.out"
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify herdr lab:w1:p2 bash raw-non-omp-busy "$1" "" 1' "$ROOT" "$dir/state" )
   [ "$out" = "busy herdr-native" ] \
     || fail "raw non-OMP Herdr must preserve native busy, got '$out'"
@@ -3641,7 +3679,7 @@ test_send_text_submit_rejects_exit_between_text_and_enter() {
 }
 
 test_herdr_input_allows_wrapped_non_omp_identity() {
-  local dir log resp fb out
+  local dir log resp fb out owner=raw-herdr-input-wrapper
   dir="$TMP_ROOT/input-wrapped-non-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
   herdr_other_process_info > "$resp/1.out"
@@ -3649,8 +3687,8 @@ test_herdr_input_allows_wrapped_non_omp_identity() {
   herdr_other_process_info > "$resp/4.out"
   printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0.01 0.01 label bash 1' "$ROOT" )
+  out=$( PATH="$fb:$PATH" FM_RAW_LAUNCH_OWNER="$owner" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0.01 0.01 label bash 1 "$1"' "$ROOT" "$owner" )
   [ "$out" = empty ] || fail "a positively corroborated raw wrapper must preserve non-OMP Herdr input, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello' "wrapped non-OMP identity did not reach Herdr text input"
   pass "Herdr input: raw wrapper metadata preserves current non-OMP input"
@@ -3719,6 +3757,13 @@ test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch() {
   pass "Herdr liveness: canonical OMP does not remain live after a non-OMP relaunch"
 }
 
+test_herdr_no_metadata_omp_requires_current_identity() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-no-metadata-relaunch" omp working "$(herdr_other_process_info w1:p1)")
+  [ "$out" = unknown ] || fail "a metadata-free OMP registration over Claude must remain unknown, got '$out'"
+  pass "Herdr liveness: metadata-free OMP registration requires current OMP identity"
+}
+
 # --- OMP's stale idle agent registration after /exit ------------------------
 #
 # OMP 17.2.12 leaves its Herdr agent registration at `idle` once /exit has
@@ -3742,6 +3787,7 @@ omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows]
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$agent" "$status" > "$resp/2.out"
   printf '%s\n' "$info" > "$resp/3.out"
+  printf '%s\n' "$info" > "$resp/4.out"
   printf '%s\n' "$rows" > "$dir/ps-rows"
   cat > "$dir/ps" <<'SH'
 #!/usr/bin/env bash
@@ -3836,8 +3882,12 @@ test_omp_idle_registration_over_a_lone_shell_is_no_agent() {
 }
 
 test_omp_idle_registration_over_a_running_bun_stays_live() {
-  local out info
-  info='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bun","argv0":"bun"}]}}}'
+  local dir out info
+  dir="$TMP_ROOT/omp-live-bun"
+  mkdir -p "$dir/fakebin"
+  : > "$dir/fakebin/omp"
+  chmod +x "$dir/fakebin/omp"
+  info=$(herdr_bun_process_info "$dir/fakebin/omp" w1:p1)
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-live-bun" omp idle "$info" '1 0
 4242 1
 5150 4242')
@@ -5247,6 +5297,7 @@ test_herdr_non_omp_record_rejects_current_omp
 test_herdr_non_omp_requires_positive_current_identity
 test_herdr_raw_background_omp_is_quarantined
 test_herdr_raw_unreadable_process_tree_is_quarantined
+test_herdr_raw_requires_marker_on_current_foreground
 test_herdr_raw_reparented_omp_is_unverified
 test_dispatch_rejects_unregistered_raw_omp_before_recovery
 test_dispatch_rejects_raw_omp_descendant_before_recovery
@@ -5277,6 +5328,7 @@ test_herdr_input_rejects_raw_non_omp_stale_registration_over_omp
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
 test_herdr_input_rejects_no_metadata_non_omp_over_omp_process
 test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch
+test_herdr_no_metadata_omp_requires_current_identity
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_over_a_lone_shell_is_no_agent
 test_omp_idle_registration_over_a_running_bun_stays_live

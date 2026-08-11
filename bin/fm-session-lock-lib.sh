@@ -171,6 +171,127 @@ fm_harness_process_identity() {  # <comm> <args> -> harness|shell|other
   printf 'other'
 }
 
+fm_harness_process_owner_state() {
+  local pid=$1 owner=$2 ps_bin=${3:-ps} environment
+  case "$pid" in ''|*[!0-9]*|0|1) return 2 ;; esac
+  case "$owner" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  if [ -r "/proc/$pid/environ" ]; then
+    environment=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null) || return 2
+  else
+    environment=$(LC_ALL=C "$ps_bin" eww -p "$pid" -o command= 2>/dev/null) || return 2
+  fi
+  printf '%s\n' "$environment" | awk -v expected="FM_RAW_LAUNCH_OWNER=$owner" '
+    { for (i = 1; i <= NF; i++) if ($i == expected) found = 1 }
+    END { exit(found ? 0 : 1) }
+  '
+  case "$?" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+fm_harness_raw_owner_state() {
+  local root=$1 owner=$2 ps_bin=${3:-ps} foreground_pids=${4:-} current_identity=${5:-}
+  local rows all_pids rc pid owner_state comm args identity marker_count=0
+  local foreground_count=0 owner_omp=0 owner_supported=
+  case "$root" in ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;; esac
+  case "$owner" in ''|*[!A-Za-z0-9._-]*) printf 'unknown'; return 0 ;; esac
+  fm_harness_identity_supported "$current_identity" || {
+    printf 'unknown'
+    return 0
+  }
+  fm_harness_process_owner_state "$root" "$owner" "$ps_bin" >/dev/null 2>&1 || {
+    printf 'unknown'
+    return 0
+  }
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    case "$pid" in ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;; esac
+    foreground_count=$((foreground_count + 1))
+    owner_state=$(fm_harness_process_owner_state "$pid" "$owner" "$ps_bin")
+    [ "$?" -eq 0 ] || { printf 'unknown'; return 0; }
+  done <<EOF
+$foreground_pids
+EOF
+  [ "$foreground_count" -gt 0 ] || { printf 'unknown'; return 0; }
+
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid= 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  all_pids=$(printf '%s\n' "$rows" | awk -v root="$root" '
+    NF == 0 { next }
+    NF != 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ { bad = 1; next }
+    { if (seen[$1]++) bad = 1; if ($1 == root) root_count++; if ($1 > 1) print $1 }
+    END { if (bad || root_count != 1) exit 2 }
+  ')
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$all_pids" ] || {
+    printf 'unknown'
+    return 0
+  }
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    owner_state=$(fm_harness_process_owner_state "$pid" "$owner" "$ps_bin")
+    case "$?" in
+      1) continue ;;
+      2) printf 'unknown'; return 0 ;;
+    esac
+    marker_count=$((marker_count + 1))
+    comm=$(LC_ALL=C "$ps_bin" -p "$pid" -o comm= 2>/dev/null) || {
+      printf 'unknown'
+      return 0
+    }
+    comm=$(printf '%s\n' "$comm" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || {
+      printf 'unknown'
+      return 0
+    }
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || {
+      printf 'unknown'
+      return 0
+    }
+    args=$(printf '%s\n' "$args" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || {
+      printf 'unknown'
+      return 0
+    }
+    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$comm" "$args")
+    case "$identity" in
+      omp) owner_omp=1 ;;
+      shell) : ;;
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        if [ -z "$owner_supported" ]; then
+          owner_supported=$identity
+        elif ! fm_harness_identity_matches "$owner_supported" "$identity"; then
+          printf 'unknown'
+          return 0
+        fi
+        ;;
+      *) : ;;
+    esac
+  done <<EOF
+$all_pids
+EOF
+  [ "$marker_count" -gt 0 ] || { printf 'unknown'; return 0; }
+  if [ "$owner_omp" -eq 1 ]; then
+    printf 'omp'
+    return 0
+  fi
+  case "$current_identity" in
+    omp)
+      printf 'unknown'
+      ;;
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+      if [ -n "$owner_supported" ] && fm_harness_identity_matches "$current_identity" "$owner_supported"; then
+        printf '%s' "$current_identity"
+      else
+        printf 'unknown'
+      fi
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_harness_process_tree_identity() {  # <root-pid> [ps-bin] -> harness|shell|other|unknown
   local root=$1 ps_bin=${2:-ps} rows tree pid comm args identity current_identity= shell_seen=0 rc
   case "$root" in
