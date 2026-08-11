@@ -38,7 +38,7 @@ routine_usage() {
 
 routine_cleanup() {
   [ -z "$ROUTINE_TMP" ] || rm -f -- "$ROUTINE_TMP"
-  rmdir "$LOCK" 2>/dev/null || true
+  fm_lock_release "$LOCK" 2>/dev/null || true
 }
 
 case "${1:-}" in
@@ -53,6 +53,9 @@ fi
 [ -f "$REGISTRY" ] || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
 [ -d "$STATE" ] && [ ! -L "$STATE" ] \
   || { routine_error "state directory is unavailable: $STATE"; exit 1; }
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 TODAY="${FM_ROUTINE_DATE:-$(date +%F)}"
 case "$TODAY" in
@@ -69,7 +72,7 @@ case "$WEEKDAY" in
   *) routine_error "invalid weekday: $WEEKDAY"; exit 1 ;;
 esac
 
-if ! mkdir "$LOCK" 2>/dev/null; then
+if ! fm_lock_try_acquire "$LOCK"; then
   exit 0
 fi
 trap routine_cleanup EXIT HUP INT TERM
@@ -171,6 +174,11 @@ done < "$REGISTRY"
 
 [ "${#DUE_LINES[@]}" -gt 0 ] || exit 0
 
+for due_line in "${DUE_LINES[@]}"; do
+  printf '%s\n' "$due_line" \
+    || { routine_error 'could not emit due routine'; exit 1; }
+done
+
 umask 077
 ROUTINE_TMP=$(mktemp "$STATE/.routine-fired.XXXXXX") \
   || { routine_error 'could not create fire-state update'; exit 1; }
@@ -191,7 +199,3 @@ done
 chmod 0600 "$ROUTINE_TMP" || { routine_error 'could not protect fire-state update'; exit 1; }
 mv -f -- "$ROUTINE_TMP" "$FIRED" || { routine_error 'could not publish fire-state update'; exit 1; }
 ROUTINE_TMP=
-
-for due_line in "${DUE_LINES[@]}"; do
-  printf '%s\n' "$due_line"
-done

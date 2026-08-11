@@ -46,7 +46,7 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
 The recurring routine uses the same authenticated custom-check rail rather than adding a scheduler service: locked primary bootstrap publishes one private registered check, the watcher invokes it on the existing slow-check cadence, and the scanner's local fire state makes repeated scans and restarts idempotent.
-[Recurring routine](configuration.md#routines) owns current operator behavior and the local-only boundary.
+[Recurring routine](configuration.md#recurring-routine) owns current operator behavior and the local-only boundary.
 
 ### Registered secondmate current state
 

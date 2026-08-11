@@ -97,21 +97,39 @@ if [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
 else
   ROUTINE_SETUP_TMP=$(mktemp "$DATA/.routines.XXXXXX") \
     || { routine_setup_error 'could not create routine registry'; exit 1; }
-  cat > "$ROUTINE_SETUP_TMP" <<'EOF'
+  if ! cat > "$ROUTINE_SETUP_TMP" <<'EOF'
 # Recurring routine registry.
 # The bin/fm-routine-scan.sh header owns the format and cadence reference.
 # Examples:
 # - example-daily-check | daily | captain | check today's priorities | do
 # - example-weekly-review | weekly:mon | captain | review the week | do
 EOF
+  then
+    routine_setup_error 'could not write routine registry'
+    exit 1
+  fi
   chmod 0600 "$ROUTINE_SETUP_TMP" \
     || { routine_setup_error 'could not protect routine registry'; exit 1; }
   fm_pr_regular_destination_on_device_or_absent "$REGISTRY" "$DATA_DEVICE" \
     || { routine_setup_error "registry path is unavailable: $REGISTRY"; exit 1; }
-  mv -f -- "$ROUTINE_SETUP_TMP" "$REGISTRY" \
-    || { routine_setup_error 'could not publish routine registry'; exit 1; }
-  ROUTINE_SETUP_TMP=
+  if ln "$ROUTINE_SETUP_TMP" "$REGISTRY" 2>/dev/null; then
+    rm -f -- "$ROUTINE_SETUP_TMP" \
+      || { routine_setup_error 'could not publish routine registry'; exit 1; }
+    ROUTINE_SETUP_TMP=
+  else
+    rm -f -- "$ROUTINE_SETUP_TMP" \
+      || { routine_setup_error 'could not discard routine registry seed'; exit 1; }
+    ROUTINE_SETUP_TMP=
+    [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ] \
+      || { routine_setup_error "could not publish routine registry: $REGISTRY"; exit 1; }
+    fm_pr_regular_destination_on_device_or_absent "$REGISTRY" "$DATA_DEVICE" \
+      || { routine_setup_error "registry path is unavailable: $REGISTRY"; exit 1; }
+    chmod 0600 "$REGISTRY" \
+      || { routine_setup_error 'could not protect routine registry'; exit 1; }
+  fi
 fi
+fm_pr_private_file_valid "$REGISTRY" 600 "$DATA_DEVICE" \
+  || { routine_setup_error "routine registry is unsafe: $REGISTRY"; exit 1; }
 
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 if ! fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
