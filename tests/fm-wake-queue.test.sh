@@ -260,6 +260,23 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
 }
 
+test_drain_accepts_autoarm_handoff_with_fresh_beacon() {
+  local dir state err
+  dir=$(make_case drain-autoarm-handoff)
+  state="$dir/state"
+  err="$dir/drain.err"
+  printf 'window=test:fm-autoarm\nkind=ship\n' > "$state/autoarm.meta"
+  touch "$state/.last-watcher-beat"
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 \
+    FM_SUPERVISION_MODEL=autoarm "$DRAIN" >/dev/null 2> "$err" \
+    || fail "drain failed during a healthy auto-arm handoff"
+  if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
+    fail "drain blamed a fresh beacon during the expected auto-arm process gap: $(cat "$err")"
+  fi
+  pass "drain accepts the expected auto-arm process gap while its beacon is fresh"
+}
+
 test_structural_signal_enrichment_preserves_raw_rows() {
   local dir state out expected actual annotation_count outside perl_bin
   dir=$(make_case enrichment)
@@ -634,6 +651,7 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
+test_drain_accepts_autoarm_handoff_with_fresh_beacon
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
