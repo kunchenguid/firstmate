@@ -662,6 +662,7 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_TREEHOUSE_LEASE_WT=
+SPAWN_TREEHOUSE_LEASE_HANDOFF=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -682,6 +683,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  [ -z "$SPAWN_TREEHOUSE_LEASE_HANDOFF" ] || rm -f -- "$SPAWN_TREEHOUSE_LEASE_HANDOFF" 2>/dev/null || true
   if [ -n "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
     if ! (cd "$PROJ_ABS" && treehouse return --force "$SPAWN_TREEHOUSE_LEASE_WT") >/dev/null 2>&1; then
       echo "warning: could not return treehouse lease after aborted spawn of $ID; inspect '$SPAWN_TREEHOUSE_LEASE_WT'" >&2
@@ -2177,7 +2179,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" "fm_treehouse_wt=\$(treehouse get --lease --lease-holder $ID) && [ -n \"\$fm_treehouse_wt\" ] && cd \"\$fm_treehouse_wt\""
+  SPAWN_TREEHOUSE_LEASE_HANDOFF="$STATE/.$ID.treehouse-lease.${BASHPID:-$$}"
+  rm -f -- "$SPAWN_TREEHOUSE_LEASE_HANDOFF"
+  sq_treehouse_lease_handoff=$(shell_quote "$SPAWN_TREEHOUSE_LEASE_HANDOFF")
+  spawn_send_text_line "$WT_TARGET" "fm_treehouse_wt=\$(treehouse get --lease --lease-holder $ID) && [ -n \"\$fm_treehouse_wt\" ] && printf '%s\\n' \"\$fm_treehouse_wt\" > $sq_treehouse_lease_handoff && cd \"\$fm_treehouse_wt\""
 
   # Wait for the durable treehouse lease and cd: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2201,10 +2206,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
   for _ in $(seq 1 60); do
+    if [ -z "$SPAWN_TREEHOUSE_LEASE_WT" ] && [ -s "$SPAWN_TREEHOUSE_LEASE_HANDOFF" ]; then
+      IFS= read -r SPAWN_TREEHOUSE_LEASE_WT < "$SPAWN_TREEHOUSE_LEASE_HANDOFF" || true
+      rm -f -- "$SPAWN_TREEHOUSE_LEASE_HANDOFF"
+    fi
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      lease_real=$(real_path_or_raw "$SPAWN_TREEHOUSE_LEASE_WT")
+      if [ -n "$SPAWN_TREEHOUSE_LEASE_WT" ] \
+         && [ "$p_real" = "$lease_real" ] \
+         && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -2223,7 +2235,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 
-  SPAWN_TREEHOUSE_LEASE_WT=$WT
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then

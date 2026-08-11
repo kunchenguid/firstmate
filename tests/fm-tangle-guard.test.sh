@@ -165,12 +165,25 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  send-keys)
+    case "${4:-}" in
+      *'treehouse get --lease'*) bash -c "${4:-}" >/dev/null 2>&1 || true ;;
+    esac
+    exit 0
+    ;;
+  has-session|new-session|new-window) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get) printf '%s\n' "$FM_FAKE_PANE_PATH" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -244,12 +257,25 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+  send-keys)
+    case "${4:-}" in
+      *'treehouse get --lease'*) bash -c "${4:-}" >/dev/null 2>&1 || true ;;
+    esac
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get) printf '%s\n' "$FM_FAKE_PANE_PATH" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -297,7 +323,7 @@ test_spawn_tmux_window_construction() {
   # the stable id. The task id is the lease holder, so a stopped-but-preserved
   # worker and concurrently-live workers keep their slots until teardown returns
   # the worktree explicitly.
-  lease_command='send-keys -t @spawnwid fm_treehouse_wt=$(treehouse get --lease --lease-holder rec-win-gg7) && [ -n "$fm_treehouse_wt" ] && cd "$fm_treehouse_wt" Enter'
+  lease_command='send-keys -t @spawnwid fm_treehouse_wt=$(treehouse get --lease --lease-holder rec-win-gg7)'
   assert_grep "$lease_command" "$rec" \
     "treehouse get must durably lease the slot to the task on the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
@@ -330,20 +356,25 @@ case "${1:-}" in
     command_text=${4:-}
     case "$command_text" in
       *'treehouse get --lease'*)
-        PATH="$PATH" bash -c "$command_text && pwd > \"$FM_FAKE_PANE_STATE\"" \
-          >/dev/null 2>&1 || true
+        if [ "${FM_FAKE_SUPPRESS_PANE_CWD:-0}" = 1 ]; then
+          PATH="$PATH" bash -c "$command_text" >/dev/null 2>&1 || true
+        else
+          PATH="$PATH" bash -c "$command_text && pwd > \"$FM_FAKE_PANE_STATE\"" \
+            >/dev/null 2>&1 || true
+        fi
         ;;
     esac
     ;;
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/sleep"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/sleep"
   printf '%s\n' "$fakebin"
 }
 
 test_treehouse_lease_lifecycle() {
-  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id live_pid
+  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id abort_id live_pid
   home="$TMP_ROOT/lease-home"
   proj=$(make_repo "$TMP_ROOT/lease-proj")
   fakebin=$(make_lease_lifecycle_fakebin "$TMP_ROOT/lease-fake")
@@ -352,6 +383,23 @@ test_treehouse_lease_lifecycle() {
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   printf '%s\n' "$proj" > "$pane"
+
+  abort_id=lease-abort-ii9
+  mkdir -p "$home/data/$abort_id"
+  printf 'brief\n' > "$home/data/$abort_id/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX=fake \
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" FM_FAKE_PANE_STATE="$pane" FM_FAKE_SUPPRESS_PANE_CWD=1 \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" "$abort_id" "$proj" codex \
+    --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 1 "$status" "spawn without cwd discovery should abort: $out"
+  if FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" status --json \
+    | jq -e --arg holder "$abort_id" '[.. | objects | .lease_holder? // empty] | index($holder) != null' >/dev/null; then
+    fail "aborted spawn leaked its pre-cwd-discovery lease"
+  fi
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
