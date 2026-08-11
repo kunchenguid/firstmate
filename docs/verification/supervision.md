@@ -362,6 +362,7 @@ Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watc
 Captain's Inbox capture was verified on 2026-08-11 with Pi 0.84.1 through `tests/fm-captain-inbox.test.sh`.
 The deterministic fixture proved opt-in and opt-out behavior, finalized-primary-response filtering, operational and worker exclusion, private mode where portable, duplicate suppression, 100-message retention, malformed-record preservation, and concurrent read-state updates.
 The same suite invokes the supported dashboard command interface rather than reaching into arbitrary files.
+The fixture also proved crash-safe lock recovery: a stale lock is reclaimed only once its owner PID is confirmed dead or its owner record is unverifiable, a stale lock with a live owner PID is left alone, and release removes a lock only when the caller's ownership token still matches the on-disk owner.
 
 Deterministic entry points:
 
