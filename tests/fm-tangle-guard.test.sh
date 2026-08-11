@@ -267,7 +267,7 @@ run_spawn_record() {
 }
 
 test_spawn_tmux_window_construction() {
-  local home proj fakebin rec wt out status
+  local home proj fakebin rec wt out status lease_command
   home="$TMP_ROOT/spawn-rec-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
@@ -293,9 +293,13 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): the durable treehouse lease and the worktree wait loop target
+  # the stable id. The task id is the lease holder, so a stopped-but-preserved
+  # worker and concurrently-live workers keep their slots until teardown returns
+  # the worktree explicitly.
+  lease_command="send-keys -t @spawnwid cd \"\$(treehouse get --lease --lease-holder rec-win-gg7)\" Enter"
+  assert_grep "$lease_command" "$rec" \
+    "treehouse get must durably lease the slot to the task on the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 
