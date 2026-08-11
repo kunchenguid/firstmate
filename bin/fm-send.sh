@@ -7,7 +7,7 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
+# Key support is backend-specific: tmux/herdr/paseo support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and

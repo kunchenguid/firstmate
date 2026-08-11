@@ -25,7 +25,12 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 adds bin/backends/paseo.sh,
+# also EXPERIMENTAL and spawn-capable, behind `--backend paseo`/
+# `FM_BACKEND=paseo`/`config/backend`, and behind runtime auto-detection when
+# firstmate itself is running inside a Paseo agent session (PASEO_AGENT_ID or
+# PASEO_AGENT_CWD marker) with no explicit backend setting; see
+# docs/paseo-backend.md for its empirical basis.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -33,7 +38,7 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
+# spawn-capable backend, currently experimental herdr, zellij, orca, cmux, or paseo,
 # carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
@@ -308,12 +313,12 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
-#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo);
+#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux, paseo) whose
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
+#     (tmux, herdr, zellij, cmux, paseo); orca owns its own task worktree and terminal,
 #     so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.

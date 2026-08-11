@@ -36,8 +36,8 @@
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
-# non-visible-launch primitive here yet and refuse loudly.
+# Supported backends: herdr, tmux. Others (zellij, orca, cmux, paseo) are not
+# wired up for this launch path yet and refuse loudly.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless

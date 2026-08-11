@@ -3,7 +3,7 @@
 # every shape a verified harness draws, every glyph, every container proof, and
 # the empty|pending|pending-unproven|unknown verdict, shared by every
 # session-provider adapter (tmux via bin/fm-tmux-lib.sh, and
-# bin/backends/{herdr,orca,cmux,zellij}.sh) and by fm-spawn.sh's kimi
+# bin/backends/{herdr,orca,cmux,zellij,paseo}.sh) and by fm-spawn.sh's kimi
 # launch-readiness check.
 #
 # WHY THIS EXISTS (tasks fm-composer-shellglyph-safety and
