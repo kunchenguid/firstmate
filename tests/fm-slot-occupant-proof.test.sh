@@ -59,6 +59,39 @@ verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   || fail "an unrelated unreadable process blocked exact endpoint proof: $verdict"
 pass "slot disposal scopes live-process proof to the exact backend endpoint"
 
+fm_backend_foreground_process_pid() { return 1; }
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
+[ "$verdict" = dispose ] \
+  || fail "a declared marker did not prove the live PID-less endpoint: $verdict"
+pass "a declared marker proves a live PID-less endpoint"
+
+DUP_HOME="$TMP_ROOT/duplicate-home"
+mkdir -p "$DUP_HOME"
+(
+  cd "$WORKTREE" || exit 1
+  exec env FM_AGENT_TASK=task-a FM_AGENT_OWNER_HOME="$DUP_HOME" \
+    FM_AGENT_ROLE=crewmate sleep 300
+) >/dev/null 2>&1 &
+DUP_PID=$!
+BG_PIDS+=("$DUP_PID")
+for _ in $(seq 1 50); do
+  [ "$(readlink "/proc/$DUP_PID/cwd" 2>/dev/null || true)" = "$WORKTREE" ] && break
+  sleep 0.02
+done
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
+[ "$verdict" = "retain: authoritative endpoint-occupant evidence is unavailable" ] \
+  || fail "ambiguous duplicate task markers did not retain the lease: $verdict"
+pass "ambiguous duplicate task markers retain the durable lease"
+kill "$DUP_PID" 2>/dev/null || true
+wait "$DUP_PID" 2>/dev/null || true
+
+fm_backend_foreground_process_pid() {
+  [ "$1" = herdr ] && [ "$2" = lab:pane-a ] || return 1
+  printf '%s' "$ENDPOINT_PID"
+}
+
 REAL_PROC_START_TIME=$(declare -f fm_agent_proc_start_time | sed '1s/fm_agent_proc_start_time/_fm_real_agent_proc_start_time/')
 eval "$REAL_PROC_START_TIME"
 START_TIME_SENTINEL="$TMP_ROOT/start-time-sentinel"

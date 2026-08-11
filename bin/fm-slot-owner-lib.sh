@@ -314,6 +314,40 @@ fm_slot_meta_referencing_tasks() {
   return "$found"
 }
 
+fm_slot_declared_endpoint_pid() {
+  local self=$1 expected_home=${2:-} matches pid ppid candidate_pids= root_pid= root_count=0
+  local current_uid proc_uid root_home
+  current_uid=$(id -u 2>/dev/null) || return 2
+  matches=$(fm_agent_pids_for_task "$self" 2>/dev/null) || return 2
+  [ -n "$matches" ] || return 2
+  while IFS= read -r pid; do
+    fm_agent_pid_is_numeric "$pid" || continue
+    proc_uid=$(stat -c '%u' "/proc/$pid" 2>/dev/null) || continue
+    [ "$proc_uid" = "$current_uid" ] || continue
+    candidate_pids="${candidate_pids}${candidate_pids:+$'\n'}$pid"
+  done <<EOF
+$matches
+EOF
+  [ -n "$candidate_pids" ] || return 2
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    ppid=$(fm_agent_ppid "$pid") || return 2
+    if printf '%s\n' "$candidate_pids" | grep -qxF "$ppid"; then
+      continue
+    fi
+    root_count=$((root_count + 1))
+    root_pid=$pid
+  done <<EOF
+$candidate_pids
+EOF
+  [ "$root_count" -eq 1 ] || return 2
+  if [ -n "$expected_home" ]; then
+    root_home=$(fm_agent_proc_env "$root_pid" FM_AGENT_OWNER_HOME 2>/dev/null) || return 2
+    fm_slot_same_path "$root_home" "$expected_home" || return 2
+  fi
+  printf '%s' "$root_pid"
+}
+
 # fm_slot_endpoint_occupant_tasks <worktree> <task-id> <home> <role> <backend> <target>:
 # inspect only the process bound to this task's already-validated backend
 # endpoint. A durable task lease prevents Treehouse from assigning the slot to
@@ -327,15 +361,23 @@ fm_slot_meta_referencing_tasks() {
 fm_slot_endpoint_occupant_tasks() {
   local wt=$1 self=$2 self_home=$3 self_role=$4 backend=$5 target=$6
   local wt_real pid start current cwd cwd_again env env_again task task_again home home_again role role_again
+  local endpoint_source=backend
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
-  command -v fm_backend_foreground_process_pid >/dev/null 2>&1 || return 2
-  pid=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  if ! command -v fm_backend_foreground_process_pid >/dev/null 2>&1 \
+    || ! pid=$(fm_backend_foreground_process_pid "$backend" "$target"); then
+    endpoint_source=declaration
+    pid=$(fm_slot_declared_endpoint_pid "$self" "$self_home") || return 2
+  fi
   fm_agent_pid_is_numeric "$pid" || return 2
   start=$(fm_agent_proc_start_time "$pid") || return 2
   cwd=$(fm_agent_proc_cwd "$pid") || return 2
   cwd=$(fm_agent_canonical_dir "$cwd") || return 2
   env=$(fm_agent_environ "$pid" 2>/dev/null) || return 2
-  current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  if [ "$endpoint_source" = backend ]; then
+    current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  else
+    current=$(fm_slot_declared_endpoint_pid "$self" "$self_home") || return 2
+  fi
   [ "$current" = "$pid" ] || return 2
   fm_agent_pid_start_matches "$pid" "$start" || return 2
   cwd_again=$(fm_agent_proc_cwd "$pid") || return 2
@@ -350,7 +392,11 @@ fm_slot_endpoint_occupant_tasks() {
   role_again=$(printf '%s\n' "$env_again" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
   [ "$task_again" = "$task" ] && [ "$home_again" = "$home" ] \
     && [ "$role_again" = "$role" ] || return 2
-  current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  if [ "$endpoint_source" = backend ]; then
+    current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  else
+    current=$(fm_slot_declared_endpoint_pid "$self" "$self_home") || return 2
+  fi
   [ "$current" = "$pid" ] || return 2
   fm_agent_pid_start_matches "$pid" "$start" || return 2
   fm_agent_path_within "$wt_real" "$cwd" || return 1

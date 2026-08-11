@@ -1551,13 +1551,7 @@ teardown_slot_endpoint_state() {
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
   case "$state" in
     dead|missing|no-agent) printf 'closed' ;;
-    alive)
-      if fm_backend_foreground_process_pid "$backend" "$target" >/dev/null 2>&1; then
-        printf 'live'
-      else
-        printf 'unknown'
-      fi
-      ;;
+    alive) printf 'live' ;;
     *) printf 'unknown' ;;
   esac
 }
