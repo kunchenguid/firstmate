@@ -419,6 +419,30 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_pi_launch_does_not_receive_pi_identity_marker() {
+  local rec id out status launch probe
+  id=profile-raw-pi-z15a
+  rec=$(make_spawn_case profile-raw-pi claude "$id")
+  read_case_record "$rec"
+  probe="$CASE_DIR/raw-pi-identity-probe"
+  cat > "$FAKEBIN_DIR/pi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_PI_HARNESS-unset}" > "$FM_RAW_PI_PROBE"
+SH
+  chmod +x "$FAKEBIN_DIR/pi"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "pi --raw-flag")
+  status=$?
+  expect_code 0 "$status" "raw pi launch should remain available"
+  launch=$(cat "$LAUNCH_LOG")
+  FM_RAW_PI_PROBE="$probe" PATH="$FAKEBIN_DIR:$PATH" \
+    env -u FM_PI_HARNESS -u PI_CODING_AGENT bash -c "$launch"
+  [ "$(cat "$probe")" = unset ] \
+    || fail "raw pi launch received a verified identity marker: $(cat "$probe")"
+  pass "raw pi launches remain unverified"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1024,6 +1048,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_pi_launch_does_not_receive_pi_identity_marker
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_selected_harness_clears_foreign_primary_markers

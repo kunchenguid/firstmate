@@ -1237,6 +1237,7 @@ esac
 # It binds to the resolved harness for a raw launch command too, or a
 # `pi-signed ...` escape-hatch worker would self-identify as plain pi and
 # contradict the harness recorded in its own task meta.
+if [ "$RAW_LAUNCH" -eq 0 ]; then
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -1271,6 +1272,7 @@ case "$HARNESS" in
   *)
     ;;
 esac
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
