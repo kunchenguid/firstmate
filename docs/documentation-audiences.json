@@ -149,6 +149,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/keep-awake/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -338,6 +342,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/keep-awake.md",
       "audience": "maintainer-verification"
     },
     {

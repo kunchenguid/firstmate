@@ -113,6 +113,34 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Keep awake (`/keep-awake`, macOS only)
+
+`/keep-awake start` creates one managed, reversible idle-system-sleep assertion for the current Firstmate home.
+`/keep-awake status` reports whether that exact assertion is still active, and `/keep-awake stop` ends it.
+The command uses `/usr/bin/caffeinate -i`, which prevents only idle system sleep.
+It intentionally leaves display sleep and normal lock-screen behavior available.
+It does not pass `-d` because that would prevent display sleep, `-m` because disk idle sleep is outside this need, `-s` because that is an AC-only system-sleep assertion, or `-u` because a one-time user-activity declaration is not a durable idle-sleep assertion.
+
+This is an explicit captain opt-in, not an automatic response to work running or to ordinary `/afk`.
+Use `/afk keep-awake` to bind it to the away lifecycle.
+That composition starts the assertion before away mode begins and stops it on the captain's first genuine return.
+A manual `/keep-awake start` survives the return and requires an explicit `/keep-awake stop`.
+If the assertion cannot start, do not enter an allegedly sleep-protected away mode.
+
+The implementation manages one detached `caffeinate` process and its private home-local identity record rather than consuming a model session or creating a terminal surface.
+It does not install a daemon, login item, LaunchAgent, or persistent power configuration.
+It never uses `pmset`, and stopping verifies the recorded PID identity and fixed `caffeinate -i` command before sending SIGTERM.
+A dead or PID-reused record is cleared without signalling that other process.
+If `caffeinate` crashes, its assertion ends with it.
+If Firstmate crashes first, the process can remain until a later explicit stop or the return-bound cleanup runs after Firstmate resumes.
+
+This feature requires macOS and `/usr/bin/caffeinate`.
+It does not prevent lid-close sleep, and battery policy or hardware can still limit how long a laptop remains available.
+The standalone command does not depend on a runtime endpoint, so it works from Pi in cmux without creating or controlling a cmux surface and without changing watcher ownership.
+`/afk` itself retains its documented supervisor-backend support limits, so use manual start and stop when away mode cannot enter from that runtime.
+`bin/fm-keep-awake.sh --help` owns exact command syntax and private-record mechanics.
+[`docs/verification/keep-awake.md`](verification/keep-awake.md) records the current real-`pmset` assertion evidence and the portable fake-process regression command.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
