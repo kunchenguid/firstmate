@@ -93,6 +93,8 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -118,13 +120,18 @@ fm_send_id_from_meta() {  # <meta-file>
 # it and submits both as one garbled message. Ctrl-U clears the composer
 # (verified), so the interrupt is not complete until it has been sent. A failed
 # clear is loud rather than silent, because the alternative is a corrupted steer.
+# WHICH adapters need that clear, and which key clears them, comes from the one
+# control-plane capability table (bin/fm-control-lib.sh) rather than a second
+# copy here - the same table bin/fm-control.sh's interrupt verb reads.
 fm_send_clear_after_interrupt() {  # <key>
-  local key=$1
+  local key=$1 family clear
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in muse*) : ;; *) return 0 ;; esac
+  family=$(fm_control_harness_family "$TARGET_HARNESS") || return 0
+  clear=$(fm_control_interrupt_clear_key "$family") || return 0
+  [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
-    echo "error: Escape reached $T, but the muse composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
+    echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
 }

@@ -49,10 +49,11 @@ Spawn registers the repository, creates an independent worktree, reuses only the
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 
 `fm-peek.sh` reads with `orca terminal read`.
-`fm-send.sh` types and verifies composer clearance, follows `oldestCursor` when Orca returns a limited page, and retries Enter without retyping when a slash popup first fills an argument placeholder.
-The composer verifier first recognizes Agy's separator-pair composer through the shared, harness-scoped `fm_composer_separated_state` proof (only when `FM_COMPOSER_HARNESS` records `agy`) before its own row classification.
-A bare shell row is `unknown`, not an empty agent composer.
-The watcher has no native Orca busy signal, so each harness adapter's classifier supplies worker state.
+`fm-send.sh` types and verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
+The composer verifier first recognizes Agy's separator-pair composer through the shared, harness-scoped `fm_composer_separated_state` proof (only when `FM_COMPOSER_HARNESS` records `agy`) before the fleet-wide classifier runs.
+The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
+A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
+The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
 Grok and Agy retain isolated rendered-tail fallbacks because neither has a verified semantic turn-start source.
 
 Cleanup keeps all shared Firstmate safety checks.

@@ -129,7 +129,7 @@ test_plain_backends_share_agy_composer_contract() {
   state=$(
     # shellcheck source=bin/backends/orca.sh
     . "$ROOT/bin/backends/orca.sh"
-    fm_backend_orca_read_text_paged() { agy_pending_capture; }
+    fm_backend_orca_capture() { agy_pending_capture; }
     FM_COMPOSER_HARNESS=agy fm_backend_orca_composer_state terminal
   )
   [ "$state" = pending ] || fail "Orca Agy composer read as $state"
@@ -250,10 +250,17 @@ test_agy_spawn_refuses_when_all_hook_roots_are_owned() {
   id="agy-roots-z2-$$"
   rec=$(make_spawn_case roots "$id")
   read_spawn_record "$rec"
+  # The occupied roots are committed project content: spawn's base refresh
+  # refuses any dirty pooled worktree and resets a clean one to origin's
+  # default branch, so only tracked occupation survives to reach the guard.
   for root in .agents .agent _agents _agent; do
-    mkdir -p "$WT_DIR/$root"
-    printf '{}\n' > "$WT_DIR/$root/hooks.json"
+    mkdir -p "$PROJ_DIR/$root"
+    printf '{}\n' > "$PROJ_DIR/$root/hooks.json"
   done
+  git -C "$PROJ_DIR" add .agents .agent _agents _agent
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'occupy hook roots'
+  git -C "$PROJ_DIR" push -q origin HEAD
   rc=0
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "Agy spawn overwrote an occupied hook root"
