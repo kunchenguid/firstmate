@@ -112,7 +112,10 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  # An empty inventory reads as "no such window", which is how every case that
+  # spawns one id once resolves. A case driving the duplicate-launch guard sets
+  # FM_FAKE_TMUX_WINDOWS so the endpoint is reported as still present instead.
+  list-windows) printf '%s' "${FM_FAKE_TMUX_WINDOWS:+$FM_FAKE_TMUX_WINDOWS$'\n'}"; exit 0 ;;
   new-session|new-window)
     [ -z "${FM_FAKE_SIDEEFFECT_LOG:-}" ] || printf 'tmux %s\n' "$1" >> "$FM_FAKE_SIDEEFFECT_LOG"
     exit 0
@@ -192,6 +195,7 @@ run_ship_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$launchlog" \
     FM_FAKE_SIDEEFFECT_LOG="${FM_FAKE_SIDEEFFECT_LOG:-}" \
+    FM_FAKE_TMUX_WINDOWS="${FM_FAKE_TMUX_WINDOWS:-}" \
     GROK_HOME="$home/grok-home" PATH="${SPAWN_PATH:-$fakebin:$PATH}" \
     "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -200,6 +204,9 @@ run_ship_spawn() {
 # created or a worktree acquired before the abort is orphaned: spawn_abort_cleanup
 # reclaims neither, and no task meta exists yet for fm-teardown to work from.
 FM_FAKE_SIDEEFFECT_LOG=
+# Window names the fake tmux reports as present, for the case that needs an
+# existing endpoint to still read as occupied. Empty everywhere else.
+FM_FAKE_TMUX_WINDOWS=
 assert_no_orphaned_side_effects() {  # <log> <label>
   local log=$1 label=$2
   [ -s "$log" ] || return 0
@@ -825,6 +832,47 @@ test_abort_after_the_shim_is_written_leaves_nothing_behind() {
   pass "a spawn that aborts after writing the shim reclaims the refusal directory instead of stranding it"
 }
 
+test_refused_second_spawn_leaves_a_live_task_shim_alone() {
+  local rec id=browseriso-livedup-b18 realdir launch live_shim shim_body rc=0 out
+  # The capability gate runs above the guard that refuses a duplicate launch for a
+  # task whose endpoint is still alive, so at gate time the task-scoped parent may
+  # belong to a running agent whose PATH points inside it. A second spawn attempt
+  # for that id must leave the live agent's directory and its shim exactly as they
+  # were: a missing PATH entry is skipped silently, so removing it would send the
+  # running agent's next browser call to the operator's shared default bridge.
+  rec=$(make_spawn_case browseriso-livedup claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-livedup/oldbin"
+  make_fake_browser_tool "$realdir" old
+
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "the first refused spawn failed"
+  launch=$(cat "$LAUNCH_LOG")
+  live_shim=$(extract_refusal_dir "$launch")
+  [ -n "$live_shim" ] || fail "the first refused spawn put no refusal directory on the agent's PATH"
+  [ -x "$live_shim/chrome-devtools-axi" ] || fail "the first refused spawn wrote no shim"
+  shim_body=$(cat "$live_shim/chrome-devtools-axi")
+
+  # The task record now exists and its endpoint reads as still occupied, so a
+  # second non-relaunch spawn for the same id must refuse.
+  : > "$LAUNCH_LOG"
+  FM_FAKE_TMUX_WINDOWS="fm-$id"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR") || rc=$?
+  FM_FAKE_TMUX_WINDOWS=
+  SPAWN_PATH=
+  [ "$rc" -ne 0 ] \
+    || fail "a second spawn for a live task id succeeded, so this case no longer exercises the duplicate-launch refusal"
+
+  [ -d "$live_shim" ] \
+    || fail "the refused second spawn deleted the live task's refusal directory; that agent's next browser call would silently reach the operator's shared default bridge"
+  [ -x "$live_shim/chrome-devtools-axi" ] \
+    || fail "the refused second spawn removed the live task's refusal shim, leaving its PATH entry empty"
+  [ "$(cat "$live_shim/chrome-devtools-axi")" = "$shim_body" ] \
+    || fail "the refused second spawn rewrote the live task's refusal shim"
+  pass "a refused second spawn for a live task id leaves that task's own refusal directory and shim untouched"
+}
+
 test_every_verified_harness_carries_the_pin
 test_raw_launch_command_escape_hatch_carries_the_pin
 test_each_task_gets_its_own_browser_session
@@ -844,6 +892,7 @@ test_group_or_other_writable_refusal_directory_is_refused
 test_symlinked_refusal_directory_is_refused
 test_pre_created_task_path_is_never_the_directory_on_path
 test_abort_after_the_shim_is_written_leaves_nothing_behind
+test_refused_second_spawn_leaves_a_live_task_shim_alone
 
 # The per-task temp roots fm-spawn creates live at a fixed /tmp/fm-<id>, outside
 # TMP_ROOT, so they are reclaimed here as one prefixed namespace.
