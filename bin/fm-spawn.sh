@@ -1216,6 +1216,11 @@ case "$ARG3" in
     ;;
 esac
 
+if [ "$SKILLS_SET" -eq 1 ] && [ "$HARNESS" != claude ]; then
+  echo "error: --skills currently requires a Claude-backed spawn; harness '$HARNESS' has no verified composition load point" >&2
+  exit 1
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -1438,11 +1443,6 @@ case "$LAUNCH" in
     fi
     ;;
 esac
-
-if [ "$SKILLS_SET" -eq 1 ] && [ "$HARNESS" != claude ]; then
-  echo "error: --skills currently requires a Claude-backed spawn; harness '$HARNESS' has no verified composition load point" >&2
-  exit 1
-fi
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
