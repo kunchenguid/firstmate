@@ -433,7 +433,7 @@ EOF
 # subprocesses, which is the process whose cwd answers "is this worker
 # isolated?". The root is the match whose own parent is not also a match.
 fm_agent_pid_for_task() {
-  local id=$1 matches pid ppid expected_home=${3:-}
+  local id=$1 matches pid ppid expected_home=${3:-} root root_count=0
   if [ "$#" -ge 2 ]; then
     matches=$(fm_agent_pids_for_task "$id" "$2" "$expected_home") || return 1
   else
@@ -455,19 +455,17 @@ EOF
   [ -n "$matches" ] || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    ppid=$(fm_agent_ppid "$pid") || ppid=
+    ppid=$(fm_agent_ppid "$pid") || return 1
     if [ -n "$ppid" ] && printf '%s\n' "$matches" | grep -qxF "$ppid"; then
       continue
     fi
-    printf '%s' "$pid"
-    return 0
+    root=$pid
+    root_count=$((root_count + 1))
   done <<EOF
 $matches
 EOF
-  # Every match claims a matching parent (a cycle cannot happen, but a race
-  # between the scan and a reap can): fall back to the lowest pid seen rather
-  # than reporting nothing.
-  printf '%s' "$(printf '%s\n' "$matches" | sort -n | head -1)"
+  [ "$root_count" -eq 1 ] || return 1
+  printf '%s' "$root"
 }
 
 # fm_agent_tmux_window_id <target>: the STABLE window id behind a tmux target.

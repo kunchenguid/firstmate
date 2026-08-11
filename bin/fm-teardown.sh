@@ -611,8 +611,21 @@ EOF
 
 teardown_unresolved_endpoint_identity_proven() {
   local id=$1 backend=$2 target=$3 state index stable stable_again
-  local task_name task_name_again command command_again
+  local task_name task_name_again command command_again raw_state session pane
   TEARDOWN_UNRESOLVED_ENDPOINT_STABLE_TARGET=
+  if [ "$backend" = herdr ]; then
+    fm_backend_source herdr || return 1
+    fm_backend_herdr_parse_target "$target" || return 1
+    session=$FM_BACKEND_HERDR_SESSION
+    pane=$FM_BACKEND_HERDR_PANE
+    raw_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+    if [ "$raw_state" = no-agent ]; then
+      index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
+      teardown_task_pid_index_empty "$id" "$index" || return 1
+      teardown_herdr_endpoint_focus_safe "$target" || return 1
+      return 0
+    fi
+  fi
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
   case "$state" in
     dead|missing) ;;
@@ -688,11 +701,25 @@ teardown_tmux_dead_endpoint_identity_proven() {
 
 teardown_child_endpoint_identity_proven() {
   local child_id=$1 child_meta=$2 child_kind=$3 parent_home=$4 child_wt=$5
-  local backend=$6 target=$7 state expected_home pid start current env env_again
+  local backend=$6 target=$7 state expected_home pid start current env env_again raw_state index
   local session workspace tab pane label info stable stable_again missing_path
   TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=0
   TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET=
   backend=$(fm_backend_of_meta "$child_meta")
+  if [ "$backend" = herdr ]; then
+    fm_backend_source herdr || return 1
+    fm_backend_herdr_parse_target "$target" || return 1
+    session=$FM_BACKEND_HERDR_SESSION
+    pane=$FM_BACKEND_HERDR_PANE
+    raw_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+    if [ "$raw_state" = no-agent ]; then
+      index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
+      teardown_task_pid_index_empty "$child_id" "$index" || return 1
+      teardown_herdr_endpoint_focus_safe "$target" || return 1
+      TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=1
+      return 0
+    fi
+  fi
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
   case "$state" in
     missing)

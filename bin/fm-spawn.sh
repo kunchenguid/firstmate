@@ -251,6 +251,7 @@ SPAWN_HOME_LOCK_HELD=0
 SPAWN_PARENT_HOME_LOCK=
 SPAWN_PARENT_HOME_LOCK_HELD=0
 SPAWN_WORKTREE_PATH=
+SPAWN_WORKTREE_RECORD_PATH=
 SPAWN_WORKTREE_LEASE_PROOF=
 SPAWN_ARTIFACTS_CLEAN=0
 SPAWN_CLAUDE_HOOK_CREATED=0
@@ -318,7 +319,7 @@ spawn_herdr_flat_uncertainty_record() {
 }
 
 spawn_abort_recovery_meta() {
-  local tmp meta="$STATE/$ID.meta"
+  local tmp meta="$STATE/$ID.meta" record_worktree
   [ -n "${T:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ "${SPAWN_RECOVERY_META_PUBLISHED:-0}" != 1 ] \
@@ -330,10 +331,14 @@ spawn_abort_recovery_meta() {
   mkdir -p "$STATE" 2>/dev/null || return 1
   tmp=$(mktemp "$STATE/.$ID.spawn-abort.XXXXXX") || return 1
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  record_worktree=${SPAWN_WORKTREE_RECORD_PATH:-}
+  if [ -z "$record_worktree" ] && [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ]; then
+    record_worktree=${WT:-}
+  fi
   {
     echo "window=$T"
-    if [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] && [ -n "${WT:-}" ]; then
-      echo "worktree=$WT"
+    if [ -n "$record_worktree" ]; then
+      echo "worktree=$record_worktree"
     else
       echo "worktree="
       echo "slot_lease_state=unresolved"
@@ -1551,7 +1556,8 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state old_slot_state target_session target_pane
+  local meta=$1 old_backend old_target old_session old_pane old_state old_slot_state
+  local old_spawn_state old_worktree old_slot_returned target_session target_pane
   HERDR_RECOVERY_BACKEND=""
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
@@ -1559,6 +1565,13 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   old_slot_state=$(awk -F= '$1 == "slot_lease_state" { print $2; exit }' "$meta" 2>/dev/null || true)
   if [ "$old_slot_state" = unresolved ]; then
     echo "error: existing task $ID has an unresolved pooled-slot lease; reconcile its recovery record before retrying" >&2
+    return 1
+  fi
+  old_spawn_state=$(awk -F= '$1 == "spawn_state" { print $2; exit }' "$meta" 2>/dev/null || true)
+  old_worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  old_slot_returned=$(awk -F= '$1 == "slot_returned" { print $2; exit }' "$meta" 2>/dev/null || true)
+  if [ "$old_spawn_state" = aborted ] && [ -n "$old_worktree" ] && [ "$old_slot_returned" != 1 ]; then
+    echo "error: existing task $ID has an aborted pooled-slot lease on $old_worktree; reconcile its recovery record before retrying" >&2
     return 1
   fi
   old_backend=$(fm_backend_of_meta "$meta")
@@ -1997,11 +2010,11 @@ if [ "$KIND" != secondmate ]; then
   rm -f "$SPAWN_WORKTREE_LEASE_PROOF"
   TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID" "$SPAWN_WORKTREE_LEASE_PROOF") || exit 1
   SPAWN_WORKTREE_LEASED=1
-  fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND" || exit 1
   spawn_abort_recovery_meta || {
     echo "error: could not persist a recovery record for the pooled lease held by $ID; refusing to continue" >&2
     exit 1
   }
+  fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND" || exit 1
 
   # Prefer the live process cwd through /proc. Provider pane cwd remains a hint
   # where no process id is available.
@@ -2020,9 +2033,6 @@ if [ "$KIND" != secondmate ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
         WT="$p"
-        case "$SPAWN_WORKTREE_PATH_SOURCE" in
-          proc|lease) SPAWN_WORKTREE_PROVEN=1 ;;
-        esac
         break
       fi
     fi
@@ -2033,10 +2043,12 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
+  SPAWN_WORKTREE_RECORD_PATH=$WT
   spawn_abort_recovery_meta || {
     echo "error: could not refresh the recovery record for the pooled lease held by $ID on $WT; refusing to continue" >&2
     exit 1
   }
+  SPAWN_WORKTREE_PROVEN=1
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
