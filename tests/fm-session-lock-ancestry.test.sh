@@ -183,6 +183,8 @@ test_owner_selection_is_harness_specific() {
   local dir fakebin got
   dir="$TMP_ROOT/owner-selection"
   fakebin=$(fm_fakebin "$dir")
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -202,10 +204,10 @@ case "$FM_TEST_OWNER_SHAPE:$pid:$field" in
   claude:200:args=) printf '%s\n' claude ;;
   claude:200:ppid=) printf '%s\n' 1 ;;
   omp:300:comm=) printf '%s\n' omp ;;
-  omp:300:args=) printf '%s\n' omp ;;
+  omp:300:args=) printf '%s\n' "$FM_TEST_OMP_PATH --resume" ;;
   omp:300:ppid=) printf '%s\n' 400 ;;
   omp:400:comm=) printf '%s\n' omp ;;
-  omp:400:args=) printf '%s\n' omp ;;
+  omp:400:args=) printf '%s\n' "$FM_TEST_OMP_PATH --resume" ;;
   omp:400:ppid=) printf '%s\n' 1 ;;
   omp:*:ppid=) printf '%s\n' 300 ;;
   *:comm=) printf '%s\n' bash ;;
@@ -221,10 +223,27 @@ SH
   got=$(lib_eval "$fakebin" 'export FM_TEST_OWNER_SHAPE=claude; unset CLAUDECODE; fm_harness_ancestry_pid') \
     || fail "the daemon-parented Claude ancestry was not resolved"
   [ "$got" = 100 ] || fail "daemon-parented Claude ownership resolved '$got', expected inner pid 100"
-  got=$(lib_eval "$fakebin" 'export FM_TEST_OWNER_SHAPE=omp; unset CLAUDECODE; fm_harness_ancestry_pid') \
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'export FM_TEST_OWNER_SHAPE=omp; unset CLAUDECODE; fm_harness_ancestry_pid') \
     || fail "the nested OMP ancestry was not resolved"
   [ "$got" = 300 ] || fail "OMP ownership resolved '$got', expected innermost pid 300"
   pass "session-lock: Claude hook ownership is outermost while OMP remains innermost"
+}
+
+test_omp_identity_requires_canonical_executable_evidence() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-identity-evidence"
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity renamed "omp --resume"')
+  [ "$got" = other ] || fail "a renamed process with exec-a style OMP args was accepted as '$got'"
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "omp --resume"')
+  [ "$got" = other ] || fail "a bare exec-a OMP identity was accepted as '$got'"
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "$FM_TEST_OMP_PATH --resume"')
+  [ "$got" = omp ] || fail "canonical OMP argv evidence was not accepted as '$got'"
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity "$FM_TEST_OMP_PATH" "$FM_TEST_OMP_PATH --resume"')
+  [ "$got" = omp ] || fail "canonical OMP executable evidence was not accepted as '$got'"
+  pass "session-lock: OMP identity requires canonical executable or argv path evidence"
 }
 
 test_competing_version_named_session_is_seen_as_live() {
@@ -440,6 +459,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_owner_selection_is_harness_specific
+test_omp_identity_requires_canonical_executable_evidence
 test_competing_version_named_session_is_seen_as_live
 test_bare_bun_lock_holder_remains_live
 test_e2e_version_named_session_claims_the_home

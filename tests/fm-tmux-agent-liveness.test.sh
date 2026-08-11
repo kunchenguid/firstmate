@@ -173,6 +173,7 @@ mkdir -p "$LAB/bunroot" "$LAB/decoyroot/omp"
 ln -s "$SH_BIN" "$LAB/bin/bun"
 cat > "$LAB/bunroot/omp" <<SH
 #!/bin/sh
+printf 'Working…\n'
 "$SLEEP_BIN" 900
 SH
 cat > "$LAB/decoyroot/omp/compiler.js" <<SH
@@ -186,6 +187,8 @@ chmod +x "$LAB/bunroot/omp" "$LAB/decoyroot/omp/compiler.js"
 new_window ompbun "$LAB/bin/bun" "$LAB/bunroot/omp"
 wait_for_state "$SESSION:ompbun" alive \
   || fail "Bun running the exact omp script must classify alive"
+[ "$(fm_tmux_composer_identity "$SESSION:ompbun")" = $'omp\tworking' ] \
+  || fail "the OMP separated composer identity was not recognized from the live Bun process"
 title_classifies_agent "$SESSION:ompbun" \
   && fail "the Bun case went vacuous: the process name alone already named a harness"
 pass "tmux liveness: a Bun process whose script argument is the exact omp path classifies alive"

@@ -47,6 +47,10 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_harness_omp_attribution_allowed() {
+  [ -z "${FM_HARNESS_UNVERIFIED:-}" ]
+}
+
 fm_harness_omp_resolve_path() {  # <path>
   local path=$1 target dir base
   [ -n "$path" ] || return 1
@@ -83,21 +87,30 @@ fm_harness_omp_command_path() {
 
 fm_harness_omp_script_matches() {  # <path>
   local path=$1 expected actual
+  case "$path" in */*) ;; *) return 1 ;; esac
+  fm_harness_omp_attribution_allowed || return 1
   expected=$(fm_harness_omp_command_path) || return 1
   actual=$(fm_harness_omp_resolve_path "$path") || return 1
   [ "$actual" = "$expected" ]
 }
 
 fm_harness_omp_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 script
+  local comm=$1 args=${2:-} argv0 rest script
+  fm_harness_omp_attribution_allowed || return 1
+  fm_harness_omp_script_matches "$comm" && return 0
+  args=${args#"${args%%[![:space:]]*}"}
+  argv0=${args%%[[:space:]]*}
+  if [ -n "$argv0" ]; then
+    argv0=${argv0%%[[:space:]]*}
+    fm_harness_omp_script_matches "$argv0" && return 0
+  fi
   case "$(basename -- "$comm")" in
-    omp) return 0 ;;
     bun)
-      script=${args#* }
-      if [ "$script" != "$args" ]; then
-        script=${script%% *}
-        fm_harness_omp_script_matches "$script" && return 0
-      fi
+      rest=${args#"$argv0"}
+      rest=${rest#"${rest%%[![:space:]]*}"}
+      [ -n "$rest" ] || return 1
+      script=${rest%%[[:space:]]*}
+      fm_harness_omp_script_matches "$script" && return 0
       ;;
   esac
   return 1
@@ -162,7 +175,7 @@ fm_harness_process_identity() {  # <comm> <args> -> harness|shell|other
 }
 
 fm_harness_process_owner_state() {
-  local pid=$1 owner=$2 ps_bin=${3:-ps} environment
+  local pid=$1 owner=$2 ps_bin=${3:-ps} environment rc
   case "$pid" in ''|*[!0-9]*|0|1) return 2 ;; esac
   case "$owner" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
   if [ -r "/proc/$pid/environ" ]; then
@@ -173,8 +186,9 @@ fm_harness_process_owner_state() {
   printf '%s\n' "$environment" | awk -v expected="FM_RAW_LAUNCH_OWNER=$owner" '
     { for (i = 1; i <= NF; i++) if ($i == expected) found = 1 }
     END { exit(found ? 0 : 1) }
-  '
-  case "$?" in
+  ' && return 0
+  rc=$?
+  case "$rc" in
     0) return 0 ;;
     1) return 1 ;;
     *) return 2 ;;
@@ -191,6 +205,12 @@ fm_harness_raw_owner_state() {
     printf 'unknown'
     return 0
   }
+  if fm_harness_process_owner_state "$root" "$owner" "$ps_bin" >/dev/null 2>&1; then
+    :
+  else
+    printf 'unknown'
+    return 0
+  fi
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     case "$pid" in ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;; esac

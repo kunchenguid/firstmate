@@ -154,6 +154,15 @@ case "$*" in
   "-axo pid=,ppid=")
     printf '%s\n' "$rows"
     ;;
+  *"eww"*"-o command="*)
+    pid=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in -p) pid=$2; shift 2 ;; *) shift ;; esac
+    done
+    printf '%s\n' "$rows" | awk -v pid="$pid" '$1 == pid { found=1 } END { exit(found ? 0 : 1) }' || exit 1
+    [ -n "${FM_RAW_LAUNCH_OWNER:-}" ] || exit 1
+    [ "$pid" = "${FM_FAKE_PS_NO_OWNER_PID:-__none__}" ] && printf 'zsh\n' || printf 'FM_RAW_LAUNCH_OWNER=%s\n' "$FM_RAW_LAUNCH_OWNER"
+    ;;
   *"-o comm="*)
     pid=
     while [ "$#" -gt 0 ]; do
@@ -3704,6 +3713,24 @@ test_herdr_process_identity_rejects_mixed_omp_group() {
   pass "Herdr identity: mixed OMP and unrelated foreground groups stay unknown"
 }
 
+test_herdr_raw_owner_lookup() {
+  local dir log resp fb out script
+  dir="$TMP_ROOT/raw-owner-lookup"; mkdir -p "$dir/canonical" "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  script="$dir/canonical/omp"
+  printf '#!/bin/sh\nexit 0\n' > "$script"
+  chmod +x "$script"
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":987654,"foreground_process_group_id":987655,"foreground_processes":[{"pid":987655,"name":"bun","argv0":"bun","argv":["bun","'"$script"'"]}]}}}' > "$resp/1.out"
+  printf '1 0\n987654 1\n987655 987654\n' > "$dir/ps-rows"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$dir/canonical:$fb:$PATH" FM_RAW_LAUNCH_OWNER=raw-owner \
+    FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$fb/ps" \
+    FM_FAKE_PS_ROWS="$(cat "$dir/ps-rows")" FM_FAKE_PS_OMP_PID=987655 \
+    FM_FAKE_PS_OMP_ARGS="bun $script" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_raw_omp_process_state lab w1:p2 raw-owner' "$ROOT" )
+  [ "$out" = omp ] || fail "raw Herdr owner lookup returned '$out', expected omp"
+  pass "Herdr raw ownership: canonical OMP process state is recovered through the shared owner classifier"
+}
+
 herdr_pi_process_info() {
   local pane=${1:-w1:p2}
   printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"pi","argv0":"pi"}]}}}'
@@ -5216,6 +5243,7 @@ test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp
 test_herdr_presence_is_checked_before_process_identity
 test_herdr_no_metadata_omp_requires_current_identity
 test_herdr_process_identity_rejects_mixed_omp_group
+test_herdr_raw_owner_lookup
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_without_stop_evidence_stays_unknown
 test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent

@@ -41,6 +41,8 @@
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
@@ -150,32 +152,47 @@ fm_tmux_composer_caps() {
 # Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
 # live pi.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm pid args identity pi_seen=0 omp_seen=0 status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
-      while read -r _ pgid tpgid comm; do
+      while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
-          pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          pi|pi-signed|pi-launcher|Pi) pi_seen=1 ;;
+          *)
+            args=$(LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -p "$pid" -o args= 2>/dev/null) || args=
+            identity=$(fm_harness_process_identity "$comm" "$args")
+            [ "$identity" = omp ] && omp_seen=1
+            ;;
         esac
       done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+$(LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
       ;;
   esac
-  if [ "$found" -ne 1 ]; then
+  if [ "$pi_seen" -eq 0 ] && [ "$omp_seen" -eq 0 ]; then
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
-      pi|pi-signed|pi-launcher) found=1 ;;
+      pi|pi-signed|pi-launcher) pi_seen=1 ;;
+      *)
+        identity=$(fm_harness_process_identity "$comm" "$comm")
+        [ "$identity" = omp ] && omp_seen=1
+        ;;
     esac
   fi
-  [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  [ "$pi_seen" -eq 1 ] || [ "$omp_seen" -eq 1 ] || return 1
+  [ "$pi_seen" -eq 0 ] || [ "$omp_seen" -eq 0 ] || return 1
+  if [ "$omp_seen" -eq 1 ]; then
+    identity=omp
+  else
+    identity=pi
+  fi
+  status=$(fm_pane_busy_state "$target" "$identity")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$identity" ;;
+    idle) printf '%s\tidle' "$identity" ;;
     *) return 1 ;;
   esac
 }
@@ -327,7 +344,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harn
         if [ "$baseline_idle" = 1 ]; then
           j=0
           while [ "$j" -lt "$retries" ]; do
-            if fm_pane_is_busy "$target"; then
+            if fm_pane_is_busy "$target" "$recorded_harness"; then
               printf 'empty'
               return 0
             fi
@@ -364,7 +381,7 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [exp
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
-  baseline_state=$(fm_pane_busy_state "$target")
+  baseline_state=$(fm_pane_busy_state "$target" "$recorded_harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
   if ! fm_tmux_submit_endpoint_allows "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then
     printf 'unknown'

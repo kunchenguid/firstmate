@@ -322,6 +322,17 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_omp_separated_needs_identity() {
+  local screen omp_idle omp_working typed
+  screen=$'transcript\n────────────────────────\n\n────────────────────────\n footer'
+  omp_idle=$(printf 'omp\tidle'); omp_working=$(printf 'omp\tworking')
+  assert_screen "OMP idle with identity" empty "$CAPS_STYLED" "$screen" '' "$omp_idle"
+  assert_screen "OMP working defers" unknown "$CAPS_STYLED" "$screen" '' "$omp_working"
+  typed=$'────────────────────────\nfix the OMP delivery bug\n────────────────────────'
+  assert_screen "OMP typed" pending "$CAPS_STYLED" "$typed" '' "$omp_idle"
+  pass "matrix: OMP's separated composer shares Pi identity gating without accepting a bare blank row"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding the "Ask anything..." hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -613,6 +624,7 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
+test_matrix_omp_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

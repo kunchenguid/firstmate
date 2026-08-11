@@ -108,6 +108,43 @@ test_busy_submit_passes_recorded_harness_to_busy_probe() {
   pass "fm_tmux_submit_core: delivery busy probe receives the recorded OMP harness"
 }
 
+test_omp_submit_passes_recorded_harness_to_baseline_and_unknown_probes() {
+  local dir fakebin composer busy_args probe_args vfile
+  dir="$TMP_ROOT/omp-baseline-unknown"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  busy_args="$dir/busy-args"
+  probe_args="$dir/probe-args"
+  vfile="$dir/verdict"
+  printf 'unreadable OMP turn\n' > "$composer"
+  (
+    fm_tmux_composer_state() { printf 'unknown'; }
+    fm_pane_busy_state() {
+      local count=0
+      [ ! -f "$busy_args" ] || count=$(wc -l < "$busy_args")
+      printf '%s\n' "${2:-}" >> "$busy_args"
+      if [ "${2:-}" = omp ] && [ "$count" -eq 0 ]; then
+        printf 'idle'
+      else
+        printf 'unknown'
+      fi
+    }
+    fm_pane_is_busy() {
+      printf '%s\n' "${2:-}" >> "$probe_args"
+      [ "${2:-}" = omp ]
+    }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      fm_tmux_submit_core "win" "hello" 1 0 0 label omp > "$vfile" 2>/dev/null
+  ) || fail "OMP baseline/unknown probe regression failed"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "an OMP idle-to-busy unknown transition should confirm delivery, got '$(cat "$vfile")'"
+  grep -qx 'omp' "$busy_args" \
+    || fail "the OMP baseline busy probe did not receive the recorded harness"
+  grep -qx 'omp' "$probe_args" \
+    || fail "the OMP unknown-state busy probe did not receive the recorded harness"
+  pass "fm_tmux_submit_core: recorded OMP identity reaches baseline and unknown-state busy probes"
+}
+
 test_idle_pane_pending_returns_pending() {
   local dir fakebin composer sent vfile
   dir="$TMP_ROOT/idle-swallow"
@@ -350,6 +387,7 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 test_busy_pane_pending_returns_empty
 test_busy_submit_passes_recorded_harness_to_busy_probe
+test_omp_submit_passes_recorded_harness_to_baseline_and_unknown_probes
 test_idle_pane_pending_returns_pending
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter

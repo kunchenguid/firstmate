@@ -2836,6 +2836,99 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
+fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unknown
+  case "$(fm_backend_herdr_process_identity "$1" "$2")" in
+    omp) printf 'omp' ;;
+    unknown) printf 'unknown' ;;
+    *) printf 'other' ;;
+  esac
+}
+
+fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> harness|unknown
+  local session=$1 pane=$2 raw_owner=${3:-${FM_RAW_LAUNCH_OWNER:-}}
+  local info shell_pid foreground_pids rows name args identity current_identity= shell_seen=0 omp_seen=0
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid | type == "number" and . > 1)
+    and (.result.process_info.foreground_process_group_id | type == "number" and . > 1)
+    and (.result.process_info.foreground_processes | type == "array" and length > 0)
+    and all(.result.process_info.foreground_processes[];
+      (.pid | type) == "number"
+      and (.name | type) == "string" and (.name | length) > 0
+      and ((.argv0 // .argv[0]) | type) == "string"
+      and ((.argv0 // .argv[0]) | length) > 0
+    )
+  ' >/dev/null 2>&1 || {
+    printf 'unknown'
+    return 0
+  }
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  foreground_pids=$(printf '%s' "$info" | jq -r \
+    '.result.process_info.foreground_processes[] | .pid | floor' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  rows=$(printf '%s' "$info" | jq -r '
+    .result.process_info.foreground_processes[]
+    | [
+        .name,
+        (if ((.argv | type) == "array" and (.argv | length) > 0)
+         then (.argv | join(" "))
+         else (.argv0 // .argv[0])
+         end)
+      ]
+    | @tsv
+  ' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  [ -n "$rows" ] || {
+    printf 'unknown'
+    return 0
+  }
+  while IFS=$'\t' read -r name args; do
+    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$name" "$args")
+    case "$identity" in
+      omp) omp_seen=1 ;;
+      shell) shell_seen=1 ;;
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        if [ -z "$current_identity" ]; then
+          current_identity=$identity
+        elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+          printf 'unknown'
+          return 0
+        fi
+        ;;
+      *) : ;;
+    esac
+  done <<EOF
+$rows
+EOF
+  if [ "$omp_seen" -eq 1 ]; then
+    [ -z "$current_identity" ] && current_identity=omp || current_identity=unknown
+  elif [ -n "$current_identity" ]; then
+    :
+  elif [ "$shell_seen" -eq 1 ]; then
+    current_identity=shell
+  else
+    current_identity=other
+  fi
+  fm_harness_raw_owner_state "$shell_pid" "$raw_owner" "${FM_HERDR_PS_BIN:-ps}" "$foreground_pids" "$current_identity"
+}
+
+fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> [raw-owner] -> true for OMP
+  [ "$(fm_backend_herdr_raw_omp_process_state "$1" "$2" "${3:-${FM_RAW_LAUNCH_OWNER:-}}")" = omp ]
+}
+
 # Registration-aware variant used by raw ownership checks. Unlike the composer
 # probe, it preserves an explicit agent_not_found result so a raw endpoint can
 # be authorized from process ownership even before a harness registration lands.
