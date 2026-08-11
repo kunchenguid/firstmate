@@ -101,6 +101,9 @@ case "$cmd $sub" in
           printf '%s\n' "$((n + 1))" > "$trust_count"
           printf '%s' "${FM_FAKE_AFTER_TRUST:-working}" > "$phase_file"
           ;;
+        idle)
+          printf working > "$phase_file"
+          ;;
       esac
     fi
     ;;
@@ -182,6 +185,7 @@ EOF
 }
 
 run_traex_spawn() {
+  local effort=${1:-high}
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -193,7 +197,36 @@ run_traex_spawn() {
     PATH="$FAKEBIN_DIR:$PATH" \
     env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend herdr \
-      --model Doubao-Seed-2.1-Pro --effort high --mode no-mistakes --yolo off 2>&1
+      --model Doubao-Seed-2.1-Pro --effort "$effort" --mode no-mistakes --yolo off 2>&1
+}
+
+run_traex_send() {  # <text>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    "$ROOT/bin/fm-send.sh" "$TASK_ID" "$1" 2>&1
+}
+
+run_traex_reconcile() {
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_traex_reconcile_current "$2" "$3" "$4"' \
+      _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2
 }
 
 test_marker_detection_is_scoped() {
@@ -283,7 +316,7 @@ test_key_send_without_working_is_not_launch_success() {
   pass "traex requires native working after trust acceptance and never trusts key transport alone"
 }
 
-test_post_ready_reconciliation_failure_revokes_readiness() {
+test_post_ready_reconciliation_failure_preserves_bound_lifecycle() {
   local rec out status verdict
   rec=$(make_spawn_case reconcile-fail)
   read_spawn_case "$rec"
@@ -292,14 +325,35 @@ test_post_ready_reconciliation_failure_revokes_readiness() {
   [ "$status" -ne 0 ] || fail "spawn succeeded after losing its native lifecycle identity"
   assert_contains "$out" 'current Herdr lifecycle could not be reconciled' \
     "post-ready reconciliation failure did not name its lifecycle consequence"
-  assert_grep 'traex_ready=failed' "$HOME_DIR/state/$TASK_ID.meta" \
-    "post-ready failure left lifecycle readiness enabled"
+  assert_grep 'traex_ready=1' "$HOME_DIR/state/$TASK_ID.meta" \
+    "post-ready failure disabled later native lifecycle recovery"
   assert_not_contains "$out" "spawned $TASK_ID" \
     "post-ready reconciliation failure still printed spawn success"
   verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
-  [ "$verdict" = 'idle fm-recovery' ] \
-    || fail "failed launch retained a false busy lifecycle: $verdict"
-  pass "traex revokes readiness when post-launch lifecycle reconciliation fails"
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "transient reconciliation failure overwrote the observed working state: $verdict"
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "later native idle recovery was refused after spawn reconciliation failed"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "later native idle did not close the preserved working state: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "later native idle recovery emitted no durable completion notification"
+  pass "traex preserves bound working state and readiness across transient spawn reconciliation failure"
+}
+
+test_max_effort_refuses_before_endpoint() {
+  local rec out status
+  rec=$(make_spawn_case max-refuse)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn max)
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX accepted the unverified max effort"
+  assert_contains "$out" 'max is not verified and is refused' \
+    "max-effort refusal did not identify the verified TraeX ceiling"
+  [ ! -s "$CASE_DIR/herdr.log" ] || fail "max effort queried or created a Herdr endpoint"
+  assert_absent "$HOME_DIR/state/$TASK_ID.meta" "max effort published task metadata"
+  pass "traex refuses max effort before endpoint creation"
 }
 
 test_unsupported_tmux_refuses_before_endpoint() {
@@ -368,7 +422,49 @@ test_secondmate_and_raw_launch_refuse() {
   [ "$status" -ne 0 ] || fail "an env-prefixed raw TraeX command bypassed the verified template"
   assert_contains "$out" 'verified launch template' \
     "env-prefixed raw TraeX refusal did not name the verified boundary"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$TASK_ID" "$PROJECT_DIR" \
+      "sh -c 'traex -y arbitrary'" --backend herdr \
+      --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a shell-wrapped raw TraeX command bypassed the verified template"
+  assert_contains "$out" 'verified launch template' \
+    "shell-wrapped raw TraeX refusal did not name the verified boundary"
+  [ ! -s "$CASE_DIR/herdr.log" ] || fail "a refused raw TraeX command queried or created Herdr state"
+  assert_absent "$HOME_DIR/state/$TASK_ID.meta" "a refused raw TraeX command published task metadata"
   pass "traex refuses secondmate and raw-command promotion"
+}
+
+test_send_persists_working_before_delivery_ack() {
+  local rec out status verdict
+  rec=$(make_spawn_case send-transition)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for steering should succeed: $out"
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "initial TraeX completion could not be reconciled"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+
+  out=$(run_traex_send 'reply with exactly STEER_OK')
+  status=$?
+  expect_code 0 "$status" "TraeX steer should be confirmed: $out"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "confirmed TraeX steer returned without persisting observed working: $verdict"
+
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "missed steer completion could not be reconciled"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "reconnect did not close the persisted steer: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "reconnect emitted no durable completion for the confirmed steer"
+  pass "traex steering persists working before acknowledgement so reconnect recovers completion"
 }
 
 test_native_transition_fold_is_sparse_and_bound() {
@@ -446,9 +542,11 @@ test_spawn_accepts_only_exact_trust_then_observes_working
 test_mismatched_launch_provenance_sends_no_key
 test_unrecognized_dialog_sends_no_key_and_fails_launch
 test_key_send_without_working_is_not_launch_success
-test_post_ready_reconciliation_failure_revokes_readiness
+test_post_ready_reconciliation_failure_preserves_bound_lifecycle
+test_max_effort_refuses_before_endpoint
 test_unsupported_tmux_refuses_before_endpoint
 test_secondmate_and_raw_launch_refuse
+test_send_persists_working_before_delivery_ack
 test_native_transition_fold_is_sparse_and_bound
 test_pending_trust_block_is_suppressed_only_until_launch_fails
 

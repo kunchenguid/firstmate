@@ -200,10 +200,8 @@ complete_cycle() {
   local token=$1
   rm -f "$PROBE/home/state/traex-live.turn-ended"
   send_text "Run sleep 1, then reply with exactly $token."
-  fm_backend_herdr_traex_reconcile_current "$PROBE/home/state" "$SESSION" "$PANE" \
-    || fail "working $token could not be persisted"
   [ "$(fm_busy_classify herdr "$TARGET" traex traex-live "$PROBE/home/state")" = 'busy herdr-traex' ] \
-    || fail "$token did not classify busy while in flight"
+    || fail "$token was acknowledged without persisting native working"
   wait_idle || fail "$token never settled"
   fm_backend_herdr_traex_reconcile_current "$PROBE/home/state" "$SESSION" "$PANE" \
     || fail "idle $token could not be persisted"
@@ -220,8 +218,8 @@ pass "real TraeX repeated send cycles preserved busy, idle, and completion seman
 
 rm -f "$PROBE/home/state/traex-live.turn-ended"
 send_text "Run \`sleep 20\`, then reply TRAEX_LIVE_SHOULD_NOT_COMPLETE."
-fm_backend_herdr_traex_reconcile_current "$PROBE/home/state" "$SESSION" "$PANE" \
-  || fail "the interrupt target never persisted working"
+[ "$(fm_busy_classify herdr "$TARGET" traex traex-live "$PROBE/home/state")" = 'busy herdr-traex' ] \
+  || fail "the interrupt target was acknowledged without persisting native working"
 send_key Escape
 wait_idle || fail "TraeX Escape plus composer clear did not return native idle"
 fm_backend_herdr_traex_reconcile_current "$PROBE/home/state" "$SESSION" "$PANE" \

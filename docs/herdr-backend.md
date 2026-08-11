@@ -226,8 +226,8 @@ The shared crew-state path therefore accepts a native `busy` as evidence of acti
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 TraeX is the narrow exception that turns Herdr's native transition stream into its task-owned semantic record.
-`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the event capability before endpoint creation, arms one generation, and publishes `traex_ready=1` only after the initial task instructions are observed in native `working`.
-Working, blocked, idle, and done transitions are then persisted as source `herdr-traex`; only busy-to-idle/done touches the ordinary turn-ended notification, so reconnect level reconciliation can recover one missed completion without repeating every idle level.
+`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the event capability before endpoint creation, arms one generation, and publishes `traex_ready=1` only after the initial task instructions are observed in native `working`. Effort values `low` through `xhigh` use TraeX's verified reasoning configuration; unverified `max` is refused before endpoint creation.
+Working, blocked, idle, and done transitions are then persisted as source `herdr-traex`; submit confirmation persists its observed working level before acknowledging a steer, and only busy-to-idle/done touches the ordinary turn-ended notification, so reconnect level reconciliation can recover one missed completion without repeating every idle level.
 No other harness inherits that trust in native idle.
 
 A fresh isolated TraeX task copy may stop at `directory_trust_prompt` even under `-y`.

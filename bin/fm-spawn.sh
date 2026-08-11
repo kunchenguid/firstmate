@@ -889,6 +889,11 @@ launch_template() {
   esac
 }
 
+raw_launch_references_traex() {  # <raw-command>
+  local raw=$1
+  [[ "$raw" =~ (^|[^[:alnum:]_.-])traex([^[:alnum:]_.-]|$) ]]
+}
+
 RAW_LAUNCH=0
 RAW_TRAEX=0
 case "$ARG3" in
@@ -896,8 +901,8 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
+    raw_launch_references_traex "$LAUNCH" && RAW_TRAEX=1
     for word in $LAUNCH; do
-      case "$word" in traex|*/traex) RAW_TRAEX=1 ;; esac
       if [ -z "$HARNESS" ]; then
         case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word") ;; esac
       fi
@@ -966,6 +971,10 @@ if [ "$HARNESS" = traex ]; then
   fi
   if [ "$BACKEND" != herdr ]; then
     echo "error: traex workers are verified only on backend=herdr; backend=$BACKEND has no proven structural trust and launch postcondition" >&2
+    exit 1
+  fi
+  if [ "$EFFORT" = max ]; then
+    echo "error: traex supports --effort low, medium, high, or xhigh; max is not verified and is refused" >&2
     exit 1
   fi
   if ! command -v traex >/dev/null 2>&1; then
@@ -1120,8 +1129,8 @@ effort_flag_for_harness() {
       ;;
     traex)
       # TraeX exposes the same config key on its interactive root command.
-      # The installed model picker advertises low..xhigh; max is omitted rather
-      # than remapped onto an unverified provider-specific level.
+      # The installed model picker advertises low..xhigh; spawn validation
+      # refuses max rather than remapping it to a provider-specific level.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -2305,13 +2314,14 @@ spawn_traex_readiness_set() {  # <expected> <new>
 }
 
 traex_spawn_fail() {  # <detail>
-  local detail=$1
-  spawn_traex_readiness_set pending failed 2>/dev/null \
-    || spawn_traex_readiness_set 1 failed 2>/dev/null \
-    || true
-  if [ -n "${BUSY_GEN:-}" ]; then
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE_REAL" "$ID" idle \
-      --gen "$BUSY_GEN" --source fm-recovery --event launch-failed \
+  local detail=$1 ready
+  ready=$(fm_backend_meta_exact_value "$STATE/$ID.meta" traex_ready 2>/dev/null || true)
+  if [ "$ready" != 1 ]; then
+    spawn_traex_readiness_set pending failed 2>/dev/null || true
+  fi
+  if fm_backend_herdr_parse_target "$T"; then
+    fm_backend_herdr_traex_reconcile_launch_failure \
+      "$STATE_REAL" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
       >/dev/null 2>&1 || true
   fi
   printf 'failed: %s\n' "$detail" >> "$STATE/$ID.status"

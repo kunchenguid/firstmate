@@ -3054,8 +3054,9 @@ EOF
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [state-dir]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local transition_state=${7:-}
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -3066,7 +3067,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$transition_state")
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
@@ -3285,8 +3286,9 @@ fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
   }' 2>/dev/null || printf '%s' "${1:-0}"
 }
 
-fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>
-  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} i interval raw bs saw_idle=0
+fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls> [state-dir]
+  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} transition_state=${5:-}
+  local i interval identity agent raw bs record saw_idle=0
   case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
   interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
   case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
@@ -3294,10 +3296,27 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
     if [ "$polls" -eq 1 ] || [ "$i" -gt 0 ]; then
       sleep "$interval"
     fi
-    raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane_id" 2>/dev/null || true)
+    agent=$(printf '%s' "$identity" | cut -f1)
+    raw=$(printf '%s' "$identity" | cut -f2)
     bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
     case "$bs" in
-      busy) printf 'busy'; return 0 ;;
+      busy)
+        if [ -n "$transition_state" ] && [ "$raw" = working ]; then
+          if ! fm_backend_herdr_traex_transition_meta "$transition_state" "$session" "$pane_id" \
+             || [ "$FM_BACKEND_HERDR_TRAEX_READY" != 1 ]; then
+            printf 'unknown'
+            return 0
+          fi
+          record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "$agent")
+          if ! fm_backend_herdr_traex_observe_transition "$transition_state" "$session" "$record"; then
+            printf 'unknown'
+            return 0
+          fi
+        fi
+        printf 'busy'
+        return 0
+        ;;
       idle) saw_idle=1 ;;
     esac
   done
@@ -3495,6 +3514,58 @@ fm_backend_herdr_traex_transition_meta() {  # <state-dir> <session> <pane>
   binding=$(fm_backend_meta_exact_value "$meta" endpoint_task_id 2>/dev/null) || return 1
   [ "$binding" = "$FM_BACKEND_HERDR_TRAEX_ID" ] || return 1
   return 0
+}
+
+fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pane>
+  local state=$1 session=$2 pane=$3 identity agent status current presence new_state source event
+  fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane" || return 1
+  identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+  agent=$(printf '%s' "$identity" | cut -f1)
+  status=$(printf '%s' "$identity" | cut -f2)
+  current=$(fm_busy_record_read "$state" "$FM_BACKEND_HERDR_TRAEX_ID" 2>/dev/null || true)
+  if [ "$agent" = traex ]; then
+    case "$status" in
+      working)
+        new_state=busy
+        source=herdr-traex
+        event=launch-failed-working
+        ;;
+      blocked|idle|done)
+        new_state=idle
+        source=herdr-traex
+        event="launch-failed-$status"
+        ;;
+      *)
+        case "$current" in
+          'busy herdr-traex '*) return 0 ;;
+        esac
+        new_state=unknown
+        source=fm-recovery
+        event=launch-failed-unknown
+        ;;
+    esac
+  elif [ -n "$agent" ] || [ -n "$status" ]; then
+    new_state=unknown
+    source=fm-recovery
+    event=launch-failed-identity
+  else
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+    if [ "$presence" = dead ]; then
+      new_state=idle
+      source=fm-recovery
+      event=launch-failed-dead
+    else
+      case "$current" in
+        'busy herdr-traex '*) return 0 ;;
+      esac
+      new_state=unknown
+      source=fm-recovery
+      event=launch-failed-unknown
+    fi
+  fi
+  "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+    "$state" "$FM_BACKEND_HERDR_TRAEX_ID" "$new_state" \
+    --gen "$FM_BACKEND_HERDR_TRAEX_GEN" --source "$source" --event "$event"
 }
 
 # Persist TraeX's native Herdr transitions through the existing semantic-state
