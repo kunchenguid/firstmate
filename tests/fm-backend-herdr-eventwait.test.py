@@ -47,6 +47,19 @@ class RejectedSubscriptionSocket(ClosingStreamSocket):
         self.chunks = [b'{"result":{"type":"not_started"}}\n']
 
 
+class SequencedEventSocket(ClosingStreamSocket):
+    def __init__(self):
+        self.chunks = [
+            b'{"result":{"type":"subscription_started"}}\n',
+            b'{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p2","workspace_id":"w1","agent_status":"done","agent":"traex","state_change_seq":17}}\n',
+        ]
+
+    def recv(self, _size):
+        if self.chunks:
+            return self.chunks.pop(0)
+        raise socket.timeout()
+
+
 class EventWaitReadLineTest(unittest.TestCase):
     def test_deadline_is_clean_timeout(self):
         left, right = socket.socketpair()
@@ -100,6 +113,15 @@ class EventWaitReadLineTest(unittest.TestCase):
 
         self.assertEqual(result, 3)
         self.assertEqual(stdout.getvalue(), "")
+
+    def test_main_projects_native_state_sequence(self):
+        stdout = io.StringIO()
+        with mock.patch.object(READER.socket, "socket", return_value=SequencedEventSocket()):
+            with mock.patch.object(READER.sys, "stdout", stdout):
+                result = READER.main(["herdr-eventwait.py", "socket", "1", "pane"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue(), "@subscribed\nw1:p2\tw1\tdone\ttraex\t17\n")
 
 
 if __name__ == "__main__":

@@ -143,10 +143,17 @@ EOF
             exit 0
           fi
         fi
+        seen=$(cat "$phase_file.seq-phase" 2>/dev/null || true)
+        seq=$(cat "$phase_file.seq" 2>/dev/null || printf 0)
+        if [ "$seen" != "$phase" ]; then
+          seq=$((seq + 1))
+          printf '%s' "$phase" > "$phase_file.seq-phase"
+          printf '%s' "$seq" > "$phase_file.seq"
+        fi
         # Herdr preserves the pane's creation cwd at the source project while
         # foreground_cwd follows treehouse into the isolated task copy.
-        printf '{"result":{"agent":{"agent":"traex","agent_status":"%s","cwd":"%s","foreground_cwd":"%s","pane_id":"w1:p2","state_change_seq":3}}}\n' \
-          "$phase" "${FM_FAKE_AGENT_CWD:-$project}" "$worktree"
+        printf '{"result":{"agent":{"agent":"traex","agent_status":"%s","cwd":"%s","foreground_cwd":"%s","pane_id":"w1:p2","state_change_seq":%s}}}\n' \
+          "$phase" "${FM_FAKE_AGENT_CWD:-$project}" "$worktree" "$seq"
         ;;
       *)
         printf '%s\n' '{"error":{"code":"agent_not_found"}}'
@@ -287,6 +294,19 @@ run_traex_observe() {  # <reported-status> <reported-agent>
     env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; rec=$(fm_backend_herdr_normalize_event "$4" "" "$5" "$6"); fm_backend_herdr_traex_observe_transition "$2" "$3" "$rec"' \
       _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2 "$1" "$2"
+}
+
+run_traex_stream_observe() {  # <reported-status> <reported-agent> <native-seq>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; rec=$(fm_backend_herdr_normalize_event "$4" "" "$5" "$6"); fm_backend_herdr_traex_observe_transition "$2" "$3" "$rec" stream "$7"' \
+      _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2 "$1" "$2" "$3"
 }
 
 start_interruptible_traex_spawn() {
@@ -585,8 +605,8 @@ test_start_observation_persists_lifecycle_before_return() {
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
     FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
     FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" PATH="$FAKEBIN_DIR:$PATH" \
-    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_traex_lock_runtime; lock="$2/.spawn-$3.lock"; fm_lock_try_acquire "$lock" || exit 1; fm_backend_herdr_traex_spawn_owner_publish "$lock" || exit 1; fm_backend_herdr_traex_wait_started "$4" "$5" "$6" "$2"' \
-      _ "$ROOT" "$HOME_DIR/state" "$TASK_ID" traex-test-session:w1:p2 "$WT_DIR" "$PROJECT_DIR" 2>&1)
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_traex_binding_publish "$2" "$3" traex-test-session w1:p2 "$7" || exit 1; fm_backend_herdr_traex_lock_runtime; lock="$2/.spawn-$3.lock"; fm_lock_try_acquire "$lock" || exit 1; fm_backend_herdr_traex_spawn_owner_publish "$lock" || exit 1; fm_backend_herdr_traex_wait_started "$4" "$5" "$6" "$2"' \
+      _ "$ROOT" "$HOME_DIR/state" "$TASK_ID" traex-test-session:w1:p2 "$WT_DIR" "$PROJECT_DIR" "$gen" 2>&1)
   status=$?
   expect_code 0 "$status" "startup working observation should persist through its owner: $out"
   lifecycle=$(fm_busy_record_read "$HOME_DIR/state" "$TASK_ID")
@@ -756,7 +776,8 @@ test_terminal_notification_intent_recovers_after_publication_failure() {
   assert_present "$pending" \
     "terminal idle committed without crash-recoverable notification intent"
   rmdir "$notification"
-  run_traex_reconcile || fail "reconnect did not publish the staged completion notification"
+  printf shell > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "reconnect did not publish the staged completion notification after native exit"
   assert_present "$notification" \
     "reconnect lost the staged completion notification"
   assert_absent "$pending" \
@@ -766,6 +787,25 @@ test_terminal_notification_intent_recovers_after_publication_failure() {
   assert_absent "$notification" \
     "repeated terminal reconciliation duplicated the recovered notification"
   pass "traex terminal notification intent survives publication failure and reconnect"
+}
+
+test_buffered_terminal_event_survives_native_deregistration() {
+  local rec out status verdict seq
+  rec=$(make_spawn_case buffered-terminal)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for buffered terminal recovery should succeed: $out"
+  seq=$(cat "$CASE_DIR/phase.seq")
+  printf shell > "$CASE_DIR/phase"
+  run_traex_stream_observe done traex "$((seq + 1))" \
+    || fail "buffered terminal event was discarded after native deregistration"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "buffered terminal event left the exited TraeX turn busy: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "buffered terminal event emitted no durable completion notification"
+  pass "buffered TraeX terminal evidence survives native deregistration"
 }
 
 test_native_transition_fold_is_sparse_and_bound() {
@@ -816,6 +856,8 @@ test_pending_trust_block_is_suppressed_only_until_launch_fails() {
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source herdr
+  fm_backend_herdr_traex_binding_publish "$state" "$id" sess w1:p2 "$gen" \
+    || fail "could not publish the pending TraeX ownership fixture"
   blocked=$(fm_transition_record w1:p2 w1 '' blocked traex)
   STATE=$state
   fm_backend_herdr_traex_lock_runtime
@@ -856,6 +898,7 @@ test_stale_idle_cannot_close_a_new_working_turn
 test_failed_and_orphaned_pending_launches_reconcile_terminal_level
 test_interrupted_spawn_clears_pending_readiness
 test_terminal_notification_intent_recovers_after_publication_failure
+test_buffered_terminal_event_survives_native_deregistration
 test_native_transition_fold_is_sparse_and_bound
 test_pending_trust_block_is_suppressed_only_until_launch_fails
 

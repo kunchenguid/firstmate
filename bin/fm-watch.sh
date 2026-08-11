@@ -632,35 +632,24 @@ heartbeat_scan_finds_actionable() {
 # loop is the permanent fail-closed backstop). This preserves the single live
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
-recorded_traex_herdr_bindings() {
-  local meta id backend harness kind session pane window binding
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    id=${meta##*/}
-    id=${id%.meta}
-    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    backend=$(fm_backend_meta_exact_value "$meta" backend 2>/dev/null) || continue
-    harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null) || continue
-    kind=$(fm_backend_meta_exact_value "$meta" kind 2>/dev/null) || continue
-    session=$(fm_backend_meta_exact_value "$meta" herdr_session 2>/dev/null) || continue
-    pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id 2>/dev/null) || continue
-    window=$(fm_backend_meta_exact_value "$meta" window 2>/dev/null) || continue
-    binding=$(fm_backend_meta_exact_value "$meta" endpoint_task_id 2>/dev/null) || continue
-    fm_backend_meta_exact_value "$meta" busy_gen >/dev/null 2>&1 || continue
-    fm_backend_meta_exact_value "$meta" traex_ready >/dev/null 2>&1 || continue
-    [ "$backend" = herdr ] && [ "$harness" = traex ] && [ "$binding" = "$id" ] || continue
-    case "$kind" in ship|scout) ;; *) continue ;; esac
-    [ -n "$session" ] && [ -n "$pane" ] && [ "$window" = "$session:$pane" ] || continue
-    case "$session$window" in *$'\t'*|*$'\n'*) continue ;; esac
-    printf '%s\t%s\n' "$session" "$window"
-  done
+RECORDED_TRAEX_HERDR_BINDINGS=()
+
+load_recorded_traex_herdr_bindings() {
+  local session window
+  RECORDED_TRAEX_HERDR_BINDINGS=()
+  fm_backend_source herdr || return 1
+  while IFS=$'\t' read -r session window; do
+    [ -n "$session" ] && [ -n "$window" ] || continue
+    RECORDED_TRAEX_HERDR_BINDINGS+=("$session"$'\t'"$window")
+  done < <(fm_backend_herdr_traex_recorded_bindings "$STATE")
 }
 
 reconcile_recorded_traex_groups_except() {  # <backend> <session>
-  local skip_backend=$1 skip_session=$2 session window candidate seen
+  local skip_backend=$1 skip_session=$2 entry session window candidate seen
   local sessions=() windows=()
-  while IFS=$'\t' read -r session window; do
-    [ -n "$session" ] && [ -n "$window" ] || continue
+  for entry in "${RECORDED_TRAEX_HERDR_BINDINGS[@]}"; do
+    session=${entry%%$'\t'*}
+    window=${entry#*$'\t'}
     if [ "$skip_backend" = herdr ] && [ "$session" = "$skip_session" ]; then
       continue
     fi
@@ -669,17 +658,19 @@ reconcile_recorded_traex_groups_except() {  # <backend> <session>
       [ "$candidate" = "$session" ] && seen=1 && break
     done
     [ "$seen" -eq 1 ] || sessions+=("$session")
-  done < <(recorded_traex_herdr_bindings)
+  done
   for session in "${sessions[@]}"; do
     windows=()
-    while IFS=$'\t' read -r candidate window; do
+    for entry in "${RECORDED_TRAEX_HERDR_BINDINGS[@]}"; do
+      candidate=${entry%%$'\t'*}
+      window=${entry#*$'\t'}
       [ "$candidate" = "$session" ] || continue
       seen=0
       for candidate in "${windows[@]}"; do
         [ "$candidate" = "$window" ] && seen=1 && break
       done
       [ "$seen" -eq 1 ] || windows+=("$window")
-    done < <(recorded_traex_herdr_bindings)
+    done
     [ "${#windows[@]}" -gt 0 ] || continue
     fm_backend_reconcile_transitions \
       herdr "$STATE" "$session" "${windows[@]}" >/dev/null 2>&1 || true
@@ -708,6 +699,7 @@ event_wait_or_sleep() {
     windows+=("$w")
   done < <(recorded_windows)
 
+  load_recorded_traex_herdr_bindings >/dev/null 2>&1 || true
   reconcile_recorded_traex_groups_except "$first_backend" "$first_session"
 
   if [ "${#windows[@]}" -eq 0 ]; then

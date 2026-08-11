@@ -36,6 +36,7 @@ reset_state() {
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled \
     "$TMP"/reconciles 2>/dev/null || true
+  rm -rf "$STATE_DIR/.traex-herdr-bindings"
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -140,6 +141,11 @@ fm_write_meta "$STATE_DIR/zclaude.meta" "window=gamma:wC:p3" "endpoint_task_id=z
 fm_write_meta "$STATE_DIR/zsecondmate.meta" "window=delta:wD:p4" "endpoint_task_id=zsecondmate" \
   "backend=herdr" "harness=traex" "kind=secondmate" "herdr_session=delta" \
   "herdr_pane_id=wD:p4" "busy_gen=g4" "traex_ready=1"
+fm_backend_source herdr
+fm_backend_herdr_traex_binding_publish "$STATE_DIR" ztraex1 alpha wA:p1 g1 \
+  || fail "could not publish the alpha TraeX ownership index"
+fm_backend_herdr_traex_binding_publish "$STATE_DIR" ztraex2 beta wB:p2 g2 \
+  || fail "could not publish the beta TraeX ownership index"
 export EVENT_CAP_FAIL_MAX=2
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_events_capable() { return 0; }

@@ -635,6 +635,35 @@ retire_busy_state() {
   fi
 }
 
+retire_task_lifecycle_state() {  # <state-dir> <id> <meta> <gen>
+  local state_dir=$1 id=$2 meta=$3 gen=${4:-} backend harness rc=0
+  [ "$meta" = "$state_dir/$id.meta" ] || return 1
+  backend=$(fm_backend_of_meta "$meta")
+  harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null || true)
+  if [ "$backend" = herdr ] && [ "$harness" = traex ]; then
+    fm_backend_source herdr || return 1
+    fm_backend_herdr_traex_transition_lock_acquire "$state_dir" "$id" || return 1
+    if ! fm_backend_herdr_traex_meta_for_id "$state_dir" "$id" \
+       || [ -z "$gen" ] || [ "$FM_BACKEND_HERDR_TRAEX_GEN" != "$gen" ]; then
+      fm_backend_herdr_traex_transition_lock_release "$state_dir" "$id" || true
+      return 1
+    fi
+    retire_busy_state "$state_dir" "$id" "$gen" || rc=1
+    if [ "$rc" -eq 0 ]; then
+      fm_backend_herdr_traex_binding_retire_locked "$state_dir" "$id" "$gen" || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+      rm -f "$state_dir/$id.status" "$state_dir/$id.turn-ended" \
+        "$state_dir/$id.traex-turn-ended.pending" "$state_dir/$id.traex-native-seq" \
+        "$state_dir/$id.meta" || rc=1
+    fi
+    fm_backend_herdr_traex_transition_lock_release "$state_dir" "$id" || true
+    return "$rc"
+  fi
+  retire_busy_state "$state_dir" "$id" "$gen" || return 1
+  rm -f "$state_dir/$id.status" "$state_dir/$id.turn-ended" "$state_dir/$id.meta"
+}
+
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
@@ -2162,10 +2191,9 @@ cleanup_firstmate_home_children() {
     if [ -z "$child_busy_gen" ]; then
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
-    retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.traex-turn-ended.pending" \
-      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+    retire_task_lifecycle_state \
+      "$sub_state" "$child_id" "$child_meta" "$child_busy_gen" || return 1
+    rm -f "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
   done
@@ -2439,10 +2467,8 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.traex-turn-ended.pending" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+retire_task_lifecycle_state "$STATE" "$ID" "$META" "$BUSY_GEN" || exit 1
+rm -f "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/.$ID.open-decisions-cursor"

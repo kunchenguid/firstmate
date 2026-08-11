@@ -988,7 +988,10 @@ if [ "$HARNESS" = traex ]; then
   TRAEX_EXISTING_READY=$(fm_backend_meta_exact_value "$STATE/$ID.meta" traex_ready 2>/dev/null || true)
   if [ "$TRAEX_EXISTING_READY" = pending ]; then
     TRAEX_EXISTING_TARGET=$(fm_backend_target_of_meta "$STATE/$ID.meta" 2>/dev/null || true)
+    TRAEX_EXISTING_GEN=$(fm_backend_meta_exact_value "$STATE/$ID.meta" busy_gen 2>/dev/null || true)
     if ! fm_backend_herdr_parse_target "$TRAEX_EXISTING_TARGET" \
+       || ! fm_backend_herdr_traex_binding_publish \
+         "$STATE" "$ID" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$TRAEX_EXISTING_GEN" \
        || ! fm_backend_herdr_traex_readiness_set \
          "$STATE" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" pending failed; then
       echo "error: stale TraeX launch readiness for $ID could not be reconciled safely; inspect $STATE/$ID.meta before retrying" >&2
@@ -2353,6 +2356,14 @@ traex_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$detail" >> "$STATE/$ID.status"
   echo "error: $detail; inspect window $T" >&2
 }
+
+if [ "$HARNESS" = traex ]; then
+  if ! fm_backend_herdr_traex_binding_publish \
+    "$STATE_REAL" "$ID" "$HERDR_SES" "$HERDR_PANE_ID" "$BUSY_GEN"; then
+    traex_spawn_fail "TraeX lifecycle ownership index could not be published"
+    exit 1
+  fi
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
