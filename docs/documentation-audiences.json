@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/deadman.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -282,6 +283,10 @@
     },
     {
       "path": "docs/configuration.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/deadman.md",
       "audience": "operator-current"
     },
     {

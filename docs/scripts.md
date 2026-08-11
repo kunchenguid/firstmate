@@ -72,6 +72,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
+| `fm-deadman.sh`          | Notify-only installed probe of one home's watcher-beacon freshness (docs/deadman.md) |
+| `fm-deadman-install.sh`  | Atomically install or uninstall the Studio deadman LaunchAgent and stable copies (docs/deadman.md) |
+| `fm-notify-lib.sh`       | Shared best-effort notification channel directives for Firstmate daemons |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
