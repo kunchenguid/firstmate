@@ -163,6 +163,12 @@ status_is_paused_or_captain_held() {  # <status-line>
 # format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
 #   needs-decision [key=api-shape]: <summary>
 #   resolved       [key=api-shape]: <how it was decided>
+# The token is also accepted at the head of the note, after the colon,
+#   needs-decision: [key=api-shape] <summary>
+# because that misplacement is a common worker output and folding an explicitly
+# stated key into the shared "default" bucket loses it silently: two decisions
+# then share one record, so an answer can close the wrong one. Both positions
+# mean the same key, and the note excludes the token wherever it was written.
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
@@ -174,11 +180,37 @@ status_line_verb() {  # <status-line> -> leading verb word
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
+# A valid "[key=<slug>]" token at the head of the note, or failure. Only a
+# well-formed slug counts, so ordinary note text starting with a bracket stays
+# note text instead of dropping the line.
+_fm_decision_note_key() {  # <status-line> -> key slug from the post-colon position
+  local n
   case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+    *:*) n=${1#*:} ;;
+    *) return 1 ;;
   esac
+  n=${n#"${n%%[![:space:]]*}"}
+  case "$n" in
+    \[key=*\]*) n=${n#\[key=}; n=${n%%\]*} ;;
+    *) return 1 ;;
+  esac
+  case "$n" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) printf '%s' "$n" ;;
+  esac
+}
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  local n
+  case "$1" in
+    *:*) n=${1#*:} ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  n=${n#"${n%%[![:space:]]*}"}
+  if _fm_decision_note_key "$1" >/dev/null; then
+    n=${n#*\]}
+    n=${n#"${n%%[![:space:]]*}"}
+  fi
+  printf '%s' "$n"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local prefix=${1%%:*} k
@@ -191,7 +223,7 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
         *) printf '%s' "$k" ;;
       esac
       ;;
-    *) printf 'default' ;;
+    *) _fm_decision_note_key "$1" || printf 'default' ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.

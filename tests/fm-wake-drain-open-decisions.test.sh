@@ -37,6 +37,39 @@ test_buried_decision_still_surfaces() {
   pass "a needs-decision buried under later routine/other-key lines still reports as open"
 }
 
+# Workers commonly write the key after the verb's colon (issue #2109). Folding
+# that explicit key into the shared "default" bucket loses it silently, so both
+# positions must name the same decision - including across positions, so an
+# answer written in either form closes the record the other form opened.
+test_key_after_the_colon_names_the_same_decision() {
+  local dir state out
+  dir=$(make_case post-colon-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision: [key=seam-max-bound] pick the bound\n' > "$state/task10.status"
+  printf 'working: continuing\n' >> "$state/task10.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a post-colon key"
+
+  grep -F 'task10 [key=seam-max-bound] needs-decision: pick the bound' "$out" >/dev/null \
+    || fail "a post-colon key did not surface as its own decision: $(cat "$out")"
+
+  # Closing it in the documented pre-colon position must still match.
+  printf 'resolved [key=seam-max-bound]: bounded at 8\n' >> "$state/task10.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after resolving a post-colon key"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a pre-colon resolution did not close the post-colon decision: $(cat "$out")"
+  fi
+
+  # A bracketed note that is not a well-formed key stays ordinary note text on
+  # the historical shared key rather than dropping the line out of the fold.
+  printf 'needs-decision: [key=not a slug] still a decision\n' > "$state/task11.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a malformed bracket note"
+  grep -F 'task11 needs-decision: [key=not a slug] still a decision' "$out" >/dev/null \
+    || fail "a malformed bracket note was not folded as an ordinary default decision: $(cat "$out")"
+  pass "a key written after the verb colon opens and closes the same keyed decision"
+}
+
 test_explicit_resolution_closes_it() {
   local dir state out
   dir=$(make_case resolved)
@@ -224,3 +257,4 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_key_after_the_colon_names_the_same_decision

@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "invoke the no-mistakes skill yourself" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -352,6 +352,60 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# Seven no-mistakes crewmates in two days reported `done:` after a green local
+# gate and never ran the pipeline, because the DOD's own first instruction was
+# to commit, report done, and wait to be told. The generated brief must now name
+# the single done line, deny the near-miss finishes, and put the pipeline
+# invocation on the worker.
+test_no_mistakes_dod_makes_the_done_gate_behavioral() {
+  local home id brief
+  home="$TMP_ROOT/done-gate-home"
+  mkdir -p "$home/data"
+  id="brief-done-gate-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep 'done: PR {url} checks green' "$brief" \
+    "no-mistakes DOD must state the exact done line"
+  assert_grep "An implementation commit is NOT done" "$brief" \
+    "no-mistakes DOD must deny an implementation commit as done"
+  assert_grep "green local test, lint, build, or review run is NOT done" "$brief" \
+    "no-mistakes DOD must deny a green local gate as done"
+  assert_grep "invoke the no-mistakes skill yourself" "$brief" \
+    "no-mistakes DOD must put the pipeline invocation on the worker"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD still tells the worker to stop and wait to be told to validate"
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes DOD still offers a pre-PR done line"
+  pass "fm-brief.sh: no-mistakes DOD names one done gate and owns the pipeline invocation"
+}
+
+# Two crewmates wrote `needs-decision: [key=slug]`, which folded to the shared
+# `default` bucket. Every scaffold's status protocol must show the key in the
+# position the fold's own grammar names first.
+test_status_protocol_shows_keyed_decision_grammar() {
+  local home id brief
+  home="$TMP_ROOT/decision-key-home"
+  mkdir -p "$home/data"
+  for id in ship scout; do
+    if [ "$id" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-key-ship some-proj --mode no-mistakes >/dev/null 2>&1
+      brief="$home/data/brief-key-ship/brief.md"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-key-scout some-proj --scout >/dev/null 2>&1
+      brief="$home/data/brief-key-scout/brief.md"
+    fi
+    assert_present "$brief" "$id brief was not scaffolded"
+    assert_grep 'needs-decision [key=<slug>]: {summary of options}' "$brief" \
+      "$id brief's rule 6 does not show the keyed decision form"
+    assert_grep 'needs-decision [key=api-shape]: REST or RPC' "$brief" \
+      "$id brief does not show a keyed decision example"
+    assert_no_grep 'append `needs-decision: {summary of options}`' "$brief" \
+      "$id brief still shows the unkeyed decision form"
+  done
+  pass "fm-brief.sh: ship and scout status protocols show the key before the colon"
 }
 
 test_ship_project_memory_wording() {
@@ -719,6 +773,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_makes_the_done_gate_behavioral
+test_status_protocol_shows_keyed_decision_grammar
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
