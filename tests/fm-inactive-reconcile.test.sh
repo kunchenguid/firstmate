@@ -278,7 +278,7 @@ test_reconciliation_never_calls_forge() {
 
 test_failed_request_delivery_retries_existing_correlation() {
   local record first_corr second_corr
-  make_world send-retry; bind_secondmate local; write_mate_meta; write_summary done
+  make_world send-retry; bind_secondmate local; write_mate_meta; write_summary "done"
   FM_TEST_SEND_FAIL_FIRST=1 run_reconcile "$MAIN" --startup
   record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
   [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=0 ] \
@@ -295,7 +295,7 @@ test_failed_request_delivery_retries_existing_correlation() {
 
 test_unknown_request_delivery_is_not_retried() {
   local record pending
-  make_world send-unknown; bind_secondmate local; write_mate_meta; write_summary done
+  make_world send-unknown; bind_secondmate local; write_mate_meta; write_summary "done"
   FM_TEST_SEND_UNKNOWN=1 run_reconcile "$MAIN" --startup
   record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
   pending=$(find "$MAIN/state/pending-replies" -type f ! -name '.delivery-confirmed-*' | head -1)
