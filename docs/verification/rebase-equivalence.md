@@ -39,7 +39,7 @@ Neither loss was reported by any pipeline signal; both were caught only by compa
 
 The push step itself is not reachable from this repository.
 `no-mistakes` is a single compiled binary (`~/.no-mistakes/bin/no-mistakes`, 24 MB, v1.40.3 at the date above), and its configuration schema exposes agent selection, timeouts, per-step `auto_fix` counts (including `rebase`), intent extraction, and test-evidence storage - no custom step, pre-push hook, or validation plugin.
-So this repository owns the comparison, and it runs only when a person invokes it: nothing in the delivery path calls it, and neither `bin/fm-pr-check.sh` nor `bin/fm-pr-merge.sh` can refuse, block, or delay a request because of it.
+So this repository owns the comparison, and it runs only when firstmate or a maintainer deliberately invokes it: nothing in the delivery path calls it, and neither `bin/fm-pr-check.sh` nor `bin/fm-pr-merge.sh` can refuse, block, or delay a request because of it.
 
 ## Where the validated head comes from
 
@@ -69,7 +69,7 @@ fm/cfvc-13-attempt-budget   submitted d459e942966f  head 352c56912080  last_push
 fm/fork-trunk-serial2-base-red submitted 646f2390494f head eabefe425ba3 last_pushed eabefe425ba3  pr 2009
 ```
 
-**This bounds what the gate can prove, and the bound is stated rather than implied.**
+**This bounds what the comparison can prove, and the bound is stated rather than implied.**
 Because `head_sha` is overwritten at push time, the pre-rebase head carrying a run's own fix commits is not retained anywhere once the push completes.
 So after a push, NO retained column is the validated head.
 
@@ -87,7 +87,7 @@ REBASE-EQUIVALENCE: DROPPED 6 path(s) lost validated content
 That run's own accepted review fix legitimately rewrote those lines, and 62 of 69 pushed runs have `submitted_head_sha` differing from `last_pushed_sha`, so this refuses the common case rather than an edge.
 A gate that refuses the common case gets switched off, and then it protects nothing.
 
-Driven end to end through intake on a wholly faithful push - the run's accepted fix rewrote `foo(a)` into `foo(a, b)` and the push carried the fixed line - the two sources diverge completely:
+Driven end to end through the intake gate that was later withdrawn, on a wholly faithful push - the run's accepted fix rewrote `foo(a)` into `foo(a, b)` and the push carried the fixed line - the two sources diverged completely:
 
 ```
 submitted_head_sha source : exit 1, "DROPPED 1 path(s) lost validated content", watch NOT armed
@@ -155,7 +155,7 @@ The regression suite constructs that collision rather than reasoning about it: t
 The trunk comes from the request too, never from a local ref.
 Whenever this check matters the trunk HAS moved, since otherwise no rebase would have been needed, so `refs/remotes/origin/<default>` is short of the commit the candidate actually sits on and would measure the removal comparison against the wrong base.
 The base BRANCH is forge metadata rather than a ref, so `gh pr view <url> --json baseRefName` names it and its current tip is then fetched into `refs/fm-rebase-equivalence/base/<n>`; each head's own base is the `git merge-base` of that tip with that head, which is why the branch tip having moved on again does not matter.
-With the trunk in hand the validated head's own base is the same fork point off the same trunk, so `--validated-base` is optional in this form and the worker's instruction names only the validated head from the run record, the `no-mistakes` remote it lives on, and the PR URL.
+With the trunk in hand the validated head's own base is the same fork point off the same trunk, so `--validated-base` is optional in this form and an invocation names only the validated head from the run record, the `no-mistakes` remote it lives on, and the PR URL.
 
 End to end against the live forge, from a scratch clone whose `origin` is a local path and holds no request refs at all:
 

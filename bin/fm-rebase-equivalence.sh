@@ -7,6 +7,12 @@
 # script is the mechanical form of the by-hand comparison that caught two such
 # rebases; see docs/verification/rebase-equivalence.md for both reproductions.
 #
+# It is a firstmate-invoked DIAGNOSTIC: it reports and never gates. Nothing in
+# the delivery path calls it, an automatic gate on it was built here and
+# withdrawn on measured evidence, and the defect it detects therefore remains
+# open; docs/verification/rebase-equivalence.md owns that record and
+# bin/fm-pr-check.sh owns why the gate must not be reintroduced there.
+#
 # It compares the pre-rebase (validated) head against the post-rebase
 # (candidate) head, each measured against ITS OWN base, and refuses when the
 # candidate does not carry every content change the validated head made.
