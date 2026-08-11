@@ -6,7 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--split-gate] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --mode no-mistakes --driver
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -40,6 +41,28 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# --split-gate (valid only with --mode no-mistakes) opts the BUILDER into the
+# split-gate definition of done: implement, commit, write or append a handoff
+# cycle at data/<task-id>/handoff.md, append
+# "done: built fm/<task-id> at <short-sha>, handoff ready", and stop - every
+# gate-driving instruction moves to the separate driver brief instead.
+# Without the flag the generated no-mistakes scaffold is unchanged.
+# --driver (valid only with --mode no-mistakes) writes the gate-driver brief to
+# data/<task-id>/driver-brief.md instead of brief.md. It is complete as
+# generated - no {TASK} placeholder - and records the fixed machine-readable
+# "Delivery contract: mode=no-mistakes phase=driver" line. Firstmate regenerates
+# it at each builder->driver flip, so an existing driver-brief.md is
+# overwritten deliberately; brief.md keeps its no-overwrite guarantee.
+# --driver is mutually exclusive with --split-gate and --herdr-lab: a driver
+# drives gate commands only and never runs task commands.
+# This header owns the handoff-file contract shared by both split scaffolds:
+# data/<task-id>/handoff.md is written by the builder, read by the driver as its
+# entire product context, and appended per cycle - one new cycle per builder
+# round, earlier cycles never rewritten. Each cycle carries five required
+# sections: Intent (one self-contained paragraph the driver passes verbatim as
+# the pipeline --intent), Change inventory (branch, base SHA, commit list,
+# touched areas), Verification notes, Review anticipation, and Escalation
+# guidance, at a target of 1-2k tokens per cycle.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -54,7 +77,8 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
-# Refuses to overwrite an existing brief.
+# Refuses to overwrite an existing brief. The regenerable driver-brief.md is the
+# one deliberate exception.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +128,8 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+DRIVER=0
+SPLIT_GATE=0
 MODE=
 MODE_SET=0
 POS=()
@@ -125,6 +151,8 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --driver) DRIVER=1 ;;
+    --split-gate) SPLIT_GATE=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
@@ -154,6 +182,27 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+
+# --driver and --split-gate are the two halves of the no-mistakes builder/driver
+# gate split; anywhere else they are meaningless and refuse loudly rather than
+# scaffolding a brief that silently ignores them.
+if [ "$DRIVER" -eq 1 ]; then
+  if [ "$KIND" != ship ] || [ "$MODE" != no-mistakes ]; then
+    echo "error: --driver applies only to --mode no-mistakes ship briefs; the driver drives that pipeline's gates from the builder's handoff" >&2
+    exit 1
+  fi
+  if [ "$SPLIT_GATE" -eq 1 ]; then
+    echo "error: --driver and --split-gate are mutually exclusive; --split-gate shapes the builder definition of done and a driver brief has none" >&2
+    exit 1
+  fi
+  if [ "$HERDR_LAB" -eq 1 ]; then
+    echo "error: --herdr-lab does not apply to --driver briefs; a driver runs gate commands only, never task commands" >&2
+    exit 1
+  fi
+elif [ "$SPLIT_GATE" -eq 1 ] && { [ "$KIND" != ship ] || [ "$MODE" != no-mistakes ]; }; then
+  echo "error: --split-gate applies only to --mode no-mistakes ship briefs; it changes the no-mistakes builder definition of done" >&2
+  exit 1
+fi
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -166,8 +215,15 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
-BRIEF="$DATA/$ID/brief.md"
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+if [ "$DRIVER" -eq 1 ]; then
+  # The driver brief carries no {TASK} placeholder, so its content is fully
+  # determined by its inputs; firstmate regenerates it at every builder->driver
+  # flip and overwriting is the intended idempotent path.
+  BRIEF="$DATA/$ID/driver-brief.md"
+else
+  BRIEF="$DATA/$ID/brief.md"
+  [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+fi
 mkdir -p "$DATA/$ID"
 
 shell_quote() {
@@ -265,6 +321,90 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+# Driver scaffold: the gate-driving half of the no-mistakes builder/driver
+# split. It is complete as generated (no {TASK}), inherits the builder's task
+# worktree, and its entire product context is the handoff file whose contract
+# this script's header owns. It carries no Herdr section because a driver never
+# runs task commands (the --herdr-lab combination is refused above).
+if [ "$DRIVER" -eq 1 ]; then
+cat > "$BRIEF" <<EOF
+You are a crewmate: a gate DRIVER agent managed by firstmate. Work on your own; do not wait for a human.
+
+# Task
+Drive the no-mistakes gate for branch \`fm/$ID\` of $REPO to completion.
+Your entire product context is \`$DATA/$ID/handoff.md\` - read it first, latest cycle first.
+You build nothing and decide nothing above the gate rules below: the builder owns code and firstmate owns decisions.
+
+# Setup
+You inherit the task's existing git worktree with branch \`fm/$ID\` checked out; verify it, create nothing.
+
+**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
+The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not touch anything - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
+1. Confirm \`git rev-parse --abbrev-ref HEAD\` prints \`fm/$ID\` and matches the handoff's Change inventory; if not, append \`blocked: worktree branch does not match the handoff\` and stop.
+2. Run \`no-mistakes axi\` and read its \`branch_sync\` block before acting.
+
+# Gate rules
+1. Start or reattach the run: \`no-mistakes axi run --intent "<the handoff's Intent section, verbatim>"\`.
+   If axi reports an active run for this branch, reattach and drive it instead of starting a new one.
+2. Keep exactly one foreground blocking AXI call per turn; never end your turn while a call is executing.
+   End your turn only after writing a park (rule 4) or an outcome (rule 6 or 7).
+3. At a gate, read the findings table's action column:
+   - all findings auto-fix and/or no-op: respond yourself
+     (\`--action fix --findings <auto-fix ids>\`, or \`--action approve\` when only no-op).
+   - anything ask-user: park (rule 4). Never approve, fix, or skip an ask-user finding yourself.
+   - a problem you noticed that the pipeline missed: fold it in with \`--add-finding\`; never edit files.
+4. To park: write the gate's findings VERBATIM (id, severity, file, action, full description)
+   to \`$DATA/$ID/gate-findings-<run>-<step>.md\`, append
+   \`needs-decision [key=gate-<step>-<n>]: <one-line summary> (details: <that file>)\`,
+   and end your turn. The run stays parked daemon-side; that is safe and expected.
+5. On every wake, FIRST re-read \`no-mistakes axi status\` and reconcile before responding;
+   the run may have moved (merged PR, monitor progress) while you were parked.
+   Then translate firstmate's decision into the exact respond call it names.
+6. Outcome checks-passed: append \`done: PR <url> checks green\` to the status file and stop.
+   The daemon alone decides readiness, including the trusted \`no_ci: true\` case; never second-guess it against the forge's own check list.
+7. Outcome failed or cancelled: write the evidence (step, log tail, findings) to
+   \`$DATA/$ID/gate-report-<run>.md\`, append
+   \`blocked [key=builder-fix-<n>]: run <state> at <step>, code fix needed (details: <that file>)\`,
+   and stop. Firstmate flips the task back to a builder cycle.
+8. You never edit, commit, or revert ANY file, trivial or not; the pipeline owns fixes (\`--action fix\`) and the builder owns code.
+   You never run \`--yes\`; it would silently bypass firstmate's authority check and any required captain escalation.
+   You never abort or rerun mid-run except under an explicit supersession instruction from firstmate, in which case:
+   abort, confirm the run stopped via \`no-mistakes axi status\`, follow \`branch_sync.next_action\` exactly
+   (\`sync --recover\` only when it reports \`recover_custody\`; a \`branch_sync.state\` of \`user_owned\` means the run
+   went terminal without changing the submitted head, no sync action is needed, and a repeated \`--recover\` is a
+   harmless no-op), append \`resolved [key=<the instruction's key>]: run aborted, custody settled\`, and stop.
+9. On \`error.code: nested_gate_context\`, stop and append \`blocked: axi reports nested_gate_context - this driver was launched inside a pipeline context, a wiring bug\`; never retry the command.
+
+# Rules
+1. Never push to the default branch. Never merge a PR.
+2. Stay inside this worktree; your only writes are the gate files under \`$DATA/$ID/\` and the status file below.
+3. Use gh-axi for GitHub operations.
+4. Report status by appending one line:
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Each append wakes firstmate, so report sparingly: only the parks, outcomes, and blockers the gate rules name.
+   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
+   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
+   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+6. A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
+   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+# Definition of done
+Delivery contract: mode=no-mistakes phase=driver
+The gate rules above define your only endings: rule 6's \`done: PR <url> checks green\` on a passed run, or rule 7's keyed builder-fix blocker on a failed or cancelled run.
+There is no other completion path; you never implement, promote, or merge anything.
+EOF
+echo "scaffolded: $BRIEF (no-mistakes driver; complete as generated, regenerated per flip)"
+exit 0
+fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -381,6 +521,32 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    if [ "$SPLIT_GATE" -eq 1 ]; then
+    # Split-gate builder: gate driving moves to the driver brief entirely; the
+    # builder's definition of done is implement, commit, and hand off. The
+    # handoff-file contract is owned by this script's header.
+    IFS= read -r -d '' DOD <<EOF || true
+# Definition of done
+Delivery contract: mode=no-mistakes
+This task uses the SPLIT gate: you are the builder only.
+You implement, commit, and write the handoff below; a separate driver agent runs the no-mistakes pipeline afterwards from that handoff.
+Do NOT run /no-mistakes, do not start, reattach, or respond to any pipeline run, and do not wait for validation; the driver owns the gate end to end.
+The task is complete only when the work is committed on your branch AND the current handoff cycle is written.
+
+Before your final status line, write or append a handoff cycle at \`$DATA/$ID/handoff.md\`.
+Each cycle must carry these five sections:
+1. **Intent** - one self-contained paragraph the driver passes verbatim as the pipeline's \`--intent\`: the task goal in the captain's terms plus every accepted requirement, clarification, constraint, exclusion, and supersession in its current accepted form, plus the decisions and tradeoffs made during implementation and anything deliberate that would look surprising in the diff.
+2. **Change inventory** - branch, base SHA, commit list (SHA + subject), touched-area summary.
+3. **Verification notes** - how you verified the change, what the test step should find, known-flaky areas.
+4. **Review anticipation** - findings you expect the review to raise, which are deliberate (with the rationale the driver or the captain will need), and known weak spots.
+5. **Escalation guidance** - anything you know that would change how firstmate or the captain should decide a parked finding.
+Append a new cycle for each builder round and never rewrite earlier cycles.
+Target 1-2k tokens per cycle: the driver's entire product context is this file, and a thin Intent buys avoidable ask-user parks in review.
+
+When the implementation is committed and the handoff cycle is written, append \`done: built fm/$ID at <short-sha>, handoff ready\` to the status file (short-sha from \`git rev-parse --short HEAD\`) and stop.
+A driver takes the gate from here; you are finished.
+EOF
+    else
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
@@ -401,6 +567,7 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
+    fi
     ;;
 esac
 
@@ -461,4 +628,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+if [ "$SPLIT_GATE" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE split-gate builder; replace {TASK})"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+fi

@@ -690,6 +690,185 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# --split-gate is the builder half of the no-mistakes builder/driver gate
+# split: the definition of done becomes implement, commit, and write the
+# handoff cycle, and every gate-driving instruction moves to the driver brief.
+test_split_gate_builder_definition_of_done() {
+  local home id brief
+  home="$TMP_ROOT/split-gate-home"
+  mkdir -p "$home/data"
+  id="brief-split-gate-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --split-gate >/dev/null 2>&1 \
+    || fail "--split-gate no-mistakes brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "split-gate brief was not scaffolded"
+  grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
+    || fail "split-gate builder lost the plain no-mistakes delivery contract line"
+  assert_grep "{TASK}" "$brief" "split-gate brief missing the {TASK} placeholder"
+  assert_grep "no-mistakes doctor" "$brief" "split-gate builder lost the doctor setup step"
+  assert_grep "Verify isolation before anything else." "$brief" \
+    "split-gate builder lost the worktree-isolation assertion"
+  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
+    "split-gate builder lost the project-memory section"
+  assert_grep "you are the builder only" "$brief" \
+    "split-gate builder DOD did not declare the builder role"
+  assert_grep "$home/data/$id/handoff.md" "$brief" \
+    "split-gate builder DOD did not name the handoff file"
+  for section in "**Intent**" "**Change inventory**" "**Verification notes**" "**Review anticipation**" "**Escalation guidance**"; do
+    assert_grep "$section" "$brief" "split-gate builder handoff spec lost its $section section"
+  done
+  assert_grep "passes verbatim as the pipeline's \`--intent\`" "$brief" \
+    "split-gate builder handoff Intent lost its verbatim --intent contract"
+  assert_grep "Append a new cycle for each builder round and never rewrite earlier cycles." "$brief" \
+    "split-gate builder handoff lost its append-per-cycle rule"
+  assert_grep "Target 1-2k tokens per cycle" "$brief" \
+    "split-gate builder handoff lost its token-budget target"
+  assert_grep "done: built fm/$id at <short-sha>, handoff ready" "$brief" \
+    "split-gate builder DOD lost its built/handoff-ready done line"
+  assert_grep "Do NOT run /no-mistakes" "$brief" \
+    "split-gate builder DOD did not forbid running the pipeline"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "split-gate builder retained the single-worker validate handoff"
+  assert_no_grep "no-mistakes axi respond" "$brief" \
+    "split-gate builder retained gate-response driving text"
+  assert_no_grep "checks green" "$brief" \
+    "split-gate builder retained the driver's PR-ready done line"
+  assert_no_grep "--yes" "$brief" \
+    "split-gate builder retained the gate-driving --yes rule"
+  assert_no_grep "ask-user findings are never yours to answer" "$brief" \
+    "split-gate builder retained the gate escalation rule that now belongs to the driver"
+  pass "fm-brief.sh: --split-gate rewrites the no-mistakes builder definition of done"
+}
+
+# Chunk-1 guarantee: without the opt-in flag, the default no-mistakes scaffold
+# carries none of the split-gate text (byte-for-byte default preservation is
+# additionally pinned by test_no_mistakes_dod_wording and
+# test_ship_modes_generate_clean_briefs on the same output).
+test_no_mistakes_default_has_no_split_gate_text() {
+  local home brief
+  home="$TMP_ROOT/split-default-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-split-default-e2 some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/brief-split-default-e2/brief.md"
+  assert_present "$brief" "default no-mistakes brief was not scaffolded"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "default no-mistakes brief lost its single-worker validate handoff"
+  assert_no_grep "handoff" "$brief" \
+    "default no-mistakes brief leaked split-gate handoff text without the flag"
+  assert_no_grep "SPLIT gate" "$brief" \
+    "default no-mistakes brief leaked the split-gate role declaration"
+  assert_no_grep "phase=driver" "$brief" \
+    "default no-mistakes brief leaked the driver phase contract"
+  pass "fm-brief.sh: the default no-mistakes scaffold carries no split-gate text"
+}
+
+# --driver writes the gate-driver brief: complete as generated, phase-marked
+# contract line, gate rules with the v1.46.0 refinements, and deliberate
+# idempotent regeneration while brief.md keeps its no-overwrite guarantee.
+test_driver_brief_structure_and_contract() {
+  local home id brief first status
+  home="$TMP_ROOT/driver-home"
+  mkdir -p "$home/data"
+  id="brief-driver-e3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --driver >/dev/null 2>&1 \
+    || fail "--driver brief should scaffold"
+  brief="$home/data/$id/driver-brief.md"
+  assert_present "$brief" "driver brief was not written to driver-brief.md"
+  assert_absent "$home/data/$id/brief.md" "--driver must not write brief.md"
+  grep -qx "Delivery contract: mode=no-mistakes phase=driver" "$brief" \
+    || fail "driver brief missing its machine-readable phase contract line"
+  assert_no_grep "{TASK}" "$brief" \
+    "driver brief must be complete as generated, with no {TASK} placeholder"
+  assert_grep "Drive the no-mistakes gate for branch \`fm/$id\`" "$brief" \
+    "driver brief lost its task statement"
+  assert_grep "$home/data/$id/handoff.md" "$brief" "driver brief lost its handoff pointer"
+  assert_grep "read it first, latest cycle first" "$brief" \
+    "driver brief lost the latest-cycle-first read order"
+  assert_grep "Verify isolation before anything else." "$brief" \
+    "driver brief lost the worktree-isolation assertion"
+  assert_no_grep "git checkout -b" "$brief" \
+    "driver brief must inherit the builder's branch, never create one"
+  assert_grep "one foreground blocking AXI call per turn" "$brief" \
+    "driver brief lost the one-blocking-call turn rule"
+  assert_grep "Never approve, fix, or skip an ask-user finding yourself." "$brief" \
+    "driver brief lost the ask-user park rule"
+  assert_grep "needs-decision [key=gate-<step>-<n>]" "$brief" \
+    "driver brief lost the keyed gate park line"
+  assert_grep "done: PR <url> checks green" "$brief" \
+    "driver brief lost the PR-ready outcome line"
+  assert_grep "The daemon alone decides readiness, including the trusted \`no_ci: true\` case" "$brief" \
+    "driver brief lost the daemon-owned readiness rule"
+  assert_grep "blocked [key=builder-fix-<n>]" "$brief" \
+    "driver brief lost the keyed builder-fix blocker"
+  assert_grep "You never edit, commit, or revert ANY file" "$brief" \
+    "driver brief lost the no-edit rule"
+  assert_grep "You never run \`--yes\`" "$brief" "driver brief lost the --yes ban"
+  assert_grep "sync --recover" "$brief" "driver brief lost the custody-recovery rule"
+  assert_grep "\`user_owned\` means the run" "$brief" \
+    "driver brief lost the user_owned no-op supersession case"
+  assert_grep "a repeated \`--recover\` is a" "$brief" \
+    "driver brief lost the harmless repeated-recover clause"
+  assert_grep "nested_gate_context" "$brief" \
+    "driver brief lost the nested-gate stop-and-report rule"
+  assert_grep "never retry the command" "$brief" \
+    "driver brief must stop rather than retry on nested_gate_context"
+  assert_grep "Never stop, restart, or update the shared \`no-mistakes\` daemon" "$brief" \
+    "driver brief lost the shared-daemon safety rule"
+
+  # Deliberate idempotent regeneration: a second run overwrites with identical
+  # bytes and exits 0, because firstmate regenerates the driver brief per flip.
+  first="$TMP_ROOT/driver-first-cycle"
+  cp "$brief" "$first"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --driver >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "regenerating an existing driver brief must succeed"
+  cmp -s "$first" "$brief" || fail "regenerated driver brief changed bytes"
+
+  # brief.md's no-overwrite guarantee is untouched: the builder brief scaffolds
+  # alongside the driver brief, and only brief.md refuses a second write.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --split-gate >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "builder brief should scaffold alongside an existing driver brief"
+  assert_present "$home/data/$id/brief.md" "builder brief missing next to driver brief"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --split-gate >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "brief.md must still refuse overwrite when the driver brief is regenerable"
+  pass "fm-brief.sh: --driver emits the phase-marked gate-driver brief and regenerates idempotently"
+}
+
+# The split flags are meaningless outside a no-mistakes ship brief; every
+# misuse must refuse loudly and write nothing.
+test_driver_and_split_gate_flag_validation() {
+  local home out status label args expect
+  home="$TMP_ROOT/driver-refusals-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
+  done <<'ROWS'
+driver without mode|brief-drv-r1 some-proj --driver|ship briefs require --mode
+driver with direct-PR|brief-drv-r2 some-proj --mode direct-PR --driver|--driver applies only to --mode no-mistakes ship briefs
+driver with local-only|brief-drv-r3 some-proj --mode local-only --driver|--driver applies only to --mode no-mistakes ship briefs
+driver on a scout|brief-drv-r4 some-proj --scout --driver|--driver applies only to --mode no-mistakes ship briefs
+driver on a secondmate|brief-drv-r5 --secondmate --no-projects --driver|--driver applies only to --mode no-mistakes ship briefs
+driver with split-gate|brief-drv-r6 some-proj --mode no-mistakes --driver --split-gate|mutually exclusive
+driver with herdr-lab|brief-drv-r7 some-proj --mode no-mistakes --driver --herdr-lab|a driver runs gate commands only
+split-gate with direct-PR|brief-drv-r8 some-proj --mode direct-PR --split-gate|--split-gate applies only to --mode no-mistakes ship briefs
+split-gate with local-only|brief-drv-r9 some-proj --mode local-only --split-gate|--split-gate applies only to --mode no-mistakes ship briefs
+split-gate on a scout|brief-drv-r10 some-proj --scout --split-gate|--split-gate applies only to --mode no-mistakes ship briefs
+split-gate on a secondmate|brief-drv-r11 --secondmate --no-projects --split-gate|--split-gate applies only to --mode no-mistakes ship briefs
+ROWS
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11; do
+    assert_absent "$home/data/brief-drv-r$i/brief.md" \
+      "refused split-flag scaffold r$i still wrote brief.md"
+    assert_absent "$home/data/brief-drv-r$i/driver-brief.md" \
+      "refused split-flag scaffold r$i still wrote driver-brief.md"
+  done
+  pass "fm-brief.sh: --driver and --split-gate misuse is refused, never silently dropped"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -719,6 +898,10 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_split_gate_builder_definition_of_done
+test_no_mistakes_default_has_no_split_gate_text
+test_driver_brief_structure_and_contract
+test_driver_and_split_gate_flag_validation
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
