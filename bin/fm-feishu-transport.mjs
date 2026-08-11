@@ -222,14 +222,15 @@ async function readOverlappingHistory(binding, verifiedChat, sinceMs, profile) {
     throw new Error("history-reconcile-failed");
   }
   const envelope = parseJsonEnvelope(result.stdout);
-  if (Object.hasOwn(envelope, "ok") && envelope.ok !== true) throw new Error("history-envelope-not-ok");
-  const data = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
+  if (envelope.ok !== true) throw new Error("history-envelope-not-ok");
+  const data = envelope.data;
   const pagination = envelope.meta?.pagination;
-  if (data.has_more === true || pagination?.complete === false || (typeof pagination?.next_token === "string" && pagination.next_token.length > 0)) {
-    recordTransportDiagnostic(HOME, "history-incomplete", "history pagination remained incomplete at the configured page bound");
+  if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data.messages)) throw new Error("history-messages-unavailable");
+  if (data.has_more !== false || !pagination || pagination.complete !== true || (pagination.next_token !== undefined && pagination.next_token !== null && pagination.next_token !== "")) {
+    recordTransportDiagnostic(HOME, "history-incomplete", "history pagination remained incomplete or unknown at the configured page bound");
     throw new Error("history-reconcile-incomplete");
   }
-  const messages = Array.isArray(data.messages) ? data.messages : [];
+  const messages = data.messages;
   const normalized = messages.map((message) => normalizeHistoryMessage(message, verifiedChat)).filter((message) => !message.deleted);
   let previousTime = -1;
   for (const message of normalized) {
@@ -275,14 +276,26 @@ function retryAfterMilliseconds(error) {
   return undefined;
 }
 
-async function sendOneOutbound(profile) {
+async function sendOneOutbound(pairing, binding, ownerFence) {
   const claim = claimNextOutbound(HOME);
   if (!claim) return false;
+  try {
+    await verifyBotIdentity(pairing);
+    await verifyP2pChat(pairing, binding);
+    const current = activeConfiguration();
+    const owner = readTransportOwner(HOME);
+    if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation || !owner || owner.pid !== ownerFence.ownerPid || owner.nonce !== ownerFence.ownerNonce || owner.process_start_token !== ownerFence.ownerProcessStartToken) throw new Error("outbound-identity-fence-changed");
+  } catch (error) {
+    failOutboundAttempt(HOME, claim, "outbound-identity-reverification-failed", { ambiguous: false });
+    recordTransportDiagnostic(HOME, "identity-reverification-failure", safeError(error));
+    writeTransportHealth(HOME, { phase: "degraded", healthy: false, lastErrorType: "outbound-identity-reverification-failed" });
+    throw new Error("outbound-identity-reverification-failed");
+  }
   const args = claim.outbox.reply_to_message_id
     ? ["im", "+messages-reply", "--message-id", claim.outbox.reply_to_message_id]
     : ["im", "+messages-send", "--chat-id", claim.outbox.destination_chat_id];
   args.push("--text", claim.chunk.chunk, "--idempotency-key", claim.chunk.idempotency_key, "--as", "bot", "--format", "json");
-  const result = await runArgv(LARK_CLI, args, { profile });
+  const result = await runArgv(LARK_CLI, args, { profile: pairing.app_profile });
   if (result.spawnError || result.timedOut || result.overflow) {
     failOutboundAttempt(HOME, claim, safeError(result.spawnError) || "ambiguous-process-result", { ambiguous: true });
     return true;
@@ -299,6 +312,7 @@ async function sendOneOutbound(profile) {
     });
     if (type === "authorization" || type === "authentication") {
       writeTransportHealth(HOME, { phase: "degraded", healthy: false, lastErrorType: `${type}:${subtype}` });
+      throw new Error("outbound-authorization-reverification-failed");
     }
     return true;
   }
@@ -324,23 +338,23 @@ async function sendOneOutbound(profile) {
   return true;
 }
 
-async function drainOutbound(profile) {
+async function drainOutbound(pairing, binding, ownerFence) {
   for (let count = 0; count < 100 && !stopping; count += 1) {
-    if (!(await sendOneOutbound(profile))) break;
+    if (!(await sendOneOutbound(pairing, binding, ownerFence))) break;
   }
 }
 
-function drainOutboundSingleFlight(profile) {
+function drainOutboundSingleFlight(pairing, binding, ownerFence) {
   if (outboundDrainTask) return outboundDrainTask;
-  outboundDrainTask = drainOutbound(profile).finally(() => { outboundDrainTask = null; });
+  outboundDrainTask = drainOutbound(pairing, binding, ownerFence).finally(() => { outboundDrainTask = null; });
   return outboundDrainTask;
 }
 
-function startConsumer(binding, verifiedChat, profile, reconnects) {
+function startConsumer(pairing, binding, verifiedChat, reconnects, ownerFence) {
   return new Promise((resolvePromise) => {
     const child = spawn(LARK_CLI, ["event", "consume", "im.message.receive_v1", "--as", "bot"], {
       cwd: ROOT,
-      env: larkEnvironment(profile),
+      env: larkEnvironment(pairing.app_profile),
       stdio: ["pipe", "pipe", "pipe"],
     });
     consumer = child;
@@ -356,6 +370,13 @@ function startConsumer(binding, verifiedChat, profile, reconnects) {
     let senderTimer = null;
     let reconcileTask = null;
     let reconcileError = null;
+    const assertCurrentConnection = () => {
+      const current = readActiveBinding(HOME);
+      const owner = readTransportOwner(HOME);
+      if (closed || consumer !== child) throw new Error("consumer-closed-before-reconciliation");
+      if (!current || current.status !== "active" || current.binding_id !== binding.binding_id || current.generation !== binding.generation) throw new Error("binding-changed-before-reconciliation");
+      if (!owner || owner.pid !== ownerFence.ownerPid || owner.nonce !== ownerFence.ownerNonce || owner.process_start_token !== ownerFence.ownerProcessStartToken) throw new Error("transport-owner-changed-before-reconciliation");
+    };
     const bindingTimer = setInterval(() => {
       try {
         const current = readActiveBinding(HOME);
@@ -503,13 +524,16 @@ function startConsumer(binding, verifiedChat, profile, reconnects) {
             try {
               const previous = readTransportHealth(HOME);
               const sinceMs = previous?.last_reconcile_at ? Date.parse(String(previous.last_reconcile_at)) : Date.now() - HISTORY_OVERLAP_MS;
-              const history = await readOverlappingHistory(binding, verifiedChat, Number.isFinite(sinceMs) ? sinceMs : Date.now() - HISTORY_OVERLAP_MS, profile);
+              const history = await readOverlappingHistory(binding, verifiedChat, Number.isFinite(sinceMs) ? sinceMs : Date.now() - HISTORY_OVERLAP_MS, pairing.app_profile);
               if (drop || overflow) throw new Error("live-buffer-integrity-lost-before-history-reconcile");
+              assertCurrentConnection();
               const staged = readStagedTransportEvents(HOME);
               publishEvents([...history, ...staged.map((record) => record.event), ...liveBuffer], "lark-history-overlap");
               clearStagedTransportEvents(HOME, staged);
               liveBuffer = [];
               liveBufferBytes = 0;
+              await drainOutboundSingleFlight(pairing, binding, ownerFence);
+              assertCurrentConnection();
               reconciled = true;
               writeTransportHealth(HOME, {
                 phase: "healthy",
@@ -519,11 +543,14 @@ function startConsumer(binding, verifiedChat, profile, reconnects) {
                 lastReconcileAt: new Date().toISOString(),
                 lastErrorType: null,
               });
-              await drainOutboundSingleFlight(profile);
-              if (!closed) {
-                senderTimer = setInterval(() => { void drainOutboundSingleFlight(profile); }, OUTBOX_POLL_MS);
-                senderTimer.unref();
-              }
+              senderTimer = setInterval(() => {
+                void drainOutboundSingleFlight(pairing, binding, ownerFence).catch((error) => {
+                  reconcileError = String(error);
+                  writeTransportHealth(HOME, { phase: "degraded", healthy: false, reconnects, lastErrorType: reconcileError });
+                  child.stdin.end();
+                });
+              }, OUTBOX_POLL_MS);
+              senderTimer.unref();
             } catch (error) {
               reconcileError = String(error);
               recordTransportDiagnostic(HOME, "reconcile-failure", reconcileError);
@@ -556,23 +583,6 @@ function startConsumer(binding, verifiedChat, profile, reconnects) {
 
 async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}) {
   const { pairing, binding } = activeConfiguration();
-  let verifiedChat;
-  try {
-    await verifyBotIdentity(pairing);
-    verifiedChat = await verifyP2pChat(pairing, binding);
-  } catch (error) {
-    writeTransportHealth(HOME, {
-      phase: "degraded",
-      healthy: false,
-      ownerPid: null,
-      ownerNonce: null,
-      ownerProcessStartToken: null,
-      bindingId: null,
-      bindingGeneration: null,
-      lastErrorType: String(error),
-    });
-    throw error;
-  }
   const nonce = randomBytes(24).toString("hex");
   const processStartToken = readProcessStartToken(process.pid);
   if (!processStartToken) throw new Error("transport process incarnation cannot be verified on this host");
@@ -600,14 +610,26 @@ async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}
   let reconnects = 0;
   let cycles = 0;
   let delay = 250;
+  let terminalError = null;
   try {
     writeTransportHealth(HOME, { ...healthFence, phase: "starting", healthy: false, reconnects });
     while (!stopping) {
       const current = activeConfiguration();
-      if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation) {
-        throw new Error("binding generation changed; restart transport under the new binding");
+      if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation) throw new Error("binding generation changed; restart transport under the new binding");
+      let verifiedChat;
+      try {
+        await verifyBotIdentity(current.pairing);
+        verifiedChat = await verifyP2pChat(current.pairing, current.binding);
+      } catch (error) {
+        cycles += 1;
+        writeTransportHealth(HOME, { ...healthFence, phase: "degraded", healthy: false, reconnects, lastErrorType: String(error) });
+        if (once || (maxCycles > 0 && cycles >= maxCycles)) throw error;
+        reconnects += 1;
+        await sleep(delay);
+        delay = Math.min(10000, delay * 2);
+        continue;
       }
-      const result = await startConsumer(binding, verifiedChat, pairing.app_profile, reconnects);
+      const result = await startConsumer(current.pairing, current.binding, verifiedChat, reconnects, healthFence);
       cycles += 1;
       if (result.reconcileError && once) throw new Error(result.reconcileError);
       if (stopping) break;
@@ -623,8 +645,11 @@ async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}
       await sleep(delay);
       delay = Math.min(10000, delay * 2);
     }
+  } catch (error) {
+    terminalError = String(error);
+    throw error;
   } finally {
-    writeTransportHealth(HOME, { ...healthFence, phase: "stopped", healthy: false, reconnects, lastErrorType: null });
+    writeTransportHealth(HOME, { ...healthFence, phase: terminalError ? "degraded" : "stopped", healthy: false, reconnects, lastErrorType: terminalError });
     releaseTransportOwner(HOME, nonce);
   }
 }

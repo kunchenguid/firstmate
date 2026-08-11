@@ -34,10 +34,10 @@ Fixed credential-pattern refusal and deterministic chunking are extension-owned.
 When the final answer asks the captain to decide an existing exact decision, register the mapping before the final text is emitted:
 
 ```bash
-bin/fm-feishu-decision.sh register <decision-ref> <decision-key>
+bin/fm-feishu-decision.sh register <decision-ref> <decision-key> <source-ref>
 ```
 
-Use the existing durable `decision_ref` and exact decision key.
+Use the existing durable `decision_ref`, exact decision key, and privacy-safe `ref=in_...` marker from that exact persisted user turn.
 The helper records correlation only and never creates or classifies outbound text.
 Never invent a decision reference, register two decisions for one final response, infer a reply from conversational proximity, or close a decision from an unrelated message.
 A later injected message carries an exact decision mapping only when its Feishu `reply_to` matched the recorded outbound receipt.

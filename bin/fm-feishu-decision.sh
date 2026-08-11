@@ -13,21 +13,21 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 case "${1:-}" in
   register)
-    [ "$#" -eq 3 ] || {
-      printf 'usage: fm-feishu-decision.sh register <decision-ref> <decision-key>\n' >&2
+    [ "$#" -eq 4 ] || {
+      printf 'usage: fm-feishu-decision.sh register <decision-ref> <decision-key> <source-ref>\n' >&2
       exit 2
     }
     [ -n "${PI_SESSION_ID:-}" ] || {
       printf 'fm-feishu-decision: PI_SESSION_ID is required; run inside the current Pi session\n' >&2
       exit 2
     }
-    exec env FM_HOME="$FM_HOME" node "$SCRIPT_DIR/fm-feishu-state.mjs" decision-register "$2" "$3"
+    exec env FM_HOME="$FM_HOME" node "$SCRIPT_DIR/fm-feishu-state.mjs" decision-register "$2" "$3" "$4"
     ;;
   -h|--help|help)
     sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'
     ;;
   *)
-    printf 'usage: fm-feishu-decision.sh register <decision-ref> <decision-key>\n' >&2
+    printf 'usage: fm-feishu-decision.sh register <decision-ref> <decision-key> <source-ref>\n' >&2
     exit 2
     ;;
 esac

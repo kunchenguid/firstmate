@@ -88,6 +88,7 @@ interface ActiveRuntime {
   activeFeishuProvenance: Provenance | null;
   lastAssistantProvenance: Provenance | null;
   directUnmarkedIngress: { deliveryRef: string } | null;
+  directMarkedIngress: { deliveryRef: string } | null;
   pendingPersistence: Map<string, string>;
   pendingUnmarkedIngress: Map<string, string>;
   pendingSensitiveEffects: Map<string, { code: string; confirmed: boolean; announced: boolean }>;
@@ -104,7 +105,7 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const lockStatusScript = process.env.FM_FEISHU_LOCK_STATUS_SCRIPT || `${fmRoot}/bin/fm-session-lock-status.sh`;
 const transportScript = process.env.FM_FEISHU_TRANSPORT_SCRIPT || `${fmRoot}/bin/fm-feishu-transport.sh`;
-const ingressMarkerPattern = /\u2063FIRSTMATE_INGRESS: v1 (feishu|tui|internal) ref=(in_[a-f0-9]{24}) g=([1-9][0-9]*)/u;
+const ingressMarkerPattern = /^\u2063FIRSTMATE_INGRESS: v1 (feishu|tui|internal) ref=(in_[a-f0-9]{24}) g=([1-9][0-9]*)$/u;
 const registeredApis = new WeakSet<object>();
 let activeRuntime: ActiveRuntime | null = null;
 let assistantOrdinal = 0;
@@ -121,8 +122,8 @@ function messageText(message: unknown): string {
     .join("");
 }
 
-export function parseFirstmateIngressMarker(text: string): ParsedIngressMarker | undefined {
-  const match = ingressMarkerPattern.exec(text);
+function parseMarkerLine(line: string): ParsedIngressMarker | undefined {
+  const match = ingressMarkerPattern.exec(line);
   if (!match) return undefined;
   const bindingGeneration = Number(match[3]);
   if (!Number.isSafeInteger(bindingGeneration) || bindingGeneration <= 0) return undefined;
@@ -131,6 +132,22 @@ export function parseFirstmateIngressMarker(text: string): ParsedIngressMarker |
     deliveryRef: match[2],
     bindingGeneration,
   };
+}
+
+function boundaryIngressMarkers(text: string): ParsedIngressMarker[] {
+  const lines = text.split("\n");
+  const markers: ParsedIngressMarker[] = [];
+  const first = parseMarkerLine(lines[0] ?? "");
+  const firstHeader = lines[1];
+  if (first && ((first.source === "feishu" && firstHeader === "[Source: authorized Feishu P2P message]") || (first.source === "tui" && firstHeader === "[Source: local TUI]"))) markers.push(first);
+  const last = parseMarkerLine(lines.at(-1) ?? "");
+  if (last && (last.source === "tui" || last.source === "internal") && !markers.some((marker) => marker.source === last.source && marker.deliveryRef === last.deliveryRef && marker.bindingGeneration === last.bindingGeneration)) markers.push(last);
+  return markers;
+}
+
+export function parseFirstmateIngressMarker(text: string): ParsedIngressMarker | undefined {
+  const markers = boundaryIngressMarkers(text);
+  return markers.length === 1 ? markers[0] : undefined;
 }
 
 function markerLine(source: FirstmateIngressSource, deliveryRef: string, generation: number): string {
@@ -223,21 +240,38 @@ function runtimeIsCurrent(runtime: ActiveRuntime): boolean {
   return identityMatches(binding, runtime.identity);
 }
 
-function provenanceForMarker(marker: ParsedIngressMarker): Provenance {
+function provenanceForMarker(marker: ParsedIngressMarker): Provenance | undefined {
   const event = findInboundByDeliveryRef(fmHome, marker.deliveryRef);
+  if (!event || event.source !== marker.source || event.delivery_ref !== marker.deliveryRef || event.binding_generation !== marker.bindingGeneration) return undefined;
   return {
     ...marker,
-    replyTo: event?.source === "feishu" ? event.message_id : null,
-    decisionRef: event?.decision_ref ?? null,
-    decisionKey: event?.decision_key ?? null,
+    replyTo: event.source === "feishu" ? event.message_id : null,
+    decisionRef: event.decision_ref ?? null,
+    decisionKey: event.decision_key ?? null,
   };
+}
+
+function markerForExpected(text: string, expected: Pick<ParsedIngressMarker, "source" | "deliveryRef" | "bindingGeneration">): ParsedIngressMarker | undefined {
+  return boundaryIngressMarkers(text).find((marker) => marker.source === expected.source && marker.deliveryRef === expected.deliveryRef && marker.bindingGeneration === expected.bindingGeneration);
+}
+
+function persistedIngressMarker(text: string): ParsedIngressMarker | undefined {
+  const candidates = boundaryIngressMarkers(text).flatMap((marker) => {
+    const event = findInboundByDeliveryRef(fmHome, marker.deliveryRef);
+    if (!event || event.source !== marker.source || event.binding_generation !== marker.bindingGeneration) return [];
+    const exact = encodeFirstmateIngress(event) === text || text === `${event.text}\n${markerLine(event.source, event.delivery_ref, event.binding_generation)}`;
+    return [{ marker, score: exact ? 2 : marker.source === "tui" && text.endsWith(`\n${markerLine(marker.source, marker.deliveryRef, marker.bindingGeneration)}`) ? 1 : 0 }];
+  }).filter((candidate) => candidate.score > 0);
+  const score = Math.max(0, ...candidates.map((candidate) => candidate.score));
+  const winners = candidates.filter((candidate) => candidate.score === score);
+  return winners.length === 1 ? winners[0].marker : undefined;
 }
 
 function sessionMarkers(ctx: ExtensionContext, identity: SessionIdentity): Array<ParsedIngressMarker & { sessionId: string; sessionEntryId: string }> {
   const markers: Array<ParsedIngressMarker & { sessionId: string; sessionEntryId: string }> = [];
   for (const entry of ctx.sessionManager.getEntries()) {
     if (entry.type !== "message" || entry.message.role !== "user") continue;
-    const marker = parseFirstmateIngressMarker(messageText(entry.message));
+    const marker = persistedIngressMarker(messageText(entry.message));
     if (!marker) continue;
     markers.push({ ...marker, sessionId: identity.sessionId, sessionEntryId: entry.id });
   }
@@ -378,6 +412,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     activeFeishuProvenance: null,
     lastAssistantProvenance: null,
     directUnmarkedIngress: null,
+    directMarkedIngress: null,
     pendingPersistence: new Map(),
     pendingUnmarkedIngress: new Map(),
     pendingSensitiveEffects: new Map(),
@@ -450,6 +485,7 @@ function onInput(event: InputEvent, ctx: ExtensionContext, token: string): Input
     runtime.directUnmarkedIngress = { deliveryRef: reserved.event.delivery_ref };
     return { action: "continue" };
   }
+  runtime.directMarkedIngress = { deliveryRef: reserved.event.delivery_ref };
   return {
     action: "transform",
     text: `${event.text}\n${markerLine("tui", reserved.event.delivery_ref, runtime.binding.generation)}`,
@@ -462,13 +498,19 @@ function onUserStart(event: MessageStartEvent, token: string): void {
   const runtime = activeRuntime;
   if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) return;
   const text = messageText(event.message);
-  const marker = parseFirstmateIngressMarker(text);
+  const expectedDeliveryRef = runtime.inFlight?.event.delivery_ref ?? runtime.directMarkedIngress?.deliveryRef;
+  const expectedEvent = expectedDeliveryRef ? findInboundByDeliveryRef(fmHome, expectedDeliveryRef) : undefined;
+  const marker = expectedEvent ? markerForExpected(text, {
+    source: expectedEvent.source,
+    deliveryRef: expectedEvent.delivery_ref,
+    bindingGeneration: expectedEvent.binding_generation,
+  }) : undefined;
   let provenance: Provenance | null = null;
   let deliveryRef: string | null = null;
   if (marker?.bindingGeneration === runtime.binding.generation) {
-    provenance = provenanceForMarker(marker);
-    deliveryRef = marker.deliveryRef;
-  } else if (runtime.directUnmarkedIngress) {
+    provenance = provenanceForMarker(marker) ?? null;
+    deliveryRef = provenance ? marker.deliveryRef : null;
+  } else if (runtime.directUnmarkedIngress && !expectedEvent) {
     deliveryRef = runtime.directUnmarkedIngress.deliveryRef;
     provenance = {
       source: "tui",
@@ -488,6 +530,7 @@ function onUserStart(event: MessageStartEvent, token: string): void {
   if (provenance.source === "feishu") runtime.activeFeishuProvenance = { ...provenance };
   runtime.lastAssistantText = "";
   if (runtime.inFlight?.event.delivery_ref === deliveryRef) runtime.inFlight = null;
+  if (runtime.directMarkedIngress?.deliveryRef === deliveryRef) runtime.directMarkedIngress = null;
   schedulePump(runtime);
 }
 
@@ -542,7 +585,7 @@ function onTurnEnd(event: TurnEndEvent, token: string): void {
 function persistSettledAssistant(runtime: ActiveRuntime): void {
   if (!runtime.lastAssistantProvenance || runtime.lastAssistantOrdinal <= runtime.lastOutboundOrdinal) return;
   const provenance = runtime.lastAssistantProvenance;
-  persistAssistantOutboundIntent(fmHome, {
+  const result = persistAssistantOutboundIntent(fmHome, {
     text: runtime.lastAssistantText,
     source: provenance.source,
     sourceRef: provenance.deliveryRef,
@@ -551,6 +594,19 @@ function persistSettledAssistant(runtime: ActiveRuntime): void {
     replyTo: provenance.source === "feishu" ? provenance.replyTo : null,
   });
   runtime.lastOutboundOrdinal = runtime.lastAssistantOrdinal;
+  if ((result as { status?: string }).status === "resource-refused") {
+    const decision = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation, provenance.source, provenance.deliveryRef);
+    finishPendingDecisionForOutbound(fmHome, decision, "resource-refused");
+    const alert = (result as { alert?: { id?: string; created?: boolean } }).alert;
+    if (alert?.created) {
+      const reason = (result as { reason?: string }).reason;
+      const message = reason === "queue-limit"
+        ? "Feishu send refused: the bounded outbound queue is full, so the entire final response stayed local."
+        : "Feishu send refused: the final response exceeded the local output or free-space safety threshold and stayed private.";
+      runtime.ctx.ui.notify(message, "error");
+      runtime.pi.appendEntry("fm-feishu-local-alert", { kind: "resource-refused", message, alertId: alert.id, createdAt: new Date().toISOString() });
+    }
+  }
 }
 
 function flushAssistantOutbound(runtime: ActiveRuntime): void {
@@ -563,12 +619,12 @@ function flushAssistantOutbound(runtime: ActiveRuntime): void {
     try {
       let intent = pendingIntent;
       if (!intent.record.decision_captured) {
-        const snapshot = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation);
+        const snapshot = claimPendingDecisionForOutbound(fmHome, runtime.identity.sessionId, runtime.binding.generation, intent.record.source, intent.record.source_ref);
         intent = bindAssistantOutboundIntentDecision(fmHome, intent, snapshot);
       }
       const record = intent.record;
       const decision = record.decision_ref && record.decision_key
-        ? findPendingDecisionForOutbound(fmHome, record.decision_ref, record.decision_key, runtime.identity.sessionId, runtime.binding.generation)
+        ? findPendingDecisionForOutbound(fmHome, record.decision_ref, record.decision_key, runtime.identity.sessionId, runtime.binding.generation, record.source, record.source_ref)
         : undefined;
       const result = registerAssistantOutbound(fmHome, {
         text: record.text,
@@ -579,6 +635,7 @@ function flushAssistantOutbound(runtime: ActiveRuntime): void {
         replyTo: record.reply_to_message_id,
         decisionRef: decision?.record.decision_ref ?? null,
         decisionKey: decision?.record.decision_key ?? null,
+        registrationIntentId: record.intent_id,
       });
       if ((result.status === "registered" || result.status === "duplicate") && result.eventId) bindPendingDecisionToOutbound(fmHome, decision, result.eventId);
       const terminal = ["registered", "duplicate", "skipped", "secret-refused", "chunk-refused", "resource-refused"].includes(result.status);
@@ -622,15 +679,11 @@ function onAgentSettled(_ctx: ExtensionContext, token: string): void {
   }
 }
 
-const sensitivePath = /(?:^|\/)(?:\.env(?:\.|$)|\.git(?:\/|$)|\.ssh(?:\/|$)|\.pi(?:\/|$)|\.agents(?:\/|$)|[^/]*(?:credential|secret|token|password|config|settings)[^/]*)/i;
 const safeRemoteTools = new Set(["read", "grep", "find", "ls"]);
 
-function protectedEffectReason(toolName: string, input: unknown): string | undefined {
+function protectedEffectReason(toolName: string, _input: unknown): string | undefined {
   if (toolName === "bash") return "protected shell effect";
-  if (toolName === "write" || toolName === "edit") {
-    const path = String((input as { path?: unknown })?.path ?? "");
-    return sensitivePath.test(path) ? "protected configuration or credential path" : undefined;
-  }
+  if (toolName === "write" || toolName === "edit") return "protected file mutation";
   if (!safeRemoteTools.has(toolName)) return "unsupported arbitrary remote tool effect";
   return undefined;
 }

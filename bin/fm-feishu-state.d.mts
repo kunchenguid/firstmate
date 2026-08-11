@@ -11,6 +11,7 @@ export const TRANSPORT_HEALTH_SCHEMA: string;
 export const DECISION_SCHEMA: string;
 export const DEFAULT_MAX_INBOUND_BYTES: number;
 export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES: number;
+export const DEFAULT_MAX_PENDING_OUTBOUND: number;
 export const IDEMPOTENCY_WINDOW_MS: number;
 
 export interface PairingRecord {
@@ -99,6 +100,8 @@ export interface StatePaths {
   inboundAcks: string;
   inboundPending: string;
   inboundPendingCount: string;
+  inboundDeliveryMap: string;
+  inboundPublications: string;
   outbox: string;
   outboundLedger: string;
   outboundReceipts: string;
@@ -106,6 +109,7 @@ export interface StatePaths {
   outboundPending: string;
   outboundRegistrationIntents: string;
   pendingDecisions: string;
+  pendingDecisionOpen: string;
   attemptsIn: string;
   attemptsOut: string;
   quarantine: string;
@@ -206,6 +210,8 @@ export function registerAssistantOutbound(home: string, input: {
   decisionKey?: string | null;
   maxChunkBytes?: number;
   maxOutboundBytes?: number;
+  maxPendingOutbound?: number;
+  registrationIntentId?: string;
 }): {
   status: string;
   reason?: string;
@@ -262,7 +268,9 @@ export function persistAssistantOutboundIntent(home: string, input: {
   sessionId: string;
   bindingGeneration: number;
   replyTo?: string | null;
-}): OutboundRegistrationIntent;
+  maxOutboundBytes?: number;
+  maxPendingOutbound?: number;
+}): OutboundRegistrationIntent | { status: "resource-refused"; reason: "queue-limit" | "resource-limit"; alert: { id: string; created: boolean } };
 export function readAssistantOutboundIntents(home: string, fence: {
   sessionId: string;
   bindingId: string;
@@ -283,15 +291,17 @@ export function receiptOutbound(home: string, claim: OutboundClaim, receipt: {
 }): boolean;
 export interface PendingDecisionCandidate {
   name: string;
-  record: { decision_ref: string; decision_key: string };
+  record: { decision_ref: string; decision_key: string; source: "feishu" | "tui"; source_ref: string };
 }
 export function registerPendingDecision(home: string, input: {
   decisionRef: string;
   decisionKey: string;
+  sourceRef: string;
   sessionId: string;
+  maxPendingOutbound?: number;
 }): Record<string, unknown>;
-export function findPendingDecisionForOutbound(home: string, decisionRef: string, decisionKey: string, sessionId: string, bindingGeneration: number): PendingDecisionCandidate;
-export function claimPendingDecisionForOutbound(home: string, sessionId: string, bindingGeneration: number): PendingDecisionCandidate | undefined;
+export function findPendingDecisionForOutbound(home: string, decisionRef: string, decisionKey: string, sessionId: string, bindingGeneration: number, source: "feishu" | "tui" | "internal", sourceRef: string): PendingDecisionCandidate;
+export function claimPendingDecisionForOutbound(home: string, sessionId: string, bindingGeneration: number, source: "feishu" | "tui" | "internal", sourceRef: string): PendingDecisionCandidate | undefined;
 export function bindPendingDecisionToOutbound(home: string, candidate: PendingDecisionCandidate | undefined, eventId: string): void;
 export function finishPendingDecisionForOutbound(home: string, candidate: PendingDecisionCandidate | undefined, outcome: string): void;
 export function claimTransportOwner(home: string, owner: {

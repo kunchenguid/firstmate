@@ -59,8 +59,8 @@ Disable never force-kills the transport.
 The transport executes fixed `lark-cli` argv arrays directly and never interpolates message text into a shell command.
 It pins every child to the paired `LARKSUITE_CLI_PROFILE`, verifies `lark-cli whoami --as bot` against that profile, bot open ID, and optional app-ID fingerprint, and independently verifies that the bound chat reports `chat_mode=p2p` before waiting for the documented `[event] ready event_key=im.message.receive_v1` stderr marker.
 It preserves body-free drop and backpressure diagnostics privately, reconnects with a bound, and runs overlapping bot-history reconciliation before marking owner- and binding-generation-scoped live dispatch healthy.
-The pre-reconciliation live buffer is capped at 1,000 events and 8 MiB, each consumer line is capped at 256 KiB, durable pending ingress is capped at 10,000 items, and publishing stops when the state filesystem has less than 64 MiB free.
-`FM_FEISHU_MAX_BUFFERED_EVENTS`, `FM_FEISHU_MAX_LIVE_BUFFER_BYTES`, `FM_FEISHU_MAX_CONSUMER_LINE_BYTES`, `FM_FEISHU_MAX_PENDING_INBOUND`, and `FM_FEISHU_MIN_FREE_BYTES` may lower or raise those local operator thresholds.
+The pre-reconciliation live buffer is capped at 1,000 events and 8 MiB, each consumer line is capped at 256 KiB, durable pending ingress is capped at 10,000 items, the aggregate logical outbound queue is capped at 1,000 items, and publishing stops when the state filesystem has less than 64 MiB free.
+`FM_FEISHU_MAX_BUFFERED_EVENTS`, `FM_FEISHU_MAX_LIVE_BUFFER_BYTES`, `FM_FEISHU_MAX_CONSUMER_LINE_BYTES`, `FM_FEISHU_MAX_PENDING_INBOUND`, `FM_FEISHU_MAX_PENDING_OUTBOUND`, and `FM_FEISHU_MIN_FREE_BYTES` may lower or raise those local operator thresholds.
 Buffer overflow stages buffered events without assigning ingress order, records a body-free diagnostic, and combines them with ascending overlap history before durable publication; a queue or free-space refusal records one local alert.
 It does not use `--quiet`, download resources, run an Agent, inspect the Pi session, or choose a different session.
 
@@ -99,7 +99,7 @@ An ambiguous result retries the same key only within Feishu's one-hour idempoten
 
 A decision reply is correlated only through the Feishu parent `message_id` mapped from a durable outbound receipt.
 An unrelated message cannot resolve a decision even if only one decision appears open.
-Before a final response asks for a decision over this channel, register the existing exact mapping from inside the current Pi turn with `bin/fm-feishu-decision.sh register <decision-ref> <decision-key>`.
+Before a final response asks for a decision over this channel, register the existing exact mapping from inside the current Pi turn with `bin/fm-feishu-decision.sh register <decision-ref> <decision-key> <source-ref>`, using the privacy-safe `ref=in_...` marker from that exact persisted user turn.
 This helper records correlation only and does not create text, classify importance, or send a message.
 If more than one unbound decision registration exists for the same final response, Firstmate records a local alert and guesses none.
 
