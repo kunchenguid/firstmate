@@ -808,6 +808,9 @@ clear_relaunch_harness_wiring() {
   # unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
+  if [ "$harness" = agy ]; then
+    agy_retire_workspace_trust "$wt" || return 1
+  fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
@@ -1379,6 +1382,44 @@ agy_pretrust_workspace() {  # <worktree>
   # Prove the entry landed rather than trusting the write.
   jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) != null' \
     "$settings" >/dev/null 2>&1
+}
+
+# The inverse of agy_pretrust_workspace, keyed on the worktree PATH alone: the
+# trust entry is agy wiring like the hook file, so a relaunch that retires agy
+# wiring retires the entry with it (a same-harness agy relaunch immediately
+# re-adds it via the pretrust above), and fm-teardown's end-of-life removal
+# stays the final owner. Same surgical fail-closed jq contract as the
+# pretrust: an absent store or absent entry returns clean, while symlinked,
+# jq-less, or malformed settings refuse without writing, and the edit proves
+# the entry is gone rather than trusting the write.
+agy_retire_workspace_trust() {  # <worktree>
+  local wt=$1 settings tmp
+  [ -n "$wt" ] || return 0
+  settings=$(agy_settings_path)
+  [ -e "$settings" ] || [ -L "$settings" ] || return 0
+  if [ -L "$settings" ]; then
+    echo "error: agy settings file '$settings' is a symlink; refusing the surgical trust removal for $wt" >&2
+    return 1
+  fi
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: removing the agy trust entry for '$wt' requires jq to edit '$settings' safely; install jq and retry" >&2
+    return 1
+  }
+  jq -e . "$settings" >/dev/null 2>&1 || {
+    echo "error: agy settings file '$settings' is not valid JSON; refusing the surgical trust removal for $wt" >&2
+    return 1
+  }
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) != null' \
+    "$settings" >/dev/null 2>&1 || return 0
+  tmp="$settings.fm-tmp.$$"
+  jq --arg wt "$wt" '.trustedWorkspaces = ((.trustedWorkspaces // []) | map(select(. != $wt)))' \
+    "$settings" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) == null' \
+    "$settings" >/dev/null 2>&1 || {
+    echo "error: agy trust entry for '$wt' is still present in '$settings' after the removal edit" >&2
+    return 1
+  }
 }
 
 # muse_credential_present: 0 when a launched muse pane can reach its provider

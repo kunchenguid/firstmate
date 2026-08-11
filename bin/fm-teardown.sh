@@ -670,14 +670,17 @@ remove_kimi_turnend_auth() {
 # file (bin/fm-control-lib.sh owns where that store lives) must not outlive the
 # task that authorized it: a recycled pool or temp path recreated at the same
 # location would otherwise be silently trusted by a future agy session. The
-# removal mirrors spawn's surgical fail-closed jq edit - symlinked, unreadable,
-# or malformed settings refuse without writing - and then proves the entry is
-# gone, so a concurrent spawn's overlapping read-modify-write of the same file
-# fails this teardown loudly for a rerun rather than silently keeping the
-# entry.
-remove_agy_workspace_trust() {  # <harness> <worktree>
-  local harness=$1 wt=$2 settings tmp
-  [ "$harness" = agy ] || return 0
+# removal is keyed on the worktree PATH, never on the task's recorded harness:
+# a harness-switch relaunch rewrites meta harness= while the pre-trust entry
+# stays, and an exact-path entry for this task's worktree can only have come
+# from firstmate's own pre-trust. An absent store or absent entry returns
+# clean, so non-agy teardowns stay cheap. The removal mirrors spawn's surgical
+# fail-closed jq edit - symlinked, unreadable, or malformed settings refuse
+# without writing - and then proves the entry is gone, so a concurrent spawn's
+# overlapping read-modify-write of the same file fails this teardown loudly
+# for a rerun rather than silently keeping the entry.
+remove_agy_workspace_trust() {  # <worktree>
+  local wt=$1 settings tmp
   [ -n "$wt" ] || return 0
   settings=$(fm_control_harness_trust_store_path agy)
   [ -e "$settings" ] || [ -L "$settings" ] || return 0
@@ -2291,7 +2294,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
-    remove_agy_workspace_trust "$(meta_value "$child_meta" harness)" "$child_wt" || return 1
+    remove_agy_workspace_trust "$child_wt" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -2571,7 +2574,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-remove_agy_workspace_trust "$(meta_value "$META" harness)" "$WT" || exit 1
+remove_agy_workspace_trust "$WT" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.

@@ -441,6 +441,36 @@ test_agy_teardown_retires_trust_entry() {
   pass "fm-teardown: agy trust entry is retired surgically, preserving foreign settings"
 }
 
+test_agy_teardown_retires_trust_entry_after_harness_switch() {
+  # A harness-switch relaunch rewrites meta harness= away from agy while the
+  # pre-trust entry stays, so the teardown removal must key on the worktree
+  # path rather than the recorded harness or the entry outlives the task.
+  local id rec out rc settings
+  id="agy-switched-z8-$$"
+  rec=$(make_spawn_case teardown-switched "$id")
+  read_spawn_record "$rec"
+  settings="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$settings")"
+  printf '{"trustedWorkspaces":["/existing/workspace"],"userSettings":{"keep":"me"}}\n' > "$settings"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --mode no-mistakes --yolo off)
+  rc=$?
+  expect_code 0 "$rc" "agy spawn should succeed before the harness switch: $out"
+  printf 'harness=claude\n' >> "$HOME_DIR/state/$id.meta"
+
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "post-switch teardown failed"
+  jq -e --arg wt "$WT_DIR" '
+    ((.trustedWorkspaces // []) | index($wt) == null)
+    and ((.trustedWorkspaces // []) | index("/existing/workspace") != null)
+    and (.userSettings.keep == "me")' "$settings" >/dev/null \
+    || fail "teardown under a non-agy recorded harness left the trust entry behind: $(cat "$settings")"
+  pass "fm-teardown: the trust entry is retired even after a relaunch switched the harness away from agy"
+}
+
 test_agy_secondmate_is_refused() {
   local case_dir home fakebin id out status
   case_dir="$TMP_ROOT/secondmate"
@@ -477,4 +507,5 @@ test_agy_pretrust_preserves_existing_settings
 test_agy_pretrust_refuses_malformed_settings
 test_agy_refuses_tracked_hook_path
 test_agy_teardown_retires_trust_entry
+test_agy_teardown_retires_trust_entry_after_harness_switch
 test_agy_secondmate_is_refused
