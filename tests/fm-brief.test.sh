@@ -371,6 +371,102 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# R3: both the ship and scout scaffolds must show the decision-key token
+# BETWEEN the verb and the colon in their own opening/closing grammar
+# examples, never after the colon - the exact mis-ordering that let a worker
+# guess wrong and file a decision under "default" (postmortem R3).
+test_decision_key_grammar_is_key_before_colon() {
+  local home id brief
+  home="$TMP_ROOT/decision-grammar-home"
+  mkdir -p "$home/data"
+
+  id="brief-grammar-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`needs-decision [key=<slug>]: {summary of options}`' "$brief" \
+    "ship brief does not show the needs-decision opening grammar with the key before the colon"
+  # shellcheck disable=SC2016
+  assert_grep '`resolved [key=<slug>]: {how}`' "$brief" \
+    "ship brief does not show the resolved closing grammar with the key before the colon"
+
+  id="brief-grammar-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  # shellcheck disable=SC2016
+  assert_grep '`needs-decision [key=<slug>]: {summary of options}`' "$brief" \
+    "scout brief does not show the needs-decision opening grammar with the key before the colon"
+  # shellcheck disable=SC2016
+  assert_grep '`resolved [key=<slug>]: {how}`' "$brief" \
+    "scout brief does not show the resolved closing grammar with the key before the colon"
+
+  pass "fm-brief.sh: ship and scout scaffolds show needs-decision/resolved with the key before the colon"
+}
+
+# R5: ship briefs carry a standing instruction that completeness on
+# parity-style work means scanning for the whole pattern family, not stopping
+# at an enumerated site list firstmate names.
+test_ship_parity_scan_wording() {
+  local home id brief
+  home="$TMP_ROOT/parity-scan-home"
+  mkdir -p "$home/data"
+  id="brief-parity-scan-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "# Completeness for parity-style work" "$brief" \
+    "ship brief missing the parity-style completeness section"
+  assert_grep "scanning the codebase for every member of the same pattern, selector, or contract family" "$brief" \
+    "ship brief missing the scan-the-family instruction"
+  assert_grep "not stopping at only the specific site(s) named above" "$brief" \
+    "ship brief missing the not-an-enumerated-list clarification"
+  pass "fm-brief.sh: ship briefs instruct the worker to scan the pattern family, not enumerate sites"
+}
+
+# R7: no-mistakes and direct-PR ship briefs carry a preview-first instruction
+# for UI-bearing work (evidence right after the implementation commit, under
+# the task's own data path, with validation continuing in parallel and no new
+# merge authority); local-only gets none because it already stops at a ready
+# branch almost immediately.
+test_ship_preview_first_ui_wording() {
+  local home id brief
+  home="$TMP_ROOT/preview-first-home"
+  mkdir -p "$home/data"
+
+  id="brief-preview-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  assert_grep "# Preview-first for UI-bearing work" "$brief" \
+    "no-mistakes brief missing the preview-first section"
+  assert_grep "immediately after your implementation commit" "$brief" \
+    "no-mistakes brief missing the immediately-after-commit timing"
+  assert_grep "Save the evidence under \`$home/data/$id/\`" "$brief" \
+    "no-mistakes brief missing the task-owned evidence path"
+  assert_grep "report its openable \`file://\` path(s)" "$brief" \
+    "no-mistakes brief missing the openable-path surfacing instruction"
+  assert_grep "Continue your normal validation and delivery work in parallel with that review" "$brief" \
+    "no-mistakes brief missing the validation-may-continue-in-parallel instruction"
+  assert_grep "does not create a second merge authority" "$brief" \
+    "no-mistakes brief missing the single-merge-authority guardrail"
+
+  id="brief-preview-dp"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Preview-first for UI-bearing work" "$brief" \
+    "direct-PR brief missing the preview-first section"
+
+  id="brief-preview-lo"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Preview-first for UI-bearing work" "$brief" \
+    "local-only brief should not carry the preview-first section (already fast to a ready branch)"
+
+  pass "fm-brief.sh: no-mistakes/direct-PR ship briefs require preview-first UI evidence, local-only does not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -719,6 +815,9 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_decision_key_grammar_is_key_before_colon
+test_ship_parity_scan_wording
+test_ship_preview_first_ui_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

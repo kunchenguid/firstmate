@@ -357,6 +357,23 @@ fi
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
+# R7 (preview-first for UI-bearing work): rendered only for no-mistakes and
+# direct-PR, whose pipeline or PR-open step can otherwise run for a while
+# before the captain sees anything. local-only already stops at a ready
+# branch almost immediately, so it gets no separate preview instruction.
+# The captain still owns the merge exactly as $RULE1/DOD already say for this
+# mode; this section only moves WHEN evidence reaches them, never who decides.
+IFS= read -r -d '' PREVIEW_SECTION <<EOF || true
+
+# Preview-first for UI-bearing work
+If this task changes what the product looks or behaves like to an end user, produce before/after evidence (screenshots, or a small rendered demo) immediately after your implementation commit - do not wait until the rest of the task is finished.
+Save the evidence under \`$DATA/$ID/\` and report its openable \`file://\` path(s) in a status line so firstmate can hand it to the captain for review right away.
+Continue your normal validation and delivery work in parallel with that review. This does not create a second merge authority: the configured merge authority for this task's delivery mode still owns the merge decision exactly as this brief already says.
+If this task has no user-visible UI surface, disregard this section.
+
+EOF
+PREVIEW_SECTION=${PREVIEW_SECTION%$'\n'}
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -372,6 +389,7 @@ EOF
     ;;
   local-only)
     SETUP2=""
+    PREVIEW_SECTION=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -471,7 +489,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-
+$PREVIEW_SECTION
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
