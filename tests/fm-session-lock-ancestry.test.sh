@@ -220,6 +220,69 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_legacy_lock_from_sibling_home_is_reclaimed() {
+  local dir home_a home_b recycled_pid status_out out rc=0 new_owner
+  dir="$TMP_ROOT/legacy-recycled-pid"
+  home_a="$dir/home-a"
+  home_b="$dir/home-b"
+  mkdir -p "$home_a/state" "$home_b/state"
+
+  FM_HOME="$home_b" "$NAMED_CLAUDE" -c 'sleep 60; :' </dev/null >/dev/null 2>&1 &
+  recycled_pid=$!
+  printf '%s\n' "$recycled_pid" > "$home_a/state/.lock"
+
+  status_out=$(FM_HOME="$home_a" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$status_out" "lock: stale (pid $recycled_pid dead or not a harness)" \
+    "a legacy lock recycled by another home's harness was not classified as stale"
+
+  out=$(FM_HOME="$home_a" FM_ROOT_OVERRIDE="$ROOT" "$NAMED_CLAUDE" -c '
+    rc=0
+    "$FM_ROOT_OVERRIDE/bin/fm-lock.sh" || rc=$?
+    printf "owner=%s\n" "$(cat "$FM_HOME/state/.lock" 2>/dev/null || true)"
+    exit "$rc"
+  ' 2>&1) || rc=$?
+  new_owner=$(printf '%s\n' "$out" | sed -n 's/^owner=//p' | tail -1)
+
+  kill -0 "$recycled_pid" 2>/dev/null \
+    || fail "reclaiming the legacy lock disturbed the sibling home's harness"
+  kill "$recycled_pid" 2>/dev/null || true
+  wait "$recycled_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "a wrong-home recycled pid must not preserve a legacy session lock"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "home A did not reclaim the wrong-home legacy lock"
+  [ -n "$new_owner" ] && [ "$new_owner" != "$recycled_pid" ] \
+    || fail "home A kept the wrong-home recycled pid as its legacy lock owner: $out"
+  pass "session-lock: a wrong-home recycled pid cannot preserve a legacy lock"
+}
+
+test_legacy_lock_from_same_home_is_preserved() {
+  local home holder status_out out rc=0
+  home="$TMP_ROOT/legacy-same-home"
+  mkdir -p "$home/state"
+
+  FM_HOME="$home" "$NAMED_CLAUDE" -c 'sleep 60; :' </dev/null >/dev/null 2>&1 &
+  holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+
+  status_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$status_out" "lock: held by live harness pid $holder" \
+    "a same-home live harness did not preserve its legacy lock"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$NAMED_CLAUDE" \
+    -c '"$FM_ROOT_OVERRIDE/bin/fm-lock.sh"' 2>&1) || rc=$?
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 1 "$rc" "a competing session must not reclaim a same-home live legacy lock"
+  assert_contains "$out" "another live firstmate session holds the lock" \
+    "same-home legacy lock contention was not reported"
+  [ "$(cat "$home/state/.lock")" = "$holder" ] \
+    || fail "the same-home live legacy lock changed owners"
+  pass "session-lock: a same-home live harness preserves its legacy lock"
+}
+
 test_recycled_pid_from_sibling_home_is_reclaimed() {
   local dir home_a home_b recycled_pid live_identity status_out out rc=0 new_owner
   dir="$TMP_ROOT/recycled-pid"
@@ -401,6 +464,8 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_legacy_lock_from_sibling_home_is_reclaimed
+test_legacy_lock_from_same_home_is_preserved
 test_recycled_pid_from_sibling_home_is_reclaimed
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home

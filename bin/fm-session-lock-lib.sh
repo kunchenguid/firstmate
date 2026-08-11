@@ -191,19 +191,42 @@ fm_session_lock_identity_matches() {  # <state> <pid>
   [ "$actual" = "$recorded" ]
 }
 
+fm_process_home_matches() {  # <pid> <home>
+  local pid=$1 expected_home=$2 proc_root entry actual_home
+  [ -n "$expected_home" ] || return 2
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -r "$proc_root/$pid/environ" ] || return 2
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      FM_HOME=*)
+        actual_home=${entry#FM_HOME=}
+        [ "$actual_home" = "$expected_home" ]
+        return $?
+        ;;
+    esac
+  done < "$proc_root/$pid/environ"
+  return 2
+}
+
 # True only when $2 is a live verified harness and any available process-
 # identity record still matches it. An absent or unreadable identity record is
 # treated conservatively as a legacy live lock; only a proven mismatch makes a
 # recycled pid stale.
 fm_session_lock_holder_alive() {  # <state> <pid>
-  local state=$1 pid=$2 identity_status
+  local state=$1 pid=$2 identity_status home_status
   fm_harness_pid_alive "$pid" || return 1
   if fm_session_lock_identity_matches "$state" "$pid"; then
     return 0
   else
     identity_status=$?
   fi
-  [ "$identity_status" -ne 1 ]
+  [ "$identity_status" -ne 1 ] || return 1
+  if fm_process_home_matches "$pid" "${FM_HOME:-}"; then
+    return 0
+  else
+    home_status=$?
+  fi
+  [ "$home_status" -ne 1 ]
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
