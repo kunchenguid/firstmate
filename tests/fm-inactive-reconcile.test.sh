@@ -149,6 +149,23 @@ test_local_secondmate_reports_terminal_child() {
   pass "secondmate reports its own inactive terminal child"
 }
 
+test_local_secondmate_rejects_relative_parent_home() {
+  make_world relative-parent; bind_secondmate local
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=relative-parent\n' \
+    > "$MATE/.fm-secondmate-parent"
+  write_child "$MATE" child 'failed: terminal'
+  (cd "$WORLD" && FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup)
+  [ ! -e "$WORLD/relative-parent/state/mate.status" ] \
+    || fail "relative parent home received a false durable report"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] \
+    || fail "relative parent route was recorded as reported"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] \
+    || fail "failed relative parent route did not retain its pending receipt"
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] \
+    || fail "failed relative parent route did not surface a recovery notice"
+  pass "relative local parent homes fail closed"
+}
+
 # A remote child route writes the existing mirror input once even across restarts.
 test_remote_parent_reply_is_idempotent() {
   make_world remote; bind_secondmate remote; write_child "$MATE" child 'done: green'
@@ -311,6 +328,7 @@ test_reconciliation_never_calls_forge() {
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_reports_terminal_child
+test_local_secondmate_rejects_relative_parent_home
 test_remote_parent_reply_is_idempotent
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
