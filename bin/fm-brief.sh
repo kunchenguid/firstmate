@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Scaffold a crewmate brief or persistent secondmate charter at
-# data/<task-id>/brief.md under the active firstmate home.
+# data/<task-id>/brief.md under the active firstmate home; --driver writes
+# data/<task-id>/driver-brief.md instead.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Firstmate then replaces the {TASK} placeholder with the task
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--split-gate] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --mode no-mistakes [--split-gate] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --mode no-mistakes --driver
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
