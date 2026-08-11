@@ -247,6 +247,19 @@ async function reclaimLockIfStale(lockPath) {
   await rm(lockPath, { recursive: true, force: true }).catch(() => {});
 }
 
+async function createLock(paths) {
+  await mkdir(paths.lock, { mode: 0o700 });
+  await chmod(paths.lock, 0o700);
+  const token = randomUUID();
+  try {
+    await writeFile(`${paths.lock}/owner`, token, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    await rm(paths.lock, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  return token;
+}
+
 async function acquireLock(paths, create) {
   if (create) {
     await ensureStoreDirectory(paths);
@@ -259,9 +272,7 @@ async function acquireLock(paths, create) {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     try {
-      await mkdir(paths.lock, { mode: 0o700 });
-      await chmod(paths.lock, 0o700);
-      return;
+      return await createLock(paths);
     } catch (error) {
       if (!error || error.code !== "EEXIST") throw error;
       await reclaimLockIfStale(paths.lock);
@@ -273,12 +284,25 @@ async function acquireLock(paths, create) {
   }
 }
 
+async function releaseLock(lockPath, token) {
+  let owner;
+  try {
+    owner = await readFile(`${lockPath}/owner`, "utf8");
+  } catch {
+    return;
+  }
+  // Only the process whose token still matches the on-disk owner may remove
+  // the lock: a reclaimed-as-stale lock may already belong to a new holder.
+  if (owner !== token) return;
+  await rm(lockPath, { recursive: true, force: true }).catch(() => {});
+}
+
 async function withStoreLock(paths, { create }, operation) {
-  await acquireLock(paths, create);
+  const token = await acquireLock(paths, create);
   try {
     return await operation();
   } finally {
-    await rm(paths.lock, { recursive: true, force: true });
+    await releaseLock(paths.lock, token);
   }
 }
 
