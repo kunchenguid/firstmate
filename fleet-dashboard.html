@@ -30,7 +30,6 @@
     .runtime { display:flex; flex-direction:column; gap:2px; padding-top:8px; border-top:1px solid var(--line); }
     .runtime span { color:var(--muted); font-size:.8rem; overflow-wrap:anywhere; }
     .age-hot { color:var(--red); }
-    .age-warm { color:var(--amber); }
     .empty { padding:18px; border:1px dashed var(--line); }
     @media (max-width:560px) { main { width:min(100% - 20px,1120px); padding-top:24px; } .section-head { display:grid; } }
   </style>
@@ -40,8 +39,8 @@
   <header>
     <p class="eyebrow">Firstmate · live state projection</p>
     <h1>Fleet Dashboard</h1>
-    <p class="lede">Needs Pedro first; everything else is context.</p>
-    <p class="stamp">Observed 2026-08-11T15:41:50Z</p>
+    <p class="lede">Decisions first; everything else is review flow.</p>
+    <p class="stamp">Observed 2026-08-11T16:01:03Z</p>
   </header>
 
   <div class="sources" aria-label="Source availability">
@@ -50,24 +49,22 @@
     <div class="source"><span>Token spend</span><strong>Not measured</strong></div>
   </div>
 
-  <section id="needs-pedro">
-    <div class="section-head"><h2>Needs Pedro</h2><p>0 items</p></div>
+  <section id="decisions">
+    <div class="section-head"><h2>Decisions</h2><p>0 items</p></div>
+    
     <div class="grid"><p class="empty">backlog absent - captain holds unknown</p></div>
   </section>
 
-  <section id="underway">
-    <div class="section-head"><h2>Underway</h2><p>0 items</p></div>
-    <div class="grid"><p class="empty">nothing underway</p></div>
+  <section id="ours-in-review">
+    <div class="section-head"><h2>Our PRs in review</h2><p>0 items</p></div>
+    <p class="stamp">github status not checked</p>
+    <div class="grid"><p class="empty">no PR of ours recorded in review</p></div>
   </section>
 
-  <section id="unhealthy">
-    <div class="section-head"><h2>Unhealthy</h2><p>0 items</p></div>
-    <div class="grid"><p class="empty">no unhealthy worker visible</p></div>
-  </section>
-
-  <section id="queued">
-    <div class="section-head"><h2>Queued</h2><p>0 items</p></div>
-    <div class="grid"><p class="empty">backlog absent - queue unknown</p></div>
+  <section id="reviewing">
+    <div class="section-head"><h2>Reviewing</h2><p>0 items</p></div>
+    
+    <div class="grid"><p class="empty">unavailable - no secondmates registered in this home</p></div>
   </section>
 </main>
 </body>

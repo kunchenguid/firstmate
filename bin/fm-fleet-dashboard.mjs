@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 // Render the Firstmate fleet cockpit from live state.
 //
+// The cockpit shows exactly three things, in Pedro's priority order:
+//   1. DECISIONS he must take now, most important first, with the ranking
+//      rule printed on screen.
+//   2. OUR PRS IN REVIEW, each with the status he acts on and its full link.
+//   3. REVIEWING - colleague PRs the reviews domain has rounds on.
+//
 // Sources stay read-only: fm-fleet-snapshot.sh (built on fm-crew-state.sh and
-// fm-classify-lib.sh) owns meta/status/backlog classification, and
-// fm-model-telemetry.sh owns its attempt sheet.
+// fm-classify-lib.sh) owns meta/status/backlog classification for this home
+// and for the reviews domain's home, fm-model-telemetry.sh owns its attempt
+// sheet, and the gh CLI supplies forge state for our own recorded PRs on a
+// deliberately slow cadence with its data age printed plainly.
 //
-// One view model, two renderers:
-//   default            ANSI terminal cockpit on stdout (no args, no server)
-//   --output <path>    self-contained HTML page written to <path>
-// The HTML output may never be written under data/, state/, or config/.
-//
-// The four buckets are Pedro's own daily read, mutually exclusive, in the
-// order he resolves them: Needs Pedro, Underway, Unhealthy, Queued.
+// Outputs:
+//   default            one-shot ANSI terminal cockpit on stdout
+//   --watch            live terminal loop; local state refreshes fast,
+//                      GitHub state refreshes slowly and shows its age
+//   --output <path>    self-contained HTML page (never under data/, state/,
+//                      or config/)
 
 import { execFileSync } from "node:child_process";
 import {
@@ -33,19 +40,23 @@ const dataDirectory = resolve(process.env.FM_DATA_OVERRIDE || resolve(fleetHome,
 const stateDirectory = resolve(process.env.FM_STATE_OVERRIDE || resolve(fleetHome, "state"));
 const configDirectory = resolve(process.env.FM_CONFIG_OVERRIDE || resolve(fleetHome, "config"));
 const telemetryPath = resolve(dataDirectory, "routing-outcomes.jsonl");
+const secondmatesPath = resolve(dataDirectory, "secondmates.md");
+
+const WATCH_LOCAL_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_LOCAL_SECONDS || "5", 10);
+const WATCH_GITHUB_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_GITHUB_SECONDS || "120", 10);
+const GITHUB_PR_LIMIT = 6;
 
 function usage(stream = process.stdout) {
-  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--project <name>] [--show <row>] [--prune-candidates] [--output <path>]
+  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--show <row>] [--watch] [--output <path>]
 
-Render the fleet cockpit from live read-only state.
-Default output is an ANSI terminal view on stdout (pairs with watch/tmux).
---width <columns>   terminal width override (default: tty width, else 80)
---all               list every item; default caps each section to fit ~40 rows
---project <name>    show only one domain's work (exact project name)
---show <row>        print one row's full context by its rendered row number
---prune-candidates  print the read-only queued-cleanup review list; nothing
-                    is ever deleted or modified by this command
---output <path>     write the self-contained HTML page to <path> instead
+Render the fleet cockpit: decisions ranked by importance, our PRs in
+review with actionable status, and the reviews domain's open rounds.
+--width <columns>  terminal width override (default: tty width, else 80)
+--all              list every item; default caps each section
+--show <row>       print one row's full context by its rendered row number
+--watch            live redraw: local state every ${WATCH_LOCAL_SECONDS}s, GitHub state every
+                   ${WATCH_GITHUB_SECONDS}s with its age printed (needs a terminal; ctrl-c exits)
+--output <path>    write the self-contained HTML page to <path> instead
 The HTML output may never be written under data/, state/, or config/.
 `);
 }
@@ -55,8 +66,7 @@ function parseArguments(argumentsList) {
   let width = null;
   let showAll = false;
   let showRow = null;
-  let projectFilter = null;
-  let pruneCandidates = false;
+  let watch = false;
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === "-h" || argument === "--help") {
@@ -67,16 +77,8 @@ function parseArguments(argumentsList) {
       showAll = true;
       continue;
     }
-    if (argument === "--prune-candidates") {
-      pruneCandidates = true;
-      continue;
-    }
-    if (argument === "--project" && index + 1 < argumentsList.length) {
-      projectFilter = argumentsList[index + 1];
-      if (projectFilter === "") {
-        throw new Error("--project requires a non-empty project name");
-      }
-      index += 1;
+    if (argument === "--watch") {
+      watch = true;
       continue;
     }
     if (argument === "--show" && index + 1 < argumentsList.length) {
@@ -107,10 +109,10 @@ function parseArguments(argumentsList) {
   if (showRow !== null && outputPath !== null) {
     throw new Error("--show and --output cannot be combined");
   }
-  if (pruneCandidates && (showRow !== null || outputPath !== null)) {
-    throw new Error("--prune-candidates cannot be combined with --show or --output");
+  if (watch && (showRow !== null || outputPath !== null)) {
+    throw new Error("--watch cannot be combined with --show or --output");
   }
-  return { outputPath, width, showAll, showRow, projectFilter, pruneCandidates };
+  return { outputPath, width, showAll, showRow, watch };
 }
 
 function pathIsWithin(candidate, parent) {
@@ -134,13 +136,14 @@ function assertSafeOutput(outputPath) {
   }
 }
 
-function run(command, argumentsList) {
+function run(command, argumentsList, environment = process.env) {
   try {
     return execFileSync(command, argumentsList, {
       encoding: "utf8",
-      env: process.env,
+      env: environment,
       maxBuffer: 16 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60000,
     });
   } catch (error) {
     const diagnostic = error.stderr?.toString().trim() || error.message;
@@ -252,118 +255,170 @@ function telemetryForTask(task, telemetryRows, observedMilliseconds) {
   return { seconds, tuple };
 }
 
-function buildModel({ snapshot, telemetryRows, telemetryPresent }, projectFilter = null) {
+// The registry line format is owned by bin/fm-secondmate-registry-lib.sh; this
+// reads only the fields needed to locate the reviews domain's local home.
+function findReviewsDomain() {
+  if (!existsSync(secondmatesPath)) {
+    return { available: false, reason: "no secondmates registered in this home" };
+  }
+  let text;
+  try {
+    text = readFileSync(secondmatesPath, "utf8");
+  } catch (error) {
+    return { available: false, reason: `secondmate registry unreadable: ${error.message}` };
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const local = line.match(/^-\s+(\S+)\s+-\s+.+\(home:\s*([^;)]*);\s*scope:\s*(.*?);\s*projects:/);
+    const remote = line.match(/^-\s+(\S+)\s+-\s+.+\(host:\s*[^;)]*;.*scope:\s*(.*?);\s*projects:/);
+    if (local && /review/i.test(local[3])) {
+      return { available: true, id: local[1], home: local[2].trim() };
+    }
+    if (remote && /review/i.test(remote[2])) {
+      return { available: false, reason: `reviews domain '${remote[1]}' lives on a remote host` };
+    }
+  }
+  return { available: false, reason: "no registered secondmate with a review scope" };
+}
+
+function collectReviewRounds() {
+  const domain = findReviewsDomain();
+  if (!domain.available) {
+    return { available: false, reason: domain.reason, rounds: [] };
+  }
+  if (!existsSync(domain.home)) {
+    return { available: false, reason: `reviews home is gone: ${domain.home}`, rounds: [] };
+  }
+  let snapshot;
+  try {
+    const text = run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--json"], {
+      ...process.env,
+      FM_HOME: domain.home,
+      FM_STATE_OVERRIDE: resolve(domain.home, "state"),
+      FM_DATA_OVERRIDE: resolve(domain.home, "data"),
+      FM_CONFIG_OVERRIDE: resolve(domain.home, "config"),
+      FM_PROJECTS_OVERRIDE: resolve(domain.home, "projects"),
+    });
+    snapshot = JSON.parse(text);
+  } catch (error) {
+    return { available: false, reason: `reviews home unreadable: ${error.message}`, rounds: [] };
+  }
+  if (snapshot.backlog?.present !== true) {
+    return { available: false, reason: "reviews home has no backlog", rounds: [] };
+  }
+  const rounds = [];
+  for (const record of snapshot.backlog.records || []) {
+    if (!record.structured || record.state === "done") {
+      continue;
+    }
+    let status = "round under way";
+    if (record.hold_reason) {
+      status = cleanProse(record.hold_reason);
+    } else if (record.unresolved_blocker_ids?.length) {
+      status = `queued behind ${record.unresolved_blocker_ids.join(", ")}`;
+    } else if (record.state === "queued") {
+      status = "round queued";
+    }
+    rounds.push({
+      id: record.id,
+      name: cleanProse(record.title) || record.id,
+      project: record.repo ?? null,
+      link: record.pr_url ?? record.links?.[0] ?? null,
+      status,
+      raw: record.raw,
+      since: record.since ?? null,
+    });
+  }
+  return { available: true, reason: null, home: domain.home, id: domain.id, rounds };
+}
+
+function githubStatusLabel(data) {
+  if (data.state === "MERGED") return "merged";
+  if (data.state === "CLOSED") return "closed";
+  const checks = Array.isArray(data.statusCheckRollup) ? data.statusCheckRollup : [];
+  const ciRed = checks.some((check) =>
+    ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"].includes(check.conclusion),
+  );
+  const ciRunning = checks.some(
+    (check) => check.conclusion == null || ["IN_PROGRESS", "QUEUED", "PENDING"].includes(check.status),
+  );
+  if (data.mergeable === "CONFLICTING") return "resolving conflicts needed";
+  if (data.reviewDecision === "CHANGES_REQUESTED") return "changes requested";
+  if (ciRed) return "CI red";
+  if (ciRunning) return "CI running";
+  if (data.reviewDecision === "APPROVED") return "approved - ready to merge";
+  return "CI green - waiting on human review";
+}
+
+// GitHub state is fetched on its own slow cadence because it is expensive and
+// rate-limited, and its age is always printed so a cached CI result is never
+// read as live.
+function fetchGithubStatuses(urls) {
+  const results = new Map();
+  let error = null;
+  for (const url of urls.slice(0, GITHUB_PR_LIMIT)) {
+    if (!/^https:\/\/github\.com\//.test(url)) {
+      results.set(url, { ok: false, status: "status unavailable (not a github.com PR)" });
+      continue;
+    }
+    try {
+      const text = run("gh", [
+        "pr",
+        "view",
+        url,
+        "--json",
+        "state,mergeable,reviewDecision,statusCheckRollup",
+      ]);
+      results.set(url, { ok: true, status: githubStatusLabel(JSON.parse(text)) });
+    } catch (fetchError) {
+      results.set(url, { ok: false, status: "github unavailable" });
+      error = fetchError.message.split("\n")[0];
+    }
+  }
+  return { fetchedAtMs: Date.now(), results, error };
+}
+
+function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github }) {
   const observedMilliseconds = Date.parse(snapshot.generated || "");
   const backlogPresent = snapshot.backlog?.present === true;
   const records = Array.isArray(snapshot.backlog?.records) ? snapshot.backlog.records : [];
   const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
-  const matchesFilter = (project) => projectFilter === null || project === projectFilter;
 
-  const needsPedro = [];
-  const underway = [];
-  const unhealthy = [];
-  const queued = [];
-  const unreadable = [];
-
-  const sinceAge = (record) => age(secondsSince(Date.parse(record.since || ""), observedMilliseconds));
-  const waitsOn = (record) =>
-    record.unresolved_blocker_ids?.length ? `waits on ${record.unresolved_blocker_ids.join(", ")}` : null;
+  const sinceAge = (since) => age(secondsSince(Date.parse(since || ""), observedMilliseconds));
   const titleById = new Map(
     records
       .filter((record) => record.structured && record.id && record.title)
       .map((record) => [record.id, cleanProse(record.title)]),
   );
-  const completedById = new Map(
-    records
-      .filter((record) => record.structured && record.id && record.state === "done")
-      .map((record) => [record.id, record]),
+  const completedIds = new Set(
+    records.filter((record) => record.structured && record.id && record.state === "done").map((record) => record.id),
   );
-  const heldById = new Map(
-    records
-      .filter((record) => record.structured && record.id && record.state !== "done" && record.hold_reason)
-      .map((record) => [record.id, record]),
-  );
-  const isActionableCaptainHold = (record) =>
-    record.hold_kind === "captain" && record.hold_reason && !record.unresolved_blocker_ids?.length;
+  const blockingDeliveryIds = new Set(records.flatMap((record) => record.unresolved_blocker_ids || []));
+
+  const decisions = [];
+  const ours = [];
+  const reviewing = [];
 
   for (const record of records) {
-    if (!record.structured) {
-      if (projectFilter === null && (record.state === "queued" || record.state === "in_flight")) {
-        queued.push({
-          tag: "NOTE",
-          name: cleanProse(record.raw),
-          project: null,
-          prose: null,
-          note: "unstructured backlog line",
-          age: age(null),
-          raw: record.raw,
-          why: "free-form backlog line the structured parser cannot classify",
-        });
-      }
+    if (!record.structured || record.state === "done") {
       continue;
     }
-    if (record.state === "done") {
-      continue;
-    }
-    if (!matchesFilter(record.repo ?? null)) {
-      continue;
-    }
-    const recordName = cleanProse(record.title) || record.id;
-    const isCaptainHold = record.hold_kind === "captain" && record.hold_reason;
-    if (isActionableCaptainHold(record)) {
-      needsPedro.push({
+    if (record.hold_kind === "captain" && record.hold_reason && !record.unresolved_blocker_ids?.length) {
+      decisions.push({
         tag: "HOLD",
-        name: recordName,
+        name: cleanProse(record.title) || record.id,
         id: record.id,
-        project: record.repo,
+        project: record.repo ?? null,
         prose: cleanProse(record.hold_reason),
         note: null,
-        age: sinceAge(record),
+        age: sinceAge(record.since),
         live: false,
         raw: record.raw,
         why: "captain hold with no unresolved blockers - only Pedro can clear it",
       });
-      continue;
     }
-    if (record.state === "queued" || isCaptainHold) {
-      queued.push({
-        tag: isCaptainHold ? "HOLD" : "QUEUED",
-        name: recordName,
-        id: record.id,
-        project: record.repo,
-        prose: null,
-        note: waitsOn(record),
-        age: sinceAge(record),
-        raw: record.raw,
-        why: isCaptainHold
-          ? "captain hold still waiting on unresolved blockers"
-          : "queued in backlog behind its dependencies or time gate",
-      });
-    }
-  }
-
-  for (const orphanId of snapshot.main_inventory?.orphan_in_flight || []) {
-    const record = records.find((candidate) => candidate.id === orphanId);
-    if (!matchesFilter(record?.repo ?? null)) {
-      continue;
-    }
-    unhealthy.push({
-      tag: "ORPHAN",
-      name: record?.title ? cleanProse(record.title) : orphanId,
-      id: orphanId,
-      project: record?.repo ?? null,
-      prose: "recorded in flight but no worker record exists",
-      note: null,
-      age: record ? sinceAge(record) : age(null),
-      raw: record?.raw ?? null,
-      why: "backlog records it in flight but no worker record exists for it",
-    });
   }
 
   for (const task of tasks) {
-    if (!matchesFilter(task.project || null)) {
-      continue;
-    }
     const telemetry = telemetryForTask(task, telemetryRows, observedMilliseconds);
     const itemAge = taskAge(task, telemetry, observedMilliseconds);
     const state = task.current_state?.state || "unknown";
@@ -373,7 +428,6 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }, projectFilter
       id: task.id,
       project: task.project || null,
       age: itemAge,
-      note: telemetry?.tuple ?? null,
       live: task.endpoint?.exists === true,
       statusLog: task.paths?.status_log?.present ? task.paths.status_log.path : null,
       pr: task.pr?.url ? task.pr : null,
@@ -381,239 +435,115 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }, projectFilter
       worktree: task.paths?.worktree?.path ?? null,
     };
     const openDecisions = task.hints?.open_decisions || [];
-    const decisions = openDecisions.filter((decision) => decision.verb === "needs-decision");
-    const blockers = openDecisions.filter((decision) => decision.verb === "blocked");
-
-    if (decisions.length || blockers.length) {
-      for (const decision of decisions) {
-        needsPedro.push({
-          ...base,
-          tag: "DECIDE",
-          prose: cleanProse(decision.summary) || "decision summary absent",
-          note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
-          why: "open needs-decision in the keyed decision fold, not yet resolved",
-        });
-      }
-      for (const blocker of blockers) {
-        needsPedro.push({
-          ...base,
-          tag: "BLOCKED",
-          prose: cleanProse(blocker.summary) || "blocker summary absent",
-          note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
-          why: "open blocked event in the keyed decision fold, not yet resolved",
-        });
-      }
-      continue;
+    for (const decision of openDecisions.filter((entry) => entry.verb === "needs-decision")) {
+      decisions.push({
+        ...base,
+        tag: "DECIDE",
+        prose: cleanProse(decision.summary) || "decision summary absent",
+        note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
+        why: "open needs-decision in the keyed decision fold, not yet resolved",
+      });
     }
-    // A secondmate is a persistent agent, not a work item: its multiplexed
-    // status log must never mint work rows. Its keyed open decisions already
-    // surfaced above; beyond that only a dead agent is worth a line.
-    if (task.kind === "secondmate") {
-      if (task.endpoint?.agent_alive === "dead") {
-        unhealthy.push({
-          ...base,
-          tag: "DEAD",
-          prose: "secondmate agent is dead",
-          note: null,
-          why: "secondmate agent reads dead on a live endpoint check",
-        });
-      }
-      continue;
+    for (const blocker of openDecisions.filter((entry) => entry.verb === "blocked")) {
+      decisions.push({
+        ...base,
+        tag: "BLOCKED",
+        prose: cleanProse(blocker.summary) || "blocker summary absent",
+        note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
+        why: "open blocked event in the keyed decision fold, not yet resolved",
+      });
     }
-    // The reconciled current state from fm-crew-state is authoritative for
-    // routing. Raw signals never override it: a gone endpoint is unhealthy
-    // only when the state claims a live worker, and a reported PR is an ask
-    // only while the fleet's own backlog does not already record it landed.
-    if (state === "blocked") {
-      needsPedro.push({
+    if (openDecisions.length === 0 && state === "blocked") {
+      decisions.push({
         ...base,
         tag: "BLOCKED",
         prose: detail || "blocked, no detail reported",
         note: null,
         why: "reconciled current state is blocked",
       });
-      continue;
     }
-    if (state === "paused") {
-      queued.push({
+
+    // Only pr= recorded in task metadata is a live PR of ours; URLs parsed
+    // out of status prose are history, and a backlog completion means landed.
+    if (task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && !completedIds.has(task.id)) {
+      const lastEvent = cleanProse(task.hints?.last_event_text).replaceAll(/https?:\/\/\S+/g, "").trim();
+      const recorded = detail || lastEvent || "no status recorded";
+      const githubResult = github?.results?.get(task.pr.url) ?? null;
+      ours.push({
         ...base,
-        tag: "PAUSED",
-        prose: null,
-        note: detail || "declared external wait",
-        why: "reconciled current state is a declared bounded external wait",
+        tag: "OURS",
+        prose: githubResult ? githubResult.status : `not checked on github - last recorded: ${recorded}`,
+        note: task.pr.url,
+        why: "our PR recorded in task metadata and not yet landed in the backlog",
       });
-      continue;
     }
-    if (state === "done") {
-      // Only the pr= recorded in task metadata is current state; a URL parsed
-      // out of status prose is history. Whether the PR is still open cannot
-      // be decided locally, so the ask never claims readiness.
-      if (task.pr?.url && task.pr?.source === "meta" && !completedById.get(task.id)) {
-        needsPedro.push({
-          ...base,
-          tag: "REVIEW",
-          prose: `PR (unverified): ${task.pr.url}`,
-          note: null,
-          why: "task done with a PR recorded in its metadata and no backlog completion; PR openness is not locally verifiable",
-        });
-      }
-      // Finished work belongs to no bucket; landing and cleanup are
-      // firstmate's own pipeline, not fleet attention.
-      continue;
-    }
-    // A worker whose current state is unreadable is not automatically sick:
-    // reconcile against the durable records first. A backlog completion means
-    // it landed; a hold means it is deliberately preserved; a declared pause
-    // is a bounded external wait. Only a worker no record accounts for is
-    // unhealthy.
-    if (state === "unknown") {
-      if (completedById.get(task.id)) {
-        continue;
-      }
-      const held = heldById.get(task.id);
-      if (held) {
-        if (isActionableCaptainHold(held)) {
-          continue;
-        }
-        queued.push({
-          ...base,
-          tag: "HOLD",
-          prose: null,
-          note: `held: ${cleanProse(held.hold_reason)}`,
-          age: sinceAge(held),
-          why: "state unreadable, but a backlog hold records it deliberately preserved",
-        });
-        continue;
-      }
-      const lastEvent = task.paths?.status_log?.last_event;
-      if (lastEvent?.state === "paused") {
-        queued.push({
-          ...base,
-          tag: "PAUSED",
-          prose: null,
-          note: `declared wait, worker gone: ${cleanProse(lastEvent.note) || "no reason recorded"}`,
-          why: "worker gone, but its last event declares a bounded external wait",
-        });
-        continue;
-      }
-      if (lastEvent?.state === "failed") {
-        unhealthy.push({
-          ...base,
-          tag: "FAILED",
-          prose: cleanProse(lastEvent.note) || "reported failed",
-          note: "current state unreadable",
-          why: "last recorded event is a failure and no record supersedes it; current state unreadable",
-        });
-        continue;
-      }
-      // No record evidences this task as bad; the reader simply cannot read
-      // its current state. That is a fact about the reader, not the worker.
-      unreadable.push({
-        ...base,
-        tag: "?",
-        prose: null,
-        note: detail || "state unreadable",
-        why: "current state cannot be read and nothing evidences it as bad",
-      });
-      continue;
-    }
-    if (state === "failed" || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
-      const reason = state === "failed" ? detail || "run failed" : "worker gone while its state claims live work";
-      const lastEvent = cleanProse(task.hints?.last_event_text);
-      unhealthy.push({
-        ...base,
-        tag: state === "failed" ? "FAILED" : "MISSING",
-        prose: reason,
-        note: lastEvent && !reason.includes(lastEvent) ? `last event: ${lastEvent}` : base.note,
-      });
-      continue;
-    }
-    underway.push({
-      ...base,
-      tag: state === "parked" ? "AT GATE" : "WORKING",
-      prose: detail || "no detail reported",
+  }
+
+  for (const round of reviews.rounds) {
+    reviewing.push({
+      tag: "THEIRS",
+      name: round.name,
+      id: round.id,
+      project: round.project,
+      prose: round.status,
+      note: round.link ?? "link not recorded in the round",
+      age: sinceAge(round.since),
+      live: false,
+      raw: round.raw,
+      why: "open review round recorded in the reviews domain's own backlog",
     });
   }
 
-  const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
-  // The printed selection rule: a live worker waiting on an answer is unblocked
-  // the moment Pedro replies, so it outranks a PR review, which outranks a
-  // standing hold; everything else last, oldest first within each group.
-  const actionTier = (item) => {
+  // The printed ranking rule: a decision a person is waiting on right now
+  // outranks one blocking queued delivery, which outranks pure age.
+  const importanceTier = (item) => {
     if ((item.tag === "DECIDE" || item.tag === "BLOCKED") && item.live) return 0;
-    if (item.tag === "REVIEW") return 1;
-    if (item.tag === "HOLD") return 2;
-    return 3;
+    if (blockingDeliveryIds.has(item.id)) return 1;
+    return 2;
   };
-  needsPedro.sort((left, right) => actionTier(left) - actionTier(right) || oldestFirst(left, right));
-  underway.sort(oldestFirst);
-  unhealthy.sort(oldestFirst);
-  queued.sort(oldestFirst);
-  unreadable.sort(oldestFirst);
+  const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
+  decisions.sort((left, right) => importanceTier(left) - importanceTier(right) || oldestFirst(left, right));
+  ours.sort(oldestFirst);
+  reviewing.sort(oldestFirst);
 
   const model = {
     generated: snapshot.generated || "observation time absent",
     backlogPresent,
     telemetryPresent,
+    reviews,
+    github,
     buckets: [
       {
-        key: "needs-pedro",
-        name: "NEEDS PEDRO",
-        htmlTitle: "Needs Pedro",
+        key: "decisions",
+        name: "DECISIONS",
+        htmlTitle: "Decisions",
         tone: "attention",
-        items: needsPedro,
-        cap: 5,
-        twoLine: true,
-        rule: "rule: live asks, PRs, holds, oldest first",
-        empty: backlogPresent ? "nothing needs you" : "backlog absent - captain holds unknown",
+        items: decisions,
+        cap: 6,
+        rule: "rule: blocking a person, then blocking delivery, then oldest",
+        empty: backlogPresent ? "nothing needs a decision" : "backlog absent - captain holds unknown",
       },
       {
-        key: "underway",
-        name: "UNDERWAY",
-        htmlTitle: "Underway",
+        key: "ours-in-review",
+        name: "OUR PRS IN REVIEW",
+        htmlTitle: "Our PRs in review",
         tone: "progress",
-        items: underway,
+        items: ours,
         cap: 5,
-        twoLine: false,
-        empty: "nothing underway",
+        empty: "no PR of ours recorded in review",
       },
       {
-        key: "unhealthy",
-        name: "UNHEALTHY",
-        htmlTitle: "Unhealthy",
-        tone: "danger",
-        items: unhealthy,
-        cap: 3,
-        twoLine: true,
-        empty: "no unhealthy worker visible",
-      },
-      {
-        key: "queued",
-        name: "QUEUED",
-        htmlTitle: "Queued",
+        key: "reviewing",
+        name: "REVIEWING",
+        htmlTitle: "Reviewing",
         tone: "neutral",
-        items: queued,
-        cap: 3,
-        twoLine: false,
-        empty: backlogPresent ? "queue empty" : "backlog absent - queue unknown",
-      },
-      {
-        key: "unreadable",
-        name: "UNREADABLE",
-        htmlTitle: "Unreadable",
-        tone: "neutral",
-        items: unreadable,
-        cap: 0,
-        twoLine: false,
-        foldWord: "unreadable right now, nothing evidences them as bad",
-        hideWhenEmpty: true,
-        empty: "",
+        items: reviewing,
+        cap: 5,
+        empty: reviews.available ? "no open review rounds" : `unavailable - ${reviews.reason}`,
       },
     ],
   };
 
-  // Stable row numbers over the full sorted model, so a number seen in the
-  // default view, in --all, and given to --show always means the same item.
   let rowNumber = 0;
   for (const bucket of model.buckets) {
     for (const item of bucket.items) {
@@ -623,145 +553,62 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }, projectFilter
     }
   }
   model.totalRows = rowNumber;
-  model.projectFilter = projectFilter;
-
-  const domainCounts = new Map();
-  for (const bucket of model.buckets) {
-    for (const item of bucket.items) {
-      if (item.project) {
-        domainCounts.set(item.project, (domainCounts.get(item.project) || 0) + 1);
-      }
-    }
-  }
-  model.domains = [...domainCounts.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .map(([name, count]) => ({ name, count }));
-
-  // Read-only cleanup review list. The retention rule forbids blanket or
-  // age-based cleanup, so this list only SURFACES candidates for an explicit,
-  // dry-run-first hygiene pass; the cockpit never deletes or edits an item.
-  const structuredIds = new Set(records.filter((record) => record.structured && record.id).map((record) => record.id));
-  model.pruneCandidates = [];
-  for (const record of records) {
-    if (!record.structured || record.state !== "queued" || !matchesFilter(record.repo ?? null)) {
-      continue;
-    }
-    const reasons = [];
-    for (const blockerId of record.blocked_by_ids || []) {
-      if (!structuredIds.has(blockerId)) {
-        reasons.push(`waits on '${blockerId}' which is not in the backlog`);
-      }
-    }
-    const recordAge = sinceAge(record);
-    if (recordAge.seconds !== null && recordAge.seconds >= PRUNE_UNTOUCHED_SECONDS) {
-      reasons.push(`untouched in queue past ${PRUNE_UNTOUCHED_SECONDS / 86400}d`);
-    }
-    if (reasons.length > 0) {
-      model.pruneCandidates.push({
-        id: record.id,
-        name: cleanProse(record.title) || record.id,
-        project: record.repo ?? null,
-        age: recordAge,
-        reasons,
-      });
-    }
-  }
-  model.pruneCandidates.sort((left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1));
   return model;
 }
 
 const ANSI = { reset: "\u001b[0m", dim: "\u001b[2m", accent: "\u001b[33m", accentBold: "\u001b[1;33m" };
 const AGE_HOT_SECONDS = 7 * 86400;
-const AGE_WARM_SECONDS = 3 * 86400;
-const PRUNE_UNTOUCHED_SECONDS = 30 * 86400;
 
 function clip(text, width) {
-  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}\u2026`;
+  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
 }
 
-function ageTier(item) {
-  if (item.age.seconds === null) return "unknown";
-  if (item.age.seconds >= AGE_HOT_SECONDS) return "hot";
-  if (item.age.seconds >= AGE_WARM_SECONDS) return "warm";
-  return "calm";
+function ageText(item) {
+  return item.age.seconds !== null && item.age.seconds >= AGE_HOT_SECONDS
+    ? `⚠ ${item.age.label}`
+    : item.age.label;
 }
 
-// The \u26a0 glyph alone carries age weight so it survives NO_COLOR and pipes;
-// age text stays dim everywhere under the one-accent rule.
-function ageSegment(item, paint) {
-  const text = ageTier(item) === "hot" ? `\u26a0 ${item.age.label}` : item.age.label;
-  return { plain: text, painted: paint("dim", text) };
-}
-
-// The needs-you count is the one thing the eye must land on first: it alone
-// carries the accent on the metric line, everything after it stays dim.
-function metricLine(model, width, paint) {
-  const countOf = (key) => model.buckets.find((bucket) => bucket.key === key).items.length;
-  const backlogCount = (key) => (model.backlogPresent ? String(countOf(key)) : "?");
-  const segments = [
-    `${backlogCount("needs-pedro")} NEED YOU`,
-    `${countOf("underway")} underway`,
-    `${countOf("unhealthy")} unhealthy`,
-    `${backlogCount("queued")} queued`,
-  ];
-  if (countOf("unreadable") > 0) {
-    segments.push(`${countOf("unreadable")} unreadable`);
+function githubAgeLine(github, nowMs) {
+  if (!github) {
+    return "github status not checked";
   }
-  const plainLength = segments.reduce((sum, segment) => sum + segment.length, 0);
-  const paintSegment = (segment, index) => (index === 0 ? paint("accentBold", segment) : paint("dim", segment));
-  if (plainLength + 3 * (segments.length - 1) > width) {
-    return clip(segments.join(" \u00b7 "), width);
+  const ageSeconds = secondsSince(github.fetchedAtMs, nowMs);
+  const ageLabel = ageSeconds !== null && ageSeconds < 3 ? "just now" : `${formatDuration(ageSeconds) ?? "?"} ago`;
+  if (github.error) {
+    return `github unavailable (${github.error}) - last tried ${ageLabel}`;
   }
-  const gap = Math.max(3, Math.floor((width - plainLength) / Math.max(1, segments.length - 1)));
-  return segments.map(paintSegment).join(" ".repeat(gap));
+  return `github status checked ${ageLabel}`;
 }
 
-function domainsLine(model, width, paint) {
-  if (model.projectFilter !== null) {
-    return paint("dim", clip(`domain: ${model.projectFilter} only \u00b7 run without --project for the full fleet`, width));
-  }
-  if (!model.domains || model.domains.length < 2) {
-    return null;
-  }
-  const listing = model.domains.map((domain) => `${domain.name} ${domain.count}`).join(" \u00b7 ");
-  return paint("dim", clip(`domains: ${listing} \u00b7 --project <name> filters`, width));
-}
-
-// One accent carries what needs Pedro; every other character stays quiet.
-function renderTerminal(model, width, useColor, showAll) {
+function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
-  lines.push(paint("dim", clip(`FIRSTMATE FLEET \u00b7 observed ${model.generated}`, width)));
-  lines.push(metricLine(model, width, paint));
+  lines.push(paint("dim", clip(`FIRSTMATE FLEET · observed ${model.generated}`, width)));
   lines.push(
     paint(
       "dim",
       clip(
-        `sources: backlog ${model.backlogPresent ? "present" : "absent"} \u00b7 telemetry ${model.telemetryPresent ? "present" : "absent"} \u00b7 token spend not measured`,
+        `sources: backlog ${model.backlogPresent ? "present" : "absent"} · telemetry ${model.telemetryPresent ? "present" : "absent"} · token spend not measured`,
         width,
       ),
     ),
   );
-  const domains = domainsLine(model, width, paint);
-  if (domains !== null) {
-    lines.push(domains);
-  }
   let firstBucket = true;
   for (const bucket of model.buckets) {
-    if (bucket.items.length === 0 && bucket.hideWhenEmpty) {
-      continue;
-    }
     lines.push("");
     if (!firstBucket) {
       lines.push("");
     }
     firstBucket = false;
-    const isAccentBucket = bucket.key === "needs-pedro";
-    const bucketPaint = (text) => paint(isAccentBucket ? "accent" : "dim", text);
-    const rule = isAccentBucket ? "\u2501" : "\u2500";
+    const isAccentBucket = bucket.key === "decisions";
+    const rule = isAccentBucket ? "━" : "─";
     const header = `${rule}${rule} ${bucket.name} (${bucket.items.length}) `;
     const fill = rule.repeat(Math.max(0, width - header.length));
     lines.push(paint(isAccentBucket ? "accentBold" : "dim", clip(header + fill, width)));
+    if (bucket.key === "ours-in-review") {
+      lines.push(paint("dim", clip(`   ${githubAgeLine(model.github, nowMs)}`, width)));
+    }
     if (bucket.items.length === 0) {
       lines.push(paint("dim", clip(`   ${bucket.empty}`, width)));
       continue;
@@ -772,67 +619,23 @@ function renderTerminal(model, width, useColor, showAll) {
     for (const item of shown) {
       const tag = clip(item.tag, 7).padEnd(7);
       const rowLabel = String(item.number).padStart(numberWidth);
-      const ageText = ageSegment(item, paint);
-      const midParts = bucket.twoLine
-        ? [item.name, item.project]
-        : [item.name, item.project, item.note];
-      const mid = midParts.filter(Boolean).join(" \u00b7 ");
-      const midWidth = Math.max(8, width - headIndent - 3 - ageText.plain.length);
+      const itemAge = ageText(item);
+      const mid = [item.name, item.project].filter(Boolean).join(" · ");
+      const midWidth = Math.max(8, width - headIndent - 3 - itemAge.length);
       lines.push(
-        `  ${paint("dim", rowLabel)} ${bucketPaint(tag)} ${clip(mid, midWidth)} \u00b7 ${ageText.painted}`,
+        `  ${paint("dim", rowLabel)} ${paint(isAccentBucket ? "accent" : "dim", tag)} ${clip(mid, midWidth)} · ${paint("dim", itemAge)}`,
       );
-      if (bucket.twoLine) {
-        const detail = [item.prose, item.note].filter(Boolean).join("  ");
-        if (detail) {
-          lines.push(paint("dim", `${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`));
-        }
+      const detail = [item.prose, item.note].filter(Boolean).join("  ");
+      if (detail) {
+        lines.push(paint("dim", `${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`));
       }
     }
     const hidden = bucket.items.length - shown.length;
     if (hidden > 0) {
-      const ruleText = bucket.rule ? ` \u00b7 ${bucket.rule}` : "";
-      const foldWord = bucket.foldWord || "more";
-      lines.push(paint("dim", clip(`  \u2026 ${hidden} ${foldWord}${ruleText} \u00b7 --all shows all`, width)));
-    }
-    if (bucket.key === "queued" && model.pruneCandidates.length > 0) {
-      lines.push(
-        paint(
-          "dim",
-          clip(
-            `  ${model.pruneCandidates.length} prune candidate${model.pruneCandidates.length === 1 ? "" : "s"} \u00b7 --prune-candidates lists them; nothing is deleted`,
-            width,
-          ),
-        ),
-      );
-    }
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-// Read-only cleanup review list: shows candidates and stops there, because
-// hygiene is explicit and dry-run-first, never blanket or age-triggered.
-function renderPrune(model, width) {
-  const lines = [];
-  lines.push(
-    clip(`PRUNE CANDIDATES (${model.pruneCandidates.length}) \u00b7 review list only - nothing is deleted or modified`, width),
-  );
-  lines.push(
-    clip(`rule: queued ${PRUNE_UNTOUCHED_SECONDS / 86400}d or longer, or waiting on a task missing from the backlog`, width),
-  );
-  if (model.projectFilter !== null) {
-    lines.push(clip(`domain: ${model.projectFilter} only`, width));
-  }
-  if (model.pruneCandidates.length === 0) {
-    lines.push("");
-    lines.push(model.backlogPresent ? "  no candidates" : "  backlog absent - candidates unknown");
-    return `${lines.join("\n")}\n`;
-  }
-  for (const candidate of model.pruneCandidates) {
-    lines.push("");
-    const head = [candidate.id, candidate.name, candidate.project].filter(Boolean).join(" \u00b7 ");
-    lines.push(clip(`  ${head} \u00b7 ${candidate.age.label}`, width));
-    for (const reason of candidate.reasons) {
-      lines.push(clip(`      ${reason}`, width));
+      const ruleText = bucket.rule ? ` · ${bucket.rule}` : "";
+      lines.push(paint("dim", clip(`  … ${hidden} more${ruleText} · --all shows all`, width)));
+    } else if (bucket.rule && bucket.items.length > 1) {
+      lines.push(paint("dim", clip(`  ${bucket.rule}`, width)));
     }
   }
   return `${lines.join("\n")}\n`;
@@ -841,7 +644,9 @@ function renderPrune(model, width) {
 // Full single-item context for --show <n>: nothing truncated, every field
 // sourced from data the cockpit already read.
 function renderShow(model, requestedNumber) {
-  const item = model.buckets.flatMap((bucket) => bucket.items).find((candidate) => candidate.number === requestedNumber);
+  const item = model.buckets
+    .flatMap((bucket) => bucket.items)
+    .find((candidate) => candidate.number === requestedNumber);
   if (!item) {
     throw new Error(`--show ${requestedNumber}: no such row (valid: 1..${model.totalRows})`);
   }
@@ -900,12 +705,11 @@ function card(item, tone) {
   const detailMarkup = detailParts.length
     ? `<span>${detailParts.map((part) => escapeHtml(part)).join(" &middot; ")}</span>`
     : "";
-  const tier = ageTier(item);
-  const marker = tier === "hot" ? "⚠ " : "";
+  const hot = item.age.seconds !== null && item.age.seconds >= AGE_HOT_SECONDS;
   return `<article class="card ${escapeHtml(tone)}">
     <p class="eyebrow">${escapeHtml([`#${item.number}`, item.tag, item.project].filter(Boolean).join(" · "))}</p>
-    <h3>${escapeHtml(item.name || item.prose || "detail absent")}</h3>
-    <div class="runtime"><strong class="age-${tier}">${escapeHtml(marker + item.age.label)}</strong>${detailMarkup}</div>
+    <h3>${escapeHtml(item.name || "detail absent")}</h3>
+    <div class="runtime"><strong class="age-${hot ? "hot" : "calm"}">${escapeHtml((hot ? "⚠ " : "") + item.age.label)}</strong>${detailMarkup}</div>
   </article>`;
 }
 
@@ -919,10 +723,10 @@ function sourceValue(label, value) {
 
 function renderHtml(model) {
   const sections = model.buckets
-    .filter((bucket) => bucket.items.length > 0 || !bucket.hideWhenEmpty)
     .map(
       (bucket) => `<section id="${bucket.key}">
     <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2><p>${bucket.items.length} item${bucket.items.length === 1 ? "" : "s"}</p></div>
+    ${bucket.key === "ours-in-review" ? `<p class="stamp">${escapeHtml(githubAgeLine(model.github, Date.now()))}</p>` : ""}
     <div class="grid">${bucket.items.map((item) => card(item, bucket.tone)).join("") || emptyState(bucket.empty)}</div>
   </section>`,
     )
@@ -959,7 +763,6 @@ function renderHtml(model) {
     .runtime { display:flex; flex-direction:column; gap:2px; padding-top:8px; border-top:1px solid var(--line); }
     .runtime span { color:var(--muted); font-size:.8rem; overflow-wrap:anywhere; }
     .age-hot { color:var(--red); }
-    .age-warm { color:var(--amber); }
     .empty { padding:18px; border:1px dashed var(--line); }
     @media (max-width:560px) { main { width:min(100% - 20px,1120px); padding-top:24px; } .section-head { display:grid; } }
   </style>
@@ -969,7 +772,7 @@ function renderHtml(model) {
   <header>
     <p class="eyebrow">Firstmate · live state projection</p>
     <h1>Fleet Dashboard</h1>
-    <p class="lede">Needs Pedro first; everything else is context.</p>
+    <p class="lede">Decisions first; everything else is review flow.</p>
     <p class="stamp">Observed ${escapeHtml(model.generated)}</p>
   </header>
 
@@ -986,7 +789,7 @@ function renderHtml(model) {
 `;
 }
 
-function collectInputs() {
+function collectLocalInputs() {
   const snapshotText = run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--json"]);
   let snapshot;
   try {
@@ -1010,7 +813,21 @@ function collectInputs() {
     }
   }
 
-  return { snapshot, telemetryRows, telemetryPresent };
+  const reviews = collectReviewRounds();
+  return { snapshot, telemetryRows, telemetryPresent, reviews };
+}
+
+function ourPrUrls(inputs) {
+  const records = Array.isArray(inputs.snapshot.backlog?.records) ? inputs.snapshot.backlog.records : [];
+  const completed = new Set(
+    records.filter((record) => record.structured && record.id && record.state === "done").map((record) => record.id),
+  );
+  return (inputs.snapshot.tasks || [])
+    .filter(
+      (task) =>
+        task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && !completed.has(task.id),
+    )
+    .map((task) => task.pr.url);
 }
 
 function writeAtomically(outputPath, html) {
@@ -1024,27 +841,66 @@ function writeAtomically(outputPath, html) {
   }
 }
 
+// Internal loop rather than external watch(1) because the GitHub cache must
+// survive between redraws; two cadences so forge polling stays slow while
+// local file-derived state stays fresh. The alternate screen buffer keeps
+// scrollback intact and home-then-erase redraws avoid flicker.
+function watchLoop(width, useColor, showAll) {
+  if (!process.stdout.isTTY) {
+    throw new Error("--watch requires a terminal");
+  }
+  process.stdout.write("\u001b[?1049h\u001b[?25l");
+  process.on("exit", () => {
+    process.stdout.write("\u001b[?25h\u001b[?1049l");
+  });
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+
+  let github = null;
+  const frame = () => {
+    let body;
+    try {
+      const inputs = collectLocalInputs();
+      if (github === null || secondsSince(github.fetchedAtMs, Date.now()) >= WATCH_GITHUB_SECONDS) {
+        github = fetchGithubStatuses(ourPrUrls(inputs));
+      }
+      const model = buildModel({ ...inputs, github });
+      const frameWidth = width ?? process.stdout.columns ?? 80;
+      body = renderTerminal(model, frameWidth, useColor, showAll, Date.now());
+      body += `\n${useColor ? ANSI.dim : ""}watch: local every ${WATCH_LOCAL_SECONDS}s · github every ${WATCH_GITHUB_SECONDS}s · ctrl-c exits${useColor ? ANSI.reset : ""}\n`;
+    } catch (error) {
+      body = `fm-fleet-dashboard: ${error.message}\n`;
+    }
+    process.stdout.write(`\u001b[H${body}\u001b[J`);
+    setTimeout(frame, WATCH_LOCAL_SECONDS * 1000);
+  };
+  frame();
+}
+
 try {
-  const parsed = parseArguments(process.argv.slice(2));
-  const { outputPath, width, showAll, showRow, projectFilter, pruneCandidates } = parsed;
+  const { outputPath, width, showAll, showRow, watch } = parseArguments(process.argv.slice(2));
   if (outputPath !== null) {
     assertSafeOutput(outputPath);
   }
-  const model = buildModel(collectInputs(), projectFilter);
-  if (pruneCandidates) {
-    const pruneWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
-    process.stdout.write(renderPrune(model, pruneWidth));
-  } else if (showRow !== null) {
-    process.stdout.write(renderShow(model, showRow));
-  } else if (outputPath !== null) {
-    writeAtomically(outputPath, renderHtml(model));
-    process.stdout.write(`${outputPath}\n`);
+  if (watch) {
+    watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
   } else {
-    const terminalWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
-    const useColor = process.env.NO_COLOR
-      ? false
-      : Boolean(process.stdout.isTTY) || Boolean(process.env.FORCE_COLOR);
-    process.stdout.write(renderTerminal(model, terminalWidth, useColor, showAll));
+    const inputs = collectLocalInputs();
+    const urls = ourPrUrls(inputs);
+    const github = urls.length > 0 ? fetchGithubStatuses(urls) : null;
+    const model = buildModel({ ...inputs, github });
+    if (showRow !== null) {
+      process.stdout.write(renderShow(model, showRow));
+    } else if (outputPath !== null) {
+      writeAtomically(outputPath, renderHtml(model));
+      process.stdout.write(`${outputPath}\n`);
+    } else {
+      const terminalWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
+      const useColor = process.env.NO_COLOR
+        ? false
+        : Boolean(process.stdout.isTTY) || Boolean(process.env.FORCE_COLOR);
+      process.stdout.write(renderTerminal(model, terminalWidth, useColor, showAll));
+    }
   }
 } catch (error) {
   process.stderr.write(`fm-fleet-dashboard: ${error.message}\n`);
