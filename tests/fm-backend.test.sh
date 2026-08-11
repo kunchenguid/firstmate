@@ -382,9 +382,9 @@ test_backend_name_cmux_fallback_notice() {
 
 # fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
 # are both absent, selects between the three markers exactly as
-# fm_backend_detect does, and is loud only when it selects herdr or cmux -
-# never when it selects tmux (today's default-path behavior must stay
-# byte-for-byte silent).
+# fm_backend_detect does, and is loud only when it selects herdr or cmux.
+# The pure resolver and bootstrap stay quiet on the hard tmux fallback; the
+# public spawn path opts into its operator notice separately below.
 test_backend_name_autodetect_notice() {
   local dir cfg out errfile
 
@@ -394,7 +394,7 @@ test_backend_name_autodetect_notice() {
   : > "$errfile"
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
-  [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
+  [ -s "$errfile" ] && fail "fm_backend_name must stay silent for a non-spawn caller with no detection markers"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
   out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
@@ -1053,6 +1053,8 @@ test_spawn_default_backend_writes_no_meta_field() {
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
+  assert_not_contains "$out" "no runtime backend setting or primary-runtime marker" \
+    "an explicit --backend choice must not be reported as the hard fallback"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
   rm -rf "/tmp/fm-$id"
@@ -1077,6 +1079,8 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
+  assert_not_contains "$out" "no runtime backend setting or primary-runtime marker" \
+    "an explicit --backend choice must not be reported as the hard fallback"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux must win over an ambient HERDR_ENV=1 auto-detect marker"
   rm -rf "/tmp/fm-$id"
@@ -1113,6 +1117,59 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_spawn_configured_backend_avoids_fallback_notice() {
+  local proj wt data id state config out fb
+  proj="$TMP_ROOT/configured-backend-project"; wt="$TMP_ROOT/configured-backend-wt"; data="$TMP_ROOT/configured-backend-data"
+  id="configuredbackendz6"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/configured-backend-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/configured-backend-state"; config="$TMP_ROOT/configured-backend-config"
+  mkdir -p "$state" "$config"
+  printf 'tmux\n' > "$config/backend"
+
+  out=$(env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
+    PATH="$fb:$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_LOG="$TMP_ROOT/configured-backend.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 $? "fm-spawn.sh should honor config/backend outside a multiplexer"$'\n'"$out"
+  assert_not_contains "$out" "no runtime backend setting or primary-runtime marker" \
+    "config/backend must be treated as an applicable choice, not the hard fallback"
+  assert_no_grep 'backend=' "$state/$id.meta" \
+    "config/backend=tmux must preserve the absent-backend metadata compatibility contract"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: config/backend is an applicable choice outside a multiplexer and stays off the fallback path"
+}
+
+test_spawn_true_default_announces_detached_tmux() {
+  local proj wt data id state config out fb
+  proj="$TMP_ROOT/true-default-project"; wt="$TMP_ROOT/true-default-wt"; data="$TMP_ROOT/true-default-data"
+  id="truedefaultz7"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/true-default-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/true-default-state"; config="$TMP_ROOT/true-default-config"
+  mkdir -p "$state" "$config"
+
+  out=$(env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
+    PATH="$fb:$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_LOG="$TMP_ROOT/true-default.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 $? "fm-spawn.sh should preserve the hard tmux fallback outside a multiplexer"$'\n'"$out"
+  assert_contains "$out" "defaulting to detached tmux session 'firstmate'" \
+    "the public spawn path did not announce its otherwise-unexplained hard backend fallback"
+  assert_contains "$out" "tmux attach -t firstmate" \
+    "the hard fallback notice did not explain how to view the detached worker"
+  assert_no_grep 'backend=' "$state/$id.meta" \
+    "the announced hard tmux fallback must preserve absent-backend metadata compatibility"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: true default preserves detached tmux behavior and announces placement before creation"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1140,3 +1197,5 @@ test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently
+test_spawn_configured_backend_avoids_fallback_notice
+test_spawn_true_default_announces_detached_tmux

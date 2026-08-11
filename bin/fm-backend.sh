@@ -235,13 +235,16 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
 # always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
-# notice (both are experimental); auto-detecting tmux stays silent - it is
-# today's default-path behavior and callers must see zero change. The cmux
+# notice (both are experimental); auto-detecting tmux stays silent because the
+# primary already runs inside that visible tmux surface. A spawn caller passes
+# `spawn` so the otherwise-unexplained hard fallback announces the detached
+# tmux session before task creation; non-spawn callers such as bootstrap remain
+# quiet. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
 fm_backend_name() {
-  local line v detected marker
+  local context=${1:-} line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
     printf '%s' "$FM_BACKEND"
     return 0
@@ -272,6 +275,9 @@ fm_backend_name() {
     fi
     printf '%s' "$detected"
     return 0
+  fi
+  if [ "$context" = spawn ]; then
+    echo "NOTICE: no runtime backend setting or primary-runtime marker matched this spawn - defaulting to detached tmux session 'firstmate'. Set config/backend or pass an authorized --backend <name> before spawning; view the worker with 'tmux attach -t firstmate'." >&2
   fi
   printf 'tmux'
 }
