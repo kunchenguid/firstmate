@@ -418,32 +418,128 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # workspace/surface/pane create all default focus to false) - no
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
+fm_backend_cmux_acquisition_record_path() {
+  local file=$1 absolute cwd parent base parent_real
+  [ -n "$file" ] || return 1
+  case "$file" in
+    -* ) file=./$file ;;
+  esac
+  case "$file" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  case "$file" in
+    /*) absolute=$file ;;
+    *)
+      cwd=$(CDPATH='' pwd -P) || return 1
+      absolute="$cwd/${file#./}"
+      ;;
+  esac
+  parent=${absolute%/*}
+  base=${absolute##*/}
+  [ -n "$parent" ] || parent=/
+  case "$base" in ''|.|..) return 1 ;; esac
+  if [ -e "$absolute" ] || [ -L "$absolute" ]; then
+    [ ! -L "$absolute" ] || return 1
+  fi
+  [ -d "$parent" ] || return 1
+  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
+  absolute="$parent_real/$base"
+  if [ -e "$absolute" ] || [ -L "$absolute" ]; then
+    [ -f "$absolute" ] && [ ! -L "$absolute" ] || return 1
+  fi
+  printf '%s\n' "$absolute"
+}
+
+fm_backend_cmux_acquisition_identity() {
+  local path=$1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%d:%i' "$path" 2>/dev/null
+  else
+    stat -c '%d:%i' "$path" 2>/dev/null
+  fi
+}
+
+fm_backend_cmux_acquisition_record_write() {
+  local requested_file=$1 kind=$2 file parent parent_identity target_identity target_state
+  local label workspace_id surface_id title workspace_candidate_id
+  shift 2
+  file=$(fm_backend_cmux_acquisition_record_path "$requested_file") || return 1
+  parent=${file%/*}
+  parent_identity=$(fm_backend_cmux_acquisition_identity "$parent") || return 1
+  target_state=absent
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    target_state=present
+    target_identity=$(fm_backend_cmux_acquisition_identity "$file") || return 1
+  fi
+  (
+    staged=
+    cleanup() {
+      [ -z "$staged" ] || rm -f "$staged"
+    }
+    trap 'cleanup' EXIT
+    trap 'cleanup; exit 1' HUP INT TERM
+    staged=$(umask 077; mktemp "$parent/.fm-cmux-acquisition.XXXXXX") || exit 1
+    staged_identity=$(fm_backend_cmux_acquisition_identity "$staged") || exit 1
+    case "$kind" in
+      exact)
+        label=$1
+        workspace_id=$2
+        surface_id=${3:-}
+        printf 'backend=cmux\nkind=%s\nworkspace_id=%s\nsurface_id=%s\nlabel=%s\n' \
+          "$([ -n "$surface_id" ] && printf target || printf cmux-workspace)" \
+          "$workspace_id" "$surface_id" "$label" > "$staged" || exit 1
+        ;;
+      unresolved)
+        label=$1
+        title=$2
+        workspace_candidate_id=${3:-}
+        if [ -n "$workspace_candidate_id" ]; then
+          fm_backend_cmux_workspace_id_valid "$workspace_candidate_id" || exit 1
+          printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nworkspace_candidate_id=%s\nreason=workspace-identity-unresolved\n' \
+            "$label" "$title" "$workspace_candidate_id" > "$staged" || exit 1
+        else
+          printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nreason=workspace-identity-unresolved\n' \
+            "$label" "$title" > "$staged" || exit 1
+        fi
+        ;;
+      *) exit 1 ;;
+    esac
+    chmod 600 "$staged" || exit 1
+    [ -f "$staged" ] && [ ! -L "$staged" ] || exit 1
+    current_staged_identity=$(fm_backend_cmux_acquisition_identity "$staged") || exit 1
+    [ "$current_staged_identity" = "$staged_identity" ] || exit 1
+    current_file=$(fm_backend_cmux_acquisition_record_path "$requested_file") || exit 1
+    [ "$current_file" = "$file" ] || exit 1
+    current_parent_identity=$(fm_backend_cmux_acquisition_identity "$parent") || exit 1
+    [ "$current_parent_identity" = "$parent_identity" ] || exit 1
+    case "$target_state" in
+      present)
+        [ -f "$file" ] && [ ! -L "$file" ] || exit 1
+        current_target_identity=$(fm_backend_cmux_acquisition_identity "$file") || exit 1
+        [ "$current_target_identity" = "$target_identity" ] || exit 1
+        ;;
+      absent)
+        [ ! -e "$file" ] && [ ! -L "$file" ] || exit 1
+        ;;
+      *) exit 1 ;;
+    esac
+    staged_parent=${staged%/*}
+    [ "$(CDPATH='' cd -- "$staged_parent" 2>/dev/null && pwd -P)" = "$parent" ] || exit 1
+    mv -f "$staged" "$file" || exit 1
+    staged=
+    trap - EXIT HUP INT TERM
+  )
+}
+
 fm_backend_cmux_acquisition_record() {
-  local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 workspace_id=$2 surface_id=${3:-} tmp
+  local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 workspace_id=$2 surface_id=${3:-}
   [ -n "$file" ] || return 0
-  case "$file" in -*) file=./$file ;; esac
-  tmp="$file.tmp.${BASHPID:-$$}"
-  printf 'backend=cmux\nkind=%s\nworkspace_id=%s\nsurface_id=%s\nlabel=%s\n' \
-    "$([ -n "$surface_id" ] && printf target || printf cmux-workspace)" \
-    "$workspace_id" "$surface_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
-    rm -f "$tmp"
-    return 1
-  }
+  fm_backend_cmux_acquisition_record_write "$file" exact "$label" "$workspace_id" "$surface_id"
 }
 
 fm_backend_cmux_unresolved_acquisition_record() {
   local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 title=$2 workspace_candidate_id=${3:-}
   [ -n "$file" ] || return 0
-  if [ -n "$workspace_candidate_id" ]; then
-    fm_backend_cmux_workspace_id_valid "$workspace_candidate_id" || return 1
-    printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nworkspace_candidate_id=%s\nreason=workspace-identity-unresolved\n' \
-      "$label" "$title" "$workspace_candidate_id" > "$file" || return 1
-  else
-    printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nreason=workspace-identity-unresolved\n' \
-      "$label" "$title" > "$file" || return 1
-  fi
-  chmod 600 "$file"
+  fm_backend_cmux_acquisition_record_write "$file" unresolved "$label" "$title" "$workspace_candidate_id"
 }
 
 fm_backend_cmux_create_task() {  # <label> <cwd>

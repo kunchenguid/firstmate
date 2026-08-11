@@ -523,6 +523,53 @@ test_create_task_rejects_replaced_workspace_after_provider_id() {
   pass "fm_backend_cmux_create_task: rejects a disappeared provider id instead of adopting a same-title replacement"
 }
 
+test_unresolved_record_preserves_previous_record_on_publish_failure() {
+  local dir failbin record old status
+  dir="$TMP_ROOT/unresolved-record-publish-failure"
+  failbin="$dir/failbin"
+  record="$dir/acquisition"
+  old='backend=cmux
+kind=cmux-unresolved
+workspace_id=
+surface_id=
+label=fm-old
+workspace_title=old-title
+reason=workspace-identity-unresolved'
+  mkdir -p "$failbin"
+  printf '%s\n' "$old" > "$record"
+  chmod 600 "$record"
+  cat > "$failbin/mv" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod 700 "$failbin/mv"
+  PATH="$failbin:$PATH" FM_BACKEND_ACQUISITION_FILE="$record" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_unresolved_acquisition_record fm-new new-title candidate-id' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "unresolved record publication should fail when its atomic rename fails"
+  [ "$(cat "$record")" = "$old" ] || fail "atomic rename failure replaced the previous unresolved acquisition record"
+  [ -z "$(find "$dir" -name '.fm-cmux-acquisition.*' -print -quit)" ] \
+    || fail "atomic rename failure left a private temporary acquisition record"
+  pass "fm_backend_cmux_unresolved_acquisition_record: preserves the previous record when rename fails"
+}
+
+test_unresolved_record_rejects_replaced_destination_path() {
+  local dir record outside status
+  dir="$TMP_ROOT/unresolved-record-replaced-path"
+  record="$dir/acquisition"
+  outside="$dir/outside"
+  mkdir -p "$dir"
+  printf 'outside-before\n' > "$outside"
+  ln -s "$outside" "$record"
+  FM_BACKEND_ACQUISITION_FILE="$record" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_unresolved_acquisition_record fm-new new-title candidate-id' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "unresolved record publication should reject a replaced destination path"
+  [ -L "$record" ] || fail "replaced acquisition destination was not left untouched"
+  [ "$(cat "$outside")" = outside-before ] || fail "replaced acquisition destination redirected a write"
+  pass "fm_backend_cmux_unresolved_acquisition_record: rejects symlinked handoff paths without redirecting writes"
+}
+
 test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup() {
   local dir home proj wt fakebin id title status
   dir="$TMP_ROOT/spawn-unresolved-write-failure"
@@ -1257,6 +1304,8 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_rejects_replaced_workspace_after_provider_id
+test_unresolved_record_preserves_previous_record_on_publish_failure
+test_unresolved_record_rejects_replaced_destination_path
 test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup
 test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails
 test_target_ready_fails_when_target_absent
