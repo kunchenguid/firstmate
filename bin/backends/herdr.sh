@@ -1935,7 +1935,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
   if [ "$raw_launch" = 1 ]; then
     process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane_id")
     case "$process_identity" in
-      omp|unknown)
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) : ;;
+      *)
         printf 'unknown'
         return 0
         ;;
@@ -1944,9 +1945,15 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
   if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
     && [ "$recorded_harness" != unknown ] \
     && [ "$raw_launch" != 1 ]; then
-    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_omp_process_tree_state "$session" "$pane_id")
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane_id")
     case "$process_identity" in
-      omp|unknown)
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        fm_harness_identity_matches "$recorded_harness" "$process_identity" "$raw_launch" || {
+          printf 'unknown'
+          return 0
+        }
+        ;;
+      *)
         printf 'unknown'
         return 0
         ;;
@@ -1986,6 +1993,27 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
       || { [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] && [ "$recorded_harness" != unknown ]; }; }; then
     printf 'unknown'
     return 0
+  fi
+  if [ "$agent" != omp ]; then
+    if [ -z "$process_identity" ]; then
+      process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane_id")
+    fi
+    case "$process_identity" in
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        fm_harness_identity_matches "$recorded_harness" "$process_identity" "$raw_launch" || {
+          printf 'unknown'
+          return 0
+        }
+        fm_harness_identity_matches "$agent" "$process_identity" || {
+          printf 'unknown'
+          return 0
+        }
+        ;;
+      *)
+        printf 'unknown'
+        return 0
+        ;;
+    esac
   fi
   case "$agent:$status" in
     omp:idle|omp:done)
@@ -2823,8 +2851,8 @@ EOF
   fi
 }
 
-fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unknown
-  local session=$1 pane=$2 info shell_pid rows name args
+fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other|unknown
+  local session=$1 pane=$2 info shell_pid rows name args identity current_identity= tree
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2833,6 +2861,7 @@ fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unk
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
     and (.result.process_info.shell_pid | type == "number" and . > 1)
+    and (.result.process_info.foreground_process_group_id | type == "number" and . > 1)
     and (.result.process_info.foreground_processes | type == "array" and length > 0)
     and all(.result.process_info.foreground_processes[];
       (.pid | type) == "number"
@@ -2859,10 +2888,21 @@ fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unk
     return 0
   }
   while IFS=$'\t' read -r name args; do
-    if fm_harness_omp_process_matches "$name" "$args"; then
-      printf 'omp'
-      return 0
-    fi
+    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$name" "$args")
+    case "$identity" in
+      omp)
+        printf 'omp'
+        return 0
+        ;;
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        if [ -z "$current_identity" ]; then
+          current_identity=$identity
+        elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+          printf 'unknown'
+          return 0
+        fi
+        ;;
+    esac
   done <<EOF
 $rows
 EOF
@@ -2871,12 +2911,41 @@ EOF
     printf 'unknown'
     return 0
   }
-  fm_harness_process_tree_omp_state "$shell_pid" "${FM_HERDR_PS_BIN:-ps}"
+  tree=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_tree_identity "$shell_pid" "${FM_HERDR_PS_BIN:-ps}")
+  case "$tree" in
+    omp|unknown)
+      printf '%s' "$tree"
+      return 0
+      ;;
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+      if [ -z "$current_identity" ]; then
+        current_identity=$tree
+      elif ! fm_harness_identity_matches "$current_identity" "$tree"; then
+        printf 'unknown'
+        return 0
+      fi
+      ;;
+    shell|other) : ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  if [ -n "$current_identity" ]; then
+    printf '%s' "$current_identity"
+  else
+    printf '%s' "$tree"
+  fi
 }
 
-fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> -> omp|other|unknown
+fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unknown
+  case "$(fm_backend_herdr_process_identity "$1" "$2")" in
+    omp) printf 'omp' ;;
+    unknown) printf 'unknown' ;;
+    *) printf 'other' ;;
+  esac
+}
+
+fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> -> harness|shell|other|unknown
   local FM_HARNESS_UNVERIFIED=
-  fm_backend_herdr_omp_process_tree_state "$1" "$2"
+  fm_backend_herdr_process_identity "$1" "$2"
 }
 
 fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> -> true for OMP
@@ -2884,30 +2953,7 @@ fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> -> true for OM
 }
 
 fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
-  local recorded_harness=$1 agent=$2 raw_launch=${3:-}
-  if [ "$raw_launch" = 1 ] && [ "$agent" != omp ]; then
-    case "$agent" in
-      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) return 0 ;;
-      *) return 1 ;;
-    esac
-  fi
-  case "$recorded_harness" in
-    omp) [ "$agent" = omp ] ;;
-    pi|pi-signed) case "$agent" in pi|pi-signed) return 0 ;; *) return 1 ;; esac ;;
-    claude*) [ "$agent" = claude ] ;;
-    codex*) [ "$agent" = codex ] ;;
-    opencode*) [ "$agent" = opencode ] ;;
-    grok*) [ "$agent" = grok ] ;;
-    kimi*) [ "$agent" = kimi ] ;;
-    muse*) [ "$agent" = muse ] ;;
-    ''|unknown)
-      case "$agent" in
-        claude|codex|opencode|grok|kimi|muse|pi|pi-signed|omp) return 0 ;;
-        *) return 1 ;;
-      esac
-      ;;
-    *) [ "$recorded_harness" = "$agent" ] ;;
-  esac
+  fm_harness_identity_matches "$1" "$2" "${3:-}"
 }
 
 # Return 0 for an authorized endpoint, 1 for a confirmed refusal, and 2 when
@@ -2958,10 +3004,13 @@ EOF
     esac
   fi
   if [ "$agent" != omp ]; then
-    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_omp_process_tree_state "$session" "$pane")
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane")
     case "$process_identity" in
       omp) return 1 ;;
-      other) : ;;
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        fm_harness_identity_matches "$recorded_harness" "$process_identity" "$raw_launch" || return 2
+        fm_harness_identity_matches "$agent" "$process_identity" || return 2
+        ;;
       *) return 2 ;;
     esac
   fi

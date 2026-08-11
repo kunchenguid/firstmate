@@ -286,8 +286,68 @@ fm_backend_tmux_foreground_omp_identity() {  # <target>
   )
 }
 
-fm_backend_tmux_omp_process_tree_state() {  # <target> -> omp|other|unknown
-  local target=$1 pane_pid state
+fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|other|unknown
+  local target=$1 name identity current_identity= shell_seen=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    identity=$(fm_harness_process_identity "$name" "$name")
+    case "$identity" in
+      omp) printf 'omp'; return 0 ;;
+      shell) shell_seen=1 ;;
+      *)
+        if fm_harness_identity_supported "$identity"; then
+          if [ -z "$current_identity" ]; then
+            current_identity=$identity
+          elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+            printf 'unknown'
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  done < <(fm_backend_tmux_foreground_comms "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    identity=$(fm_harness_process_identity "$name" "$name")
+    case "$identity" in
+      omp) printf 'omp'; return 0 ;;
+      shell) shell_seen=1 ;;
+      *)
+        if fm_harness_identity_supported "$identity"; then
+          if [ -z "$current_identity" ]; then
+            current_identity=$identity
+          elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+            printf 'unknown'
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  done < <(fm_backend_tmux_foreground_argv0s "$target")
+  name=$(fm_backend_tmux_current_command "$target") || {
+    printf 'unknown'
+    return 0
+  }
+  identity=$(fm_harness_process_identity "$name" "$name")
+  case "$identity" in
+    omp) printf 'omp' ;;
+    shell) [ -n "$current_identity" ] && printf '%s' "$current_identity" || printf 'shell' ;;
+    *)
+      if [ -n "$current_identity" ]; then
+        printf '%s' "$current_identity"
+      elif fm_harness_identity_supported "$identity"; then
+        printf '%s' "$identity"
+      elif [ "$shell_seen" -eq 1 ]; then
+        printf 'shell'
+      else
+        printf 'other'
+      fi
+      ;;
+  esac
+}
+
+fm_backend_tmux_process_identity() {  # <target> -> harness|shell|other|unknown
+  local target=$1 pane_pid tree foreground
   pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -295,29 +355,46 @@ fm_backend_tmux_omp_process_tree_state() {  # <target> -> omp|other|unknown
   case "$pane_pid" in
     ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
   esac
-  state=$(fm_harness_process_tree_omp_state "$pane_pid" "${FM_TMUX_PS_BIN:-ps}")
-  case "$state" in
+  tree=$(fm_harness_process_tree_identity "$pane_pid" "${FM_TMUX_PS_BIN:-ps}")
+  foreground=$(fm_backend_tmux_foreground_process_identity "$target")
+  case "$tree" in
     omp) printf 'omp' ;;
-    other)
-      if fm_backend_tmux_foreground_omp_identity "$target"; then
-        printf 'omp'
-      else
-        printf 'other'
-      fi
-      ;;
     unknown)
-      if fm_backend_tmux_foreground_omp_identity "$target"; then
-        printf 'omp'
-      else
-        printf 'unknown'
-      fi
+      [ "$foreground" = omp ] && printf 'omp' || printf 'unknown'
       ;;
+    shell|other)
+      case "$foreground" in
+        omp) printf 'omp' ;;
+        claude|codex|opencode|grok|kimi|muse|pi|pi-signed) printf '%s' "$foreground" ;;
+        unknown) printf 'unknown' ;;
+        *) printf '%s' "$tree" ;;
+      esac
+      ;;
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+      case "$foreground" in
+        omp) printf 'omp' ;;
+        claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+          fm_harness_identity_matches "$tree" "$foreground" && printf '%s' "$tree" || printf 'unknown'
+          ;;
+        unknown) printf 'unknown' ;;
+        *) printf '%s' "$tree" ;;
+      esac
+      ;;
+    *) printf 'unknown' ;;
   esac
 }
 
-fm_backend_tmux_raw_omp_process_state() {  # <target> -> omp|other|unknown
+fm_backend_tmux_omp_process_tree_state() {  # <target> -> omp|other|unknown
+  case "$(fm_backend_tmux_process_identity "$1")" in
+    omp) printf 'omp' ;;
+    unknown) printf 'unknown' ;;
+    *) printf 'other' ;;
+  esac
+}
+
+fm_backend_tmux_raw_omp_process_state() {  # <target> -> harness|shell|other|unknown
   local FM_HARNESS_UNVERIFIED=
-  fm_backend_tmux_omp_process_tree_state "$1"
+  fm_backend_tmux_process_identity "$1"
 }
 
 fm_backend_tmux_raw_omp_identity() {  # <target>
@@ -386,7 +463,8 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
   if [ "$raw_launch" = 1 ]; then
     process_identity=$(fm_backend_tmux_raw_omp_process_state "$target")
     case "$process_identity" in
-      omp|unknown)
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) : ;;
+      *)
         printf 'unverified'
         return 0
         ;;
@@ -394,16 +472,20 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
   fi
   if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
     && [ "$recorded_harness" != unknown ] && [ "$raw_launch" != 1 ]; then
-    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_omp_process_tree_state "$target")
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_process_identity "$target")
     case "$process_identity" in
-      omp) printf 'ambiguous'; return 0 ;;
-      unknown) printf 'unreadable'; return 0 ;;
-      other) : ;;
+      omp|unknown|shell|other) printf 'ambiguous'; return 0 ;;
+      *)
+        fm_harness_identity_matches "$recorded_harness" "$process_identity" || {
+          printf 'ambiguous'
+          return 0
+        }
+        ;;
     esac
   fi
   if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ] \
     && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
-    && ! fm_backend_tmux_foreground_omp_identity "$target"; then
+    && [ "$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_process_identity "$target")" != omp ]; then
     printf 'ambiguous'
     return 0
   fi

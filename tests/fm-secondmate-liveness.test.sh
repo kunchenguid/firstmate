@@ -95,10 +95,12 @@ SH
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
-case "\$*" in
+  case "\$*" in
   "-axo pid=,ppid=")
     if [ "\${FM_FAKE_PS_BAD:-0}" = 1 ]; then
       printf 'not-a-process-row\\n'
+    elif [ "\${FM_FAKE_PS_REPARENTED:-0}" = 1 ]; then
+      printf '1 0\\n4242 1\\n6161 1\\n'
     else
       printf '1 0\\n4242 1\\n5151 4242\\n6161 5151\\n'
     fi
@@ -239,6 +241,21 @@ test_tmux_non_omp_record_rejects_current_omp() {
   pass "tmux identity: recorded non-OMP rejects a current OMP endpoint"
 }
 
+test_tmux_non_omp_requires_positive_current_identity() {
+  local fb out status current
+  for current in bash codex; do
+    fb=$(make_probe_tmux "$TMP_ROOT/tmux-non-omp-current-$current" "$current")
+    out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win claude' "$ROOT")
+    [ "$out" = ambiguous ] || fail "a recorded Claude task over current $current must remain ambiguous, got '$out'"
+    PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label claude' "$ROOT" >/dev/null 2>&1
+    status=$?
+    [ "$status" -ne 0 ] || fail "a recorded Claude task over current $current must reject control input"
+    out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify tmux sess:win claude current "$1"' "$ROOT" "$TMP_ROOT/tmux-non-omp-current-$current/state")
+    [ "$out" = "unknown identity-mismatch" ] || fail "busy must reject current $current for recorded Claude, got '$out'"
+  done
+  pass "tmux identity: shell and cross-harness relaunches require positive equality"
+}
+
 test_tmux_raw_background_omp_is_quarantined() {
   local fb out status
   fb=$(make_tree_probe_tmux "$TMP_ROOT/tmux-raw-background-omp" bash "$TMP_ROOT/tmux-raw-background-omp/omp")
@@ -252,6 +269,9 @@ test_tmux_raw_background_omp_is_quarantined() {
   out=$(PATH="$fb:$BASE_PATH" FM_FAKE_PS_OMP_PID=6161 FM_FAKE_PS_BAD=1 \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
   [ "$out" = unverified ] || fail "an unreadable raw tmux process tree must remain unverified, got '$out'"
+  out=$(PATH="$fb:$BASE_PATH" FM_FAKE_PS_REPARENTED=1 FM_FAKE_PS_OMP_PID=6161 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
+  [ "$out" = unverified ] || fail "a reparented raw OMP process must remain unverified, got '$out'"
   pass "tmux identity: background raw OMP descendants are quarantined"
 }
 
@@ -266,10 +286,13 @@ test_tmux_busy_rejects_reverse_omp_identity() {
 
 test_tmux_raw_non_omp_preserves_liveness() {
   local fb out
-  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-non-omp" bash)
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-non-omp" claude)
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
-  [ "$out" = dead ] || fail "raw non-OMP tmux endpoints must retain ordinary shell recovery, got '$out'"
-  pass "tmux liveness: raw non-OMP endpoints preserve shell recovery"
+  [ "$out" = alive ] || fail "positively corroborated raw Claude endpoints must remain alive, got '$out'"
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-shell" bash)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
+  [ "$out" = unverified ] || fail "raw shell endpoints must remain unverified, got '$out'"
+  pass "tmux liveness: positively corroborated raw non-OMP endpoints remain live"
 }
 
 test_tmux_control_rejects_stale_canonical_omp() {
@@ -514,22 +537,19 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
-test_sweep_respawns_confirmed_dead_secondmate() {
+test_sweep_skips_shell_without_positive_identity() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead)
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
-    "a successfully respawned secondmate should be handled silently"
-  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
-    "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
-  assert_contains "$(cat "$log")" "new-window" \
-    "a confirmed-dead secondmate should actually be relaunched"
-  pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: existing endpoint has ambiguous agent process" \
+    "a shell relaunch must remain non-actionable without positive identity"
+  [ ! -s "$log" ] || fail "an ambiguous shell endpoint must never be killed or relaunched: $(cat "$log")"
+  pass "sweep: a shell endpoint without positive identity stays untouched"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -637,7 +657,7 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
 
   assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded harness 'custom-agent' is unverified for recovery" \
     "an unverified harness should not let a dead endpoint become actionable"
@@ -667,8 +687,8 @@ test_sweep_converges_no_retouch_once_alive() {
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  # Round 1: dead -> respawned silently (kill + new-window logged).
-  out1=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  # Round 1: missing -> respawned silently (new-window logged).
+  out1=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
   assert_not_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1 should handle the successful respawn silently"
   [ -s "$log" ] || fail "round 1 should have logged the kill+respawn window operations"
 
@@ -709,7 +729,7 @@ test_sweep_noop_with_no_secondmate_meta() {
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
     "with no kind=secondmate meta present, the sweep must print nothing"
@@ -722,6 +742,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_tmux_canonical_omp_rejects_stale_endpoint
 test_tmux_canonical_omp_accepts_current_endpoint
 test_tmux_non_omp_record_rejects_current_omp
+test_tmux_non_omp_requires_positive_current_identity
 test_tmux_raw_background_omp_is_quarantined
 test_tmux_busy_rejects_reverse_omp_identity
 test_tmux_raw_non_omp_preserves_liveness
@@ -729,7 +750,7 @@ test_tmux_control_rejects_stale_canonical_omp
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_raw_marker_gates_busy_and_control
-test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_skips_shell_without_positive_identity
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

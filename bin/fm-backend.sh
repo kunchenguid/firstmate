@@ -696,6 +696,7 @@ fm_backend_current_omp_identity() {  # <backend> <target>
 fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-launch]
   local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state
   [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if [ "$recorded_harness" = raw-omp ]; then
     printf 'omp'
     return 0
@@ -705,7 +706,6 @@ fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-
     printf '%s' "${FM_BACKEND_RAW_OMP_STATE:-unknown}"
     return 0
   fi
-  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if [ "$recorded_harness" = omp ]; then
     if ! fm_harness_omp_attribution_allowed; then
       printf 'unknown'
@@ -714,15 +714,11 @@ fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-
     case "$backend" in
       herdr)
         fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-        state=$(fm_backend_herdr_omp_process_identity \
+        state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity \
           "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
         ;;
       tmux)
-        if fm_backend_tmux_foreground_omp_identity "$target"; then
-          state=omp
-        else
-          state=other
-        fi
+        state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_process_identity "$target")
         ;;
       *)
         state=other
@@ -740,11 +736,11 @@ fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-
   case "$backend" in
     herdr)
       fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-      state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_omp_process_tree_state \
+      state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
       ;;
     tmux)
-      state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_omp_process_tree_state "$target")
+      state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_process_identity "$target")
       ;;
     *)
       state=other
@@ -754,8 +750,9 @@ fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-
 }
 
 fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw-launch]
-  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state identity agent agent_status
   [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  fm_backend_source "$backend" || return 1
   case "$recorded_harness:$raw_launch" in
     raw-omp:*|omp:1)
       return 1
@@ -764,20 +761,34 @@ fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw
   case "$recorded_harness:$raw_launch" in
     *:1)
       state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
-      [ "$state" = other ]
+      fm_harness_identity_matches '' "$state" 1 || return 1
       ;;
     omp:)
       state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
-      [ "$state" = omp ]
+      [ "$state" = omp ] || return 1
       ;;
     :|unknown:)
       return 0
       ;;
     *)
       state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
-      [ "$state" = other ]
+      fm_harness_identity_matches "$recorded_harness" "$state" || return 1
       ;;
   esac
+  if [ "$backend" = herdr ]; then
+    fm_backend_source herdr || return 1
+    fm_backend_herdr_parse_target "$target" || return 1
+    identity=$(fm_backend_herdr_agent_identity_raw \
+      "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent_status" in
+      working|idle|done|blocked) ;;
+      *) return 1 ;;
+    esac
+    fm_harness_identity_matches "$state" "$agent" || return 1
+  fi
 }
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style

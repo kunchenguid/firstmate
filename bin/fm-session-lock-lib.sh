@@ -25,7 +25,7 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 # avoids treating ordinary
 # firstmate paths such as bin/fm-claude-stop-autoarm.sh as harness processes.
 # OMP's Bun shape is matched by its canonical executable or script path below.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi muse pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -109,8 +109,70 @@ fm_harness_omp_process_matches() {  # <comm> <args>
   return 1
 }
 
-fm_harness_process_tree_omp_state() {  # <root-pid> [ps-bin] -> omp|other|unknown
-  local root=$1 ps_bin=${2:-ps} rows tree pid ppid comm args rc
+fm_harness_identity_supported() {  # <identity>
+  case "$1" in
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed|omp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_harness_identity_matches() {  # <expected> <actual> [raw-launch]
+  local expected=$1 actual=$2 raw_launch=${3:-}
+  if [ "$raw_launch" = 1 ]; then
+    [ "$actual" != omp ] && fm_harness_identity_supported "$actual"
+    return
+  fi
+  case "$expected" in
+    omp) [ "$actual" = omp ] ;;
+    pi|pi-signed) case "$actual" in pi|pi-signed) return 0 ;; *) return 1 ;; esac ;;
+    claude*) [ "$actual" = claude ] ;;
+    codex*) [ "$actual" = codex ] ;;
+    opencode*) [ "$actual" = opencode ] ;;
+    grok*) [ "$actual" = grok ] ;;
+    kimi*) [ "$actual" = kimi ] ;;
+    muse*) [ "$actual" = muse ] ;;
+    ''|unknown) fm_harness_identity_supported "$actual" ;;
+    *) [ "$expected" = "$actual" ] ;;
+  esac
+}
+
+fm_harness_process_identity() {  # <comm> <args> -> harness|shell|other
+  local comm=$1 args=${2:-} base argv0 script name
+  [ -n "$comm" ] || { printf 'unknown'; return 0; }
+  if fm_harness_omp_process_matches "$comm" "$args"; then
+    printf 'omp'
+    return 0
+  fi
+  base=$(basename -- "$comm")
+  base=${base#-}
+  case "$base" in
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+      printf '%s' "$base"
+      return 0
+      ;;
+    muse-bin-*) printf 'muse'; return 0 ;;
+    pi-launcher|Pi) printf 'pi'; return 0 ;;
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell'; return 0 ;;
+  esac
+  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "${args%% *}"); then
+    printf '%s' "$name"
+    return 0
+  fi
+  case "$base" in
+    node|nodejs|python|python3)
+      script=${args#* }
+      script=${script%% *}
+      if name=$(fm_harness_path_name "$script"); then
+        printf '%s' "$name"
+        return 0
+      fi
+      ;;
+  esac
+  printf 'other'
+}
+
+fm_harness_process_tree_identity() {  # <root-pid> [ps-bin] -> harness|shell|other|unknown
+  local root=$1 ps_bin=${2:-ps} rows tree pid comm args identity current_identity= shell_seen=0 rc
   case "$root" in
     ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
   esac
@@ -159,27 +221,54 @@ fm_harness_process_tree_omp_state() {  # <root-pid> [ps-bin] -> omp|other|unknow
       printf 'unknown'
       return 0
     }
-    args=$comm
-    case "${comm##*/}" in
-      bun)
-        args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || {
-          printf 'unknown'
-          return 0
-        }
-        args=$(printf '%s\n' "$args" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || {
-          printf 'unknown'
-          return 0
-        }
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || {
+      printf 'unknown'
+      return 0
+    }
+    args=$(printf '%s\n' "$args" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || {
+      printf 'unknown'
+      return 0
+    }
+    identity=$(fm_harness_process_identity "$comm" "$args")
+    case "$identity" in
+      omp)
+        printf 'omp'
+        return 0
+        ;;
+      unknown)
+        printf 'unknown'
+        return 0
+        ;;
+      shell) shell_seen=1 ;;
+      *)
+        if fm_harness_identity_supported "$identity"; then
+          if [ -z "$current_identity" ]; then
+            current_identity=$identity
+          elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
+            printf 'unknown'
+            return 0
+          fi
+        fi
         ;;
     esac
-    if fm_harness_omp_process_matches "$comm" "$args"; then
-      printf 'omp'
-      return 0
-    fi
   done <<EOF
 $tree
 EOF
-  printf 'other'
+  if [ -n "$current_identity" ]; then
+    printf '%s' "$current_identity"
+  elif [ "$shell_seen" -eq 1 ]; then
+    printf 'shell'
+  else
+    printf 'other'
+  fi
+}
+
+fm_harness_process_tree_omp_state() {  # <root-pid> [ps-bin] -> omp|other|unknown
+  case "$(fm_harness_process_tree_identity "$@")" in
+    omp) printf 'omp' ;;
+    unknown) printf 'unknown' ;;
+    *) printf 'other' ;;
+  esac
 }
 
 # True when the process described by command name $1 and full argument string $2
