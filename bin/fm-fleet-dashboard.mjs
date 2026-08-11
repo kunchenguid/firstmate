@@ -229,6 +229,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   const underway = [];
   const unhealthy = [];
   const queued = [];
+  const unreadable = [];
 
   const sinceAge = (record) => age(secondsSince(Date.parse(record.since || ""), observedMilliseconds));
   const waitsOn = (record) =>
@@ -399,16 +400,26 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
         });
         continue;
       }
+      if (lastEvent?.state === "failed") {
+        unhealthy.push({
+          ...base,
+          tag: "FAILED",
+          prose: cleanProse(lastEvent.note) || "reported failed",
+          note: "current state unreadable",
+        });
+        continue;
+      }
+      // No record evidences this task as bad; the reader simply cannot read
+      // its current state. That is a fact about the reader, not the worker.
+      unreadable.push({ ...base, tag: "?", prose: null, note: detail || "state unreadable" });
+      continue;
     }
-    if (["failed", "unknown"].includes(state) || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
-      const reason =
-        state === "failed" || state === "unknown"
-          ? detail || "no readable state"
-          : "worker gone while its state claims live work";
+    if (state === "failed" || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
+      const reason = state === "failed" ? detail || "run failed" : "worker gone while its state claims live work";
       const lastEvent = cleanProse(task.hints?.last_event_text);
       unhealthy.push({
         ...base,
-        tag: state === "failed" ? "FAILED" : state === "unknown" ? "UNKNOWN" : "MISSING",
+        tag: state === "failed" ? "FAILED" : "MISSING",
         prose: reason,
         note: lastEvent && !reason.includes(lastEvent) ? `last event: ${lastEvent}` : base.note,
       });
@@ -435,6 +446,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   underway.sort(oldestFirst);
   unhealthy.sort(oldestFirst);
   queued.sort(oldestFirst);
+  unreadable.sort(oldestFirst);
 
   return {
     generated: snapshot.generated || "observation time absent",
@@ -482,6 +494,18 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
         twoLine: false,
         empty: backlogPresent ? "queue empty" : "backlog absent - queue unknown",
       },
+      {
+        key: "unreadable",
+        name: "UNREADABLE",
+        htmlTitle: "Unreadable",
+        tone: "neutral",
+        items: unreadable,
+        cap: 0,
+        twoLine: false,
+        foldWord: "unreadable right now, nothing evidences them as bad",
+        hideWhenEmpty: true,
+        empty: "",
+      },
     ],
   };
 }
@@ -520,6 +544,9 @@ function renderTerminal(model, width, useColor, showAll) {
     ),
   );
   for (const bucket of model.buckets) {
+    if (bucket.items.length === 0 && bucket.hideWhenEmpty) {
+      continue;
+    }
     lines.push("");
     const header = `── ${bucket.name} (${bucket.items.length}) `;
     const fill = "─".repeat(Math.max(0, width - header.length));
@@ -548,7 +575,8 @@ function renderTerminal(model, width, useColor, showAll) {
     const hidden = bucket.items.length - shown.length;
     if (hidden > 0) {
       const ruleText = bucket.rule ? ` · ${bucket.rule}` : "";
-      lines.push(paint("dim", clip(`  … ${hidden} more${ruleText} · --all shows all`, width)));
+      const foldWord = bucket.foldWord || "more";
+      lines.push(paint("dim", clip(`  … ${hidden} ${foldWord}${ruleText} · --all shows all`, width)));
     }
   }
   return `${lines.join("\n")}\n`;
@@ -587,6 +615,7 @@ function sourceValue(label, value) {
 
 function renderHtml(model) {
   const sections = model.buckets
+    .filter((bucket) => bucket.items.length > 0 || !bucket.hideWhenEmpty)
     .map(
       (bucket) => `<section id="${bucket.key}">
     <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2><p>${bucket.items.length} item${bucket.items.length === 1 ? "" : "s"}</p></div>

@@ -57,7 +57,7 @@ for argument in "$@"; do
 done
 case "${1:-}" in
   list-windows)
-    printf '%s\n' fm-progressing-task fm-decision-task fm-review-task fm-sm-relay
+    printf '%s\n' fm-progressing-task fm-decision-task fm-review-task fm-sm-relay fm-opaque-task
     ;;
   display-message)
     case "$*" in
@@ -85,7 +85,7 @@ intake_payload() {
 write_live_fixture() {  # <home>
   local home=$1 intake attempt root generation decision_generation review_generation
   mkdir -p "$home/projects/progressing" "$home/projects/decision" "$home/projects/unhealthy" \
-    "$home/projects/merged" "$home/projects/review" "$home/projects/paused"
+    "$home/projects/merged" "$home/projects/review" "$home/projects/paused" "$home/projects/opaque"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] progressing-task - Continue implementation (repo: firstmate) (kind: ship) (since 2026-08-02)
@@ -102,6 +102,7 @@ write_live_fixture() {  # <home>
 
 - [ ] review-task - Ship the review branch (repo: firstmate) (kind: ship) (since 2026-08-01)
 - [ ] paused-task - Wait out the vendor limit (repo: firstmate) (kind: ship) (since 2026-08-01)
+- [ ] opaque-task - Push the hotfix (repo: firstmate) (kind: ship) (since 2026-08-01)
 
 ## Queued
 - [ ] queued-task - Ship the follow-up blocked-by: decision-task (repo: firstmate) (kind: ship) (since 2026-07-30)
@@ -191,6 +192,18 @@ EOF
     "yolo=off"
   printf 'paused: vendor rate limit resets tomorrow\n' > "$home/state/paused-task.status"
 
+  # A live worker whose harness state the reader cannot verify: not evidence
+  # of sickness, so it must fold into the quiet unreadable line.
+  fm_write_meta "$home/state/opaque-task.meta" \
+    "window=firstmate:fm-opaque-task" \
+    "worktree=$home/projects/opaque" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: pushing the fix\n' > "$home/state/opaque-task.status"
+
   # A secondmate's multiplexed log mentioning a historical PR must never mint
   # a review ask: the URL below exists only in status prose, not in metadata.
   fm_write_meta "$home/state/sm-relay.meta" \
@@ -206,7 +219,7 @@ EOF
   # Pin status mtimes so age-in-state is deterministic against FM_SNAPSHOT_NOW.
   TZ=UTC touch -t 202608020000 "$home/state/decision-task.status" "$home/state/unhealthy-task.status" \
     "$home/state/merged-task.status" "$home/state/review-task.status" "$home/state/paused-task.status" \
-    "$home/state/sm-relay.status"
+    "$home/state/sm-relay.status" "$home/state/opaque-task.status"
 }
 
 render_terminal() {  # <home> <fakebin> [extra args...]
@@ -257,6 +270,9 @@ test_terminal_cockpit_opens_on_needs_pedro() {
     "a PR URL parsed from secondmate status prose minted a review ask"
   assert_contains "$out" "declared wait, worker gone: vendor rate" \
     "a declared pause with a gone worker was not rendered as a wait"
+  assert_contains "$out" "UNREADABLE (1)" "unverifiable harness state did not get its own quiet section"
+  assert_contains "$out" "nothing evidences them as bad" "the unreadable fold line does not disclaim sickness"
+  assert_not_contains "$out" "Push the hotfix" "an unreadable worker rendered as a full row by default"
   assert_contains "$out" "5 more" "hidden Needs Pedro items were not counted"
   assert_contains "$out" "rule: live asks, PRs, holds, oldest first" "selection rule is not printed on screen"
   assert_contains "$out" "--all shows all" "expansion hint is not printed"
@@ -278,6 +294,7 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   all_out=$(render_terminal "$home" "$fakebin" --width 100 --all) || fail "terminal --all render failed"
   assert_contains "$all_out" "Sign off on the icon refresh" "--all does not list capped-out items"
   assert_contains "$all_out" "Pedro must choose the deployment window." "--all does not list capped-out hold detail"
+  assert_contains "$all_out" "Push the hotfix" "--all does not list unreadable workers"
   assert_not_contains "$all_out" "more · --all shows all" "--all still hides items behind a count line"
 
   # shellcheck disable=SC2016  # the ${...} below is a node template literal, not shell
