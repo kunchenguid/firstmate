@@ -53,6 +53,19 @@ if [ "\${FM_TEST_FAIL_RM_CURSOR_ONCE:-0}" = 1 ] && [ ! -e "$TMP_ROOT/rm-cursor-f
     esac
   done
 fi
+if [ "\${FM_TEST_FAIL_RM_BRIDGE_ONCE:-0}" = 1 ] && [ ! -e "$TMP_ROOT/rm-bridge-failed" ]; then
+  for arg in "\$@"; do
+    case "\$arg" in
+      */sandbox-bridge/partial-remove-task)
+        "$REAL_RM" -f \
+          "\$arg/binding" "\$arg/status" "\$arg/runtime-brief.md" \
+          "\$arg/fm-operational-input.sh"
+        : > "$TMP_ROOT/rm-bridge-failed"
+        exit 1
+        ;;
+    esac
+  done
+fi
 exec "$REAL_RM" "\$@"
 SH
 chmod 700 "$FAILBIN/rm"
@@ -301,6 +314,32 @@ fm_sandbox_bridge_remove "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" || s
 expect_code 0 "$status" "bridge removal retry"
 assert_no_entry "$remove_bridge" "bridge removal retry left the bridge behind"
 assert_no_entry "$remove_cursor" "bridge removal retry left the cursor behind"
+
+PARTIAL_REMOVE_ID='partial-remove-task'
+status=0
+fm_sandbox_bridge_create "$STATE" "$PARTIAL_REMOVE_ID" "$WORKTREE" "$BRIEF" "$ENCODER" || status=$?
+expect_code 0 "$status" "partial bridge removal fixture creation"
+partial_bridge=$(fm_sandbox_bridge_expected_path "$STATE" "$PARTIAL_REMOVE_ID") \
+  || fail "partial bridge removal path resolution failed"
+partial_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$PARTIAL_REMOVE_ID") \
+  || fail "partial bridge removal cursor path resolution failed"
+export FM_TEST_FAIL_RM_BRIDGE_ONCE=1
+status=0
+fm_sandbox_bridge_remove "$partial_bridge" "$STATE" "$PARTIAL_REMOVE_ID" "$WORKTREE" || status=$?
+expect_code 1 "$status" "partial bridge deletion should report its provider failure"
+assert_present "$partial_bridge" "partial bridge deletion removed the bridge root unexpectedly"
+assert_no_entry "$partial_bridge/binding" "partial bridge deletion did not leave a partially consumed bridge"
+assert_present "$partial_cursor" "partial bridge deletion did not retain the cursor"
+assert_present "$STATE/sandbox-bridge-remove/$PARTIAL_REMOVE_ID" \
+  "partial bridge deletion did not retain exact cleanup identities"
+unset FM_TEST_FAIL_RM_BRIDGE_ONCE
+status=0
+fm_sandbox_bridge_remove "$partial_bridge" "$STATE" "$PARTIAL_REMOVE_ID" "$WORKTREE" || status=$?
+expect_code 0 "$status" "partial bridge deletion retry"
+assert_no_entry "$partial_bridge" "partial bridge deletion retry left the bridge behind"
+assert_no_entry "$partial_cursor" "partial bridge deletion retry left the cursor behind"
+assert_no_entry "$STATE/sandbox-bridge-remove/$PARTIAL_REMOVE_ID" \
+  "partial bridge deletion retry left its cleanup identity record"
 
 MISSING_WORKTREE_ID='missing-worktree-task'
 mkdir -p "$TMP_ROOT/missing-worktree-source"

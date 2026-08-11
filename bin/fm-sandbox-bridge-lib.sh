@@ -69,6 +69,72 @@ fm_sandbox_bridge_cursor_path() {  # <state> <task-id>
   printf '%s/sandbox-bridge-cursor/%s' "$state_real" "$task_id"
 }
 
+fm_sandbox_bridge_removal_record_path() {  # <state> <task-id>
+  local state=$1 task_id=$2 state_real
+  fm_sandbox_bridge_task_id_valid "$task_id" || return 1
+  state_real=$(fm_sandbox_bridge_real_dir "$state") || return 1
+  printf '%s/sandbox-bridge-remove/%s' "$state_real" "$task_id"
+}
+
+fm_sandbox_bridge_removal_record_read() {  # <record>
+  local record=$1 fields bridge_id cursor_id
+  fm_sandbox_bridge_private_regular "$record" || return 1
+  fields=$(awk -F= '
+    NR == 1 && NF == 2 && $1 == "bridge_id" { bridge = $2; next }
+    NR == 2 && NF == 2 && $1 == "cursor_id" { cursor = $2; next }
+    { invalid = 1 }
+    END {
+      if (NR != 2 || invalid) exit 1
+      print bridge "\t" cursor
+    }
+  ' "$record") || return 1
+  IFS=$'\t' read -r bridge_id cursor_id <<EOF
+$fields
+EOF
+  case "$bridge_id" in *[!A-Za-z0-9:._-]*) return 1 ;; esac
+  case "$cursor_id" in *[!A-Za-z0-9:._-]*) return 1 ;; esac
+  # shellcheck disable=SC2034
+  FM_SANDBOX_BRIDGE_REMOVAL_BRIDGE_ID=$bridge_id
+  # shellcheck disable=SC2034
+  FM_SANDBOX_BRIDGE_REMOVAL_CURSOR_ID=$cursor_id
+}
+
+fm_sandbox_bridge_removal_record_write() {  # <state> <task-id> <bridge-id> <cursor-id>
+  local state=$1 task_id=$2 bridge_id=$3 cursor_id=$4 record record_dir tmp
+  case "$bridge_id" in *[!A-Za-z0-9:._-]*) return 1 ;; esac
+  case "$cursor_id" in *[!A-Za-z0-9:._-]*) return 1 ;; esac
+  record=$(fm_sandbox_bridge_removal_record_path "$state" "$task_id") || return 1
+  record_dir=${record%/*}
+  if [ -e "$record_dir" ] || [ -L "$record_dir" ]; then
+    [ -d "$record_dir" ] && [ ! -L "$record_dir" ] || return 1
+  else
+    mkdir -m 700 "$record_dir" || return 1
+  fi
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    return 1
+  fi
+  tmp=$(mktemp "${record}.XXXXXX") || return 1
+  if ! {
+    chmod 600 "$tmp" &&
+      printf 'bridge_id=%s\ncursor_id=%s\n' "$bridge_id" "$cursor_id" > "$tmp" &&
+      mv -f "$tmp" "$record"
+  }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fm_sandbox_bridge_removal_record_remove() {  # <state> <task-id>
+  local state=$1 task_id=$2 record record_dir
+  record=$(fm_sandbox_bridge_removal_record_path "$state" "$task_id") || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    fm_sandbox_bridge_private_regular "$record" || return 1
+    rm -f "$record" || return 1
+  fi
+  record_dir=${record%/*}
+  rmdir "$record_dir" 2>/dev/null || true
+}
+
 fm_sandbox_bridge_binding_value() {  # <binding> <key>
   local binding=$1 key=$2 count
   fm_sandbox_bridge_safe_regular "$binding" || return 1
@@ -312,20 +378,23 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
   }
 }
 
-fm_sandbox_bridge_remove_acquired() {  # <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]
-  [ "$#" -ge 5 ] && [ "$#" -le 6 ] || {
-    fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_remove_acquired <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]'
-    return 2
-  }
-  local bridge=$1 state=$2 task_id=$3 bridge_id=$5 cursor_id=${6:-} expected cursor current
+fm_sandbox_bridge_validate_removal_identity() {  # <bridge> <state> <task-id> <bridge-id> [cursor-id]
+  [ "$#" -ge 4 ] && [ "$#" -le 5 ] || return 2
+  local bridge=$1 state=$2 task_id=$3 bridge_id=$4 cursor_id=${5:-}
+  local expected cursor state_real bridge_root cursor_root current
   expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || return 1
   cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
+  state_real=$(fm_sandbox_bridge_real_dir "$state") || return 1
+  bridge_root=$(fm_sandbox_bridge_real_dir "$state_real/sandbox-bridge") || return 1
+  cursor_root=$(fm_sandbox_bridge_real_dir "$state_real/sandbox-bridge-cursor") || return 1
+  [ "$bridge_root" = "$state_real/sandbox-bridge" ] || return 1
+  [ "$cursor_root" = "$state_real/sandbox-bridge-cursor" ] || return 1
+  perl -e 'my @s = lstat($ARGV[0]) or exit 1; exit 1 unless -d _ && $s[4] == $< && !($s[2] & 0022);' "$bridge_root" || return 1
+  perl -e 'my @s = lstat($ARGV[0]) or exit 1; exit 1 unless -d _ && $s[4] == $< && !($s[2] & 0077);' "$cursor_root" || return 1
   [ "$bridge" = "$expected" ] || return 1
-  if [ ! -e "$bridge" ] && [ ! -L "$bridge" ] && [ ! -e "$cursor" ] && [ ! -L "$cursor" ]; then
-    return 0
-  fi
   if [ -e "$bridge" ] || [ -L "$bridge" ]; then
     [ -d "$bridge" ] && [ ! -L "$bridge" ] || return 1
+    [ -n "$bridge_id" ] || return 1
     current=$(fm_sandbox_bridge_lstat_identity "$bridge") || return 1
     [ "$current" = "$bridge_id" ] || return 1
   fi
@@ -335,6 +404,27 @@ fm_sandbox_bridge_remove_acquired() {  # <bridge> <state> <task-id> <worktree> <
     current=$(fm_sandbox_bridge_lstat_identity "$cursor") || return 1
     [ "$current" = "$cursor_id" ] || return 1
   fi
+}
+
+fm_sandbox_bridge_validate_removal_record() {  # <bridge> <state> <task-id>
+  [ "$#" -eq 3 ] || return 2
+  local bridge=$1 state=$2 task_id=$3 record
+  record=$(fm_sandbox_bridge_removal_record_path "$state" "$task_id") || return 1
+  fm_sandbox_bridge_removal_record_read "$record" || return 1
+  fm_sandbox_bridge_validate_removal_identity \
+    "$bridge" "$state" "$task_id" \
+    "$FM_SANDBOX_BRIDGE_REMOVAL_BRIDGE_ID" \
+    "$FM_SANDBOX_BRIDGE_REMOVAL_CURSOR_ID"
+}
+
+fm_sandbox_bridge_remove_acquired() {  # <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]
+  [ "$#" -ge 5 ] && [ "$#" -le 6 ] || {
+    fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_remove_acquired <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]'
+    return 2
+  }
+  local bridge=$1 state=$2 task_id=$3 bridge_id=$5 cursor_id=${6:-} cursor
+  cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
+  fm_sandbox_bridge_validate_removal_identity "$bridge" "$state" "$task_id" "$bridge_id" "$cursor_id" || return 1
   if [ -e "$bridge" ] || [ -L "$bridge" ]; then
     rm -rf "$bridge" || return 1
   fi
@@ -507,9 +597,20 @@ fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
 fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
   [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_remove <bridge> <state> <task-id> <worktree>'; return 2; }
   local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor worktree_is_dir=0
+  local removal_record bridge_id='' cursor_id=''
   expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || return 1
   cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
   [ "$bridge" = "$expected" ] || return 1
+  removal_record=$(fm_sandbox_bridge_removal_record_path "$state" "$task_id") || return 1
+  if [ -e "$removal_record" ] || [ -L "$removal_record" ]; then
+    fm_sandbox_bridge_removal_record_read "$removal_record" || return 1
+    fm_sandbox_bridge_remove_acquired \
+      "$bridge" "$state" "$task_id" "$worktree" \
+      "$FM_SANDBOX_BRIDGE_REMOVAL_BRIDGE_ID" \
+      "$FM_SANDBOX_BRIDGE_REMOVAL_CURSOR_ID" || return 1
+    fm_sandbox_bridge_removal_record_remove "$state" "$task_id" || return 1
+    return 0
+  fi
   if [ -d "$worktree" ] && [ ! -L "$worktree" ]; then
     worktree_is_dir=1
   fi
@@ -528,11 +629,21 @@ fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
         fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || return 1
       fi
     fi
-    rm -rf "$bridge" || return 1
   fi
-  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+  if { [ ! -e "$bridge" ] && [ ! -L "$bridge" ]; } \
+     && { [ -e "$cursor" ] || [ -L "$cursor" ]; }; then
     fm_sandbox_bridge_private_regular "$cursor" || return 1
     fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || return 1
-    rm -f "$cursor" || return 1
   fi
+  if [ -e "$bridge" ] || [ -L "$bridge" ]; then
+    bridge_id=$(fm_sandbox_bridge_lstat_identity "$bridge") || return 1
+  fi
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    cursor_id=$(fm_sandbox_bridge_lstat_identity "$cursor") || return 1
+  fi
+  fm_sandbox_bridge_removal_record_write \
+    "$state" "$task_id" "$bridge_id" "$cursor_id" || return 1
+  fm_sandbox_bridge_remove_acquired \
+    "$bridge" "$state" "$task_id" "$worktree" "$bridge_id" "$cursor_id" || return 1
+  fm_sandbox_bridge_removal_record_remove "$state" "$task_id"
 }

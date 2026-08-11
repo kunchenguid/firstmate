@@ -130,7 +130,11 @@ case "$1" in
     [ -n "${1:-}" ] || exit 2
     workspace=${2:-}
     if [ "${FM_FAKE_SBX_CREATE_NO_RECORD:-0}" != 1 ]; then
-      printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
+      if [ "${FM_FAKE_SBX_CREATE_FOREIGN_SAME_NAME:-0}" = 1 ]; then
+        printf 'id-foreign-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
+      else
+        printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
+      fi
       if [ "${FM_FAKE_SBX_CREATE_AMBIGUOUS:-0}" = 1 ]; then
         printf 'id-race-%s\trace-%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
       fi
@@ -226,27 +230,31 @@ case_record=$(make_case provider-failure provider-fail-cd4)
 IFS='|' read -r case_dir home proj wt fakebin <<EOF
 $case_record
 EOF
-export FM_FAKE_SBX_CREATE_FAIL=1
+export FM_FAKE_SBX_CREATE_FAIL=1 FM_FAKE_SBX_CREATE_FOREIGN_SAME_NAME=1
 run_spawn "$case_dir" provider-fail-cd4 "$home" "$proj" "$wt" "$fakebin" > "$case_dir/output" 2>&1
 status=$?
-unset FM_FAKE_SBX_CREATE_FAIL
+unset FM_FAKE_SBX_CREATE_FAIL FM_FAKE_SBX_CREATE_FOREIGN_SAME_NAME
 rm -rf -- "/tmp/fm-provider-fail-cd4"
 expect_code 1 "$status" 'provider creation failure should abort fresh Docker spawn'
 assert_absent "$home/state/provider-fail-cd4.meta" 'provider failure published task metadata'
 assert_absent "$home/state/sandbox-bridge/provider-fail-cd4" 'provider failure left the bridge behind'
-[ ! -s "$case_dir/sbx.state" ] || fail 'provider failure left the reconciled partial sandbox live'
-assert_grep $'sbx\tstop\tid-fm-provider-fail-cd4' "$case_dir/events.log" \
-  'provider failure did not stop the exact reconciled provider identity'
-assert_grep $'sbx\trm\t--force\tid-fm-provider-fail-cd4' "$case_dir/events.log" \
-  'provider failure did not remove the exact reconciled provider identity'
-assert_absent "$home/state/.spawn-cleanup/provider-fail-cd4.record" \
-  'provider failure retained cleanup after exact reverse release'
+assert_grep $'id-foreign-fm-provider-fail-cd4\tfm-provider-fail-cd4' "$case_dir/sbx.state" \
+  'provider failure discarded the post-failure same-name sandbox'
+assert_no_grep $'sbx\tstop' "$case_dir/events.log" \
+  'provider failure attempted cleanup without provider ownership'
+assert_no_grep $'sbx\trm' "$case_dir/events.log" \
+  'provider failure removed the post-failure same-name sandbox'
+assert_present "$home/state/.spawn-cleanup/provider-fail-cd4.record" \
+  'provider failure did not retain unresolved ownership'
+assert_grep 'placement_pending_reason=provider-ownership-unproven' \
+  "$home/state/.spawn-cleanup/provider-fail-cd4.record" \
+  'provider failure did not retain the ownership-proof failure'
 assert_grep $'treehouse\treturn\t--force\t'"$wt" "$case_dir/events.log" \
   'provider failure did not return the acquired treehouse worktree'
 assert_grep $'tmux\tkill-window\t-t\tfirstmate:@spawnwid' "$case_dir/events.log" \
   'provider failure did not remove the exact tmux endpoint'
 assert_events_in_order $'treehouse\treturn' $'tmux\tkill-window' "$case_dir/events.log"
-pass 'fresh Docker spawn reconciles and releases partial provider creation'
+pass 'fresh Docker spawn retains unresolved partial provider ownership'
 
 case_record=$(make_case provider-no-create provider-no-create-ef5)
 IFS='|' read -r case_dir home proj wt fakebin <<EOF

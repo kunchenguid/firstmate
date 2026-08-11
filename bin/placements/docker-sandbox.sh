@@ -240,7 +240,7 @@ fm_workspace_placement_docker_sandbox_resolve_acquired() {  # <task-id> <name> <
 }
 
 fm_workspace_placement_docker_sandbox_reconcile_failed_create() {  # <task-id> <name> <before-ids>
-  local task_id=$1 name=$2 before_ids=${3:-} inventory before_json candidates new_count provider_id provider_name handle
+  local name=$2 before_ids=${3:-} inventory before_json candidates new_count provider_name
   # shellcheck disable=SC2034
   FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=
   # shellcheck disable=SC2034
@@ -274,14 +274,9 @@ fm_workspace_placement_docker_sandbox_reconcile_failed_create() {  # <task-id> <
     FM_WORKSPACE_PLACEMENT_PENDING_REASON=unattributable-new-provider-identity
     return 1
   fi
-  handle="docker-sandbox:$task_id:$name:$provider_id"
   # shellcheck disable=SC2034
-  FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
-  # shellcheck disable=SC2034
-  FM_WORKSPACE_PLACEMENT_PENDING_NAME=
-  # shellcheck disable=SC2034
-  FM_WORKSPACE_PLACEMENT_PENDING_REASON=
-  printf '%s' "$handle"
+  FM_WORKSPACE_PLACEMENT_PENDING_REASON=provider-ownership-unproven
+  return 1
 }
 
 fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <workspace> <preset> [additional-workspace] [kit-ref...]

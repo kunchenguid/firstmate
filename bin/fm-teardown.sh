@@ -470,7 +470,7 @@ PLACEMENT_HANDLE=$(fm_meta_get "$META" placement_handle)
 PLACEMENT_BRIDGE=$(fm_meta_get "$META" placement_bridge)
 DOCKER_SANDBOX=0
 validate_docker_sandbox_teardown_placement() {
-  local bridge_cursor
+  local bridge_cursor removal_record
   [ "$PLACEMENT_MODE" = direct ] || {
     echo "REFUSED: Docker Sandbox placement for $ID is not direct; preserving task state." >&2
     return 1
@@ -501,6 +501,17 @@ validate_docker_sandbox_teardown_placement() {
     echo "REFUSED: Docker Sandbox bridge for $ID has no valid host-private cursor path; preserving task state." >&2
     return 1
   }
+  removal_record=$(fm_sandbox_bridge_removal_record_path "$STATE" "$ID") || {
+    echo "REFUSED: Docker Sandbox bridge for $ID has no valid removal record path; preserving task state." >&2
+    return 1
+  }
+  if [ -e "$removal_record" ] || [ -L "$removal_record" ]; then
+    fm_sandbox_bridge_validate_removal_record "$PLACEMENT_BRIDGE" "$STATE" "$ID" || {
+      echo "REFUSED: Docker Sandbox bridge cleanup identity for $ID is invalid; preserving task state." >&2
+      return 1
+    }
+    return 0
+  fi
   if [ -e "$PLACEMENT_BRIDGE" ] || [ -L "$PLACEMENT_BRIDGE" ]; then
     if [ -d "$WT" ] && [ ! -L "$WT" ]; then
       if [ -e "$bridge_cursor" ] || [ -L "$bridge_cursor" ]; then

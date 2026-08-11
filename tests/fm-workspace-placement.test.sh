@@ -88,7 +88,11 @@ case "$1" in
     [ -n "${name:-}" ] || exit 2
     workspace=${2:-}
     if [ "${SBX_CREATE_NO_RECORD:-0}" != 1 ]; then
-      printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
+      if [ "${SBX_CREATE_FOREIGN_SAME_NAME:-0}" = 1 ]; then
+        printf 'id-foreign-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
+      else
+        printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
+      fi
       if [ "${SBX_CREATE_AMBIGUOUS:-0}" = 1 ]; then
         printf 'id-race-%s\trace-%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
       fi
@@ -231,21 +235,21 @@ pass 'Docker inventory rejects malformed members without dropping live identitie
 
 : > "$SBX_STATE"
 : > "$SBX_LOG"
-export SBX_FAIL_CREATE_AFTER_RECORD=1
+export SBX_FAIL_CREATE_AFTER_RECORD=1 SBX_CREATE_FOREIGN_SAME_NAME=1
 if fm_workspace_placement_prepare docker-sandbox direct partial.task "$workspace_real" official-agent; then
   fail 'Docker create failure unexpectedly succeeded'
 fi
-unset SBX_FAIL_CREATE_AFTER_RECORD
-assert_grep 'fm-partial.task' "$SBX_STATE" 'Docker create failure discarded the unresolved provider state'
-[ "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" = 'docker-sandbox:partial.task:fm-partial.task:id-fm-partial.task' ] || \
-  fail 'Docker create failure did not reconcile the exact new provider identity'
-[ -z "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" ] || fail 'reconciled Docker create failure retained a pending provider name'
-fm_workspace_placement_release docker-sandbox "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" force || \
-  fail 'reconciled Docker create failure could not retry exact cleanup'
-assert_grep $'stop\tid-fm-partial.task' "$SBX_LOG" 'reconciled Docker create failure did not stop exact provider identity'
-assert_grep $'rm\t--force\tid-fm-partial.task' "$SBX_LOG" 'reconciled Docker create failure did not remove exact provider identity'
-assert_no_grep 'fm-partial.task' "$SBX_STATE" 'reconciled Docker create failure left the provider live after retry cleanup'
-pass 'Docker create failure reconciles and retries exact partial placement cleanup'
+unset SBX_FAIL_CREATE_AFTER_RECORD SBX_CREATE_FOREIGN_SAME_NAME
+assert_grep 'id-foreign-fm-partial.task' "$SBX_STATE" 'post-failure same-name provider was not retained for operator reconciliation'
+[ -z "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" ] || \
+  fail 'failed Docker create adopted a same-name provider without ownership evidence'
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" = 'fm-partial.task' ] || \
+  fail 'failed Docker create lost the unresolved same-name provider'
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_REASON" = 'provider-ownership-unproven' ] || \
+  fail 'failed Docker create did not record the ownership-proof failure'
+assert_no_grep $'stop\t' "$SBX_LOG" 'failed Docker create attempted cleanup without provider ownership'
+assert_no_grep $'rm\t' "$SBX_LOG" 'failed Docker create removed a same-name provider'
+pass 'post-failure same-name Docker creation retains unresolved ownership'
 
 : > "$SBX_STATE"
 : > "$SBX_LOG"
