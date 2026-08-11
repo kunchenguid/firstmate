@@ -315,10 +315,11 @@ fm_slot_meta_referencing_tasks() {
 }
 
 fm_slot_declared_endpoint_pid() {
-  local self=$1 expected_home=${2:-} matches pid ppid candidate_pids= root_pid= root_count=0
+  local self=$1 expected_home=${2:-} index matches pid ppid candidate_pids= root_pid= root_count=0
   local current_uid proc_uid root_home
   current_uid=$(id -u 2>/dev/null) || return 2
-  matches=$(fm_agent_pids_for_task "$self" 2>/dev/null) || return 2
+  index=$(fm_agent_task_pid_index 2>/dev/null) || return 2
+  matches=$(fm_agent_pids_for_task "$self" "$index" 2>/dev/null) || return 2
   [ -n "$matches" ] || return 2
   while IFS= read -r pid; do
     fm_agent_pid_is_numeric "$pid" || continue

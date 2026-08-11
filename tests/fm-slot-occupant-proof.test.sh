@@ -59,6 +59,16 @@ verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   || fail "an unrelated unreadable process blocked exact endpoint proof: $verdict"
 pass "slot disposal scopes live-process proof to the exact backend endpoint"
 
+SELF_START_TIME=$(fm_agent_proc_start_time "$SELF_PID")
+fm_agent_task_pid_index() {
+  printf 'task-a\t%s\t%s\t%s\tcrewmate\n' \
+    "$SELF_PID" "$SELF_START_TIME" "$HOME_DIR"
+  if [ -n "${DUP_PID:-}" ] && kill -0 "$DUP_PID" 2>/dev/null; then
+    DUP_START_TIME=$(fm_agent_proc_start_time "$DUP_PID") || return 2
+    printf 'task-a\t%s\t%s\t%s\tcrewmate\n' \
+      "$DUP_PID" "$DUP_START_TIME" "$DUP_HOME"
+  fi
+}
 fm_backend_foreground_process_pid() { return 1; }
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
@@ -86,6 +96,13 @@ verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
 pass "ambiguous duplicate task markers retain the durable lease"
 kill "$DUP_PID" 2>/dev/null || true
 wait "$DUP_PID" 2>/dev/null || true
+
+fm_agent_task_pid_index() { return 2; }
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
+[ "$verdict" = "retain: authoritative endpoint-occupant evidence is unavailable" ] \
+  || fail "an incomplete task PID index did not retain the lease: $verdict"
+pass "an incomplete task PID index retains the durable lease"
 
 fm_backend_foreground_process_pid() {
   [ "$1" = herdr ] && [ "$2" = lab:pane-a ] || return 1
