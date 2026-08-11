@@ -94,14 +94,17 @@ submitted_head_sha source : exit 1, "DROPPED 1 path(s) lost validated content", 
 snapshot source           : exit 0, "armed: state/task-a.check.sh"
 ```
 
-### The validated head is snapshot while it still exists
+### The validated head was snapshot while it still existed, and that machinery is removed
 
-Firstmate's watcher records the last `head_sha` each run had while it had NOT yet pushed, keyed by run id, with the observation time - a tail rather than a trigger, because poll timing cannot reliably catch the exact pre-push boundary.
-Firstmate takes it rather than the worker, because the party being checked must not supply the evidence; it is a mechanical copy of the pipeline's own record about its own run.
-This was withdrawn with the gate, and the machinery is gone: nothing consumed the snapshot once the gate went, so a watcher tick spawning an interpreter and a database read every fifteen seconds wrote files nobody read into a directory nothing pruned.
+Nothing described in this subsection runs any more; it is recorded because someone will otherwise propose it again.
+Firstmate's watcher recorded the last `head_sha` each run had while it had NOT yet pushed, keyed by run id, with the observation time - a tail rather than a trigger, because poll timing cannot reliably catch the exact pre-push boundary.
+Firstmate took it rather than the worker, because the party being checked must not supply the evidence; it was a mechanical copy of the pipeline's own record about its own run.
+It was withdrawn with the gate and the machinery deleted: nothing consumed the snapshot once the gate went, so a watcher tick spawning an interpreter and a database read every fifteen seconds wrote files nobody read into a directory nothing pruned.
 Wiring the diagnostic to read it instead was rejected, because a stale snapshot would put a silently wrong head into a report a human treats as considered, and a diagnostic that carries a wrong head is worse than one that reports less.
 
-Those objects are reachable, because the pipeline's repository is an ordinary local-path remote in every initialized clone:
+### What the diagnostic reads instead
+
+There is no snapshot, so the diagnostic is handed the commit id directly and obtains that object from the pipeline's own repository, which is an ordinary local-path remote in every initialized clone:
 
 ```
 $ git remote -v
@@ -113,7 +116,9 @@ no-mistakes  /home/shane/.no-mistakes/repos/5f306883d81c.git (push)
 A local-path remote answers a bare object id even when no ref points at the commit any more, which is what the gate looks like once its branch has moved past the validated head; the regression suite constructs exactly that state by pushing the validated head to a scratch ref in a bare fixture repository and then deleting the ref.
 Only a full commit id is accepted with that flag, because a symbolic name would resolve in the worker's clone and hand back the local head the flag exists to stop trusting.
 An object id is the content, so once it resolves it names the run record's commit and nothing else, whether the fetch carried it here or this clone already held that exact object; git's own fetch relies on the same identity and treats an already-present object id as satisfied without contacting the remote.
+The flag is therefore how the id is obtained and not provenance, and the script header says so in those words: it establishes that the caller named a full object id and that the id resolves here, never that the head came from the pipeline.
 A head that cannot be named or obtained at all is `CANNOT-OBSERVE`, and there is deliberately no fallback to a local ref.
+The ref that carries the fetched object is released from a trap armed the moment it is created, so no refusal or signal can leak it; the candidate and base refs are deliberately kept, because they are keyed by request number rather than object id and their persistence is the evidence below that the fetch ran.
 
 Sync-then-compare was rejected on evidence.
 `no-mistakes axi sync` moves the local branch TO the pipeline-pushed head with reset semantics, so after syncing the local head IS the candidate and the comparison would be a head compared against itself.
@@ -344,7 +349,7 @@ None of that narrowed what the check can still answer: a faithful rebase over a 
 
 `tests/fm-rebase-equivalence.test.sh` builds every fixture commit by commit rather than running `git rebase`, so a scenario means exactly one thing, and every fixture commit is allowed to fail the suite rather than being folded silently into the next one.
 
-Refusals: a whole path present at the validated head and absent from the candidate; hunks lost inside a surviving path; a dropped hunk whose lines all already occur in the file, in both count directions; a validated line removal undone, both with and without a candidate base; a validated file deletion resurrected; a binary path the candidate lacks entirely; an executable bit the validated change set, both alongside a content change and as a validated change made entirely of a mode.
+Refusals: a whole path present at the validated head and absent from the candidate; hunks lost inside a surviving path; a dropped hunk whose lines all already occur in the file, in both count directions; a validated line removal undone, both with and without a candidate base; a validated file deletion resurrected; a binary path the candidate lacks entirely; an executable bit the validated change set, both alongside a content change and as a validated change made entirely of a mode; a dropped hunk in a repository whose `.gitattributes` names a `diff=<driver>` textconv, which the diffs disable because the counted copies come from `git show` and always are the raw blob - measured, counting converted lines against raw ones fails OPEN and reports `PASS` on a candidate that dropped the hunk outright.
 Each asserts the exit status, the `DROPPED` verdict, the direction, and the naming of the losing path.
 
 Clearances: a faithful rebase whose validated lines all shifted position because the trunk edited around them; a hunk the trunk landed independently so the rebase had nothing left to apply; a line the trunk added that matches one the validated change deleted; a path whose tracked name globs onto its siblings; content added after validation; whitespace-only churn; a mode the trunk set on its own that the validated change never touched; the same moved trunk ref given to both base flags, and that trunk given as the candidate base alone with the validated base derived from it.
@@ -360,11 +365,12 @@ Any verdict other than could-not-observe there is itself proof the fetch ran: a 
 The collision is constructed rather than argued: the worker's own `origin` holds a request 7 that would clear the comparison while the URL names a repository the worker cannot reach, and the check reports could-not-observe rather than reading either verdict off the wrong repository.
 A companion case pins the stale-trunk hazard by advancing the fixture forge's trunk after the clone: the base fetched from the request clears the faithful rebase that the worker's own `origin/main` would refuse.
 
-Could-not-observe, each of which a check that treated an unusable input as "nothing to do" would report as a pass: an unresolvable ref, a missing directory, a directory that is not a git repository, a missing required argument, an empty validated contribution, a binary path that changed, a request head that cannot be fetched, an unparseable request, a request whose base branch the forge will not name, a base branch that cannot be fetched, a bare request number that can name no base, a candidate remote that is not the request's repository, two candidates named at once, and an unresolvable candidate base.
+Could-not-observe, each of which a check that treated an unusable input as "nothing to do" would report as a pass: an unresolvable ref, a missing directory, a directory that is not a git repository, a missing required argument, an empty validated contribution, a binary path that changed, a request head that cannot be fetched, an unparseable request, a request whose base branch the forge will not name, a base branch that cannot be fetched, a bare request number, which is refused outright for naming no repository rather than for failing to resolve a base, a candidate remote that is not the request's repository, two candidates named at once, and an unresolvable candidate base.
 A binary path whose blob is identical is still a sound observation and passes.
 One case pins that every fetch is issued with `GIT_TERMINAL_PROMPT=0`, since a credential prompt would hang with no verdict line rather than refuse.
+A companion case pins the ssh path behaviourally rather than by grep: it exports its own `GIT_SSH_COMMAND`, points the check at an `ssh://` remote, and asserts that the ssh git actually invoked carries both the caller's own option and the appended `-oBatchMode=yes`, because keeping a caller's value verbatim would drop batch mode and reopen exactly that hang.
 A final case asserts every outcome prints a verdict line and exits with that verdict's own status, so a caller can tell "compared and passed" from "never ran".
 
-`tests/fm-brief.test.sh` pins the gate's ABSENCE from the generated no-mistakes brief.
+`tests/fm-brief.test.sh` pins the comparison's ABSENCE from the generated no-mistakes brief.
 Asking a worker for this verdict was tried and retired: it cannot obtain either head, so the instruction could only ever report could-not-observe.
 `tests/fm-pr-check-security.test.sh` pins that neither intake nor merge can block on head comparison again, on the exact state that used to brick delivery.

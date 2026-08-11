@@ -360,7 +360,7 @@ test_no_mistakes_dod_wording() {
 # gate runs anywhere now - the comparison is a firstmate-invoked diagnostic - so
 # a heredoc edit that reintroduced it here would put back an instruction that
 # structurally cannot pass.
-test_no_mistakes_dod_pins_rebase_equivalence_gate() {
+test_no_mistakes_dod_pins_rebase_equivalence_absence() {
   local home id brief
   home="$TMP_ROOT/rebase-equivalence-home"
   mkdir -p "$home/data"
@@ -371,16 +371,17 @@ test_no_mistakes_dod_pins_rebase_equivalence_gate() {
   # The rebase-equivalence comparison is deliberately NOT a worker instruction.
   # Three rounds of defects all reduced to one fact: a worker cannot see the
   # validated bytes, because a run's fix commits live in the pipeline's gate
-  # repository and the pushed head never reaches the worker's clone. The gate
-  # therefore runs at pull-request intake, in bin/fm-pr-check.sh, where the run
-  # record and the forge are both readable. Reintroducing it here would
-  # reinstate a check that structurally cannot pass, so this pins its absence.
+  # repository and the pushed head never reaches the worker's clone. No gate was
+  # left standing anywhere to move it to either, so the comparison is run by
+  # firstmate, deliberately, as a diagnostic that reports and never gates.
+  # Reintroducing it here would reinstate a check that structurally cannot pass,
+  # so this pins its absence.
   assert_no_grep "fm-rebase-equivalence.sh" "$brief" \
-    "the rebase-equivalence comparison belongs at intake, not in a worker brief"
+    "the rebase-equivalence comparison is a firstmate-invoked diagnostic, not a worker instruction"
   assert_no_grep "REBASE-EQUIVALENCE" "$brief" \
     "a worker must not be asked for a verdict it cannot obtain"
   assert_no_grep "--validated-remote" "$brief" \
-    "the validated head is read at intake from the pipeline's own run record"
+    "a worker cannot name the validated head, so it must not be asked to source one"
 }
 
 test_ship_project_memory_wording() {
@@ -748,7 +749,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
-test_no_mistakes_dod_pins_rebase_equivalence_gate
+test_no_mistakes_dod_pins_rebase_equivalence_absence
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

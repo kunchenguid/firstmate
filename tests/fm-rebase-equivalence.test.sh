@@ -562,6 +562,47 @@ run_check "$REPO" "$B" "$V" "$C"
 expect_code 0 "$RC" 'an identical binary blob is carried'
 pass 'an unchanged binary path passes on blob identity'
 
+# --- a textconv gitattribute must not turn a drop into a pass ---------------
+#
+# The counted copies come from `git show <commit>:<path>`, which always emits
+# the raw blob, while `git diff` applies a `diff=<driver>` textconv wherever the
+# repository configures one. Harvesting converted lines and counting raw ones
+# compares two different texts, and it fails OPEN: a harvested line that occurs
+# nowhere in the validated copy requires zero copies of itself, so a candidate
+# that dropped the hunk outright reports PASS. This repository has no
+# .gitattributes, but --repo takes any directory, so the fixture builds one.
+
+# Built inline rather than from new_repo, because the driver must be in force
+# at the BASE commit: git reads .gitattributes from the worktree, so a fixture
+# that introduced it later would lose it at the first checkout back to the base.
+REPO="$TMP_ROOT/textconv"
+mkdir -p "$REPO"
+git -C "$REPO" init -q
+cat > "$TMP_ROOT/upcase.sh" <<'SH'
+#!/bin/sh
+exec tr a-z A-Z < "$1"
+SH
+chmod +x "$TMP_ROOT/upcase.sh"
+git -C "$REPO" config diff.upcase.textconv "$TMP_ROOT/upcase.sh"
+printf 'core.sh diff=upcase\n' > "$REPO/.gitattributes"
+printf 'alpha\nbravo\ncharlie\n' > "$REPO/core.sh"
+B=$(commit_all "$REPO" 'base: core.sh carries a textconv diff driver')
+printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$REPO/core.sh"
+V=$(commit_all "$REPO" 'validated: one addition, under a textconv driver')
+
+git_do "$REPO" checkout -q -b trunk "$B"
+printf 'unrelated\n' > "$REPO/unrelated.txt"
+C=$(commit_all "$REPO" 'candidate: the validated line never landed')
+
+# The driver must really be in force, or this case would prove nothing.
+git -C "$REPO" diff "$B" "$V" -- core.sh | grep -q '^+VALIDATED LINE$' \
+  || fail 'the textconv fixture must actually convert the diff it produces'
+run_check "$REPO" "$B" "$V" "$C"
+expect_code 3 "$RC" 'a textconv driver must not hide a dropped hunk'
+assert_contains "$OUT" 'dropped-content' 'the drop must still be named under a textconv driver'
+assert_contains "$OUT" 'core.sh' 'the losing path must be named under a textconv driver'
+pass 'a converted diff cannot be counted against raw copies and pass by not comparing'
+
 # --- the candidate head is fetched from the forge ---------------------------
 #
 # The pipeline builds the pushed head inside its own repository and those
@@ -711,8 +752,15 @@ RC=0
 OUT=$(FM_FAKE_GH_BASE=no-such-branch "$CHECK" --repo "$WORKER" --validated-head "$V" --validated-remote "$GATE" \
   --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
 expect_code 2 "$RC" 'a base branch that cannot be fetched must be could-not-observe'
-run_check_pr "$WORKER" "$B" "$V" 8
-expect_code 2 "$RC" 'a bare request number cannot name a base, so it must be could-not-observe'
+# The validated side is made obtainable so this reaches the NUMBER's own
+# refusal rather than the earlier missing-validated-remote guard, and the text
+# is asserted because exit 2 alone cannot tell those two refusals apart.
+run_check_pr "$WORKER" "$B" "$V" 8 --validated-remote "$GATE"
+expect_code 2 "$RC" 'a bare request number names no repository, so it must be could-not-observe'
+assert_contains "$OUT" 'names no repository' \
+  'the bare-number refusal must be distinguishable from a missing validated remote'
+assert_not_contains "$OUT" 'needs --validated-remote' \
+  'this case must exercise the bare number, not an input it forgot to pass'
 pass 'a candidate base that cannot be read from the request never falls back to a local ref'
 
 # --- the request's base is fetched, never read from a stale local ref -------
@@ -855,9 +903,39 @@ assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: DROPPED' \
   'an unfetchable validated head must never resolve to something else'
 pass 'a validated head that cannot be obtained refuses instead of comparing anything'
 
+# --- every fetch is non-interactive, including a caller-supplied ssh --------
+#
+# An unattended worker blocked on a passphrase or a host-key prompt prints no
+# verdict line at all, and that is the one outcome a caller cannot tell apart
+# from a crash. A caller that already exports GIT_SSH_COMMAND is the hard case:
+# keeping its value verbatim drops batch mode and reopens exactly that hang, so
+# the option must be APPENDED. This is measured on the ssh command git actually
+# invokes rather than read off the script's source.
+
 assert_grep 'GIT_TERMINAL_PROMPT=0' "$CHECK" \
   'every fetch must run non-interactively so a credential prompt cannot swallow the verdict'
-pass 'the fetch path is non-interactive by construction'
+
+SSH_LOG="$TMP_ROOT/ssh-argv.log"
+FAKE_SSH="$TMP_ROOT/fm-fake-ssh"
+cat > "$FAKE_SSH" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SSH_LOG"
+exit 255
+SH
+chmod +x "$FAKE_SSH"
+
+RC=0
+OUT=$(GIT_SSH_COMMAND="$FAKE_SSH -oIdentitiesOnly=yes" \
+  "$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$ABSENT_OID" \
+  --validated-remote 'ssh://git@example.invalid/pipe/proj.git' \
+  --candidate-head "$PW" 2>&1) || RC=$?
+expect_code 2 "$RC" 'an ssh remote that cannot answer must refuse, never hang'
+assert_present "$SSH_LOG" "the ssh form must reach the caller's own GIT_SSH_COMMAND"
+assert_grep '-oBatchMode=yes' "$SSH_LOG" \
+  'a fetch must stay in batch mode even when the caller already exported GIT_SSH_COMMAND'
+assert_grep '-oIdentitiesOnly=yes' "$SSH_LOG" \
+  "batch mode must be appended to the caller's ssh command rather than replace it"
+pass 'the fetch path is non-interactive even when the caller supplies an ssh command'
 
 RC=0
 OUT=$("$CHECK" --repo "$WORKER" --validated-base "$B" --validated-head "$V" 2>&1) || RC=$?

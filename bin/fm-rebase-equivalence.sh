@@ -25,14 +25,23 @@
 # branch. A run commits its own fixes onto its copy of the branch, so the
 # worker's head holds OLDER content, and a fix that REWRITES a line the branch
 # added - foo(a) becoming foo(a, b) - would read as that line being dropped.
-# --validated-remote names the pipeline's repository, which every initialized
-# clone carries as an ordinary local-path remote, and --validated-head then
-# carries the exact commit id the run record names. The commit is fetched from
-# there by object id, which a local-path remote answers even once the branch ref
-# has moved off it. A validated head that cannot be named or fetched is
-# CANNOT-OBSERVE: there is deliberately no fallback to a local ref, because
-# quietly comparing the worker's own head is the defect this flag exists to
-# remove.
+# --validated-head must therefore be the full commit id the run record names,
+# and --validated-remote is only HOW that id is obtained: it names the
+# pipeline's repository, which every initialized clone carries as an ordinary
+# local-path remote, and such a remote answers a bare object id even once the
+# branch ref has moved off it.
+#
+# What that pair establishes is exactly this and no more: the caller named a
+# full object id, and that id resolves here. It is not provenance. A fetch of an
+# object id succeeds whenever the object is already present locally, even when
+# the remote does not hold it at all, so the remote is never evidence that the
+# head came from the pipeline. The guarantee comes from the id itself: an object
+# id IS the content, so it names the run record's commit or nothing, which is
+# why only a full id is accepted and a symbolic name - which would resolve in
+# this clone and hand back the local head - is refused. A validated head that
+# cannot be named or obtained is CANNOT-OBSERVE: there is deliberately no
+# fallback to a local ref, because quietly comparing the worker's own head is
+# the defect this flag exists to remove.
 #
 # ONLY FROM THE REPOSITORY THE REQUEST NAMES
 # A request number is unique only within one repository, and every forge
@@ -133,10 +142,18 @@ VERDICT_PASS=0
 VERDICT_CANNOT=2
 VERDICT_DROPPED=3
 
-# Released from a trap rather than at one call site: the ref exists from the
-# fetch onward, and every refusal between there and the resolve would otherwise
-# exit with it still present, accumulating one ref per validated commit in what
-# is a SHARED object store for a gate worktree and pinning its objects.
+# Released from a trap armed the moment the ref is created, rather than at one
+# call site: the ref exists from the fetch onward, and every refusal - and every
+# signal - between there and the end of the run would otherwise exit with it
+# still present, accumulating one ref per validated commit in what is a SHARED
+# object store for a gate worktree and pinning its objects.
+#
+# The candidate and base refs are deliberately NOT released, and the reason the
+# validated ref is does not apply to them: they are keyed by REQUEST NUMBER, so
+# a repeat run force-updates the same pair rather than adding one, while the
+# validated ref is keyed by object id and would add one per validated commit
+# forever. Their persistence is also what shows the fetch ran at all, which
+# docs/verification/rebase-equivalence.md cites as evidence.
 VALIDATED_REF=
 release_validated_ref() {
   [ -n "$VALIDATED_REF" ] || return 0
@@ -271,12 +288,15 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
 # Every fetch is non-interactive. An unattended worker that blocks on a
 # credential prompt produces no verdict line at all, which is the one outcome
 # this script's contract cannot tell apart from a crash, so a remote that wants
-# credentials must fail onto CANNOT-OBSERVE instead.
+# credentials must fail onto CANNOT-OBSERVE instead. Batch mode is APPENDED to
+# whatever ssh command the caller already exports rather than supplied only as a
+# default: keeping a caller's value verbatim would drop the option and leave an
+# ssh-form remote free to hang on a passphrase or a host-key prompt.
 git_fetch() {  # <source> <refspec>
   GIT_TERMINAL_PROMPT=0 \
   GIT_ASKPASS=true \
   SSH_ASKPASS=true \
-  GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}" \
+  GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -oBatchMode=yes" \
     git -C "$REPO" fetch --quiet "$1" "$2" >/dev/null 2>&1
 }
 
@@ -318,6 +338,11 @@ if [ -n "$VALIDATED_REMOTE" ]; then
   [ "${#VALIDATED_HEAD}" -ge 40 ] \
     || cannot_observe "--validated-remote needs --validated-head to be the full commit id the run record names, not $VALIDATED_HEAD"
   VALIDATED_REF="refs/fm-rebase-equivalence/validated/$VALIDATED_HEAD"
+  # Armed BEFORE the fetch, because the ref can exist the instant the fetch
+  # writes it. Everything slow in this run - the candidate fetch, the forge
+  # call, the base fetch - happens after this point, so a trap armed later
+  # would leave a whole window in which a signal leaks the ref.
+  trap release_validated_ref EXIT INT TERM
   git_fetch "$VALIDATED_REMOTE" "+$VALIDATED_HEAD:$VALIDATED_REF" \
     || cannot_observe "cannot fetch the validated head $VALIDATED_HEAD from $VALIDATED_REMOTE"
   VALIDATED_HEAD=$VALIDATED_REF
@@ -328,10 +353,6 @@ fi
 # would report CANNOT-OBSERVE on every run and gate nothing.
 CANDIDATE_BASE_REF=
 if [ -n "$CANDIDATE_PR" ]; then
-  PR_NUMBER=
-  PR_URL_SOURCE=
-  PR_PROVIDER=
-  PR_NAMESPACES=()
   case "$CANDIDATE_PR" in
     *://*)
       fm_pr_url_parse "$CANDIDATE_PR" \
@@ -344,16 +365,18 @@ if [ -n "$CANDIDATE_PR" ]; then
         *) PR_NAMESPACES=(refs/merge-requests) ;;
       esac
       ;;
-    [1-9]*)
-      case "$CANDIDATE_PR" in
-        *[!0-9]*) cannot_observe "--candidate-pr must be a request URL or number: $CANDIDATE_PR" ;;
-      esac
-      PR_NUMBER=$CANDIDATE_PR
-      # A bare number names no repository, so it can only mean "this number on
-      # that remote" and both head namespaces are tried.
-      PR_NAMESPACES=(refs/pull refs/merge-requests)
-      ;;
-    *) cannot_observe "--candidate-pr must be a request URL or number: $CANDIDATE_PR" ;;
+    *[!0-9]*) cannot_observe "--candidate-pr must be a request URL: $CANDIDATE_PR" ;;
+    # An all-digit value is a well-formed request number and is still refused,
+    # because it names no repository and so nothing can prove any source is the
+    # one the request belongs to. Falling back to a configured remote is exactly
+    # the collision the identity rule below exists to close: every forge
+    # publishes the same head namespace for every repository, so the number
+    # resolves against WHICHEVER repository that remote happens to be - here
+    # origin fetches upstream while requests are opened on the fork. That
+    # returned a confident DROPPED verdict over 12 paths of an unrelated
+    # project's request. A verdict about code nobody asked about is worse than
+    # no verdict, so the numeric form has no path onward at all.
+    *) cannot_observe "--candidate-pr $CANDIDATE_PR is a bare number, which names no repository; pass the request URL so the source can be proven to be the repository it belongs to" ;;
   esac
 
   # A request number is only unique within one repository, and every forge
@@ -363,36 +386,24 @@ if [ -n "$CANDIDATE_PR" ]; then
   # wrong rather than merely unavailable. Only a source proven to be that
   # repository is used.
   CANDIDATE_SOURCES=()
-  if [ -n "$PR_URL_SOURCE" ]; then
-    PR_IDENTITY=$(repo_identity "$PR_URL_SOURCE") \
-      || cannot_observe "cannot read a repository identity from the request URL: $CANDIDATE_PR"
-    if [ -n "$CANDIDATE_REMOTE" ]; then
-      REMOTE_URL=$(git -C "$REPO" remote get-url "$CANDIDATE_REMOTE" 2>/dev/null || printf '%s' "$CANDIDATE_REMOTE")
-      REMOTE_IDENTITY=$(repo_identity "$REMOTE_URL" || true)
-      if [ -n "$REMOTE_IDENTITY" ] && [ "$REMOTE_IDENTITY" = "$PR_IDENTITY" ]; then
-        CANDIDATE_SOURCES+=("$CANDIDATE_REMOTE")
-      else
-        cannot_observe "--candidate-remote $CANDIDATE_REMOTE names ${REMOTE_IDENTITY:-no repository}, not $PR_IDENTITY which the request URL names"
-      fi
+  PR_IDENTITY=$(repo_identity "$PR_URL_SOURCE") \
+    || cannot_observe "cannot read a repository identity from the request URL: $CANDIDATE_PR"
+  if [ -n "$CANDIDATE_REMOTE" ]; then
+    REMOTE_URL=$(git -C "$REPO" remote get-url "$CANDIDATE_REMOTE" 2>/dev/null || printf '%s' "$CANDIDATE_REMOTE")
+    REMOTE_IDENTITY=$(repo_identity "$REMOTE_URL" || true)
+    if [ -n "$REMOTE_IDENTITY" ] && [ "$REMOTE_IDENTITY" = "$PR_IDENTITY" ]; then
+      CANDIDATE_SOURCES+=("$CANDIDATE_REMOTE")
     else
-      ORIGIN_URL=$(git -C "$REPO" remote get-url origin 2>/dev/null || true)
-      ORIGIN_IDENTITY=$(repo_identity "$ORIGIN_URL" || true)
-      if [ -n "$ORIGIN_IDENTITY" ] && [ "$ORIGIN_IDENTITY" = "$PR_IDENTITY" ]; then
-        CANDIDATE_SOURCES+=(origin)
-      fi
+      cannot_observe "--candidate-remote $CANDIDATE_REMOTE names ${REMOTE_IDENTITY:-no repository}, not $PR_IDENTITY which the request URL names"
     fi
-    CANDIDATE_SOURCES+=("$PR_URL_SOURCE")
   else
-    # A bare request number names no repository, so there is nothing to prove a
-    # source against. Falling back to a configured remote is exactly the
-    # collision this section exists to close: every forge publishes the same
-    # head namespace for every repository, so the number resolves against
-    # WHICHEVER repository that remote happens to be - here origin fetches
-    # upstream while requests are opened on the fork. That returned a confident
-    # DROPPED verdict over 12 paths of an unrelated project's request. A
-    # verdict about code nobody asked about is worse than no verdict.
-    cannot_observe "--candidate-pr $CANDIDATE_PR is a bare number, which names no repository; pass the request URL so the source can be proven to be the repository it belongs to"
+    ORIGIN_URL=$(git -C "$REPO" remote get-url origin 2>/dev/null || true)
+    ORIGIN_IDENTITY=$(repo_identity "$ORIGIN_URL" || true)
+    if [ -n "$ORIGIN_IDENTITY" ] && [ "$ORIGIN_IDENTITY" = "$PR_IDENTITY" ]; then
+      CANDIDATE_SOURCES+=(origin)
+    fi
   fi
+  CANDIDATE_SOURCES+=("$PR_URL_SOURCE")
 
   CANDIDATE_REF="refs/fm-rebase-equivalence/candidate/$PR_NUMBER"
   fetched=no
@@ -452,11 +463,6 @@ resolve() {  # <ref>
   printf '%s' "$out"
 }
 
-# The fetched ref has served its purpose the moment the object id resolves, and
-# the objects stay reachable for the rest of this run. Keeping one ref per
-# validated commit would accumulate forever in what is, for a gate worktree, the
-# SHARED object store, pinning every fetched object against gc.
-
 VH=$(resolve "$VALIDATED_HEAD") \
   || cannot_observe "cannot resolve --validated-head: $VALIDATED_HEAD"
 CH=$(resolve "$CANDIDATE_HEAD") \
@@ -505,12 +511,22 @@ VB=$(git -C "$REPO" merge-base "$VB_TRUNK" "$VH" 2>/dev/null) \
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-rebase-equiv.XXXXXX") \
   || cannot_observe "cannot create a working directory"
+# Re-armed rather than newly armed: the validated release above is kept and the
+# working directory joins it, so neither can be dropped by replacing the trap.
 trap 'release_validated_ref; rm -rf "$WORK"' EXIT INT TERM
 
 # The validated contribution's footprint. --no-renames keeps both sides
 # measuring the same way, so a rename detected on one side only cannot read as
-# a drop.
-if ! git -C "$REPO" diff --no-renames --no-ext-diff -z --name-only "$VB" "$VH" > "$WORK/paths.z" 2>/dev/null; then
+# a drop. --no-textconv joins --no-ext-diff because the copies counted below
+# come from `git show <commit>:<path>`, which always emits the RAW blob: under a
+# `diff=<driver>` gitattribute with a textconv, the harvested lines would be
+# CONVERTED text and the two halves of the comparison would be different texts.
+# Measured, that fails OPEN rather than loudly - a harvested line absent from
+# the validated copy requires zero copies of itself, so a candidate that dropped
+# the hunk outright reports PASS. That is the verdict-without-comparing outcome
+# this check exists to make impossible, and --repo takes any directory, so the
+# exposure is real wherever this diagnostic is pointed.
+if ! git -C "$REPO" diff --no-renames --no-ext-diff --no-textconv -z --name-only "$VB" "$VH" > "$WORK/paths.z" 2>/dev/null; then
   cannot_observe "cannot read the validated contribution ($VB..$VH)"
 fi
 if [ ! -s "$WORK/paths.z" ]; then
@@ -563,7 +579,7 @@ while IFS= read -r -d '' path; do
 
   # ":(literal)" keeps a tracked name containing *, ?, [ or a leading : from
   # being read as a wildcard, which would pull other files into this diff.
-  if ! git -C "$REPO" diff --no-renames --no-ext-diff -U0 "$VB" "$VH" -- ":(literal)$path" > "$WORK/d" 2>/dev/null; then
+  if ! git -C "$REPO" diff --no-renames --no-ext-diff --no-textconv -U0 "$VB" "$VH" -- ":(literal)$path" > "$WORK/d" 2>/dev/null; then
     printf '%s\tthe validated change to this path could not be read\n' "$path" >> "$UNCERTAIN"
     continue
   fi
