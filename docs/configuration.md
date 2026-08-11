@@ -346,7 +346,7 @@ Keeping it inside the home's state dir rather than under world-writable `/tmp` m
 firstmate creates it owner-only and checks it is a real directory owned by you and not group- or other-writable before putting it on any agent's `PATH`; if it cannot establish that, the spawn refuses rather than launch with a shim directory it cannot vouch for.
 This raises the bar rather than making the shim tamper-proof: firstmate agents all run as you with permissions bypassed, so no directory permissions separate one agent from another, and the guarantee here is the same one the rest of this section makes - it removes what an agent reaches by default, not what it is capable of.
 That refusal happens before the task window or worktree exists, so nothing is left behind to clean up; a spawn that fails later removes the directory on its way out, and tearing the task down removes it with the task's other state records.
-Spawning always succeeds either way, and a task that never opens a browser is unaffected.
+Apart from that unvouchable directory, spawning succeeds whether the tool is capable or not - the browser tool's version never blocks a task - and a task that never opens a browser is unaffected.
 If `chrome-devtools-axi` is not installed at all there is nothing to refuse and nothing changes.
 
 Tearing a task down closes that task's own bridge by name, since a bridge has no idle timeout and would otherwise outlive the agent along with its headless Chrome.
