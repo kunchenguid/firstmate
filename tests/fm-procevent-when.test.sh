@@ -362,4 +362,29 @@ assert_absent "$TMP_ROOT/tamper-count" "nothing from the mutated spec was execut
 assert_contains "$(when "$H" classify "$RESULT")" rejected "classify reads the refusal"
 pass "a mutated spec is refused without executing anything"
 
+# --- mutated action bytes are refused before the fire is claimed -------------
+H="$TMP_ROOT/h-action-tamper"; new_home "$H"
+ACTION_TAMPER_LOG="$TMP_ROOT/action-tamper-act"
+MUTABLE_ACT="$TMP_ROOT/mutable-act.sh"
+cat > "$MUTABLE_ACT" <<'SH'
+#!/usr/bin/env bash
+printf 'original action ran\n' >> "$1"
+SH
+chmod +x "$MUTABLE_ACT"
+when "$H" arm action-tamper --stable 1 \
+  --condition true --action "$MUTABLE_ACT" "$ACTION_TAMPER_LOG" >/dev/null
+cat > "$MUTABLE_ACT" <<'SH'
+#!/usr/bin/env bash
+printf 'mutated action ran\n' >> "$1"
+SH
+chmod +x "$MUTABLE_ACT"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-action-tamper || fail "no outcome was captured for the mutated action"
+RESULT=$(first_result "$H" when-action-tamper)
+assert_grep 'status: rejected' "$RESULT" "the outcome reports the action trust refusal"
+assert_grep 'trust binding' "$RESULT" "the refusal names the action trust binding"
+assert_absent "$ACTION_TAMPER_LOG" "the mutated action was not executed"
+assert_absent "$H/state/when/when-action-tamper.fired" "no fire was claimed for mutated action bytes"
+pass "mutated action bytes are refused before claiming the fire"
+
 printf 'all fm-procevent-when tests passed\n'

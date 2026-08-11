@@ -15,10 +15,12 @@
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
 #            hash-bound by a trust record the same way fm-check-register.sh
-#            binds a custom check, so the runner refuses a mutated or
-#            unregistered spec without executing anything. Both argv vectors are
-#            executed directly with no shell, so nothing is re-split or
-#            interpreted. Options, before --condition:
+#            binds a custom check. The action executable is resolved and its
+#            bytes are hash-bound at registration, then checked again immediately
+#            before the fire is claimed. The runner refuses a mutated spec or
+#            action without executing anything. Both argv vectors are executed
+#            directly with no shell, so nothing is re-split or interpreted.
+#            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
 #              --deadline <secs>           give up and wake firstmate if the condition
@@ -117,6 +119,21 @@ positive_number() {
   [ "$n" != 0 ] && [[ ! "$n" =~ ^0+(\.0+)?$ ]]
 }
 
+action_executable() {  # <argv-zero>: print the executable's absolute path
+  local command=$1 found dir base
+  case "$command" in
+    */*) found=$command ;;
+    *) found=$(type -P -- "$command") || return 1 ;;
+  esac
+  dir=${found%/*}
+  base=${found##*/}
+  [ "$dir" != "$found" ] || dir=.
+  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  found="$dir/$base"
+  [ -f "$found" ] && [ -x "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
 # --- arm ---------------------------------------------------------------------
 
 cmd_arm() {
@@ -169,7 +186,10 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device
+  local tmp trust_tmp hash device action_path action_hash
+  action_path=$(action_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
+  action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
+  act[0]=$action_path
   device=$(fm_pr_file_device "$WHEN_DIR") || die "cannot inspect the watch directory"
   tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || die "cannot stage the spec"
   {
@@ -181,6 +201,7 @@ cmd_arm() {
     printf 'condition_timeout=%s\n' "$condition_timeout"
     printf 'action_timeout=%s\n' "$action_timeout"
     printf 'error_budget=%s\n' "$error_budget"
+    printf 'action_sha256=%s\n' "$action_hash"
     printf 'condition_argc=%s\n' "${#cond[@]}"
     printf 'action_argc=%s\n' "${#act[@]}"
     printf 'argv:\n'
@@ -239,6 +260,7 @@ spec_load() {
 
   SPEC_ARMED='' SPEC_INTERVAL='' SPEC_STABLE='' SPEC_DEADLINE=''
   SPEC_CONDITION_TIMEOUT='' SPEC_ACTION_TIMEOUT='' SPEC_ERROR_BUDGET=''
+  SPEC_ACTION_SHA256=''
   local cond_argc='' act_argc='' in_argv=0 read_cond=0 read_act=0
   {
     IFS= read -r version || { SPEC_ERROR="spec is empty"; return 1; }
@@ -256,6 +278,7 @@ spec_load() {
           condition_timeout) SPEC_CONDITION_TIMEOUT=$value ;;
           action_timeout)    SPEC_ACTION_TIMEOUT=$value ;;
           error_budget)      SPEC_ERROR_BUDGET=$value ;;
+          action_sha256)     SPEC_ACTION_SHA256=$value ;;
           condition_argc)    cond_argc=$value ;;
           action_argc)       act_argc=$value ;;
           *) SPEC_ERROR="spec carries an unknown field: $key"; return 1 ;;
@@ -280,6 +303,8 @@ spec_load() {
   positive_int "$SPEC_CONDITION_TIMEOUT" || { SPEC_ERROR="spec condition timeout is malformed"; return 1; }
   positive_int "$SPEC_ACTION_TIMEOUT" || { SPEC_ERROR="spec action timeout is malformed"; return 1; }
   positive_int "$SPEC_ERROR_BUDGET" || { SPEC_ERROR="spec error budget is malformed"; return 1; }
+  [[ "$SPEC_ACTION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { SPEC_ERROR="spec action hash is malformed"; return 1; }
   positive_int "${cond_argc:-}" || { SPEC_ERROR="spec condition argc is malformed"; return 1; }
   positive_int "${act_argc:-}" || { SPEC_ERROR="spec action argc is malformed"; return 1; }
   [ "$read_cond" -eq "$cond_argc" ] && [ "$read_act" -eq "$act_argc" ] \
@@ -387,6 +412,16 @@ cmd_run() {
   if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
     emit_doc "$sid" never-true \
       "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' "$out"
+    exit 0
+  fi
+
+  # Revalidate the registered action bytes immediately before claiming the
+  # fire. A changed or unavailable executable must never be run.
+  local current_action_hash
+  current_action_hash=$(fm_pr_sha256 "${ACT_ARGV[0]}") || current_action_hash=
+  if [ "$current_action_hash" != "$SPEC_ACTION_SHA256" ]; then
+    emit_doc "$sid" rejected \
+      "refused without executing the action: its bytes do not match the registered trust binding" "$polls" '' ''
     exit 0
   fi
 
