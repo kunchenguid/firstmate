@@ -1685,6 +1685,13 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
+  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    # Local-only repo with no origin remote: there is nothing to fetch and the
+    # pooled base cannot drift from origin, so the freshness guarantee is
+    # trivially satisfied. (fc5f164 introduced the fetch without this guard and
+    # broke spawning for every local-only project.)
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
