@@ -1421,7 +1421,21 @@ reap_task_backend_process_group() {  # <label>
 # so this takes the id whose session to close rather than reading $ID: the task
 # being torn down by default, and each retired child on that path.
 # Purely additive: `stop` is a documented idempotent no-op when nothing is
-# running, and a missing tool or a failure never blocks teardown.
+# running, and a missing tool, a failure, or a HANG never blocks teardown. The
+# last of those is why the stop is bounded by fm_run_timed with the same
+# FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS the capability probe uses, and takes its
+# stdin from /dev/null: an installed third-party executable is not a trusted
+# caller, and forced secondmate cleanup issues one stop per retired child, so a
+# single build that hangs or reads stdin would otherwise wedge the whole
+# retirement rather than one call.
+#
+# The profile-and-port pins come from fm-pr-lib.sh's fm_browser_isolation_pins,
+# the same list fm-spawn puts on the launch command, so the two sides agree by
+# construction. PORT is the one that matters here: the tool derives a named
+# session's port from the name only when CHROME_DEVTOOLS_AXI_PORT is unset, so
+# inheriting an exported one would aim this stop at a port that is not the task's
+# - leaving the leak this function exists to close, and firing at the shared port
+# instead.
 #
 # Gated on the SAME capability probe fm-spawn refuses on, because the session
 # name is only a target on a tool that has named sessions. One that does not
@@ -1447,7 +1461,8 @@ reap_task_backend_process_group() {  # <label>
 # for every retired child.
 BROWSER_BRIDGE_CAPABLE=
 stop_task_browser_bridge() {  # [task-id]
-  local id=${1:-$ID} executable
+  local id=${1:-$ID} executable pin
+  local -a pins=()
   if [ -z "$BROWSER_BRIDGE_CAPABLE" ]; then
     BROWSER_BRIDGE_CAPABLE=no
     if executable=$(type -P -- chrome-devtools-axi 2>/dev/null) && [ -x "$executable" ]; then
@@ -1457,8 +1472,12 @@ stop_task_browser_bridge() {  # [task-id]
     fi
   fi
   [ "$BROWSER_BRIDGE_CAPABLE" = yes ] || return 0
-  CHROME_DEVTOOLS_AXI_SESSION="$(fm_task_browser_session "$id")" \
-    chrome-devtools-axi stop >/dev/null 2>&1 || true
+  while IFS= read -r pin; do
+    pins+=("$pin")
+  done < <(fm_browser_isolation_pins)
+  fm_run_timed "$FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS" \
+    env "${pins[@]}" "CHROME_DEVTOOLS_AXI_SESSION=$(fm_task_browser_session "$id")" \
+    chrome-devtools-axi stop >/dev/null 2>&1 </dev/null || true
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp

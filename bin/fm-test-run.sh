@@ -928,11 +928,13 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       ;;
     bin/fm-pr-lib.sh)
-      # fm-pr-lib also owns fm_task_browser_session and the browser-tool
-      # capability probe - the name fm-spawn pins onto every launch command and
-      # fm-teardown closes, and the single verdict both gate on - so a change to
-      # either has to re-run the spawn-side pin test (backend-dispatch) alongside
-      # the pr-forge family that covers the teardown side.
+      # fm-pr-lib also owns fm_task_browser_session, fm_browser_isolation_pins and
+      # the browser-tool capability probe - the name fm-spawn pins onto every
+      # launch command and fm-teardown closes, the environment both put on their
+      # chrome-devtools-axi invocations, and the single verdict both gate on - so a
+      # change to any of them has to re-run the spawn-side pin test
+      # (backend-dispatch) alongside the pr-forge family that covers the teardown
+      # side.
       printf '%s\n' pr-forge
       printf '%s\n' backend-dispatch
       ;;

@@ -204,12 +204,14 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [id]
+# The id defaults to task-x1; a case that overrides it must pass the same value
+# through FM_TEARDOWN_TEST_ID so run_teardown tears down the record it wrote.
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
-  fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=firstmate:fm-task-x1" \
-    "endpoint_task_id=task-x1" \
+  local case_dir=$1 mode=$2 kind=$3 id=${4:-task-x1}
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
@@ -552,7 +554,7 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
-    "$TEARDOWN" task-x1 "$@"
+    "$TEARDOWN" "${FM_TEARDOWN_TEST_ID:-task-x1}" "$@"
 }
 
 # Build the teardown test's executable search path without lsof, regardless of
@@ -2238,27 +2240,38 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
-# write_browser_stop_logger <case-dir> [named-sessions|no-named-sessions]: a
-# chrome-devtools-axi stand-in recording the session name every invocation ran
-# against in <case-dir>/browser-stop.log, so a case can assert on what teardown
-# asked the tool to do. It answers the capability probe either the way a current
-# build does or the way one predating named sessions does, because teardown may
-# only close a session by name on a tool that HAS named sessions: one that does
-# not resolves every session name to the operator's own shared `default` bridge.
-write_browser_stop_logger() {  # <case-dir> [mode]
-  local case_dir=$1 mode=${2:-named-sessions} session_line=
+# write_browser_stop_logger <case-dir> [named-sessions|no-named-sessions] [body]:
+# a chrome-devtools-axi stand-in recording the session name and the port every
+# non-help invocation ran against in <case-dir>/browser-stop.log, so a case can
+# assert on what teardown asked the tool to do. It answers the capability probe
+# either the way a current build does or the way one predating named sessions
+# does, because teardown may only close a session by name on a tool that HAS named
+# sessions: one that does not resolves every session name to the operator's own
+# shared `default` bridge.
+#
+# The port is recorded because it decides WHICH bridge a stop reaches: the tool
+# derives a named session's port from the name only while CHROME_DEVTOOLS_AXI_PORT
+# is unset, so an inherited one would send the stop somewhere that is not the
+# task's. `port=` is the pinned-empty value and `port=<unset>` is an inherited
+# absence, which the log tells apart.
+#
+# <body> is shell run before the stop is recorded, for cases that need the stand-in
+# to hang or to read stdin first.
+write_browser_stop_logger() {  # <case-dir> [mode] [body]
+  local case_dir=$1 mode=${2:-named-sessions} body=${3-} session_line=
   if [ "$mode" = named-sessions ]; then
     session_line="  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation"
   fi
   cat > "$case_dir/fakebin/chrome-devtools-axi" <<SH
 #!/usr/bin/env bash
 set -u
-printf '%s %s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" \\
-  >> "$case_dir/browser-stop.log"
 if [ "\${1:-}" = --help ]; then
   printf '%s\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port'${session_line:+" '$session_line'"}
   exit 0
 fi
+$body
+printf '%s %s port=%s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" "\${CHROME_DEVTOOLS_AXI_PORT-<unset>}" \\
+  >> "$case_dir/browser-stop.log"
 exit 0
 SH
   chmod +x "$case_dir/fakebin/chrome-devtools-axi"
@@ -2356,6 +2369,104 @@ test_missing_browser_tool_never_blocks_teardown() {
 
   expect_code 0 "$rc" "browser-tool-absent: teardown should succeed with no browser tool installed"
   pass "an absent browser tool leaves teardown unchanged"
+}
+
+# The session name through bin/fm-pr-lib.sh, the single owner fm-spawn pins the
+# launch from and fm-teardown re-derives its stop from. Comparing against it is
+# what proves the two sides aim at the same bridge.
+derive_session_name() {  # <task-id>
+  bash -c '. "$1"; fm_task_browser_session "$2"' _ "$ROOT/bin/fm-pr-lib.sh" "$1"
+}
+
+test_browser_stop_targets_the_task_port_not_an_inherited_one() {
+  local case_dir rc
+  case_dir=$(make_case browser-session-port-pin)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  write_browser_stop_logger "$case_dir"
+
+  # chrome-devtools-axi derives a named session's port from the name only while
+  # CHROME_DEVTOOLS_AXI_PORT is unset. An operator who exports one would otherwise
+  # send this stop at a port that is not the task's: the task's own bridge and
+  # headless Chrome survive - the exact leak this close exists to plug - and the
+  # stop lands on the shared port instead. fm-spawn pins the variable empty on the
+  # launch for that reason, so teardown has to pin it on the stop.
+  rc=0
+  export CHROME_DEVTOOLS_AXI_PORT=59999
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  unset CHROME_DEVTOOLS_AXI_PORT
+
+  expect_code 0 "$rc" "browser-session-port-pin: teardown should succeed"
+  assert_present "$case_dir/browser-stop.log" \
+    "browser-session-port-pin: teardown never asked the browser tool to close this task's session"
+  grep -Fxq "$(derive_session_name task-x1) stop port=" "$case_dir/browser-stop.log" \
+    || fail "browser-session-port-pin: teardown's stop did not pin the port to the task's own derived one ($(cat "$case_dir/browser-stop.log"))"
+  pass "teardown's stop pins the port, so an exported CHROME_DEVTOOLS_AXI_PORT cannot redirect it off the task's own bridge"
+}
+
+test_browser_stop_for_a_maximum_length_task_id_matches_the_spawned_session() {
+  local case_dir rc id
+  # The session name is the only handle the two sides share, and a long id is where
+  # the derivation stops being the plain "fm-<id>" both could have spelled by hand.
+  id="teardown-longid-$(printf '%48s' '' | tr ' ' 'z')"
+  [ "${#id}" -eq 64 ] || fail "fixture id is ${#id} chars, not the 64-char maximum this case exists to cover"
+  case_dir=$(make_case browser-session-longid)
+  write_meta "$case_dir" no-mistakes ship "$id"
+  land_shippable_commit "$case_dir"
+  write_browser_stop_logger "$case_dir"
+
+  rc=0
+  FM_TEARDOWN_TEST_ID="$id" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  unset FM_TEARDOWN_TEST_ID
+
+  expect_code 0 "$rc" "browser-session-longid: teardown should succeed for a maximum-length task id"
+  assert_grep "$(derive_session_name "$id") stop" "$case_dir/browser-stop.log" \
+    "browser-session-longid: teardown stopped a session other than the one a spawn of this id would have opened, so the task's bridge outlives it"
+  pass "teardown closes the same session name a spawn of that task id pins, including at the maximum id length"
+}
+
+test_browser_stop_that_never_returns_does_not_wedge_teardown() {
+  local case_dir rc
+  case_dir=$(make_case browser-session-hang)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # An installed third-party executable is not a trusted caller. The capability
+  # probe is already bounded on those grounds, and the stop it gates needs the same
+  # bound: forced secondmate cleanup issues one stop per retired child, so a build
+  # that hangs would block the whole retirement rather than one call.
+  write_browser_stop_logger "$case_dir" named-sessions 'sleep 120'
+
+  rc=0
+  export FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=2
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  unset FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS
+
+  expect_code 0 "$rc" "browser-session-hang: a browser tool whose stop never returns wedged teardown instead of being bounded"
+  pass "a stop that never returns is bounded, so a hung browser tool cannot wedge teardown"
+}
+
+test_browser_stop_does_not_inherit_teardown_stdin() {
+  local case_dir rc
+  case_dir=$(make_case browser-session-stdin)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # Drains stdin BEFORE recording, so the log line only ever appears where the stop
+  # was given a closed stdin; with teardown's own inherited it would block until the
+  # bound killed it and record nothing.
+  write_browser_stop_logger "$case_dir" named-sessions 'cat >/dev/null'
+
+  rc=0
+  export FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=5
+  # A stdin that never reaches EOF, which is what a dispatching terminal is.
+  run_teardown "$case_dir" < <(sleep 60) > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  unset FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS
+
+  expect_code 0 "$rc" "browser-session-stdin: teardown should succeed against a browser tool whose stop reads stdin"
+  assert_present "$case_dir/browser-stop.log" \
+    "browser-session-stdin: the stop never completed, so it was handed teardown's own stdin and blocked on it until the bound killed it"
+  assert_grep "stop port=" "$case_dir/browser-stop.log" \
+    "browser-session-stdin: the stop never completed against a tool that reads stdin before answering"
+  pass "the stop takes its stdin from /dev/null, so a browser tool that reads it still completes instead of blocking on the dispatching terminal"
 }
 
 test_leaked_tasktmp_process_is_reaped() {
@@ -2771,6 +2882,10 @@ test_task_browser_session_is_closed
 test_secondmate_teardown_closes_its_own_and_child_browser_sessions
 test_browser_tool_without_named_sessions_is_never_stopped
 test_missing_browser_tool_never_blocks_teardown
+test_browser_stop_targets_the_task_port_not_an_inherited_one
+test_browser_stop_for_a_maximum_length_task_id_matches_the_spawned_session
+test_browser_stop_that_never_returns_does_not_wedge_teardown
+test_browser_stop_does_not_inherit_teardown_stdin
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

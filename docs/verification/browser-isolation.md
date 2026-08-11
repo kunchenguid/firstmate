@@ -61,6 +61,7 @@ A named session gets its own bridge, its own port derived from the name, and its
 A bridge's own health check carries the expected session name, so a session cannot silently attach to another session's bridge even when both resolve to the same port.
 Session names are restricted to 1-64 characters of `[A-Za-z0-9._-]`, and an out-of-range name throws rather than degrading, which would break every browser command for the agent that inherited it.
 `fm_task_id_creation_valid` (`bin/fm-pr-lib.sh`) already restricts a task id to that same charset, no leading dot, and at most 64 characters, so length is the only axis `fm-spawn` has to correct.
+It corrects it without losing the id: `fm_task_browser_session` passes ids of 60 characters or fewer through as `fm-<id>`, and folds a longer one into a fixed 64-character `fm-<first 44 characters>-<16 hex of sha256(id)>`, so no two task ids the validator accepts can land on one session name and share a bridge.
 
 Named sessions are a tool capability rather than a firstmate one, so this is the only part of the pin that a different install can silently withdraw: a `chrome-devtools-axi` without them ignores `CHROME_DEVTOOLS_AXI_SESSION` and leaves the agent on the shared `default` bridge while the launch string still reads as isolated.
 The observable signal for the capability is the tool's own `--help`, which lists `CHROME_DEVTOOLS_AXI_SESSION` under `environment:` in 0.1.26; `--help` exits 0 in about 0.1s and starts no bridge and no browser, so it is safe to run on every spawn and every teardown.
@@ -91,7 +92,10 @@ The reap is incidental rather than deterministic, though: an agent that browsed 
 It is gated on the same capability probe above for the case where it does not: a tool without named sessions resolves any `CHROME_DEVTOOLS_AXI_SESSION` to the shared `default` session, so an ungated stop would terminate the operator's own bridge, MCP server, and Chrome - the opposite of this pin's purpose, and against a tool that never gave the agent a private bridge to reclaim.
 Teardown therefore issues no stop at all there, which is exactly the set of tasks `fm-spawn` refused the tool for.
 
-A stopped session leaves its own small state directory at `~/.chrome-devtools-axi/sessions/fm-<task-id>/` holding a snapshot-generation counter.
+That stop carries the same environment pins the launch does, from the same `fm_browser_isolation_pins` owner, because the tool derives a named session's port from the name only while `CHROME_DEVTOOLS_AXI_PORT` is unset: an inherited one would aim the stop at a port that is not the task's, leaving the leak intact and firing at the shared port instead.
+It is also bounded by `FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS` with its stdin from `/dev/null`, on the same grounds as the capability probe, since forced secondmate cleanup issues one stop per retired child and a single hung build would otherwise wedge the whole retirement.
+
+A stopped session leaves its own small state directory at `~/.chrome-devtools-axi/sessions/<session-name>/` holding a snapshot-generation counter.
 That directory belongs to the tool rather than to firstmate, and teardown deliberately does not reach outside firstmate's state to delete it.
 
 ## Inheritance into a real agent's shell

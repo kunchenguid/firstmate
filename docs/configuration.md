@@ -341,13 +341,15 @@ None of those five reaches an authenticated profile, so the isolation above is u
 The per-task bridge is the one part of this that depends on your installed `chrome-devtools-axi`: it needs the named-session support the tool documents as `CHROME_DEVTOOLS_AXI_SESSION`, and firstmate checks for it by reading the tool's own `--help`.
 When it cannot confirm that support - the tool is older, or its help cannot be read - the launched agent instead gets a `chrome-devtools-axi` that refuses to run and explains what is missing, rather than quietly falling back to the shared `default` bridge on port 9224 that your own use of the tool sits on.
 The throwaway-profile pins still hold in that case, so any browser the agent does start still carries none of your cookies; only the private bridge is withheld, and the refusal message says exactly that.
+That refusing shim is written into the task's own temp root at `/tmp/fm-<id>/browser-refusal/`, which is what the launch puts on that one agent's `PATH`, so nothing another task writes can shadow a command for it; tearing the task down removes the temp root and the shim with it.
 Spawning always succeeds either way, and a task that never opens a browser is unaffected.
 If `chrome-devtools-axi` is not installed at all there is nothing to refuse and nothing changes.
 
 Tearing a task down closes that task's own bridge by name, since a bridge has no idle timeout and would otherwise outlive the agent along with its headless Chrome.
 That close is gated on the same check, so where the per-task bridge was refused firstmate closes nothing rather than issue a stop that a tool without named sessions would resolve onto the shared `default` bridge your own browsing sits on.
 
-[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned and why, and [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh)'s `fm_browser_tool_supports_named_sessions` owns the capability check both spawn and teardown gate on; [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns why each value is pinned, and [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) owns the three things both spawn and teardown have to agree on: `fm_browser_isolation_pins` (the pinned list itself), `fm_task_browser_session` (the per-task session name), and `fm_browser_tool_supports_named_sessions` (the capability check both gate on).
+[`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
 
 ## Relay (.env)
 

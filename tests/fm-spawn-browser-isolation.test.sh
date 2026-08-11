@@ -26,6 +26,25 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-browser-isolation)
 
+# fm-spawn's per-task temp root is a fixed /tmp/fm-<id>, outside any fixture dir,
+# and the refusal shim now lives inside it. Every id this file spawns therefore
+# starts with this prefix so the roots are reclaimable as one namespace at the end.
+TASK_ID_PREFIX=browseriso
+
+# The temp root fm-spawn recorded for a task, read back from the task record so a
+# test asserts on the directory teardown will actually reclaim rather than on a
+# path spelled twice.
+task_tmp_root() {  # <home> <task-id>
+  sed -n 's/^tasktmp=//p' "$1/state/$2.meta"
+}
+
+# The session name through bin/fm-pr-lib.sh, the single owner both fm-spawn and
+# fm-teardown call, so a test can compare what a launch actually shipped against
+# it instead of restating the derivation.
+derive_session_name() {  # <task-id>
+  bash -c '. "$1"; fm_task_browser_session "$2"' _ "$ROOT/bin/fm-pr-lib.sh" "$1"
+}
+
 # The five profile inputs fm-spawn must neutralise, and the value each must carry.
 # Written out here rather than derived from bin/fm-spawn.sh so this stays an
 # independent pin: a change to the implementation has to be made twice, on purpose.
@@ -306,7 +325,8 @@ test_longest_accepted_task_id_still_yields_a_usable_session_name() {
   # [A-Za-z0-9._-], and that rejection breaks EVERY browser command for the agent
   # that inherits it. fm_task_id_creation_valid accepts ids up to 64 chars, so the
   # "fm-" prefix is exactly what can push the name out of range.
-  id=$(printf '%64s' '' | tr ' ' 'b')
+  id="$TASK_ID_PREFIX-longid-$(printf '%46s' '' | tr ' ' 'b')"
+  [ "${#id}" -eq 64 ] || fail "fixture id is ${#id} chars, not the 64-char maximum this case exists to cover"
   rec=$(make_spawn_case browseriso-longid claude "$id")
   read_case_record "$rec"
   run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
@@ -322,7 +342,51 @@ test_longest_accepted_task_id_still_yields_a_usable_session_name() {
   esac
   printf '%s' "$session" | grep -Eq '^[A-Za-z0-9._-]{1,64}$' \
     || fail "session name '$session' is outside the charset chrome-devtools-axi accepts"
-  pass "a maximum-length task id still produces a session name the browser tool accepts"
+  # fm-teardown closes this task's bridge by re-deriving the name from the shared
+  # owner, so a launch that spelled it any other way would leave the bridge and its
+  # headless Chrome running past teardown.
+  [ "$session" = "$(derive_session_name "$id")" ] \
+    || fail "the launch pinned '$session' but the shared owner derives '$(derive_session_name "$id")'; teardown would aim at a session this task never opened"
+  pass "a maximum-length task id still produces a session name the browser tool accepts, and the one teardown will look for"
+}
+
+test_session_name_is_unique_and_tool_legal_for_every_accepted_task_id() {
+  local id name seen='' prefix
+  local -a ids
+  # The session name is the ONLY handle teardown has on a task's bridge, so the
+  # derivation has to be injective as well as legal: two ids mapping to one name
+  # would put two live tasks on one bridge, and tearing either down would close the
+  # other's browser and headless Chrome mid-work. Ids sharing a long prefix are
+  # exactly what plain truncation collapses, so they lead the list here.
+  prefix=$(printf '%61s' '' | tr ' ' 'c')
+  ids=(
+    "${prefix}aaa"
+    "${prefix}aab"
+    "${prefix}ab"
+    "${prefix}a"
+    "$prefix"
+    "$(printf '%64s' '' | tr ' ' 'd')"
+    "$(printf '%60s' '' | tr ' ' 'e')"
+    "$(printf '%61s' '' | tr ' ' 'e')"
+    x
+    a.b_c-d
+    browseriso-plain
+  )
+  for id in "${ids[@]}"; do
+    [ "${#id}" -le 64 ] || fail "fixture id '$id' is longer than fm_task_id_creation_valid accepts"
+    name=$(derive_session_name "$id")
+    printf '%s' "$name" | grep -Eq '^fm-[A-Za-z0-9._-]{1,61}$' \
+      || fail "session name '$name' for id '$id' is outside the 1-64 chars of [A-Za-z0-9._-] chrome-devtools-axi accepts, so every browser command for that agent would be rejected"
+    [ "$name" = "$(derive_session_name "$id")" ] \
+      || fail "the session name for '$id' is not deterministic, so a later teardown would aim at a name the spawn never opened"
+    case "$seen" in
+      *"<$name>"*)
+        fail "two task ids fm_task_id_creation_valid accepts map to the session name '$name', so two live tasks would share one bridge and tearing either down would close the other's browser"
+        ;;
+    esac
+    seen="$seen<$name>"
+  done
+  pass "every accepted task id gets a distinct session name inside the charset and length the browser tool accepts"
 }
 
 test_secondmate_agents_are_isolated_too() {
@@ -377,7 +441,7 @@ test_capable_browser_tool_leaves_the_launch_untouched() {
   assert_full_pin "$launch" "fm-$id" "capable tool"
   assert_not_contains "$launch" 'PATH=' \
     "a capable browser tool must not have the agent's PATH rewritten"
-  [ ! -e "$HOME_DIR/state/.browser-refusal" ] \
+  [ ! -e "$(task_tmp_root "$HOME_DIR" "$id")/browser-refusal" ] \
     || fail "a capable browser tool left a refusal shim on disk"
   pass "a browser tool that supports named sessions changes nothing about the launch"
 }
@@ -522,15 +586,94 @@ test_absent_browser_tool_is_left_alone() {
   assert_full_pin "$launch" "fm-$id" "absent tool"
   assert_not_contains "$launch" 'PATH=' \
     "an absent browser tool must not have the agent's PATH rewritten"
-  [ ! -e "$HOME_DIR/state/.browser-refusal" ] \
+  [ ! -e "$(task_tmp_root "$HOME_DIR" "$id")/browser-refusal" ] \
     || fail "an absent browser tool produced a refusal shim for a tool that cannot be run"
   pass "an uninstalled browser tool is neither refused nor shimmed"
+}
+
+test_refusal_shim_is_private_to_the_task_it_was_written_for() {
+  local rec realdir launch shim_a shim_b out
+  local id_a=browseriso-priv-a-b12 id_b=browseriso-priv-b-b12
+  # The refusal directory is prepended to that agent's PATH ahead of every system
+  # directory, and agents run same-uid with permissions bypassed. A directory
+  # shared by every task in the home would therefore let anything one agent drops
+  # there shadow an arbitrary command - git, node, npx - for every later-launched
+  # agent that takes this path. Each task gets its own instead.
+  realdir="$TMP_ROOT/browseriso-priv/oldbin"
+  make_fake_browser_tool "$realdir" old
+
+  rec=$(make_spawn_case browseriso-priv-a claude "$id_a")
+  read_case_record "$rec"
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_a" "$PROJ_DIR" >/dev/null \
+    || fail "first refused spawn failed"
+  launch=$(cat "$LAUNCH_LOG")
+  shim_a=$(extract_refusal_dir "$launch")
+  [ -n "$shim_a" ] || fail "the first refused spawn put no refusal directory on the agent's PATH"
+  # The shim has to sit under the temp root the task recorded, because that root is
+  # what teardown removes; anywhere else and the shim outlives the task.
+  case "$shim_a" in
+    "$(task_tmp_root "$HOME_DIR" "$id_a")"/*) : ;;
+    *) fail "the refusal shim at '$shim_a' is outside the temp root task $id_a recorded, so teardown would not reclaim it" ;;
+  esac
+
+  rec=$(make_spawn_case browseriso-priv-b claude "$id_b")
+  read_case_record "$rec"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_b" "$PROJ_DIR" >/dev/null \
+    || fail "second refused spawn failed"
+  SPAWN_PATH=
+  launch=$(cat "$LAUNCH_LOG")
+  shim_b=$(extract_refusal_dir "$launch")
+  [ -n "$shim_b" ] || fail "the second refused spawn put no refusal directory on the agent's PATH"
+
+  [ "$shim_a" != "$shim_b" ] \
+    || fail "two tasks were given the same refusal directory on their PATH, so anything either agent writes into it shadows a command for the other"
+
+  # The concrete consequence, exercised rather than argued: one agent plants a
+  # `git` in its own refusal directory, and the other's PATH must not resolve to it.
+  printf '%s\n' '#!/bin/sh' 'echo HIJACKED-BY-THE-OTHER-TASK' > "$shim_a/git"
+  chmod +x "$shim_a/git"
+  [ ! -e "$shim_b/git" ] \
+    || fail "a binary planted in one task's refusal directory appeared in another task's"
+  out=$(PATH="$shim_b:$PATH" git --version 2>&1) || true
+  assert_not_contains "$out" HIJACKED-BY-THE-OTHER-TASK \
+    "a binary one agent planted in its refusal directory shadowed git for another task's launch"
+  pass "each refused launch gets a refusal directory private to its own task, so one agent cannot shadow another's commands"
+}
+
+test_refusal_shim_that_cannot_be_written_refuses_the_spawn() {
+  local rec id=browseriso-shimfail-b13 realdir out rc=0 task_tmp
+  # The refusal is the whole point of the gate: an agent launched without it
+  # silently reaches the shared `default` bridge on port 9224, which is the
+  # operator's own. Writing it into the task's temp root is a per-spawn write that
+  # can fail, so the spawn must abort loudly rather than launch without it.
+  rec=$(make_spawn_case browseriso-shimfail claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-shimfail/oldbin"
+  make_fake_browser_tool "$realdir" old
+  # Occupy the shim directory's own path with a plain file so it cannot be created.
+  task_tmp="/tmp/fm-$id"
+  mkdir -p "$task_tmp"
+  : > "$task_tmp/browser-refusal"
+
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR") || rc=$?
+  SPAWN_PATH=
+
+  [ "$rc" -ne 0 ] \
+    || fail "the spawn succeeded although the refusal shim could not be written, so the agent would reach the operator's shared default bridge"
+  assert_contains "$out" 'could not write the browser-refusal shim' \
+    "the spawn failed without saying the refusal shim was what could not be installed"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" CHROME_DEVTOOLS_AXI_SESSION \
+    "a launch command was sent to the pane despite the refusal never being installed"
+  pass "a refusal shim that cannot be written aborts the spawn instead of launching an unprotected agent"
 }
 
 test_every_verified_harness_carries_the_pin
 test_raw_launch_command_escape_hatch_carries_the_pin
 test_each_task_gets_its_own_browser_session
 test_longest_accepted_task_id_still_yields_a_usable_session_name
+test_session_name_is_unique_and_tool_legal_for_every_accepted_task_id
 test_secondmate_agents_are_isolated_too
 test_capable_browser_tool_leaves_the_launch_untouched
 test_browser_tool_without_named_sessions_is_refused
@@ -539,5 +682,10 @@ test_browser_tool_that_reads_stdin_still_resolves
 test_probe_bound_rejects_values_that_are_not_bounds
 test_browser_tool_help_that_never_returns_is_refused
 test_absent_browser_tool_is_left_alone
+test_refusal_shim_is_private_to_the_task_it_was_written_for
+test_refusal_shim_that_cannot_be_written_refuses_the_spawn
 
+# The per-task temp roots fm-spawn creates live at a fixed /tmp/fm-<id>, outside
+# TMP_ROOT, so they are reclaimed here as one prefixed namespace.
+rm -rf "/tmp/fm-$TASK_ID_PREFIX"-*
 fm_test_cleanup "$TMP_ROOT"

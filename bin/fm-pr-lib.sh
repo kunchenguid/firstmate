@@ -123,21 +123,74 @@ fm_task_id_creation_valid() {
 #
 # The tool rejects a session name outside 1-64 chars of [A-Za-z0-9._-], and that
 # rejection breaks every browser command for the agent that inherits it, so this
-# must be TOTAL over ids fm_task_id_creation_valid already accepted. Those are
-# already within that charset, have no leading dot, and are at most 64 chars, so
-# the "fm-" prefix is the only thing that can push the name out of range and
-# truncating back to 64 is the whole fix. The prefix also keeps firstmate's
+# must be TOTAL over ids fm_task_id_creation_valid already accepted: that exact
+# charset, no leading dot, at most 64 chars. The "fm-" prefix is the only thing
+# that can push a name out of range, and it is also what keeps firstmate's
 # bridges distinguishable from a session the captain named by hand under
-# ~/.chrome-devtools-axi/sessions/, and guarantees the name is neither empty nor
-# all-dots. Two ids sharing a 61-char prefix would share one browser, which is
-# the pre-existing shared-default-session behavior rather than a new exposure.
-# That collision is not free on the teardown side, though: fm-teardown closes a
-# session by this name, so tearing down one of two colliding tasks also closes
-# the other's live bridge and its headless Chrome mid-work. Neither task is
-# exposed to a page it could not already read, but one of them loses its browser.
-fm_task_browser_session() {
-  local name="fm-${1-}"
-  printf '%s' "${name:0:64}"
+# ~/.chrome-devtools-axi/sessions/ and what guarantees the name is neither empty
+# nor all-dots.
+#
+# It must also be INJECTIVE, because this name is the only handle teardown has:
+# two ids mapping to one name would put two live tasks on one bridge, and tearing
+# either of them down would close the other's bridge and its headless Chrome
+# mid-work. Plain truncation is not injective - any two ids sharing a 61-char
+# prefix land on one name - so an id too long to carry whole is truncated and the
+# WHOLE id is folded into a digest suffix rather than having its tail dropped.
+# The two forms are separated by LENGTH, not by any marker character: every
+# character this charset allows can also occur inside an id, so no separator can
+# be reserved, but the pass-through form is at most 63 chars and the hashed form
+# is always exactly 64, so no truncated id can ever land on an untruncated one's
+# name. The derivation reads nothing but the id, so a teardown days after the
+# spawn re-derives the identical name.
+fm_task_browser_session() {  # <task-id>
+  local id=${1-}
+  if [ "${#id}" -le 60 ]; then
+    printf 'fm-%s' "$id"
+    return 0
+  fi
+  printf 'fm-%s-%s' "${id:0:44}" "$(fm_task_browser_session_digest "$id")"
+}
+
+# Exactly 16 hex characters over the whole task id, which is what makes the
+# truncated form above a fixed 64 chars and therefore length-separable from the
+# pass-through form. The shasum/sha256sum cascade follows
+# bin/fm-backend-hometag-lib.sh; the cksum tail is the same last resort for a
+# host carrying neither, padded to the same width so the length invariant holds
+# there too, at the cost of far weaker collision resistance.
+fm_task_browser_session_digest() {  # <task-id>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{printf "%s", substr($1,1,16)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{printf "%s", substr($1,1,16)}'
+  else
+    printf '%s' "$1" | cksum | awk '{printf "%08x%08x", $1, $2}'
+  fi
+}
+
+# The chrome-devtools-axi environment pins that make an invocation resolve to a
+# task's own bridge and a throwaway profile instead of to whatever the operator
+# exported. Owned here because BOTH sides of a task's browser lifecycle need the
+# same list: fm-spawn's browser_isolation_env prepends these to the launch
+# command - that function's comment owns why each one is pinned - and fm-teardown
+# prefixes them onto the `stop` it aims at the task's session.
+#
+# For teardown that is correctness, not tidiness. The tool derives a named
+# session's port from the name only when CHROME_DEVTOOLS_AXI_PORT is unset, so an
+# operator who exports it makes the stop target a port that is not the task's:
+# the task's own bridge and headless Chrome survive, and the stop lands on the
+# shared port the capability gate exists to keep firstmate away from.
+#
+# Emitted one NAME=VALUE assignment per line. Every value is a literal with no
+# shell metacharacters, so a caller may place them verbatim in a command line.
+# CHROME_DEVTOOLS_AXI_SESSION is not here: it is per-task, and fm_task_browser_session
+# above owns it.
+fm_browser_isolation_pins() {
+  printf '%s\n' \
+    'CHROME_DEVTOOLS_AXI_AUTO_CONNECT=0' \
+    'CHROME_DEVTOOLS_AXI_BROWSER_URL=' \
+    'CHROME_DEVTOOLS_AXI_USER_DATA_DIR=' \
+    'CHROME_DEVTOOLS_AXI_CHROME_ARGS=' \
+    'CHROME_DEVTOOLS_AXI_PORT='
 }
 
 # Seconds allowed for the capability probe below. An installed third-party
