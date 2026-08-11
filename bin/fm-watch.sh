@@ -873,7 +873,7 @@ while :; do
   fi
 
   # Slow authenticated checks, including task PR polls and registered home-level
-  # custom checks such as the business agenda. Firstmate writes some of these,
+  # custom checks such as recurring routines. Firstmate writes some of these,
   # e.g. a merged-PR poll.
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed

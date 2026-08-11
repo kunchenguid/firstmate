@@ -19,7 +19,7 @@
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
 #   - Need: arms only while work is in flight, a process-event source is
-#     registered, the persistent business-agenda check is installed, or X mode
+#     registered, the persistent routines check is installed, or X mode
 #     has a relay poll to run; a home with none of those exits 0.
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
