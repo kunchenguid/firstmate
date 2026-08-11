@@ -541,6 +541,41 @@ test_relaunch_onto_an_unverified_harness_is_refused() {
   pass "fm-control relaunch: refuses to relaunch onto an adapter with no verified mechanics"
 }
 
+test_relaunch_onto_an_unverified_backend_pair_is_refused_before_stop() {
+  local dir meta brief out rc
+  dir=$(new_case badpair rl35)
+  add_ship_task "$dir" rl35 claude
+  meta="$dir/home/state/rl35.meta"
+  brief="$dir/home/data/rl35/brief.md"
+  sed 's|^window=.*|window=fmtest:w1:p1|' "$meta" > "$meta.tmp"
+  {
+    cat "$meta.tmp"
+    echo 'backend=herdr'
+    echo 'herdr_session=fmtest'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t1'
+    echo 'herdr_pane_id=w1:p1'
+  } > "$meta"
+  rm -f "$meta.tmp"
+  cp "$meta" "$meta.before"
+  cp "$brief" "$brief.before"
+  out=$(run_control "$dir" rl35 relaunch --harness cursor --note "switch runtime"); rc=$?
+  expect_code 1 "$rc" "an unverified harness/backend pair should refuse"
+  assert_contains "$out" "not verified on backend 'herdr'" \
+    "the refusal should name the unsupported runtime pair"
+  cmp -s "$meta.before" "$meta" \
+    || fail "an unsupported runtime pair must leave task metadata byte-identical"
+  cmp -s "$brief.before" "$brief" \
+    || fail "an unsupported runtime pair must not append the relaunch note"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an unsupported runtime pair must not stop the running agent"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "an unsupported runtime pair must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl35.control-relaunch" ] \
+    || fail "an unsupported runtime pair must not create a durable journal"
+  pass "fm-control relaunch: unsupported runtime pairs refuse before stop"
+}
+
 test_prior_harness_turnend_registry_entry_is_cleared() {
   local dir auth
   dir=$(new_case grokauth rl9)
@@ -1312,6 +1347,7 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
+test_relaunch_onto_an_unverified_backend_pair_is_refused_before_stop
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter

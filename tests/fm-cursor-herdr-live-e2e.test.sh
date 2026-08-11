@@ -18,7 +18,7 @@ if [ "$LIVE_FLAG" != 1 ]; then
   exit 0
 fi
 
-for command_name in cursor-agent herdr jq treehouse; do
+for command_name in cursor-agent herdr jq; do
   command -v "$command_name" >/dev/null 2>&1 \
     || fail "$command_name is required for the live Cursor+Herdr guard"
 done
@@ -34,25 +34,14 @@ SESSION=$("$ROOT/bin/fm-herdr-lab.sh" name fm-cursor-herdr) \
 ID=fm-cursor-herdr-live
 HOME_DIR="$TMP_ROOT/home"
 PROJECT="$TMP_ROOT/project"
-META="$HOME_DIR/state/$ID.meta"
 
 cleanup() {
-  if [ -f "$META" ]; then
-    FM_GATE_REFUSE_BYPASS=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-      HERDR_SESSION="$SESSION" "$ROOT/bin/fm-teardown.sh" "$ID" --force \
-      >/dev/null 2>&1 || true
-  fi
   "$ROOT/bin/fm-herdr-lab.sh" teardown "$SESSION" >/dev/null 2>&1 || true
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
 
-mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/$ID" "$HOME_DIR/projects" \
-  "$HOME_DIR/config" "$PROJECT"
-printf 'Reply only: HERDRCURSORREADY\n' \
-  > "$HOME_DIR/data/$ID/brief.md"
+mkdir -p "$HOME_DIR" "$PROJECT"
 git -C "$PROJECT" init -q
 printf '# Cursor Herdr live test\n' > "$PROJECT/README.md"
 git -C "$PROJECT" add README.md
@@ -62,18 +51,31 @@ git -C "$PROJECT" -c user.name='Firstmate Tests' \
 HERDR_SESSION="$SESSION" "$ROOT/bin/fm-herdr-lab.sh" provision "$SESSION" \
   || fail "could not provision isolated Herdr lab session"
 
-FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" \
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-  FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
-  FM_CONFIG_OVERRIDE="$HOME_DIR/config" HERDR_SESSION="$SESSION" \
-  "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJECT" --scout --harness cursor \
-  --backend herdr >/dev/null 2>"$TMP_ROOT/spawn.err" \
-  || fail "Cursor Agent Herdr spawn failed"$'\n'"$(cat "$TMP_ROOT/spawn.err")"
-
-PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
-[ -n "$PANE" ] || fail "spawn metadata did not record a Herdr pane"
-
 lab() { "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" "$@"; }
+CREATE=$(lab workspace create --cwd "$PROJECT" --label "$ID" --no-focus) \
+  || fail "could not create an isolated Herdr evidence workspace"
+PANE=$(printf '%s' "$CREATE" | jq -er '.result.root_pane.pane_id') \
+  || fail "could not resolve the isolated Herdr evidence pane"
+TARGET="$SESSION:$PANE"
+
+FM_HOME=$HOME_DIR
+FM_ROOT_OVERRIDE=$ROOT
+export FM_HOME FM_ROOT_OVERRIDE
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+fm_backend_source herdr || fail "could not load the Herdr backend adapter"
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+CURSOR_BIN=$(command -v cursor-agent)
+LAUNCH="env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT $(shell_quote "$CURSOR_BIN") --yolo --trust $(shell_quote 'Reply only: HERDRCURSORREADY')"
+fm_backend_herdr_send_text_line "$TARGET" "$LAUNCH" \
+  || fail "could not launch Cursor Agent in the isolated Herdr evidence pane"
+
 wait_for_exact_response() {
   local expected=$1 output
   for _ in $(seq 1 60); do
@@ -91,18 +93,16 @@ wait_for_exact_response() {
 wait_for_exact_response HERDRCURSORREADY \
   || fail "Cursor Agent did not produce the Herdr launch response"
 
-FM_GATE_REFUSE_BYPASS=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-  FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-  HERDR_SESSION="$SESSION" FM_SEND_SETTLE=0 \
-  "$ROOT/bin/fm-send.sh" "$ID" \
-  "Reply only: HERDRCURSORSEND" \
-  >/dev/null 2>"$TMP_ROOT/send.err" \
-  || fail "Cursor Agent Herdr send failed"$'\n'"$(cat "$TMP_ROOT/send.err")"
+verdict=$(FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
+  FM_BACKEND_HERDR_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
+  fm_backend_send_text_submit herdr "$TARGET" "Reply only: HERDRCURSORSEND" \
+  3 0.4 0.3 '' cursor)
+[ "$verdict" = empty ] \
+  || fail "Cursor Agent Herdr evidence delivery was not confirmed: $verdict"
 
 wait_for_exact_response HERDRCURSORSEND \
   || fail "Cursor Agent did not receive the Herdr delivery"
 
 VERSION=$(cursor-agent --version 2>/dev/null | head -1)
 [ -n "$VERSION" ] || fail "cursor-agent --version produced no output"
-pass "live Cursor+Herdr spawn/send verified on $VERSION"
+pass "live Cursor+Herdr evidence passed on $VERSION"

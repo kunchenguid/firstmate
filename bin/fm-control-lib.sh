@@ -12,7 +12,7 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables
+# This file owns four capability tables plus their pure artifact-path tables
 # and nothing else. It has no side effects, runs no backend command, and reads
 # no state, so it can be sourced by a test as a pure contract:
 #
@@ -28,7 +28,9 @@
 #      skill now points here so one executable owner holds them, and
 #      bin/fm-send.sh's --key path reads the same table rather than a second
 #      copy of it.
-#   3. Per-backend capability: which named keys a runtime backend can deliver,
+#   3. Per-harness runtime compatibility: which verified backend an adapter is
+#      allowed to launch on.
+#   4. Per-backend capability: which named keys a runtime backend can deliver,
 #      and whether the backend has a recovery-grade agent-state classifier
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
 #      stopped. A verb whose postcondition cannot be proven on the recorded
@@ -102,6 +104,19 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
     muse|cursor) [ "$kind" != secondmate ] || return 1 ;;
+  esac
+  return 0
+}
+
+fm_control_harness_supports_backend() {  # <harness> <backend>
+  local harness=${1-} backend=${2-}
+  fm_control_harness_supported "$harness" || return 1
+  case "$backend" in
+    tmux|herdr|zellij|orca|cmux) ;;
+    *) return 1 ;;
+  esac
+  case "$harness" in
+    cursor) [ "$backend" = tmux ] || return 1 ;;
   esac
   return 0
 }

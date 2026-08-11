@@ -420,7 +420,7 @@ test_spawn_refuses_secondmate() {
 
 test_cursor_spawn_refuses_unverified_backends() {
   local backend rec case_dir home proj wt fakebin id out status
-  for backend in zellij cmux orca; do
+  for backend in herdr zellij cmux orca; do
     rec=$(make_spawn_case "unsupported-$backend")
     IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec

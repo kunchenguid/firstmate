@@ -90,16 +90,19 @@ There is no `docs/supervision-protocols/cursor.md`, so a primary detected as cur
 | Backend | Applicability | Evidence |
 |---|---|---|
 | tmux | Supported | Live TUI probes and process classification of exact `cursor-agent` |
-| herdr | Verification pending | The corrected opt-in guard requires exact response-only rows and must pass before support is claimed |
-| zellij | Unverified / out of scope | No Cursor-specific live spawn, send, or composer evidence |
-| cmux | Unverified / out of scope | No Cursor-specific live spawn, send, or composer evidence |
-| orca | Interrupt-capable only | Orca can deliver `C-c` and Enter; Escape-only harnesses remain refused |
+| herdr | Unverified / refused | Product spawn fails closed; the corrected response-only live guard remains evidence-only until a passing dated result is recorded |
+| zellij | Unverified / refused | No Cursor-specific live spawn, send, or composer evidence |
+| cmux | Unverified / refused | No Cursor-specific live spawn, send, or composer evidence |
+| orca | Unverified / refused | Orca can deliver `C-c` and Enter, but Cursor product spawn remains refused |
 
-### Herdr live guard
+### Herdr evidence-only live guard
 
 Command: FM_CURSOR_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-cursor-herdr-live-e2e.test.sh.
+Product Cursor spawn on Herdr remains refused.
+The opt-in guard creates an isolated Herdr lab pane directly and tests the real Cursor CLI plus Herdr submission transport without enabling the product spawn path.
 The guard requires exact assistant response rows for both the launch brief and the follow-up, so echoed prompt text cannot satisfy it.
-The 2026-08-10 run used substring matching and does not support the Herdr compatibility claim; rerun the corrected guard before marking Herdr supported.
+A passing run is necessary evidence only; support still requires a dated result and an explicit allowlist change.
+The 2026-08-10 run used substring matching and does not support a Herdr compatibility claim.
 
 ## Still unproven / out of scope
 

@@ -1255,14 +1255,10 @@ if [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" = cursor ]; t
   HARNESS=cursor
 fi
 
-if [ "$HARNESS" = cursor ]; then
-  case "$BACKEND" in
-    tmux|herdr) ;;
-    *)
-      echo "error: cursor is not verified on backend '$BACKEND'; supported backends are tmux and herdr" >&2
-      exit 1
-      ;;
-  esac
+if [ "$HARNESS" = cursor ] \
+   && ! fm_control_harness_supports_backend "$HARNESS" "$BACKEND"; then
+  echo "error: cursor is not verified on backend '$BACKEND'; supported backend is tmux" >&2
+  exit 1
 fi
 
 case "$HARNESS" in
