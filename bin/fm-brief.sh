@@ -54,6 +54,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship tasks also include a standing "Completeness for parity-style work"
+# section instructing the worker to scan for the whole pattern/selector/contract
+# family on parity-style work rather than stopping at an enumerated site list;
+# see .agents/skills/ask-user-authority/SKILL.md "Simple-ship parity authority"
+# for how that scan interacts with a reviewer finding a missed family member.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -415,6 +420,12 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+# Completeness for parity-style work
+When this task's intent is to make one thing behave like another, or otherwise complete an existing pattern (parity, fill-in, alignment completions), completeness means scanning the codebase for every member of the same pattern, selector, or contract family and bringing each one into scope, not stopping at only the specific site(s) named above.
+Search for the family by its pattern or language yourself rather than waiting for an enumerated list; the fix is done only when no family member is left behind.
+This scan is the completeness contract for such work: a reviewer finding a missed family member is an ordinary in-scope fix, not a new decision.
+If this task is not parity-style work, disregard this section.
 
 $HERDR_SECTION
 
