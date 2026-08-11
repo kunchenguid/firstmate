@@ -1416,11 +1416,16 @@ reap_task_backend_process_group() {  # <label>
 # because each inherits the agent's working directory - but only while that
 # directory was this task's own worktree. An agent that browsed from anywhere
 # else would leak a whole browser, so name the session and let the tool close it.
+# fm-spawn pins a session for every task kind, including secondmate, and forced
+# secondmate cleanup retires that home's children without ever running the reap,
+# so this takes the id whose session to close rather than reading $ID: the task
+# being torn down by default, and each retired child on that path.
 # Purely additive: `stop` is a documented idempotent no-op when nothing is
 # running, and a missing tool or a failure never blocks teardown.
-stop_task_browser_bridge() {
+stop_task_browser_bridge() {  # [task-id]
+  local id=${1:-$ID}
   command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
-  CHROME_DEVTOOLS_AXI_SESSION="$(fm_task_browser_session "$ID")" \
+  CHROME_DEVTOOLS_AXI_SESSION="$(fm_task_browser_session "$id")" \
     chrome-devtools-axi stop >/dev/null 2>&1 || true
 }
 
@@ -2229,6 +2234,7 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    stop_task_browser_bridge "$child_id"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2392,10 +2398,12 @@ fi
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
+# not by task-worktree cleanup. The browser session is the exception: it is
+# named after the task rather than rooted in the worktree, and fm-spawn pins one
+# for every kind, so it is closed here for every kind.
+stop_task_browser_bridge
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  stop_task_browser_bridge
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 

@@ -334,7 +334,10 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 Agents firstmate launches use `chrome-devtools-axi` in their own throwaway Chrome profile, holding no logged-in sessions, on a bridge named after the task.
 Your own browsing and your own use of the tool are untouched.
 So an agent cannot reach a site you are signed in to, and a task that genuinely needs an authenticated page has to sign in itself within its own profile.
-Exporting a `CHROME_DEVTOOLS_AXI_*` value in your shell does not change what a launched agent gets; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned and why, and [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
+Every launch pins the six values that select the browser profile and the bridge - `CHROME_DEVTOOLS_AXI_AUTO_CONNECT`, `_BROWSER_URL`, `_USER_DATA_DIR`, `_CHROME_ARGS`, `_PORT`, and `_SESSION` - so exporting any of those in your own shell does not change what a launched agent gets.
+The tool's five other variables are deliberately not pinned, and an agent still inherits whatever you exported: `_MCP_PATH` still redirects which MCP module the agent's bridge runs, `_HEADED=1` still opens the agent's Chrome on your display, and `_CHANNEL`, `_WS_HEADERS`, and `_BRIDGE_TIMEOUT_MS` are inherited the same way.
+None of those five reaches an authenticated profile, so the isolation above is unchanged by them; they are left alone because each has a legitimate use, such as headed mode for visible debugging.
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned and why, and [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
 
 ## Relay (.env)
 

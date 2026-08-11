@@ -281,12 +281,21 @@ probe_one_harness() {  # <harness>
   for kv in "${HOSTILE_ENV[@]}"; do
     send_line_confirmed "export ${kv%%=*}=\"${kv#*=}\"" '$ ' >/dev/null 2>&1 || true
   done
-  send_line_confirmed 'env | grep -c "^CHROME_DEVTOOLS_AXI" && echo hostile-armed' hostile-armed \
-    || fail "$harness: could not arm the hostile environment in the lab pane, so the attack would not have been a real attack"
-  case "$(tmux -L "$SOCKET" capture-pane -p -t live)" in
-    *"5"*) : ;;
-    *) fail "$harness: the hostile environment did not take in the lab pane; the attack would have been a no-op" ;;
-  esac
+  # The count has to be read from the line the probe printed, not matched
+  # anywhere in the pane: the pane also carries this lab's mktemp suffix, the
+  # socket name's PID, and the export lines above, so a bare digit there would
+  # let a half-armed attack pass. The probe prints the count behind a marker the
+  # typed command line itself does not contain, so the exact expected string can
+  # be the proof that the probe ran AND that every hostile value landed.
+  local expected_armed="hostile-armed=${#HOSTILE_ENV[@]}" armed_line
+  if ! send_line_confirmed \
+      "printf 'hostile-armed=%s\\n' \"\$(env | grep -c '^CHROME_DEVTOOLS_AXI')\"" \
+      "$expected_armed"; then
+    armed_line=$(tmux -L "$SOCKET" capture-pane -p -t live 2>/dev/null | grep '^hostile-armed=' | tail -1)
+    [ -n "$armed_line" ] \
+      || fail "$harness: could not arm the hostile environment in the lab pane; the count probe never reported, so the attack would not have been a real attack"
+    fail "$harness: the hostile environment did not take in the lab pane (pane reported $armed_line, expected $expected_armed); the attack would have been a no-op"
+  fi
 
   tmux -L "$SOCKET" send-keys -l "$launch"
   tmux -L "$SOCKET" send-keys Enter

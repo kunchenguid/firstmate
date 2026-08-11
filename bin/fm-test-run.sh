@@ -923,6 +923,14 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
       ;;
+    bin/fm-pr-lib.sh)
+      # fm-pr-lib also owns fm_task_browser_session, the name fm-spawn pins onto
+      # every launch command and fm-teardown closes, so a change to that
+      # derivation has to re-run the spawn-side pin test (backend-dispatch)
+      # alongside the pr-forge family that covers the teardown side.
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
+      ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge

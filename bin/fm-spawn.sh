@@ -1096,6 +1096,15 @@ shell_quote() {
 #                      task, and so tearing one task down cannot kill another's bridge.
 #                      fm-pr-lib.sh's fm_task_browser_session owns that name, so
 #                      fm-teardown closes the same session this launch opened
+# The tool's five remaining variables - CHANNEL, HEADED, MCP_PATH, WS_HEADERS and
+# BRIDGE_TIMEOUT_MS - are inherited unchanged, on purpose. None of them selects a
+# profile or a session, so the guarantee above is not weakened by leaving them
+# alone, but an exported MCP_PATH still redirects which MCP module the agent's
+# bridge runs and HEADED=1 still opens the agent's Chrome on the captain's
+# display. Each has a legitimate operator use - headed mode for visible
+# debugging, MCP_PATH for the tool's documented npx-bootstrap speedup - that
+# pinning would remove, and the boundary is stated here rather than left unsaid
+# because an unstated boundary reads as coverage.
 # docs/verification/browser-isolation.md is the dated evidence for every claim
 # above and names the guard that re-derives it.
 # Scoped to the launch command exactly like CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION

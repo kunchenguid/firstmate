@@ -119,3 +119,7 @@ An isolated profile loading `https://mail.google.com` still renders a page title
 This removes ambient reach, not capability.
 An agent holds a shell and can export different values itself, and per the 2026-08-10 instrument scout no allowlist contains a tool that already reads and writes arbitrary files.
 The verified guarantee is that a firstmate-launched agent does not start inside the operator's authenticated browser, and does not share one with the operator or another task.
+
+The pin covers only the values above.
+`CHROME_DEVTOOLS_AXI_CHANNEL`, `_HEADED`, `_MCP_PATH`, `_WS_HEADERS`, and `_BRIDGE_TIMEOUT_MS` are inherited from the operator's environment unchanged; none of them selects a profile or a session, so none reaches an authenticated page on its own.
+`browser_isolation_env` records why each is left alone, and `docs/configuration.md` states the same boundary for operators.

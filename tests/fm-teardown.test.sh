@@ -152,7 +152,16 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  # Default hermetic browser-tool stub. Teardown closes the task's own browser
+  # session on every case; without this, each one would shell out to whatever
+  # real chrome-devtools-axi the runner happens to have installed. Cases that
+  # assert on the stop override this file with a logging one.
+  cat > "$fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" \
+    "$fakebin/chrome-devtools-axi"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -2262,6 +2271,39 @@ SH
   pass "teardown closes the task's own browser session by name, not only whatever the cwd reap happens to catch"
 }
 
+test_secondmate_teardown_closes_its_own_and_child_browser_sessions() {
+  local case_dir rc child
+  case_dir=$(make_case secondmate-browser-close)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+
+  # fm-spawn pins a per-task session for kind=secondmate exactly as it does for
+  # any other kind, and forced cleanup retires that home's children without ever
+  # running the cwd-matched reap, so every session this home opened has to be
+  # closed by name or each retired agent leaks a bridge and a headless Chrome.
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+printf '%s %s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" \\
+  >> "$case_dir/browser-stop.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "secondmate-browser-close: forced secondmate teardown should succeed"
+  assert_present "$case_dir/browser-stop.log" \
+    "secondmate-browser-close: secondmate teardown never asked the browser tool to close a session"
+  assert_grep "fm-task-x1 stop" "$case_dir/browser-stop.log" \
+    "secondmate-browser-close: the retired secondmate's own browser session was left running"
+  for child in child-a child-b; do
+    assert_grep "fm-$child stop" "$case_dir/browser-stop.log" \
+      "secondmate-browser-close: forced cleanup left child $child's browser session running"
+  done
+  pass "retiring a secondmate closes its own browser session and every session its forced-cleanup children opened"
+}
+
 test_missing_browser_tool_never_blocks_teardown() {
   local case_dir rc
   case_dir=$(make_case browser-tool-absent)
@@ -2269,7 +2311,10 @@ test_missing_browser_tool_never_blocks_teardown() {
   land_shippable_commit "$case_dir"
 
   # A home with no chrome-devtools-axi installed must tear down exactly as
-  # before; the browser step is additive cleanup, never a new refusal.
+  # before; the browser step is additive cleanup, never a new refusal. The
+  # fakebin is prepended to every run, so the default stub has to go for the
+  # tool to actually be absent here.
+  rm -f "$case_dir/fakebin/chrome-devtools-axi"
   rc=0
   FM_TEARDOWN_TEST_PATH=$(make_path_without_lsof "$case_dir") \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2688,6 +2733,7 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_task_browser_session_is_closed
+test_secondmate_teardown_closes_its_own_and_child_browser_sessions
 test_missing_browser_tool_never_blocks_teardown
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
