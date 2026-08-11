@@ -35,12 +35,13 @@ const configDirectory = resolve(process.env.FM_CONFIG_OVERRIDE || resolve(fleetH
 const telemetryPath = resolve(dataDirectory, "routing-outcomes.jsonl");
 
 function usage(stream = process.stdout) {
-  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--output <path>]
+  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--show <row>] [--output <path>]
 
 Render the fleet cockpit from live read-only state.
 Default output is an ANSI terminal view on stdout (pairs with watch/tmux).
 --width <columns>  terminal width override (default: tty width, else 80)
 --all              list every item; default caps each section to fit ~40 rows
+--show <row>       print one row's full context by its rendered row number
 --output <path>    write the self-contained HTML page to <path> instead
 The HTML output may never be written under data/, state/, or config/.
 `);
@@ -50,6 +51,7 @@ function parseArguments(argumentsList) {
   let outputPath = null;
   let width = null;
   let showAll = false;
+  let showRow = null;
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === "-h" || argument === "--help") {
@@ -58,6 +60,14 @@ function parseArguments(argumentsList) {
     }
     if (argument === "--all") {
       showAll = true;
+      continue;
+    }
+    if (argument === "--show" && index + 1 < argumentsList.length) {
+      showRow = Number.parseInt(argumentsList[index + 1], 10);
+      if (!Number.isInteger(showRow) || showRow < 1) {
+        throw new Error("--show requires a positive row number");
+      }
+      index += 1;
       continue;
     }
     if (argument === "--output" && index + 1 < argumentsList.length) {
@@ -77,7 +87,10 @@ function parseArguments(argumentsList) {
     usage(process.stderr);
     throw new Error(`unknown or incomplete argument: ${argument}`);
   }
-  return { outputPath, width, showAll };
+  if (showRow !== null && outputPath !== null) {
+    throw new Error("--show and --output cannot be combined");
+  }
+  return { outputPath, width, showAll, showRow };
 }
 
 function pathIsWithin(candidate, parent) {
@@ -255,7 +268,16 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   for (const record of records) {
     if (!record.structured) {
       if (record.state === "queued" || record.state === "in_flight") {
-        queued.push({ tag: "NOTE", name: cleanProse(record.raw), project: null, prose: null, note: "unstructured backlog line", age: age(null) });
+        queued.push({
+          tag: "NOTE",
+          name: cleanProse(record.raw),
+          project: null,
+          prose: null,
+          note: "unstructured backlog line",
+          age: age(null),
+          raw: record.raw,
+          why: "free-form backlog line the structured parser cannot classify",
+        });
       }
       continue;
     }
@@ -268,11 +290,14 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       needsPedro.push({
         tag: "HOLD",
         name: recordName,
+        id: record.id,
         project: record.repo,
         prose: cleanProse(record.hold_reason),
         note: null,
         age: sinceAge(record),
         live: false,
+        raw: record.raw,
+        why: "captain hold with no unresolved blockers - only Pedro can clear it",
       });
       continue;
     }
@@ -280,10 +305,15 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       queued.push({
         tag: isCaptainHold ? "HOLD" : "QUEUED",
         name: recordName,
+        id: record.id,
         project: record.repo,
         prose: null,
         note: waitsOn(record),
         age: sinceAge(record),
+        raw: record.raw,
+        why: isCaptainHold
+          ? "captain hold still waiting on unresolved blockers"
+          : "queued in backlog behind its dependencies or time gate",
       });
     }
   }
@@ -293,10 +323,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     unhealthy.push({
       tag: "ORPHAN",
       name: record?.title ? cleanProse(record.title) : orphanId,
+      id: orphanId,
       project: record?.repo ?? null,
       prose: "recorded in flight but no worker record exists",
       note: null,
       age: record ? sinceAge(record) : age(null),
+      raw: record?.raw ?? null,
+      why: "backlog records it in flight but no worker record exists for it",
     });
   }
 
@@ -307,10 +340,15 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     const detail = cleanProse(task.current_state?.detail);
     const base = {
       name: titleById.get(task.id) || task.id,
+      id: task.id,
       project: task.project || null,
       age: itemAge,
       note: telemetry?.tuple ?? null,
       live: task.endpoint?.exists === true,
+      statusLog: task.paths?.status_log?.present ? task.paths.status_log.path : null,
+      pr: task.pr?.url ? task.pr : null,
+      report: task.paths?.report?.present ? task.paths.report.path : null,
+      worktree: task.paths?.worktree?.path ?? null,
     };
     const openDecisions = task.hints?.open_decisions || [];
     const decisions = openDecisions.filter((decision) => decision.verb === "needs-decision");
@@ -323,6 +361,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
           tag: "DECIDE",
           prose: cleanProse(decision.summary) || "decision summary absent",
           note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
+          why: "open needs-decision in the keyed decision fold, not yet resolved",
         });
       }
       for (const blocker of blockers) {
@@ -331,6 +370,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
           tag: "BLOCKED",
           prose: cleanProse(blocker.summary) || "blocker summary absent",
           note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
+          why: "open blocked event in the keyed decision fold, not yet resolved",
         });
       }
       continue;
@@ -340,7 +380,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     // surfaced above; beyond that only a dead agent is worth a line.
     if (task.kind === "secondmate") {
       if (task.endpoint?.agent_alive === "dead") {
-        unhealthy.push({ ...base, tag: "DEAD", prose: "secondmate agent is dead", note: null });
+        unhealthy.push({
+          ...base,
+          tag: "DEAD",
+          prose: "secondmate agent is dead",
+          note: null,
+          why: "secondmate agent reads dead on a live endpoint check",
+        });
       }
       continue;
     }
@@ -349,11 +395,23 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     // only when the state claims a live worker, and a reported PR is an ask
     // only while the fleet's own backlog does not already record it landed.
     if (state === "blocked") {
-      needsPedro.push({ ...base, tag: "BLOCKED", prose: detail || "blocked, no detail reported", note: null });
+      needsPedro.push({
+        ...base,
+        tag: "BLOCKED",
+        prose: detail || "blocked, no detail reported",
+        note: null,
+        why: "reconciled current state is blocked",
+      });
       continue;
     }
     if (state === "paused") {
-      queued.push({ ...base, tag: "PAUSED", prose: null, note: detail || "declared external wait" });
+      queued.push({
+        ...base,
+        tag: "PAUSED",
+        prose: null,
+        note: detail || "declared external wait",
+        why: "reconciled current state is a declared bounded external wait",
+      });
       continue;
     }
     if (state === "done") {
@@ -361,7 +419,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       // out of status prose is history. Whether the PR is still open cannot
       // be decided locally, so the ask never claims readiness.
       if (task.pr?.url && task.pr?.source === "meta" && !completedById.get(task.id)) {
-        needsPedro.push({ ...base, tag: "REVIEW", prose: `PR (unverified): ${task.pr.url}`, note: null });
+        needsPedro.push({
+          ...base,
+          tag: "REVIEW",
+          prose: `PR (unverified): ${task.pr.url}`,
+          note: null,
+          why: "task done with a PR recorded in its metadata and no backlog completion; PR openness is not locally verifiable",
+        });
       }
       // Finished work belongs to no bucket; landing and cleanup are
       // firstmate's own pipeline, not fleet attention.
@@ -387,6 +451,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
           prose: null,
           note: `held: ${cleanProse(held.hold_reason)}`,
           age: sinceAge(held),
+          why: "state unreadable, but a backlog hold records it deliberately preserved",
         });
         continue;
       }
@@ -397,6 +462,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
           tag: "PAUSED",
           prose: null,
           note: `declared wait, worker gone: ${cleanProse(lastEvent.note) || "no reason recorded"}`,
+          why: "worker gone, but its last event declares a bounded external wait",
         });
         continue;
       }
@@ -406,12 +472,19 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
           tag: "FAILED",
           prose: cleanProse(lastEvent.note) || "reported failed",
           note: "current state unreadable",
+          why: "last recorded event is a failure and no record supersedes it; current state unreadable",
         });
         continue;
       }
       // No record evidences this task as bad; the reader simply cannot read
       // its current state. That is a fact about the reader, not the worker.
-      unreadable.push({ ...base, tag: "?", prose: null, note: detail || "state unreadable" });
+      unreadable.push({
+        ...base,
+        tag: "?",
+        prose: null,
+        note: detail || "state unreadable",
+        why: "current state cannot be read and nothing evidences it as bad",
+      });
       continue;
     }
     if (state === "failed" || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
@@ -448,7 +521,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   queued.sort(oldestFirst);
   unreadable.sort(oldestFirst);
 
-  return {
+  const model = {
     generated: snapshot.generated || "observation time absent",
     backlogPresent,
     telemetryPresent,
@@ -508,6 +581,19 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       },
     ],
   };
+
+  // Stable row numbers over the full sorted model, so a number seen in the
+  // default view, in --all, and given to --show always means the same item.
+  let rowNumber = 0;
+  for (const bucket of model.buckets) {
+    for (const item of bucket.items) {
+      rowNumber += 1;
+      item.number = rowNumber;
+      item.bucketName = bucket.name;
+    }
+  }
+  model.totalRows = rowNumber;
+  return model;
 }
 
 const ANSI = { reset: "\u001b[0m", bold: "\u001b[1m", dim: "\u001b[2m", amber: "\u001b[33m", green: "\u001b[32m", red: "\u001b[31m", boldAmber: "\u001b[1;33m", boldRed: "\u001b[1;31m" };
@@ -556,19 +642,24 @@ function renderTerminal(model, width, useColor, showAll) {
       continue;
     }
     const shown = showAll ? bucket.items : bucket.items.slice(0, bucket.cap);
+    const numberWidth = String(model.totalRows).length;
+    const headIndent = 2 + numberWidth + 1 + 8;
     for (const item of shown) {
       const tag = clip(item.tag, 7).padEnd(7);
+      const rowLabel = String(item.number).padStart(numberWidth);
       const ageText = ageSegment(item, paint);
       const midParts = bucket.twoLine
         ? [item.name, item.project]
         : [item.name, item.project, item.note];
       const mid = midParts.filter(Boolean).join(" · ");
-      const midWidth = Math.max(8, width - 10 - 3 - ageText.plain.length);
-      lines.push(`  ${paint(BUCKET_COLOR[bucket.tone], tag)} ${clip(mid, midWidth)} · ${ageText.painted}`);
+      const midWidth = Math.max(8, width - headIndent - 3 - ageText.plain.length);
+      lines.push(
+        `  ${paint("dim", rowLabel)} ${paint(BUCKET_COLOR[bucket.tone], tag)} ${clip(mid, midWidth)} · ${ageText.painted}`,
+      );
       if (bucket.twoLine) {
         const detail = [item.prose, item.note].filter(Boolean).join("  ");
         if (detail) {
-          lines.push(`          ${clip(detail, Math.max(0, width - 10))}`);
+          lines.push(`${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`);
         }
       }
     }
@@ -578,6 +669,54 @@ function renderTerminal(model, width, useColor, showAll) {
       const foldWord = bucket.foldWord || "more";
       lines.push(paint("dim", clip(`  … ${hidden} ${foldWord}${ruleText} · --all shows all`, width)));
     }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+// Full single-item context for --show <n>: nothing truncated, every field
+// sourced from data the cockpit already read.
+function renderShow(model, requestedNumber) {
+  const item = model.buckets.flatMap((bucket) => bucket.items).find((candidate) => candidate.number === requestedNumber);
+  if (!item) {
+    throw new Error(`--show ${requestedNumber}: no such row (valid: 1..${model.totalRows})`);
+  }
+  const lines = [];
+  lines.push(`#${item.number} · ${item.bucketName} · ${item.tag}`);
+  lines.push(item.name || "(unnamed)");
+  lines.push("");
+  if (item.prose) {
+    lines.push(`detail: ${item.prose}`);
+  }
+  if (item.note) {
+    lines.push(`note: ${item.note}`);
+  }
+  lines.push(`age: ${item.age.label}`);
+  lines.push(`why here: ${item.why || "routing reason not recorded"}`);
+  const identity = [item.id ? `task ${item.id}` : null, item.project ? `project ${item.project}` : null]
+    .filter(Boolean)
+    .join(" · ");
+  if (identity) {
+    lines.push(identity);
+  }
+  lines.push(`pr: ${item.pr?.url ? `${item.pr.url} (source: ${item.pr.source})` : "none recorded"}`);
+  lines.push(`report: ${item.report || "none"}`);
+  if (item.worktree) {
+    lines.push(`worktree: ${item.worktree}`);
+  }
+  if (item.raw) {
+    lines.push(`backlog record: ${item.raw}`);
+  }
+  if (item.statusLog && existsSync(item.statusLog)) {
+    const events = readFileSync(item.statusLog, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== "")
+      .slice(-5);
+    lines.push(`recent events (${item.statusLog}):`);
+    for (const event of events) {
+      lines.push(`  ${event}`);
+    }
+  } else if (item.id && !item.raw) {
+    lines.push("recent events: no status log");
   }
   return `${lines.join("\n")}\n`;
 }
@@ -599,7 +738,7 @@ function card(item, tone) {
   const tier = ageTier(item);
   const marker = tier === "hot" ? "⚠ " : "";
   return `<article class="card ${escapeHtml(tone)}">
-    <p class="eyebrow">${escapeHtml([item.tag, item.project].filter(Boolean).join(" · "))}</p>
+    <p class="eyebrow">${escapeHtml([`#${item.number}`, item.tag, item.project].filter(Boolean).join(" · "))}</p>
     <h3>${escapeHtml(item.name || item.prose || "detail absent")}</h3>
     <div class="runtime"><strong class="age-${tier}">${escapeHtml(marker + item.age.label)}</strong>${detailMarkup}</div>
   </article>`;
@@ -721,12 +860,14 @@ function writeAtomically(outputPath, html) {
 }
 
 try {
-  const { outputPath, width, showAll } = parseArguments(process.argv.slice(2));
+  const { outputPath, width, showAll, showRow } = parseArguments(process.argv.slice(2));
   if (outputPath !== null) {
     assertSafeOutput(outputPath);
   }
   const model = buildModel(collectInputs());
-  if (outputPath !== null) {
+  if (showRow !== null) {
+    process.stdout.write(renderShow(model, showRow));
+  } else if (outputPath !== null) {
     writeAtomically(outputPath, renderHtml(model));
     process.stdout.write(`${outputPath}\n`);
   } else {

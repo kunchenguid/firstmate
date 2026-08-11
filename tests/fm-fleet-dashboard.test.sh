@@ -252,6 +252,7 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   { [ "$needs" -lt "$underway" ] && [ "$underway" -lt "$unhealthy" ] && [ "$unhealthy" -lt "$queued" ]; } \
     || fail "sections are not ordered Needs Pedro, Underway, Unhealthy, Queued"
 
+  assert_contains "$out" " 1 DECIDE" "rows are not numbered"
   assert_contains "$out" "Choose the public API shape." "open decision was not rendered"
   assert_contains "$out" "[api-shape]" "decision key was not rendered"
   assert_contains "$out" "Decide the public API · firstmate · for 5m" "decision was not rendered under its readable name with age"
@@ -268,7 +269,7 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   assert_not_contains "$out" "Ship the merged thing" "a landed task still occupies a bucket"
   assert_not_contains "$out" "pull/5555" \
     "a PR URL parsed from secondmate status prose minted a review ask"
-  assert_contains "$out" "declared wait, worker gone: vendor rate" \
+  assert_contains "$out" "declared wait, worker gone: vendor" \
     "a declared pause with a gone worker was not rendered as a wait"
   assert_contains "$out" "UNREADABLE (1)" "unverifiable harness state did not get its own quiet section"
   assert_contains "$out" "nothing evidences them as bad" "the unreadable fold line does not disclaim sickness"
@@ -310,6 +311,44 @@ test_terminal_cockpit_opens_on_needs_pedro() {
     });
   ' || fail "terminal output overflows the requested width"
   pass "terminal cockpit opens on Needs Pedro with aged, bucketed, artifact-free items"
+}
+
+test_show_expands_a_row_with_full_context() {
+  local home fakebin out all_out num hidden_num shown hidden_shown error rc
+  home=$(make_home show)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
+  num=$(printf '%s\n' "$out" | grep -F "Decide the public API" | head -1 | awk '{print $1}')
+  [ -n "$num" ] || fail "could not read the decision row's number from the default view"
+
+  shown=$(render_terminal "$home" "$fakebin" --show "$num") || fail "--show $num failed"
+  assert_contains "$shown" "NEEDS PEDRO · DECIDE" "expanded row does not name its bucket and tag"
+  assert_contains "$shown" "Decide the public API" "expanded row lost its full title"
+  assert_contains "$shown" "Choose the public API shape." "expanded row lost its full reason"
+  assert_contains "$shown" "age: for 5m" "expanded row lost its age"
+  assert_contains "$shown" "why here: open needs-decision in the keyed decision fold" \
+    "expanded row does not explain why it landed in its bucket"
+  assert_contains "$shown" "task decision-task · project firstmate" "expanded row lost its identity"
+  assert_contains "$shown" "recent events" "expanded row does not show its status events"
+  assert_contains "$shown" "needs-decision [key=api-shape]" "expanded row lost the recorded event"
+
+  all_out=$(render_terminal "$home" "$fakebin" --width 100 --all) || fail "terminal --all render failed"
+  hidden_num=$(printf '%s\n' "$all_out" | grep -F "Sign off on the icon refresh" | head -1 | awk '{print $1}')
+  [ -n "$hidden_num" ] || fail "could not read a capped-out row's number from --all"
+  hidden_shown=$(render_terminal "$home" "$fakebin" --show "$hidden_num") || fail "--show $hidden_num failed"
+  assert_contains "$hidden_shown" "Two candidates shortlisted." "a capped-out hold cannot be expanded"
+  assert_contains "$hidden_shown" "captain hold with no unresolved blockers" \
+    "a hold's expansion does not explain its routing"
+
+  set +e
+  error=$(render_terminal "$home" "$fakebin" --show 99 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--show accepted an out-of-range row"
+  assert_contains "$error" "no such row" "out-of-range --show refusal is not actionable"
+  pass "any numbered row expands to its full context and bad numbers refuse loudly"
 }
 
 test_html_page_renders_four_buckets() {
@@ -376,6 +415,7 @@ test_ignored_operational_directories_are_never_output_targets() {
 }
 
 test_terminal_cockpit_opens_on_needs_pedro
+test_show_expands_a_row_with_full_context
 test_html_page_renders_four_buckets
 test_absent_sources_stay_absent
 test_ignored_operational_directories_are_never_output_targets
