@@ -608,8 +608,44 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # anywhere else.
 # If the target belongs to the active tab, exact tab preservation is
 # impossible, so cleanup refuses instead of changing focus.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
+fm_backend_herdr_projection_task_identity_matches() {
+  local session=$1 workspace=$2 tab_id=$3 pane_id=$4 expected_label=$5 expected_harness=${6:-}
+  local required_agent_state=${7:-} info state identity agent agent_status
+  [ -n "$workspace" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] && [ -n "$expected_label" ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab_id" --arg pane "$pane_id" '
+    .result.pane.workspace_id == $workspace
+    and .result.pane.tab_id == $tab
+    and .result.pane.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab_id" --arg label "$expected_label" '
+    .result.tab.workspace_id == $workspace
+    and .result.tab.tab_id == $tab
+    and .result.tab.label == $label
+  ' >/dev/null 2>&1 || return 1
+  if [ -n "$required_agent_state" ]; then
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    [ "$state" = "$required_agent_state" ] || return 1
+  else
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  fi
+  if [ "$state" = live ] && [ -n "$expected_harness" ]; then
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane_id") || return 1
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    [ -n "$agent_status" ] || return 1
+    case "$expected_harness:$agent" in
+      claude*:claude|codex*:codex|grok*:grok|opencode*:opencode|pi*:pi) ;;
+      *) [ "$agent" = "$expected_harness" ] || return 1 ;;
+    esac
+  fi
+}
+
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [workspace] [tab] [label] [harness]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
+  local expected_workspace=${4:-} expected_tab=${5:-} expected_label=${6:-} expected_harness=${7:-}
   local before active_tab info target_pane target_tab close_status state
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
@@ -637,6 +673,11 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
+  if [ -n "$expected_workspace" ] || [ -n "$expected_tab" ] || [ -n "$expected_label" ] || [ -n "$expected_harness" ]; then
+    fm_backend_herdr_projection_task_identity_matches \
+      "$session" "$expected_workspace" "$expected_tab" "$pane_id" \
+      "$expected_label" "$expected_harness" "$required_agent_state" || return 1
+  fi
   if fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then
     close_status=0
   else
@@ -647,10 +688,13 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 }
 
 fm_backend_herdr_projection_teardown_close() {
-  local session=$1 pane_id=$2 required_agent_state=${3:-} close_status
+  local session=$1 pane_id=$2 required_agent_state=${3:-}
+  local expected_workspace=${4:-} expected_tab=${5:-} expected_label=${6:-} expected_harness=${7:-}
+  local close_status
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ] && return 0
   if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" \
-    "$required_agent_state" 2>/dev/null; then
+    "$required_agent_state" "$expected_workspace" "$expected_tab" "$expected_label" \
+    "$expected_harness" 2>/dev/null; then
     close_status=0
   else
     close_status=$?

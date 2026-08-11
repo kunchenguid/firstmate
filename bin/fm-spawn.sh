@@ -1321,6 +1321,10 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+json_string() {
+  printf '"%s"' "$(json_escape "$1")"
+}
+
 resolved_existing_dir() {
   local path=$1
   [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
@@ -2083,11 +2087,10 @@ exclude_path() {
 }
 if [ "$KIND" != secondmate ]; then
   spawn_create_new_artifact "$TURNEND" SPAWN_TURNEND_INODE SPAWN_TURNEND_DIGEST SPAWN_TURNEND_CREATED </dev/null || exit 1
-  TURNEND_SHELL=$(shell_quote "$TURNEND") || exit 1
-  TURNEND_JS=$(printf '%s' "$TURNEND" | jq -Rs .) || exit 1
-  CLAUDE_TURNEND_COMMAND=$(printf 'touch %s' "$TURNEND_SHELL" | jq -Rs .) || exit 1
   case "$HARNESS" in
     claude*)
+      TURNEND_SHELL=$(shell_quote "$TURNEND") || exit 1
+      CLAUDE_TURNEND_COMMAND=$(json_string "touch $TURNEND_SHELL") || exit 1
       spawn_preflight_real_directory_path "$WT/.claude" || exit 1
       spawn_ensure_real_directory_path "$WT/.claude" || exit 1
       spawn_create_new_artifact "$WT/.claude/settings.local.json" SPAWN_CLAUDE_HOOK_INODE SPAWN_CLAUDE_HOOK_DIGEST SPAWN_CLAUDE_HOOK_CREATED <<EOF || exit 1
@@ -2096,6 +2099,7 @@ EOF
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
+      TURNEND_JS=$(json_string "$TURNEND") || exit 1
       spawn_preflight_real_directory_path "$WT/.opencode/plugins" || exit 1
       spawn_ensure_real_directory_path "$WT/.opencode/plugins" || exit 1
       spawn_create_new_artifact "$WT/.opencode/plugins/fm-turn-end.js" SPAWN_OPENCODE_HOOK_INODE SPAWN_OPENCODE_HOOK_DIGEST SPAWN_OPENCODE_HOOK_CREATED <<EOF || exit 1
@@ -2108,6 +2112,7 @@ EOF
       exclude_path '.opencode/plugins/fm-turn-end.js'
       ;;
     pi*)
+      TURNEND_JS=$(json_string "$TURNEND") || exit 1
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.

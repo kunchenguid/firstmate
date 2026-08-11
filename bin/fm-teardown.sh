@@ -609,6 +609,7 @@ teardown_herdr_endpoint_focus_safe() {
   local target=$1 child_id=${2:-} child_meta=${3:-} child_kind=${4:-}
   local parent_home=${5:-} child_wt=${6:-}
   local session pane state close_status=1 acquired_here=0
+  local expected_workspace= expected_tab= expected_label= expected_harness=
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
@@ -626,7 +627,14 @@ teardown_herdr_endpoint_focus_safe() {
     fi
     return 1
   fi
-  if fm_backend_herdr_projection_teardown_close "$session" "$pane" "$state"; then
+  if [ -n "$child_id" ]; then
+    expected_workspace=$(meta_value "$child_meta" herdr_workspace_id)
+    expected_tab=$(meta_value "$child_meta" herdr_tab_id)
+    expected_label=$(meta_value "$child_meta" display_label)
+    expected_harness=$(meta_value "$child_meta" harness)
+  fi
+  if fm_backend_herdr_projection_teardown_close "$session" "$pane" "$state" \
+    "$expected_workspace" "$expected_tab" "$expected_label" "$expected_harness"; then
     close_status=0
   else
     close_status=$?
@@ -2246,6 +2254,11 @@ if [ "$BACKEND" = herdr ]; then
   # returned the slot also already closed this pane, so re-closing it would
   # refuse on a pane that is legitimately gone and leave the task unfinishable.
   if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$TOP_ENDPOINT_CLOSED" != 1 ] \
+    && [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+    echo "REFUSED: authoritative Herdr occupancy proof for $ID was not retained; preserving task state and worktree" >&2
+    exit 1
+  fi
+  if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$TOP_ENDPOINT_CLOSED" != 1 ] \
     && ! teardown_herdr_endpoint_focus_safe "$T" "$ID" "$META" "$KIND" "$FM_HOME" "$WT"; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
@@ -2343,6 +2356,10 @@ fi
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  remove_secondmate_registry_entry "$ID" || {
+    echo "error: could not remove secondmate $ID from its registry; preserving home and task state" >&2
+    exit 1
+  }
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
   if [ "$FORCE_RETIRE_STAGED" = 1 ] \
      && ! fm_pending_reply_finalize_force_retire_task \
@@ -2350,7 +2367,6 @@ if [ "$KIND" = secondmate ]; then
     echo "error: secondmate $ID was removed but its pending-reply handoff could not be finalized" >&2
     exit 1
   fi
-  remove_secondmate_registry_entry "$ID"
 fi
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
   if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" \
