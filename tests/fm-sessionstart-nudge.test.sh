@@ -321,6 +321,22 @@ test_run_clear_rejects_previous_owner_completion() {
   pass "run wrapper: clear accepts completion only from the current harness"
 }
 
+test_run_clear_rejects_recycled_owner_identity() {
+  local root="$TMP_ROOT/run-clear-recycled-owner" out status=0 lock_pid
+  make_run_primary "$root"
+  run_hook "$root" --source startup </dev/null >/dev/null
+  lock_pid=$(cat "$root/state/.lock")
+  printf '%s\n' 'retired original session identity' > "$root/state/.lock.pid-identity.$lock_pid"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear with recycled owner identity"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear treated a recycled lock owner's completion as current"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear skipped startup sweeps after the lock owner's identity changed"
+  pass "run wrapper: clear rejects completion from a recycled lock owner"
+}
+
 test_pi_startup_classifies_cli_continuations() {
   local fixture out expected actual status=0
   command -v node >/dev/null 2>&1 || {
@@ -546,6 +562,7 @@ test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
+test_run_clear_rejects_recycled_owner_identity
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
