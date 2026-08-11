@@ -208,6 +208,7 @@ set -u
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  printf '%s\n' "$POST_CREATE_ABORT_CONTROL/not-a-worktree"
   exit 0
 fi
 exec "$REAL_TREEHOUSE" "$@"
@@ -822,6 +823,7 @@ assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation orde
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
+mkdir -p "$POST_CREATE_ABORT_CONTROL/not-a-worktree"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
