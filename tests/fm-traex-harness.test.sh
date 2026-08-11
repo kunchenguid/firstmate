@@ -129,6 +129,9 @@ case "$cmd $sub" in
       | sed -n "s/.*--session-id '\([0-9a-f-]*\)'.*/\1/p")
     [ -z "$native_session" ] || printf '%s\n' "$native_session" > "$native_session_file"
     [ "$phase" = shell ] || printf '%s' "$text" > "$composer"
+    if [ "$phase" = idle ] && [ "${FM_FAKE_UNKNOWN_WHILE_COMPOSING:-0}" = 1 ]; then
+      printf composing > "$phase_file"
+    fi
     ;;
   "pane send-keys")
     key=${4:-}
@@ -144,7 +147,7 @@ case "$cmd $sub" in
           : > "$composer"
           printf '%s' "${FM_FAKE_AFTER_TRUST:-working}" > "$phase_file"
           ;;
-        idle)
+        idle|composing)
           : > "$composer"
           printf working > "$phase_file"
           ;;
@@ -152,6 +155,11 @@ case "$cmd $sub" in
           [ "${FM_FAKE_SWALLOW_WORKING_ENTER:-0}" = 1 ] || : > "$composer"
           ;;
       esac
+    elif [ "$key" = escape ] && [ "$phase" = working ]; then
+      printf 'restored interrupted input' > "$composer"
+      printf idle > "$phase_file"
+    elif [ "$key" = ctrl+u ]; then
+      : > "$composer"
     fi
     ;;
   "pane read")
@@ -168,11 +176,19 @@ case "$cmd $sub" in
   Press enter to continue
 EOF
     else
+      native_session=$(cat "$native_session_file" 2>/dev/null || printf '11111111-1111-4111-8111-111111111111')
+      printf '─────────────── %s ───────────────\n' "$native_session"
       printf '❯ %s\n' "$(cat "$composer" 2>/dev/null || true)"
+      printf '%s\n' '──────────────────────────────────────────────────────'
+      printf '%s\n' 'Doubao-Seed-2.1-Pro · Full Access'
     fi
     ;;
   "agent get")
     case "$phase" in
+      composing)
+        printf '{"result":{"agent":{"agent":"traex","agent_status":"unknown","cwd":"%s","foreground_cwd":"%s","pane_id":"w1:p2"}}}\n' \
+          "${FM_FAKE_AGENT_CWD:-$project}" "$worktree"
+        ;;
       blocked|working|idle|done)
         if [ "$phase" = working ] && [ "${FM_FAKE_DROP_AFTER_WORKING:-0}" = 1 ]; then
           reads=$(cat "$phase_file.working-reads" 2>/dev/null || printf 0)
@@ -947,6 +963,27 @@ test_active_send_requires_post_submit_composer_clearance() {
   pass "traex active steering requires post-submit composer clearance"
 }
 
+test_pending_native_composer_state_keeps_bound_steer() {
+  local rec out status verdict
+  rec=$(make_spawn_case pending-native-composer)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for pending-composer steering should succeed: $out"
+  printf idle > "$CASE_DIR/phase"
+  run_traex_reconcile || fail "initial pending-composer completion could not be reconciled"
+
+  out=$(FM_FAKE_UNKNOWN_WHILE_COMPOSING=1 run_traex_send 'reply with exactly PENDING_COMPOSER_OK')
+  status=$?
+  expect_code 0 "$status" "bound TraeX pending-composer steer should be confirmed: $out"
+  [ ! -s "$CASE_DIR/launch.log.composer" ] \
+    || fail "confirmed pending-composer steer remained unsubmitted"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'busy herdr-traex' ] \
+    || fail "pending-composer steer returned without persisting native working: $verdict"
+  pass "traex steering preserves its idle baseline across native pending-composer state"
+}
+
 test_send_persists_working_before_delivery_ack() {
   local rec out status verdict
   rec=$(make_spawn_case send-transition)
@@ -1401,6 +1438,7 @@ test_resume_revalidates_native_session_identity
 test_resume_refuses_mismatched_worktree_and_lifecycle_bindings
 test_start_observation_persists_lifecycle_before_return
 test_active_send_requires_post_submit_composer_clearance
+test_pending_native_composer_state_keeps_bound_steer
 test_send_persists_working_before_delivery_ack
 test_blocked_ready_and_resumed_screens_refuse_steer
 test_replaced_native_session_refuses_controls_and_transitions

@@ -3029,8 +3029,51 @@ fm_backend_herdr_traex_steer_ready() {  # <state-dir> <target>
   fi
 }
 
+# TraeX temporarily reports agent_status=unknown after literal text enters its
+# composer. Revalidate the exact ready lifecycle, native session process, agent
+# identity, pane, and isolated foreground cwd without requiring an idle status.
+# A structurally identified blocker still refuses before Enter can select it.
+fm_backend_herdr_traex_injected_input_bound() {  # <state-dir> <target>
+  local state=$1 target=$2 session pane id native_session meta worktree worktree_real
+  local out agent status observed_pane pane_out foreground foreground_real
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  fm_backend_herdr_traex_ready_lifecycle "$state" "$session" "$pane" || return 1
+  id=$FM_BACKEND_HERDR_TRAEX_ID
+  native_session=$FM_BACKEND_HERDR_TRAEX_NATIVE_SESSION
+  meta="$state/$id.meta"
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree 2>/dev/null) || return 1
+  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
+  agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null) || return 1
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || return 1
+  observed_pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || return 1
+  [ "$agent" = traex ] && [ "$observed_pane" = "$pane" ] || return 1
+  case "$status" in
+    blocked)
+      echo "warning: TraeX became natively blocked after text injection; refusing to submit it" >&2
+      return 1
+      ;;
+    working|idle|done|unknown) ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_traex_native_session_matches \
+    "$session" "$pane" "$native_session" bound || return 1
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  observed_pane=$(printf '%s' "$pane_out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null) || return 1
+  foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null) || return 1
+  foreground_real=$(CDPATH='' cd -- "$foreground" 2>/dev/null && pwd -P) || return 1
+  [ "$observed_pane" = "$pane" ] && [ "$foreground_real" = "$worktree_real" ] || return 1
+  fm_backend_herdr_traex_ready_lifecycle "$state" "$session" "$pane"
+}
+
 fm_backend_herdr_traex_send_key() {  # <state-dir> <target> <key>
-  fm_backend_herdr_traex_control_ready "$1" "$2" || return 1
+  if [ "$3" = C-u ]; then
+    fm_backend_herdr_traex_injected_input_bound "$1" "$2" || return 1
+  else
+    fm_backend_herdr_traex_control_ready "$1" "$2" || return 1
+  fi
   fm_backend_herdr_send_key "$2" "$3"
 }
 
@@ -3099,9 +3142,17 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     esac
   elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
-    # A lower unmatched separator proves the generic row is stale, but does
-    # not provide the complete Pi composer structure required for injection.
-    found=0
+    # TraeX's bare composer has a session-labelled opening rule (therefore not
+    # a Pi separator) and a solid closing rule immediately below it. Preserve
+    # that generic candidate only when Herdr natively identifies TraeX; every
+    # other unmatched lower separator still proves the generic row stale.
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    agent=$(printf '%s' "$identity" | cut -f1)
+    agent_status=$(printf '%s' "$identity" | cut -f2)
+    case "$agent:$agent_status:$shape:$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" in
+      traex:working:bare:"$((generic_line + 1))"|traex:idle:bare:"$((generic_line + 1))"|traex:done:bare:"$((generic_line + 1))"|traex:blocked:bare:"$((generic_line + 1))"|traex:unknown:bare:"$((generic_line + 1))") ;;
+      *) found=0 ;;
+    esac
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
@@ -3200,13 +3251,6 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local transition_state=${7:-} agent status record
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  if [ -n "$transition_state" ] \
-     && ! fm_backend_herdr_traex_steer_ready "$transition_state" "$target"; then
-    printf 'unknown'
-    return 0
-  fi
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
   if [ -n "$transition_state" ]; then
     if ! fm_backend_herdr_traex_steer_ready "$transition_state" "$target"; then
       printf 'unknown'
@@ -3221,6 +3265,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     status=$(fm_transition_to_status "$FM_BACKEND_HERDR_TRAEX_OBSERVED_RECORD")
     [ -n "$status" ] || { printf 'unknown'; return 0; }
     baseline=$(fm_backend_herdr_classify_submit_agent_status "$status")
+  fi
+  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  sleep "$settle"
+  if [ -n "$transition_state" ]; then
+    if ! fm_backend_herdr_traex_injected_input_bound "$transition_state" "$target"; then
+      printf 'unknown'
+      return 0
+    fi
   else
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
       "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")

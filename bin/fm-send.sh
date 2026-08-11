@@ -128,6 +128,45 @@ fm_send_backend_key() {  # <key>
   fi
 }
 
+FM_SEND_TRAEX_CLEAR_POLLS=${FM_SEND_TRAEX_CLEAR_POLLS:-100}
+FM_SEND_TRAEX_CLEAR_INTERVAL=${FM_SEND_TRAEX_CLEAR_INTERVAL:-0.05}
+
+# Escape and the first C-u can race TraeX's asynchronous input restoration.
+# After the immediate verified clear sequence, keep observing the exact bound
+# native agent and structured composer; if restored input appears later, clear
+# that same composer again. Empty plus native idle/done is the postcondition.
+fm_send_verify_traex_interrupt_clear() {
+  local i=0 polls=$FM_SEND_TRAEX_CLEAR_POLLS interval=$FM_SEND_TRAEX_CLEAR_INTERVAL composer
+  [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ] || return 0
+  case "$polls" in ''|*[!0-9]*|0) polls=100 ;; esac
+  while [ "$i" -lt "$polls" ]; do
+    if fm_backend_herdr_traex_control_ready "$STATE" "$T"; then
+      case "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS" in
+        idle|done)
+          composer=$(fm_backend_herdr_composer_state "$T")
+          case "$composer" in
+            empty) return 0 ;;
+            pending)
+              fm_send_backend_key C-u || {
+                echo "error: Escape reached $T, but TraeX's restored input could not be cleared." >&2
+                return 1
+              }
+              ;;
+          esac
+          ;;
+        blocked)
+          echo "error: TraeX became blocked while restoring interrupted input; refusing to clear an unverified composer." >&2
+          return 1
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  echo "error: Escape reached $T, but TraeX's restored input remained in the composer after clear." >&2
+  return 1
+}
+
 fm_send_clear_after_interrupt() {  # <key>
   local key=$1
   [ "$key" = Escape ] || return 0
@@ -137,6 +176,7 @@ fm_send_clear_after_interrupt() {  # <key>
     echo "error: Escape reached $T, but the worker composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
+  fm_send_verify_traex_interrupt_clear
 }
 
 fm_send_normalize_key() {  # <key>
