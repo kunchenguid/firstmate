@@ -16,7 +16,6 @@ PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 API_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-api.toon"
 CLAIMS_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-view-full.toon"
 MERGE_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-merge-success.toon"
-QUEUE_FIXTURE="$ROOT/tests/fixtures/gh-axi-merge-enqueued.toon"
 PR_URL=https://github.com/ruby-dlee/firstmate/pull/72
 HEAD_SHA=c9cbe79154013efcec9aa478f1476d0eff6c63df
 BASE_SHA=68f014697d0eea733a4e7c0294becff4e76c7bcf
@@ -84,12 +83,60 @@ case "${1:-} ${2:-}" in
     esac
     case "${FM_TEST_MERGE_MODE:-success}" in
       success) cat "$FM_TEST_MERGE_FIXTURE" ;;
-      enqueued) cat "$FM_TEST_QUEUE_FIXTURE" ;;
       race)
         echo "error: HEAD WAS MODIFIED" >&2
         exit 41
         ;;
       *) exit 98 ;;
+    esac
+    ;;
+  "api /repos/ruby-dlee/firstmate/rules/branches/main")
+    case "${FM_TEST_QUEUE_RULE:-absent}" in
+      absent) printf '%s\n' '[0]:' ;;
+      active)
+        printf '%s\n' \
+          '[1]:' \
+          '  - type: merge_queue' \
+          '    parameters:' \
+          '      merge_method: SQUASH'
+        ;;
+      *) exit 98 ;;
+    esac
+    ;;
+  "api POST")
+    case "$*" in
+      *"query=query { repository("*)
+        printf '%s\n' \
+          'data:' \
+          '  repository:' \
+          '    pullRequest:' \
+          '      id: PR_test_72' \
+          '      number: 72' \
+          '      state: OPEN' \
+          '      isDraft: false' \
+          "      headRefOid: $FM_TEST_HEAD"
+        ;;
+      *"query=mutation { enqueuePullRequest("*)
+        case "$*" in
+          *"expectedHeadOid:\"$FM_TEST_HEAD\""*) ;;
+          *) echo "enqueue omitted exact SHA" >&2; exit 96 ;;
+        esac
+        printf '%s\n' \
+          'data:' \
+          '  enqueuePullRequest:' \
+          '    mergeQueueEntry:' \
+          '      id: MQE_test_72' \
+          '      state: AWAITING_CHECKS' \
+          '      pullRequest:' \
+          '        number: 72' \
+          '        state: OPEN' \
+          '        isDraft: false' \
+          "        headRefOid: $FM_TEST_HEAD"
+        ;;
+      *)
+        echo "unsupported GraphQL fake invocation: $*" >&2
+        exit 97
+        ;;
     esac
     ;;
   *)
@@ -168,7 +215,7 @@ run_pr_merge() {
   FM_TEST_API_FIXTURE="$API_FIXTURE" \
   FM_TEST_CLAIMS_FIXTURE="$CLAIMS_FIXTURE" \
   FM_TEST_MERGE_FIXTURE="$MERGE_FIXTURE" \
-  FM_TEST_QUEUE_FIXTURE="$QUEUE_FIXTURE" \
+  FM_TEST_QUEUE_RULE="${FM_TEST_QUEUE_RULE:-absent}" \
   FM_TEST_HEAD="${FM_TEST_HEAD:-$HEAD_SHA}" \
   FM_TEST_BASE="$BASE_SHA" \
     "$PR_MERGE" "$@"
@@ -204,7 +251,7 @@ test_merge_queue_acceptance_is_enqueued_unconfirmed() {
   local case_dir output
   case_dir=$(make_case merge-queue)
   : > "$case_dir/gh-axi.log"
-  output=$(FM_TEST_MERGE_MODE=enqueued run_pr_merge "$case_dir" task-x1 "$PR_URL") \
+  output=$(FM_TEST_QUEUE_RULE=active run_pr_merge "$case_dir" task-x1 "$PR_URL") \
     || fail "successful queue submission was reported as a merge failure"
   assert_contains "$output" '"merged": false' \
     "queue submission claimed the PR was merged"
@@ -217,6 +264,14 @@ test_merge_queue_acceptance_is_enqueued_unconfirmed() {
   esac
   [ "$(grep -c '^api /repos/ruby-dlee/firstmate/pulls/72$' "$case_dir/gh-axi.log")" -eq 5 ] \
     || fail "queue submission did not add exactly one independent PR readback"
+  assert_grep 'api /repos/ruby-dlee/firstmate/rules/branches/main' "$case_dir/gh-axi.log" \
+    "queue submission did not inspect the active base-branch rules"
+  assert_grep "expectedHeadOid:\"$HEAD_SHA\"" "$case_dir/gh-axi.log" \
+    "queue submission did not atomically bind the reviewed SHA"
+  assert_no_grep 'api PUT ' "$case_dir/gh-axi.log" \
+    "queue submission called the immediate merge API"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "queue submission used the ambiguous unguarded merge wrapper"
   pass "merge queue acceptance is enqueued/unconfirmed, not merged or failed"
 }
 

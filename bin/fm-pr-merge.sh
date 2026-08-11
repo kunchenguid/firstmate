@@ -13,15 +13,16 @@
 # itself, so neither can be skipped by omission. Use it for every PR merge.
 #
 # The installed gh-axi `pr merge` surface has no expected-head option. This
-# script instead uses the private GitHub merge primitive through
+# script instead uses the private GitHub merge or enqueue primitives through
 # bin/fm-crosscheck.sh, which repeats ledger verification and passes the exact
-# reviewed SHA in the atomic merge request. A force-push between verification
-# and the request makes GitHub reject the merge.
+# reviewed SHA in the atomic request. A force-push between verification and the
+# request makes GitHub reject the merge or enqueue.
 #
-# Merge method defaults to squash. The supported optional arguments are
+# With no explicit merge method, an active base-branch merge queue is used;
+# otherwise the method defaults to squash. The supported optional arguments are
 # --squash, --merge, --rebase, --method, --subject, --body, and --body-file.
-# --auto and --delete-branch are refused because neither belongs to the atomic
-# expected-head merge request.
+# --auto and --delete-branch are refused because neither belongs to an atomic
+# expected-head merge or enqueue request.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <atomic merge options>]
 set -eu
@@ -57,19 +58,21 @@ parse_pr_url() {
 parse_pr_url "$URL" || exit 1
 
 MERGE_METHOD=squash
+MERGE_METHOD_EXPLICIT=0
 MERGE_TITLE=
 MERGE_BODY=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --squash) MERGE_METHOD=squash ;;
-    --merge) MERGE_METHOD=merge ;;
-    --rebase) MERGE_METHOD=rebase ;;
+    --squash) MERGE_METHOD=squash; MERGE_METHOD_EXPLICIT=1 ;;
+    --merge) MERGE_METHOD=merge; MERGE_METHOD_EXPLICIT=1 ;;
+    --rebase) MERGE_METHOD=rebase; MERGE_METHOD_EXPLICIT=1 ;;
     --method)
       [ "$#" -ge 2 ] || { echo "error: --method requires a value" >&2; exit 1; }
       MERGE_METHOD=$2
+      MERGE_METHOD_EXPLICIT=1
       shift
       ;;
-    --method=*) MERGE_METHOD=${1#--method=} ;;
+    --method=*) MERGE_METHOD=${1#--method=}; MERGE_METHOD_EXPLICIT=1 ;;
     --subject)
       [ "$#" -ge 2 ] || { echo "error: --subject requires a value" >&2; exit 1; }
       MERGE_TITLE=$2
@@ -128,6 +131,7 @@ grep -qxF "pr_head=$REVIEWED_HEAD" "$META" || {
 }
 
 MERGE_COMMAND=("$SCRIPT_DIR/fm-crosscheck.sh" merge "$ID" "$URL" "$REVIEWED_HEAD" "$MERGE_METHOD")
+[ "$MERGE_METHOD_EXPLICIT" -eq 1 ] || MERGE_COMMAND+=(--allow-queue)
 [ -z "$MERGE_TITLE" ] || MERGE_COMMAND+=(--title "$MERGE_TITLE")
 [ -z "$MERGE_BODY" ] || MERGE_COMMAND+=(--body "$MERGE_BODY")
 "${MERGE_COMMAND[@]}"

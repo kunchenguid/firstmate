@@ -10,8 +10,9 @@ Observed against gh-axi 0.1.25 on 2026-08-02:
 * ``gh-axi api PUT .../merge --field sha=<sha> --field merge_method=<method>``
   emits root ``sha``, ``merged``, and ``message`` fields on success.
 
-A successful merge request can enqueue a pull request instead of merging it.
-That outcome is reported as ``enqueued/unconfirmed`` only after a fresh API
+A base branch governed by a merge-queue ruleset is enqueued through GitHub's
+GraphQL mutation with ``expectedHeadOid`` set to the reviewed SHA.
+That outcome is reported as ``enqueued/unconfirmed`` only after a fresh REST
 read confirms that the same reviewed head remains open and unmerged.
 
 The adapter deliberately does not pass raw-gh ``--json`` or ``-q`` flags.
@@ -28,6 +29,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+from urllib.parse import quote
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -51,6 +53,11 @@ ARRAY_HEADER_RE = re.compile(
     r"(?:,[A-Za-z_][A-Za-z0-9_]*)*)\})?:$"
 )
 MAX_GH_AXI_OUTPUT_BYTES = 1_000_000
+MERGE_QUEUE_RULE_RE = re.compile(r"^[ ]+- type: merge_queue[ ]*$", re.MULTILINE)
+ROOT_ARRAY_HEADER_RE = re.compile(
+    r"^\[(?:0|[1-9][0-9]*)\](?:\{[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:,[A-Za-z_][A-Za-z0-9_]*)*\})?:$"
+)
 
 
 class GitHubContractError(RuntimeError):
@@ -459,12 +466,118 @@ def snapshot(url: str) -> dict[str, Any]:
     return result
 
 
+def parse_root_toon_array(document: str) -> None:
+    lines = document.splitlines()
+    if not lines or ROOT_ARRAY_HEADER_RE.fullmatch(lines[0]) is None:
+        raise GitHubContractError("gh-axi returned an invalid root TOON array")
+    parse_toon_mapping("rules" + document)
+
+
+def base_uses_merge_queue(owner: str, repo: str, base_ref: str) -> bool:
+    encoded_ref = quote(base_ref, safe="")
+    raw = run_gh_axi(
+        ["api", f"/repos/{owner}/{repo}/rules/branches/{encoded_ref}"]
+    )
+    parse_root_toon_array(raw)
+    return MERGE_QUEUE_RULE_RE.search(raw) is not None
+
+
+def enqueue_exact(
+    url: str,
+    expected_sha: str,
+) -> dict[str, Any]:
+    owner, repo, number = parse_pr_url(url)
+    query = (
+        "query { repository(owner:"
+        f"{json.dumps(owner)}, name:{json.dumps(repo)}) {{ "
+        f"pullRequest(number:{number}) {{ id number state isDraft headRefOid }} "
+        "} }"
+    )
+    raw = run_gh_axi(["api", "POST", "/graphql", "--field", f"query={query}"])
+    values = parse_toon_mapping(raw)
+    prefix = ("data", "repository", "pullRequest")
+    node_id = _required(values, *prefix, "id")
+    actual_number = _required(values, *prefix, "number")
+    state = _required(values, *prefix, "state")
+    draft = _required(values, *prefix, "isDraft")
+    head_oid = _required(values, *prefix, "headRefOid")
+    if not isinstance(node_id, str) or not node_id:
+        raise GitHubContractError("GitHub returned an invalid pull request node ID")
+    if (
+        not isinstance(actual_number, int)
+        or isinstance(actual_number, bool)
+        or actual_number != number
+    ):
+        raise GitHubContractError(
+            f"GraphQL returned PR {actual_number!r}, expected {number}"
+        )
+    if state != "OPEN" or draft is not False or head_oid != expected_sha:
+        raise GitHubContractError(
+            "pull request identity changed before the expected-head enqueue request"
+        )
+
+    mutation = (
+        "mutation { enqueuePullRequest(input:{pullRequestId:"
+        f"{json.dumps(node_id)}, expectedHeadOid:{json.dumps(expected_sha)}}}) {{ "
+        "mergeQueueEntry { id state pullRequest { number state isDraft "
+        "headRefOid } } } }"
+    )
+    raw = run_gh_axi(
+        ["api", "POST", "/graphql", "--field", f"query={mutation}"]
+    )
+    values = parse_toon_mapping(raw)
+    prefix = ("data", "enqueuePullRequest", "mergeQueueEntry")
+    entry_id = _required(values, *prefix, "id")
+    entry_state = _required(values, *prefix, "state")
+    entry_number = _required(values, *prefix, "pullRequest", "number")
+    entry_pr_state = _required(values, *prefix, "pullRequest", "state")
+    entry_draft = _required(values, *prefix, "pullRequest", "isDraft")
+    entry_pr_head = _required(values, *prefix, "pullRequest", "headRefOid")
+    if not isinstance(entry_id, str) or not entry_id:
+        raise GitHubContractError("GitHub returned an invalid merge queue entry ID")
+    if not isinstance(entry_state, str) or not entry_state:
+        raise GitHubContractError("GitHub returned an invalid merge queue entry state")
+    if (
+        entry_pr_head != expected_sha
+        or entry_number != number
+        or isinstance(entry_number, bool)
+        or entry_pr_state != "OPEN"
+        or entry_draft is not False
+    ):
+        raise GitHubContractError(
+            "GitHub merge queue entry did not preserve the reviewed pull request"
+        )
+
+    observed = fetch_pr_api(url)
+    if observed["head_sha"] != expected_sha:
+        raise GitHubContractError(
+            "PR head changed before the queued merge request could be confirmed"
+        )
+    if observed["merged"] or observed["state"] != "open":
+        raise GitHubContractError(
+            "GitHub accepted the queue request, but the independent readback did "
+            f"not report an open PR: state={observed['state']!r}, "
+            f"merged={observed['merged']!r}"
+        )
+    return {
+        "sha": None,
+        "merged": False,
+        "message": "Pull Request accepted for merge queue processing",
+        "outcome": "enqueued/unconfirmed",
+        "observed_state": "open",
+        "queue_entry_id": entry_id,
+        "queue_entry_state": entry_state,
+    }
+
+
 def merge_exact(
     url: str,
     expected_sha: str,
     method: str,
     title: str | None,
     body: str | None,
+    *,
+    allow_queue: bool = False,
 ) -> dict[str, Any]:
     owner, repo, number = parse_pr_url(url)
     if SHA_RE.fullmatch(expected_sha) is None:
@@ -490,6 +603,13 @@ def merge_exact(
             f"refusing to merge PR with state={pre_merge['state']!r}, "
             f"merged={pre_merge['merged']!r}"
         )
+
+    if allow_queue and base_uses_merge_queue(owner, repo, pre_merge["base_ref"]):
+        if title is not None or body is not None:
+            raise GitHubContractError(
+                "merge queue requests do not accept a commit title or body"
+            )
+        return enqueue_exact(url, expected_sha)
 
     arguments = [
         "api",

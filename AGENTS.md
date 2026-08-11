@@ -522,7 +522,7 @@ This do-not-fight rule does not license evidence commits in firstmate's own repo
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
 With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
 Never merge a red PR even under yolo.
-`bin/fm-pr-merge.sh` always records `pr=` and the live `pr_head=`, refuses both draft PRs and undeterminable draft status, requires a clear crosscheck ledger for that exact head and PR claims, and passes the reviewed SHA to GitHub's atomic merge API; do not call `gh-axi pr merge` or the API directly for a task's PR.
+`bin/fm-pr-merge.sh` always records `pr=` and the live `pr_head=`, refuses both draft PRs and undeterminable draft status, requires a clear crosscheck ledger for that exact head and PR claims, and passes the reviewed SHA to GitHub's atomic expected-head merge or enqueue API; do not call `gh-axi pr merge` or the API directly for a task's PR.
 An accepted merge-queue submission reports `enqueued/unconfirmed` with an independently observed open state; treat it as pending, never as either merged or failed.
 After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
@@ -568,8 +568,8 @@ Tell the captain: the PR's full URL (always the complete `https://...` link, nev
 
 If the captain says "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` yourself; that instruction is the explicit approval.
 If `yolo=on`, merge a green/approved PR yourself the same way and post the required FYI.
-The helper defaults to `--squash`, accepts immediate merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, and accepts `--subject`, `--body`, or `--body-file` for the atomic request.
-It refuses repository overrides, `--auto`, and `--delete-branch` because those options cannot preserve the same immediate expected-head merge contract.
+With no explicit method, the helper uses an active base-branch merge queue and otherwise defaults to `--squash`; it accepts immediate merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, plus `--subject`, `--body`, or `--body-file` for an immediate atomic request.
+It refuses repository overrides, `--auto`, and `--delete-branch` because those options cannot preserve the same expected-head merge or enqueue contract.
 
 ### Ship teardown (only after merge is confirmed)
 

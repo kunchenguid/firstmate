@@ -89,7 +89,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-crosscheck.sh`       | Run, verify, or atomically merge through the durable exact-head PR finding ledger     |
 | `fm-crosscheck.py`       | Validate and execute crosscheck reviewer evidence and finding lifecycle transitions  |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
-| `fm-pr-merge.sh`         | Require exact-head crosscheck, record PR metadata, and atomically merge the reviewed SHA |
+| `fm-pr-merge.sh`         | Require exact-head crosscheck, record PR metadata, and atomically merge or enqueue the reviewed SHA |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-report-contract-lib.sh` | Render the shared ship completion-report contract inserted into briefs and continuation prompts |
 | `fm-report-stack.mjs`    | Publish and browse machine-global, account-independent completion reports            |

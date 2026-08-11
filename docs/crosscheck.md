@@ -181,8 +181,8 @@ bin/fm-crosscheck.sh verify <task-id> <https://github.com/owner/repo/pull/number
 Verification re-reads the live PR head and complete claims document.
 It requires the latest attempt matching that head and the stable PR number/title/body claims digest to be clear, then prints only the exact reviewed SHA.
 Dynamic check counts in the full `gh-axi` document remain visible to the reviewer but are excluded from the digest so CI completing in parallel does not invalidate an otherwise exact review.
-The merge helper sends that SHA in GitHub's atomic merge request.
-A force-push before verification invalidates the ledger match, while a force-push after verification makes GitHub reject the expected-head merge request.
+The merge helper sends that SHA in GitHub's atomic expected-head merge or enqueue request.
+A force-push before verification invalidates the ledger match, while a force-push after verification makes GitHub reject the expected-head merge or enqueue request.
 
 ## Finding lifecycle
 
@@ -345,8 +345,8 @@ Reviewer result arrays are capped at 32 entries, at most 32 evidence executions 
 
 ## Installed external contracts
 
-The external surface was observed on 2026-08-02 before implementation, rechecked on 2026-08-03 for nonempty TOON arrays, and re-run against installed `gh-axi 0.1.25` on 2026-08-04.
-The current recheck observed `gh-axi 0.1.25`, `codex-cli 0.146.0-alpha.9.2`, and Claude Code 2.1.221; the original Claude contract was first exercised on 2.1.220.
+The external surface was observed on 2026-08-02 before implementation, rechecked on 2026-08-03 for nonempty TOON arrays, re-run against installed `gh-axi 0.1.25` on 2026-08-04, and extended with read-only merge-queue checks on 2026-08-08.
+The 2026-08-04 recheck observed `gh-axi 0.1.25`, `codex-cli 0.146.0-alpha.9.2`, and Claude Code 2.1.221; the original Claude contract was first exercised on 2.1.220.
 
 `gh-axi pr view` supports `--full` but does not support raw-gh `--json` or `-q` flags.
 The production adapter therefore uses these exact forms.
@@ -354,6 +354,8 @@ The production adapter therefore uses these exact forms.
 ```sh
 gh-axi api /repos/<owner>/<repo>/pulls/<number>
 gh-axi pr view <number> --repo <owner>/<repo> --full
+gh-axi api /repos/<owner>/<repo>/rules/branches/<url-encoded-base-ref>
+gh-axi api POST /graphql --field query=<query-or-mutation>
 gh-axi api PUT /repos/<owner>/<repo>/pulls/<number>/merge \
   --field sha=<reviewed-40-hex-sha> \
   --field merge_method=<merge|squash|rebase>
@@ -365,7 +367,7 @@ The `labels[1]{id,name,color,default,description}:` table in the PR API fixture 
 The 2026-08-04 recheck used `gh-axi api /repos/ruby-dlee/firstmate/pulls/72` and observed head `c9cbe79154013efcec9aa478f1476d0eff6c63df`, base `68f014697d0eea733a4e7c0294becff4e76c7bcf`, and `merged: true` in the installed TOON shape.
 It also confirmed from `gh-axi pr view --help` that view still accepts only `--comments`, `--reviews`, and `--full`, while `gh-axi api --help` still accepts `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `HEAD` with repeated `--field` values.
 The merge form with optional `commit_title` and `commit_message` fields was separately exercised against an already-merged PR and returned the observed successful no-op response.
-The read adapter exposes no merge subcommand; only the gate-refused `fm-crosscheck.sh merge` boundary can reach its private exact-SHA merge primitive, and that boundary freshly verifies the ledger before issuing the request.
+The read adapter exposes no merge subcommand; only the gate-refused `fm-crosscheck.sh merge` boundary can reach its private exact-SHA merge or enqueue primitives, and that boundary freshly verifies the ledger before issuing the request.
 
 The installed reviewer invocation was exercised successfully with `--output-schema`, `--output-last-message`, `--model gpt-5.6-sol`, and `model_reasoning_effort="xhigh"` before production code used those flags.
 The installed Claude invocation was exercised successfully with a private `HOME`, selected-account `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `--model claude-opus-5`, `--effort xhigh`, `--dangerously-skip-permissions`, `--tools Bash,Read,Glob,Grep`, `--no-session-persistence`, `--output-format json`, and `--json-schema` before production code used those flags.
@@ -376,7 +378,8 @@ The tracked `V3PreviewPane.test.tsx` reported 33 executed and zero failed tests 
 
 ## Validation evidence boundaries
 
-`tests/fm-github-pr.test.sh` is hermetic coverage using checked-in TOON shapes observed from installed `gh-axi 0.1.25`.
+`tests/fm-github-pr.test.sh` is hermetic coverage using checked-in TOON shapes.
+The versioned fixtures it uses were observed from installed `gh-axi 0.1.25`.
 Most of `tests/fm-crosscheck.test.sh` is hermetic coverage using observed-shape GitHub, Codex, Claude, and sandbox fakes.
 Its `test_installed_sandbox_denies_shared_private_tmp` case is the exception: it invokes the real installed `/usr/bin/sandbox-exec` and verifies the generated proof profile denies shared host temporary state.
 Its tracked `test_real_claude_sandbox_executes_exact_sha_git_diff` case is an opt-in real-runtime guard: with `FM_TEST_REAL_CLAUDE_SANDBOX_GIT_DIFF=1` and `FM_TEST_REAL_CLAUDE_CONFIG_DIR` set to a credentialed independent Claude home, it creates the same private execution `HOME`, verifies the selected OAuth-file or scoped-Keychain source, launches installed Claude under the generated installed sandbox, requires Bash to execute `git diff` between two real exact SHAs, checks the selected config paths and isolated `CLAUDE_CODE_TMPDIR`, and rejects any profile grant for the ambient operator `~/.claude/session-env`.
@@ -406,11 +409,19 @@ The focused PR-check cases in `tests/fm-teardown-suite.sh` and the merge cases i
 Those deterministic suites validate parsing, lifecycle, failure handling, and atomic request construction; they do not claim to exercise live provider availability.
 The real installed-tool exercise is separate and network-dependent: the dated `gh-axi` observations above cover successful documents, while an adapter lookup for an absent PR through installed `gh-axi` must exit nonzero with `GitHub state is unreviewed`.
 
+The 2026-08-08 merge-queue proof deliberately stopped at the authorization boundary.
+Live read-only production code invoked `GET /repos/Ruby-Labs/relvino/rules/branches/main`, received one applicable `merge_queue` rule with `SQUASH`, and returned `True`.
+Live GraphQL introspection showed `EnqueuePullRequestInput.expectedHeadOid`.
+Deterministic tests proved exact-head mutation construction, `enqueued/unconfirmed` rendering, and an independent open readback.
+No live enqueue mutation was sent, so live mutation acceptance, live `gh-axi` `mergeQueueEntry` rendering, post-acceptance readback, and the complete live enqueue flow remain unproven.
+A real product PR was not used as a test, no pre-authorized disposable queue repository existed, and the legacy enqueue fixture lacks durable live provenance, so none of those sources is end-to-end proof.
+
 ## Deliberate limitations
 
-Crosscheck supports immediate `merge`, `squash`, and `rebase` methods plus commit title and body fields.
-It rejects `--auto` because an asynchronous merge would escape the immediate expected-head request.
-It rejects `--delete-branch` because branch deletion is not part of the atomic merge operation.
+When the caller omits an explicit method, the merge helper uses an applicable base-branch merge queue; queue requests do not accept commit title or body fields.
+Otherwise Crosscheck supports immediate `merge`, `squash`, and `rebase` methods plus commit title and body fields.
+It rejects `--auto` because that path is neither the atomic expected-head REST merge nor the expected-head GraphQL enqueue.
+It rejects `--delete-branch` because branch deletion is not part of the atomic merge or enqueue operation.
 Delete a branch only in a later separately authorized action after the merge is confirmed.
 
 Reviewer-generated commands execute in a non-login shell, so evidence never depends on the operator's shell profile.
