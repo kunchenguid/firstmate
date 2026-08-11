@@ -486,6 +486,7 @@ test_cursor_launch_command_typed() {
   expect_code 0 "$status" "cursor spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=cursor" "spawn did not report cursor harness"
   assert_grep "harness=cursor" "$HOME_DIR/state/$id.meta" "meta missing harness=cursor"
+  assert_grep 'spawn_gen=s' "$HOME_DIR/state/$id.meta" "meta missing spawn incarnation"
   launch=$(cat "$LAUNCH_LOG")
   resolved="$HOME_DIR/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent"
   token=${launch%% *}

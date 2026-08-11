@@ -442,11 +442,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
   case "$pid:$field:${FM_TEST_CURSOR_CASE:-valid}" in
-  710:comm=:valid|710:comm=:invalid|710:comm=:spoof) printf '%s\n' node ;;
+  710:comm=:valid|710:comm=:custom|710:comm=:invalid|710:comm=:spoof) printf '%s\n' node ;;
   710:args=:valid) printf '%s\n' "$FM_TEST_HOME/.local/share/cursor-agent/versions/current/cursor-agent --force" ;;
+  710:args=:custom) printf '%s\n' "$FM_TEST_HOME/opt/cursor/bin/cursor-agent --force" ;;
   710:args=:invalid) printf '%s\n' '/usr/bin/node /tmp/cursor-agent --force' ;;
   710:args=:spoof) printf '%s\n' "$dir/decoy/cursor-agent --force" ;;
-  710:command=:valid|710:command=:invalid|710:command=:spoof) printf '%s\n' 'node cursor-agent CURSOR_AGENT=1' ;;
+  710:command=:valid|710:command=:custom|710:command=:invalid|710:command=:spoof) printf '%s\n' 'node cursor-agent CURSOR_AGENT=1' ;;
   710:ppid=*) printf '%s\n' 1 ;;
   *:comm=*) printf '%s\n' bash ;;
   *:args=*) printf '%s\n' 'bash tests/run.sh' ;;
@@ -454,12 +455,18 @@ done
 esac
 SH
   chmod +x "$fakebin/ps"
+  mkdir -p "$FM_TEST_HOME/opt/cursor/bin"
+  fm_fake_cursor_alias "$FM_TEST_HOME/opt/cursor/bin" cursor-agent
   printf '710\n' > "$dir/state/.lock"
 
   got=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_CURSOR_CASE=valid \
     lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
     || fail "external Cursor primary with CURSOR_AGENT=1 was rejected without launch metadata"
   [ "$got" = 710 ] || fail "external Cursor primary resolved '$got', expected 710"
+  got=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_CURSOR_CASE=custom \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "probe-verified custom Cursor primary was rejected without launch metadata"
+  [ "$got" = 710 ] || fail "custom Cursor primary resolved '$got', expected 710"
   if FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_TEST_CURSOR_CASE=invalid \
     lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
     fail "a later cursor-agent argument was treated as Cursor identity"
