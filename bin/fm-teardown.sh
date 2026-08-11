@@ -84,6 +84,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+SECOND_MATE_REGISTRY_BACKUP=
+SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
+SECOND_MATE_REGISTRY_HOME_REMOVED=0
+SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED=0
 # shellcheck source=bin/fm-tool-path-lib.sh
 . "$SCRIPT_DIR/fm-tool-path-lib.sh"
 fm_normalize_tool_path
@@ -1962,6 +1966,53 @@ remove_secondmate_registry_entry() {
   mv -- "$tmp" "$SECONDMATE_REG"
 }
 
+secondmate_registry_transaction_begin() {
+  local id=$1 dir backup
+  [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ] || return 0
+  [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ] || return 1
+  dir=$(dirname -- "$SECONDMATE_REG") || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  backup=$(mktemp "$STATE/.secondmate-registry-$id.XXXXXX") || return 1
+  chmod 600 "$backup" || { rm -f -- "$backup"; return 1; }
+  cp -p "$SECONDMATE_REG" "$backup" || {
+    rm -f -- "$backup"
+    return 1
+  }
+  SECOND_MATE_REGISTRY_BACKUP=$backup
+  SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=1
+}
+
+secondmate_registry_transaction_restore() {
+  local dir tmp
+  [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ] || return 0
+  [ "$SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED" != 1 ] || return 0
+  [ "$SECOND_MATE_REGISTRY_HOME_REMOVED" != 1 ] || return 0
+  [ -f "$SECOND_MATE_REGISTRY_BACKUP" ] || return 1
+  dir=$(dirname -- "$SECONDMATE_REG") || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  tmp=$(mktemp "$dir/.secondmates.md.restore.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  cp -p "$SECOND_MATE_REGISTRY_BACKUP" "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv -- "$tmp" "$SECONDMATE_REG" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  rm -f -- "$SECOND_MATE_REGISTRY_BACKUP" || return 1
+  SECOND_MATE_REGISTRY_BACKUP=
+  SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
+}
+
+secondmate_registry_transaction_commit() {
+  [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ] || return 0
+  rm -f -- "$SECOND_MATE_REGISTRY_BACKUP" || return 1
+  SECOND_MATE_REGISTRY_BACKUP=
+  SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
+  SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED=1
+}
+
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   if [ "$TOP_SLOT_RETURNED" != 1 ]; then
@@ -2132,7 +2183,7 @@ teardown_release_top_slot_lock() {
     TOP_SLOT_LOCK_HELD=0
   fi
 }
-trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true' EXIT
+trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true; secondmate_registry_transaction_restore || true' EXIT
 if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
   teardown_acquire_herdr_presentation_lock "$T" || {
     echo "REFUSED: could not acquire the Herdr presentation lock for $ID; preserving task state and worktree" >&2
@@ -2356,17 +2407,26 @@ fi
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  if [ "$FORCE_RETIRE_STAGED" = 1 ] \
+     && ! fm_pending_reply_finalize_force_retire_task \
+       "$STATE" "$ID" "$STATE" "$FORCE_RETIRE_SOURCE"; then
+    echo "error: secondmate $ID's pending-reply handoff could not be finalized; preserving home and task state" >&2
+    exit 1
+  fi
+  secondmate_registry_transaction_begin "$ID" || {
+    echo "error: could not prepare secondmate $ID registry recovery; preserving home and task state" >&2
+    exit 1
+  }
   remove_secondmate_registry_entry "$ID" || {
     echo "error: could not remove secondmate $ID from its registry; preserving home and task state" >&2
     exit 1
   }
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
-  if [ "$FORCE_RETIRE_STAGED" = 1 ] \
-     && ! fm_pending_reply_finalize_force_retire_task \
-       "$STATE" "$ID" "$STATE" "$FORCE_RETIRE_SOURCE"; then
-    echo "error: secondmate $ID was removed but its pending-reply handoff could not be finalized" >&2
+  if [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ]; then
+    echo "error: secondmate home $HOME_PATH remains after cleanup; preserving its registry and task state" >&2
     exit 1
   fi
+  SECOND_MATE_REGISTRY_HOME_REMOVED=1
 fi
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
   if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" \
@@ -2458,6 +2518,10 @@ teardown_release_top_slot_lock || {
 }
 teardown_release_herdr_presentation_lock || {
   echo "error: could not release the Herdr presentation lock for $ID" >&2
+  exit 1
+}
+secondmate_registry_transaction_commit || {
+  echo "error: secondmate registry recovery binding could not be retired; preserving its recovery record" >&2
   exit 1
 }
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
