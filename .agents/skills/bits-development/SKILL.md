@@ -16,7 +16,7 @@ Load this before Firstmate, or a crewmate Firstmate directs, creates, reuses, or
 This skill is the single owner of the Firstmate procedure for landing one or more already-completed code changes into BITS Dev Tasks and pipelines.
 It governs the workflow and its safety, not the platform.
 It is not a wrapper, control plane, or verifier around BITS, and it changes nothing in no-mistakes core.
-When one code change or a set of related changes has reached a stable head with a known merge request, this skill decides how that work becomes a correct BITS Dev Task, Change Card, and pipeline run without inventing state or exceeding authority.
+When one code change or a set of related changes has reached a stable committed head with either a known merge request or a verified release-train MR auto-creation path, this skill decides how that work becomes a correct BITS Dev Task, Change Card, and pipeline run without inventing state or exceeding authority.
 
 ## Owners this skill defers to
 
@@ -32,7 +32,8 @@ Every mechanical fact lives with its existing owner; this skill only sequences a
 ## Intake and project identity
 
 Resolve which project each completed change belongs to before touching BITS, using the `project-management` identity rules, not a BITS project name guess.
-Confirm the change is genuinely complete: it has a committed head, an opened merge request, and a settled target branch.
+Confirm the change is genuinely complete: it has a committed head, a settled target branch, and either an opened merge request or a release-train path that will auto-create one.
+Before taking the release-train exception, pin and verify the exact committed head and the release ticket's integration branch from live sources.
 BITS integration is delivery of finished work, so do not start it for an in-flight branch whose head or target is still moving.
 
 Gather the authoritative evidence for every change in the set before any decision:
@@ -74,7 +75,8 @@ Run each operation through its owner with the write discipline above; the notes 
 - Multi-project coordination: combine related changes across projects and repositories into one Dev Task through a single official prepare rather than several independent submits, so one intent stays one delivery.
 - Project attach and reuse: reuse an already-attached project when it matches; attach a new project only with an explicit branch for code projects, preserving the full snapshot and every Change Card.
 - Change Card ensure, bind, and reuse: ensure or reuse the exact card for each repository, source, and target, add only genuinely missing cards, and bind an existing MR by iid; never let an ensure or attach silently clear existing cards or projects.
-- Release-train target-branch constraints and auto-created MRs: on the release-train bugfix path, the target branch is constrained to the release ticket's integration branch, so let that path set the target rather than forcing a target to satisfy BITS, and reconcile any MR the platform auto-creates by reading it back and binding its real identity instead of creating a second one.
+- Release-train target-branch constraints and auto-created MRs: on the release-train bugfix path, the target branch is constrained to the release ticket's pinned integration branch, so let that path set the target rather than forcing a target to satisfy BITS.
+  After the platform auto-creates an MR, independently read it back, verify its repository, source, head, and target against the pinned evidence, and bind its real identity instead of creating a second one.
 - Pipeline and project discovery: discover the current stage, tasks, projects, pipelines, and runs through the read-only surfaces before acting; treat an incomplete or unproven discovery result as a stop, not an assumption.
 - PPE, E2E, self-test, and quick-run: trigger a deployment or test run only when the captain has explicitly authorized that run, because these are live operations; dry-run first where the command supports it, confirm the exact project, type, control plane, and target, and never let one authorization cover a later changed target.
 - Monitoring and recovery: watch a running pipeline, deploy, or run through the `process-event-sources` long-poll supervision path instead of blocking a conversational turn, and recover after any interruption by reading BITS state back rather than inferring an outcome from a process exit or a single event.
