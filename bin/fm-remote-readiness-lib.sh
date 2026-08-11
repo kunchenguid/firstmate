@@ -35,6 +35,8 @@ FM_REMOTE_READINESS_OUT=
 # harmless, so detection stays deliberately simple rather than exhaustive.
 # FM_WSL_CONFIG_PATH overrides the .wslconfig path this checks (tests only);
 # unset or empty uses the real per-user Windows path.
+# FM_WSL_USERS_DIR overrides the /mnt/c/Users base directory used to resolve
+# that per-user path (tests only); unset or empty uses the real mount.
 fm_wsl2_mirrored_networking_hint() {
   case "$(uname -r 2>/dev/null)" in
     *microsoft*|*WSL2*) ;;
@@ -42,16 +44,16 @@ fm_wsl2_mirrored_networking_hint() {
   esac
   local cfg="${FM_WSL_CONFIG_PATH:-}"
   if [ -z "$cfg" ]; then
-    local winuser
+    local users_dir="${FM_WSL_USERS_DIR:-/mnt/c/Users}" winuser
     winuser=$(cmd.exe /c 'echo %USERNAME%' 2>/dev/null | tr -d '\r\n')
-    if [ -n "$winuser" ] && [ -f "/mnt/c/Users/$winuser/.wslconfig" ]; then
-      cfg="/mnt/c/Users/$winuser/.wslconfig"
+    if [ -n "$winuser" ] && [ -f "$users_dir/$winuser/.wslconfig" ]; then
+      cfg="$users_dir/$winuser/.wslconfig"
     else
-      local matches=(/mnt/c/Users/*/.wslconfig)
+      local matches=("$users_dir"/*/.wslconfig)
       if [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ]; then
         cfg="${matches[0]}"
       elif [ -n "${USER:-}" ]; then
-        cfg="/mnt/c/Users/${USER}/.wslconfig"
+        cfg="$users_dir/${USER}/.wslconfig"
       else
         return 0
       fi

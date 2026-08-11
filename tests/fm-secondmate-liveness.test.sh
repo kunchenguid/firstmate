@@ -270,6 +270,62 @@ test_wsl2_hint_fires_when_mode_not_mirrored() {
   pass "fm_wsl2_mirrored_networking_hint: fires when .wslconfig lacks networkingMode=mirrored"
 }
 
+# fake_cmd_exe <dir> <username>: a fake cmd.exe answering `/c echo %USERNAME%`
+# with <username>, exercising the real (non-FM_WSL_CONFIG_PATH) resolution
+# path together with FM_WSL_USERS_DIR.
+fake_cmd_exe() {
+  local dir=$1 username=$2 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/cmd.exe" <<SH
+#!/usr/bin/env bash
+printf '%s\r\n' "$username"
+SH
+  chmod +x "$fakebin/cmd.exe"
+  printf '%s\n' "$fakebin"
+}
+
+test_wsl2_hint_resolves_via_cmd_exe_username() {
+  local fb users_dir out
+  fb=$(fake_uname "$TMP_ROOT/hint-cmdexe" "5.15.167.4-microsoft-standard-WSL2")
+  fake_cmd_exe "$TMP_ROOT/hint-cmdexe" jdoe >/dev/null
+  users_dir="$TMP_ROOT/hint-cmdexe/Users"
+  mkdir -p "$users_dir/jdoe"
+  printf '%s\n' '[wsl2]' 'networkingMode=mirrored' > "$users_dir/jdoe/.wslconfig"
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_USERS_DIR="$users_dir" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  [ -z "$out" ] || fail "cmd.exe's %USERNAME% must resolve the real per-user .wslconfig, got '$out'"
+  pass "fm_wsl2_mirrored_networking_hint: resolves the Windows user via cmd.exe when unconfigured"
+}
+
+test_wsl2_hint_falls_back_to_sole_glob_match() {
+  local fb users_dir out
+  fb=$(fake_uname "$TMP_ROOT/hint-glob" "5.15.167.4-microsoft-standard-WSL2")
+  users_dir="$TMP_ROOT/hint-glob/Users"
+  mkdir -p "$users_dir/onlyuser"
+  printf '%s\n' '[wsl2]' 'networkingMode=mirrored' > "$users_dir/onlyuser/.wslconfig"
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_USERS_DIR="$users_dir" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  [ -z "$out" ] || fail "a single Users/*/.wslconfig match must be used when cmd.exe is unavailable, got '$out'"
+  pass "fm_wsl2_mirrored_networking_hint: falls back to the sole glob match when cmd.exe fails"
+}
+
+test_wsl2_hint_case_insensitive_mode_match() {
+  local fb out cfg
+  fb=$(fake_uname "$TMP_ROOT/hint-mixed-case" "5.15.167.4-microsoft-standard-WSL2")
+  cfg="$TMP_ROOT/hint-mixed-case/.wslconfig"
+  printf '%s\n' '[wsl2]' 'NetworkingMode=Mirrored' > "$cfg"
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_CONFIG_PATH="$cfg" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  [ -z "$out" ] || fail "networkingMode/mirrored matching must be case-insensitive, got '$out'"
+  pass "fm_wsl2_mirrored_networking_hint: matches networkingMode=mirrored case-insensitively"
+}
+
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
 
 # make_toolchain <dir>: the fixed set of stubs bin/fm-bootstrap.sh's read-only
@@ -620,6 +676,9 @@ test_wsl2_hint_silent_on_non_wsl2_host
 test_wsl2_hint_silent_when_mirrored_configured
 test_wsl2_hint_fires_when_config_missing
 test_wsl2_hint_fires_when_mode_not_mirrored
+test_wsl2_hint_resolves_via_cmd_exe_username
+test_wsl2_hint_falls_back_to_sole_glob_match
+test_wsl2_hint_case_insensitive_mode_match
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
