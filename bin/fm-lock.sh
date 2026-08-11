@@ -96,6 +96,7 @@ if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
 fi
 CLAIM_LOCK_HELD=1
 
+lock_pid=$me
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   if [ ! -f "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is not a regular file; operate read-only until resolved" >&2
@@ -122,6 +123,12 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
+  if [ -n "$recorded_codex_thread" ]; then
+    case "$old" in
+      ''|*[!0-9]*) ;;
+      *) lock_pid=$old ;;
+    esac
+  fi
 fi
 if [ -n "$codex_thread" ]; then
   CODEX_LOCK_TMP=$(mktemp "$STATE/.lock-codex-thread-write.XXXXXX" 2>/dev/null) || {
@@ -140,7 +147,7 @@ else
     exit 1
   }
 fi
-if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
+if ! { printf '%s\n' "$lock_pid" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi
@@ -148,7 +155,7 @@ written=$(cat "$LOCK" 2>/dev/null) || {
   echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
   exit 1
 }
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
+if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$lock_pid" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
@@ -163,4 +170,4 @@ elif [ -e "$codex_lock_path" ] || [ -L "$codex_lock_path" ]; then
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+echo "lock acquired: harness pid $lock_pid"

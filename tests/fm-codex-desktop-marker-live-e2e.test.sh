@@ -67,8 +67,14 @@ esac
 out=$(FM_TEST_SESSION_PID=$$ PATH="$LAB/fakebin:$PATH" FM_HOME="$LAB/home" \
   FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-lock.sh" 2>&1) \
   || fail "same live thread did not retain the lock after its tool pid exited: $out"
-[ "$(cat "$LAB/home/state/.lock")" != "$first_owner" ] \
-  || fail "same live thread did not refresh its short-lived numeric owner pid"
+[ "$(cat "$LAB/home/state/.lock")" = "$first_owner" ] \
+  || fail "same live thread's re-emit churned the durable numeric owner pid"
+
+out=$(FM_TEST_SESSION_PID=$$ PATH="$LAB/fakebin:$PATH" FM_HOME="$LAB/home" \
+  FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-lock.sh" 2>&1) \
+  || fail "same live thread did not retain the lock after a second re-emit: $out"
+[ "$(cat "$LAB/home/state/.lock")" = "$first_owner" ] \
+  || fail "same live thread's second re-emit churned the durable numeric owner pid"
 
 printf 'ok - %s live paired UUID markers identified Codex and retained the lock across short-lived tools\n' \
   "$(codex --version)"

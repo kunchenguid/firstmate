@@ -223,7 +223,7 @@ SH
 }
 
 test_codex_desktop_marker_identifies_harness_and_reclaims_stale_lock() {
-  local dir fakebin out rc=0 dead_pid competing_pid first_owner second_owner
+  local dir fakebin out rc=0 dead_pid competing_pid first_owner second_owner third_owner
   dir="$TMP_ROOT/codex-desktop"
   fakebin=$(fm_fakebin "$dir/fakebin")
   mkdir -p "$dir/home/state"
@@ -292,8 +292,20 @@ SH
     "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
   expect_code 0 "$rc" "the same Codex Desktop thread must retain ownership after its tool pid exits"
   second_owner=$(cat "$dir/home/state/.lock")
-  [ "$second_owner" != "$first_owner" ] \
-    || fail "the same Codex Desktop thread did not refresh its short-lived numeric owner pid"
+  [ "$second_owner" = "$first_owner" ] \
+    || fail "the same Codex Desktop thread's re-emit churned the durable numeric owner pid: $first_owner -> $second_owner"
+  assert_contains "$out" "lock acquired: harness pid $first_owner" \
+    "the re-emit's own acquisition message did not report the retained pid"
+
+  rc=0
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
+  expect_code 0 "$rc" "a second repeated Codex Desktop re-emit must retain ownership after its tool pid exits"
+  third_owner=$(cat "$dir/home/state/.lock")
+  [ "$third_owner" = "$first_owner" ] \
+    || fail "a second repeated Codex Desktop re-emit churned the durable numeric owner pid: $first_owner -> $third_owner"
 
   if env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CODEX_CI -u CODEX_THREAD_ID \
     FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" FM_HOME="$dir/unmanaged" FM_ROOT_OVERRIDE="$ROOT" \
