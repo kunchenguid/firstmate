@@ -109,6 +109,27 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+# The chrome-devtools-axi session name for a task's own browser, so the agent
+# never shares a live authenticated page with the captain or another task.
+# fm-spawn pins it onto the launch command (see its browser_isolation_env) and
+# fm-teardown closes that session by name, so the derivation lives here, beside
+# the task-id validators it depends on, rather than in either script.
+#
+# The tool rejects a session name outside 1-64 chars of [A-Za-z0-9._-], and that
+# rejection breaks every browser command for the agent that inherits it, so this
+# must be TOTAL over ids fm_task_id_creation_valid already accepted. Those are
+# already within that charset, have no leading dot, and are at most 64 chars, so
+# the "fm-" prefix is the only thing that can push the name out of range and
+# truncating back to 64 is the whole fix. The prefix also keeps firstmate's
+# bridges distinguishable from a session the captain named by hand under
+# ~/.chrome-devtools-axi/sessions/, and guarantees the name is neither empty nor
+# all-dots. Two ids sharing a 61-char prefix would share one browser, which is
+# the pre-existing shared-default-session behavior rather than a new exposure.
+fm_task_browser_session() {
+  local name="fm-${1-}"
+  printf '%s' "${name:0:64}"
+}
+
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.

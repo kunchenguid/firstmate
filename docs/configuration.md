@@ -329,6 +329,13 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Agent browser isolation
+
+Agents firstmate launches use `chrome-devtools-axi` in their own throwaway Chrome profile, holding no logged-in sessions, on a bridge named after the task.
+Your own browsing and your own use of the tool are untouched.
+So an agent cannot reach a site you are signed in to, and a task that genuinely needs an authenticated page has to sign in itself within its own profile.
+Exporting a `CHROME_DEVTOOLS_AXI_*` value in your shell does not change what a launched agent gets; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned and why, and [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.

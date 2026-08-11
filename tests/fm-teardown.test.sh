@@ -2232,6 +2232,52 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
+test_task_browser_session_is_closed() {
+  local case_dir rc
+  case_dir=$(make_case browser-session-close)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # fm-spawn gives each agent its own chrome-devtools-axi session, and a bridge
+  # has no idle timeout. The cwd-matched reap only finds the bridge, MCP server
+  # and headless Chrome while the agent browsed from its own worktree, so
+  # teardown must also close the session by name or an agent that browsed from
+  # anywhere else leaks a whole browser.
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+printf '%s %s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" \\
+  >> "$case_dir/browser-stop.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "browser-session-close: teardown should succeed"
+  assert_present "$case_dir/browser-stop.log" \
+    "browser-session-close: teardown never asked the browser tool to close this task's session"
+  assert_grep "fm-task-x1 stop" "$case_dir/browser-stop.log" \
+    "browser-session-close: teardown did not stop THIS task's own browser session"
+  pass "teardown closes the task's own browser session by name, not only whatever the cwd reap happens to catch"
+}
+
+test_missing_browser_tool_never_blocks_teardown() {
+  local case_dir rc
+  case_dir=$(make_case browser-tool-absent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A home with no chrome-devtools-axi installed must tear down exactly as
+  # before; the browser step is additive cleanup, never a new refusal.
+  rc=0
+  FM_TEARDOWN_TEST_PATH=$(make_path_without_lsof "$case_dir") \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "browser-tool-absent: teardown should succeed with no browser tool installed"
+  pass "an absent browser tool leaves teardown unchanged"
+}
+
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-tasktmp-reap)
@@ -2641,6 +2687,8 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_task_browser_session_is_closed
+test_missing_browser_tool_never_blocks_teardown
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

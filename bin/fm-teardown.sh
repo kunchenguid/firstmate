@@ -1409,6 +1409,21 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
+# Close the browser session fm-spawn gave this task (see that script's
+# browser_isolation_env). A chrome-devtools-axi bridge has no idle timeout, so a
+# task that browsed leaves a bridge, an MCP server, and a headless Chrome behind.
+# The cwd-matched reap below already collects all three in the ordinary case,
+# because each inherits the agent's working directory - but only while that
+# directory was this task's own worktree. An agent that browsed from anywhere
+# else would leak a whole browser, so name the session and let the tool close it.
+# Purely additive: `stop` is a documented idempotent no-op when nothing is
+# running, and a missing tool or a failure never blocks teardown.
+stop_task_browser_bridge() {
+  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  CHROME_DEVTOOLS_AXI_SESSION="$(fm_task_browser_session "$ID")" \
+    chrome-devtools-axi stop >/dev/null 2>&1 || true
+}
+
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
@@ -2380,6 +2395,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  stop_task_browser_bridge
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 

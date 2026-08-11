@@ -159,6 +159,11 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Every launch command, verified adapter or raw escape hatch, is prefixed with the
+# browser-isolation environment built by browser_isolation_env() below: the agent's
+# chrome-devtools-axi work runs in its own named bridge on a throwaway Chrome profile
+# with no logged-in sessions, instead of inheriting the captain's authenticated
+# browser. That function's comment owns the exact variables and why each is pinned.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1061,6 +1066,54 @@ shell_quote() {
   printf "'"
 }
 
+# AGENTS.md section 3 points every agent at chrome-devtools-axi for browser work
+# and crewmates run with permissions bypassed, so whatever browser that tool
+# reaches is inside the agent's blast radius. The tool's own default is already an
+# isolated throwaway profile - chrome-devtools-mcp --isolated --headless, a fresh
+# /tmp/puppeteer_dev_chrome_profile-* user-data-dir carrying no cookies - but a
+# default is not a guarantee, and two inherited paths reach the captain's real
+# authenticated Chrome without anyone editing firstmate: any CHROME_DEVTOOLS_AXI_*
+# value exported into the environment firstmate runs in is inherited by every
+# agent it launches, and the unnamed "default" session is a single shared bridge,
+# so an agent's first browser command attaches to whatever page the captain's own
+# interactive use of the tool left live on port 9224.
+# These assignments pin the isolating choice rather than relying on it. An empty
+# assignment is enough to neutralise the four profile inputs because the tool
+# reads each as falsy-when-empty, and AUTO_CONNECT is compared against the exact
+# string 1:
+#   AUTO_CONNECT=0     refuses --autoConnect, the attach-to-the-captain's-Chrome mode
+#   BROWSER_URL=       refuses --browserUrl/--wsEndpoint (and inerts WS_HEADERS with it)
+#   USER_DATA_DIR=     keeps --isolated, so the profile is a fresh temp dir per bridge
+#   CHROME_ARGS=       drops inherited --chrome-arg flags, which can carry their own
+#                      --user-data-dir and override the isolated one - measured to
+#                      beat --isolated in the launched browser, so neutralising
+#                      USER_DATA_DIR alone would leave this override open
+#   PORT=              lets each session keep its own derived port; a globally
+#                      exported PORT collapses every session onto one and the losing
+#                      bridge dies on EADDRINUSE (the tool's own help warns about this)
+#   SESSION=<name>     gives this task its own bridge, port, and browser, so it never
+#                      shares a live authenticated page with the captain or another
+#                      task, and so tearing one task down cannot kill another's bridge.
+#                      fm-pr-lib.sh's fm_task_browser_session owns that name, so
+#                      fm-teardown closes the same session this launch opened
+# docs/verification/browser-isolation.md is the dated evidence for every claim
+# above and names the guard that re-derives it.
+# Scoped to the launch command exactly like CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION
+# below; the captain's own shell, config, and Chrome are untouched.
+# This removes AMBIENT reach, not capability: an agent holds a shell and can
+# export different values itself, and a tool that already reads and writes
+# arbitrary files cannot be contained by an environment variable. The guarantee
+# is that a firstmate-launched agent does not START inside the captain's session.
+browser_isolation_env() {
+  printf '%s ' \
+    'CHROME_DEVTOOLS_AXI_AUTO_CONNECT=0' \
+    'CHROME_DEVTOOLS_AXI_BROWSER_URL=' \
+    'CHROME_DEVTOOLS_AXI_USER_DATA_DIR=' \
+    'CHROME_DEVTOOLS_AXI_CHROME_ARGS=' \
+    'CHROME_DEVTOOLS_AXI_PORT='
+  printf 'CHROME_DEVTOOLS_AXI_SESSION=%s' "$(shell_quote "$(fm_task_browser_session "$1")")"
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -1189,6 +1242,14 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# Applied here, after every branch above has produced a LAUNCH, so the verified
+# adapters and the raw-command escape hatch are covered by one prefix that no new
+# launch template can forget. Every template is a simple command (some already
+# carrying their own env assignments or an `env -u ...` wrapper), so prepending
+# more assignments is always valid shell and always reaches the harness process
+# and the tool calls it runs.
+LAUNCH="$(browser_isolation_env "$ID") $LAUNCH"
 
 case "$HARNESS" in
   pi|pi-signed)
