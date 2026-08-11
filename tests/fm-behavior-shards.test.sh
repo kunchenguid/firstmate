@@ -19,6 +19,7 @@ test_checked_in_plan_is_complete_balanced_and_deterministic() {
   plan_b="$tmp/plan-b.tsv"
   inventory="$tmp/inventory.txt"
   planned="$tmp/planned.txt"
+  expected_count=$(find "$ROOT/tests" -maxdepth 1 -type f -name '*.test.sh' -print | wc -l | tr -d ' ')
 
   find "$ROOT/tests" -maxdepth 1 -type f -name '*.test.sh' -print \
     | sed "s#^$ROOT/##" | LC_ALL=C sort > "$inventory"
@@ -165,6 +166,7 @@ test_post_run_guard_requires_the_exact_executed_union() {
   failed="$tmp/failed"
   expected_count=$(find "$ROOT/tests" -maxdepth 1 -type f -name '*.test.sh' | wc -l | tr -d ' ')
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan"
+  expected_count=$(wc -l < "$plan" | tr -d ' ')
   write_complete_manifests "$plan" "$good"
   out=$("$SHARDER" --verify "$SHARD_COUNT" "$good") \
     || fail "post-run guard rejected the exact complete manifest union"
