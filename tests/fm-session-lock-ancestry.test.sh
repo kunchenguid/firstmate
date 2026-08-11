@@ -13,6 +13,8 @@
 # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME and $$ expand inside the fixture child
 set -u
 
+unset CODEX_CI CODEX_THREAD_ID
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -220,6 +222,103 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_codex_desktop_marker_identifies_harness_and_reclaims_stale_lock() {
+  local dir fakebin out rc=0 dead_pid competing_pid first_owner second_owner
+  dir="$TMP_ROOT/codex-desktop"
+  fakebin=$(fm_fakebin "$dir/fakebin")
+  mkdir -p "$dir/home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  "${FM_TEST_SESSION_PID}:comm=") printf '%s\n' Electron ;;
+  "${FM_TEST_SESSION_PID}:args=") printf '%s\n' '/Applications/Codex.app/Contents/MacOS/Electron' ;;
+  "${FM_TEST_SESSION_PID}:ppid=") printf '%s\n' 1 ;;
+  "${FM_TEST_COMPETING_PID:-0}:comm=") printf '%s\n' codex ;;
+  "${FM_TEST_COMPETING_PID:-0}:args=") printf '%s\n' codex ;;
+  "${FM_TEST_COMPETING_PID:-0}:ppid=") printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' "$FM_TEST_SESSION_PID" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = codex ] || fail "Codex Desktop markers reported '$out', expected codex"
+
+  for marker_env in 'CODEX_CI=1' \
+    'CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258' \
+    'CODEX_CI=1 CODEX_THREAD_ID=not-a-uuid'; do
+    # shellcheck disable=SC2086 # deliberate assignment-word fixture
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CODEX_CI -u CODEX_THREAD_ID \
+      $marker_env FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" "$ROOT/bin/fm-harness.sh")
+    [ "$out" = unknown ] || fail "partial Codex Desktop marker '$marker_env' reported '$out', expected unknown"
+  done
+
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+  printf '%s\n' "$dead_pid" > "$dir/home/state/.lock"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
+  expect_code 0 "$rc" "a marker-identified Codex Desktop session must reclaim a dead lock owner"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "Codex Desktop session did not acquire the stale fleet lock"
+  first_owner=$(cat "$dir/home/state/.lock")
+  case "$first_owner" in
+    ''|*[!0-9]*) fail "Codex Desktop session did not preserve the numeric lock format" ;;
+  esac
+  [ "$(cat "$dir/home/state/.lock.codex-thread")" = 019feec1-fe6f-72a3-a792-9de5b7dd7258 ] \
+    || fail "Codex Desktop session did not publish its thread identity sidecar"
+  kill -0 "$first_owner" 2>/dev/null \
+    && fail "Codex Desktop lock fixture did not use a short-lived tool process"
+
+  rc=0
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
+  expect_code 0 "$rc" "the same Codex Desktop thread must retain ownership after its tool pid exits"
+  second_owner=$(cat "$dir/home/state/.lock")
+  [ "$second_owner" != "$first_owner" ] \
+    || fail "the same Codex Desktop thread did not refresh its short-lived numeric owner pid"
+
+  if env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CODEX_CI -u CODEX_THREAD_ID \
+    FM_TEST_SESSION_PID=$$ PATH="$fakebin:$PATH" FM_HOME="$dir/unmanaged" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
+    fail "an unmanaged shell with no harness ancestry acquired a fleet lock"
+  fi
+
+  sleep 30 &
+  competing_pid=$!
+  mkdir -p "$dir/competing/state"
+  printf '%s\n' "$competing_pid" > "$dir/competing/state/.lock"
+  printf '%s\n' 119feec1-fe6f-72a3-a792-9de5b7dd7258 > "$dir/competing/state/.lock.codex-thread"
+  rc=0
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_SESSION_PID=$$ FM_TEST_COMPETING_PID="$competing_pid" PATH="$fakebin:$PATH" \
+    FM_HOME="$dir/competing" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
+  kill "$competing_pid" 2>/dev/null || true
+  wait "$competing_pid" 2>/dev/null || true
+  expect_code 1 "$rc" "a marker-identified Codex Desktop session must preserve a live competing owner"
+  assert_contains "$out" "another Codex Desktop thread holds the lock" \
+    "Codex Desktop session did not fail closed on a different live thread identity"
+  pass "Codex Desktop's paired UUID marker identifies the harness and preserves durable thread lock safety"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -358,6 +457,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_codex_desktop_marker_identifies_harness_and_reclaims_stale_lock
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

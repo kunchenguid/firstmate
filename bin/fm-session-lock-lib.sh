@@ -17,6 +17,20 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
+# Print the UUID-shaped thread identity exposed to tool subprocesses by a
+# managed Codex Desktop thread, or return 1. Neither variable alone, nor an
+# arbitrary non-empty thread value, is harness evidence.
+fm_codex_desktop_thread_id() {
+  [ "${CODEX_CI:-}" = 1 ] || return 1
+  [[ "${CODEX_THREAD_ID:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
+    || return 1
+  printf '%s\n' "$CODEX_THREAD_ID"
+}
+
+fm_codex_desktop_marker_active() {
+  fm_codex_desktop_thread_id >/dev/null
+}
+
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
 #
@@ -108,6 +122,12 @@ fm_harness_ancestry_pids() {
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
+  if [ "$printed" -eq 0 ] && fm_codex_desktop_marker_active; then
+    # Codex Desktop's tool process is intentionally short-lived. Its paired
+    # thread sidecar, not this pid, carries ownership across later tool calls.
+    printf '%s\n' "$$"
+    return 0
+  fi
   [ "$printed" -eq 1 ]
 }
 
@@ -138,6 +158,33 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+fm_codex_desktop_lock_path() {  # <state>
+  printf '%s/.lock.codex-thread\n' "$1"
+}
+
+# Print a valid recorded Codex Desktop thread identity, or return 1. The
+# sidecar is rejected if it is not a regular non-symlink file or its value is
+# not UUID-shaped.
+fm_codex_desktop_lock_thread_id() {  # <state>
+  local path recorded
+  path=$(fm_codex_desktop_lock_path "$1")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  recorded=$(cat "$path" 2>/dev/null) || return 1
+  [[ "$recorded" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
+    || return 1
+  printf '%s\n' "$recorded"
+}
+
+# True when this tool call belongs to the Codex Desktop thread recorded beside
+# the numeric lock. The pid may already be dead because tool subprocesses are
+# short-lived; the exact thread identity is the durable ownership proof.
+fm_codex_desktop_lock_owned_by_self() {  # <state>
+  local current recorded
+  current=$(fm_codex_desktop_thread_id) || return 1
+  recorded=$(fm_codex_desktop_lock_thread_id "$1") || return 1
+  [ "$current" = "$recorded" ]
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -152,6 +199,7 @@ fm_session_lock_owned_by_self() {
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  fm_codex_desktop_lock_owned_by_self "$state" && return 0
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

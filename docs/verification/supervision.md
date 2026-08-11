@@ -214,6 +214,20 @@ The current Stop-owned main/secondmate inclusion and child-worktree exclusion ar
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+Managed Codex Desktop identity was verified on 2026-08-11 with Codex CLI 0.146.0 by observing the paired `CODEX_CI=1` and UUID-shaped `CODEX_THREAD_ID` tool environment, masking every Codex-named process ancestor, and exercising harness detection plus thread-owned lock continuity across short-lived tool processes through the public scripts.
+
+```sh
+codex --version
+FM_CODEX_DESKTOP_MARKER_LIVE_E2E=1 tests/fm-codex-desktop-marker-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+codex-cli 0.146.0
+ok - codex-cli 0.146.0 live paired UUID markers identified Codex and retained the lock across short-lived tools
+```
+
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, stale acknowledgement rejection, and a persistent successor remaining live after recovery is acknowledged.

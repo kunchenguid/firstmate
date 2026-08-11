@@ -29,11 +29,13 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_codex_desktop_lock_thread_id "$STATE" >/dev/null || fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+codex_thread=$(fm_codex_desktop_thread_id 2>/dev/null || true)
+codex_lock_path=$(fm_codex_desktop_lock_path "$STATE")
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -46,7 +48,12 @@ rm -f "$probe" 2>/dev/null || {
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
+CODEX_LOCK_TMP=
 release_claim_lock() {
+  if [ -n "$CODEX_LOCK_TMP" ]; then
+    rm -f "$CODEX_LOCK_TMP" 2>/dev/null || true
+    CODEX_LOCK_TMP=
+  fi
   if [ "$CLAIM_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$CLAIM_LOCK"
     CLAIM_LOCK_HELD=0
@@ -57,11 +64,23 @@ trap 'exit 1' HUP INT TERM
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
+  recorded_codex_thread=
+  if [ -e "$codex_lock_path" ] || [ -L "$codex_lock_path" ]; then
+    recorded_codex_thread=$(fm_codex_desktop_lock_thread_id "$STATE" 2>/dev/null) || {
+      echo "error: Codex Desktop lock identity is unreadable; operate read-only until resolved" >&2
+      exit 1
+    }
+  fi
+  if [ -n "$recorded_codex_thread" ] && [ "$recorded_codex_thread" != "$codex_thread" ]; then
+    echo "error: another Codex Desktop thread holds the lock; operate read-only until resolved" >&2
+    exit 1
+  fi
   if [ "$old" = "$me" ]; then
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
+  if { [ -z "$recorded_codex_thread" ] || [ "$recorded_codex_thread" != "$codex_thread" ]; } \
+    && fm_harness_pid_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
@@ -86,10 +105,40 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  recorded_codex_thread=
+  if [ -e "$codex_lock_path" ] || [ -L "$codex_lock_path" ]; then
+    recorded_codex_thread=$(fm_codex_desktop_lock_thread_id "$STATE" 2>/dev/null) || {
+      echo "error: Codex Desktop lock identity is unreadable; operate read-only until resolved" >&2
+      exit 1
+    }
+  fi
+  if [ -n "$recorded_codex_thread" ] && [ "$recorded_codex_thread" != "$codex_thread" ]; then
+    echo "error: another Codex Desktop thread holds the lock; operate read-only until resolved" >&2
+    exit 1
+  fi
+  if [ "$old" != "$me" ] \
+    && { [ -z "$recorded_codex_thread" ] || [ "$recorded_codex_thread" != "$codex_thread" ]; } \
+    && fm_harness_pid_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
+fi
+if [ -n "$codex_thread" ]; then
+  CODEX_LOCK_TMP=$(mktemp "$STATE/.lock-codex-thread-write.XXXXXX" 2>/dev/null) || {
+    echo "error: cannot write session lock; operate read-only until resolved" >&2
+    exit 1
+  }
+  if ! printf '%s\n' "$codex_thread" > "$CODEX_LOCK_TMP" 2>/dev/null \
+    || ! mv -f "$CODEX_LOCK_TMP" "$codex_lock_path" 2>/dev/null; then
+    echo "error: cannot write session lock; operate read-only until resolved" >&2
+    exit 1
+  fi
+  CODEX_LOCK_TMP=
+else
+  rm -f "$codex_lock_path" 2>/dev/null || {
+    echo "error: cannot write session lock; operate read-only until resolved" >&2
+    exit 1
+  }
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
@@ -100,6 +149,16 @@ written=$(cat "$LOCK" 2>/dev/null) || {
   exit 1
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
+  echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if [ -n "$codex_thread" ]; then
+  written_codex_thread=$(fm_codex_desktop_lock_thread_id "$STATE" 2>/dev/null || true)
+  if [ "$written_codex_thread" != "$codex_thread" ]; then
+    echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+    exit 1
+  fi
+elif [ -e "$codex_lock_path" ] || [ -L "$codex_lock_path" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
