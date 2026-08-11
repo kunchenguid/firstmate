@@ -2630,6 +2630,12 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# SSH_AUTH_SOCK is likewise session-scoped and can be absent from a pane created
+# by a long-lived backend. Forward the caller's current socket to every harness
+# so child commands, including a no-mistakes daemon they start, inherit it.
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  LAUNCH="SSH_AUTH_SOCK=$(shell_quote "$SSH_AUTH_SOCK") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
