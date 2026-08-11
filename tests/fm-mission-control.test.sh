@@ -2775,6 +2775,63 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       }
     };`}, sid);
   await navigate(sid, boardPath);
+  async function themeRoles(scheme) {
+    await send("Emulation.setEmulatedMedia", {features:[{name:"prefers-color-scheme",value:scheme}]}, sid);
+    return evaluate(sid, `(() => {
+      const root=getComputedStyle(document.documentElement);
+      const color=(name)=>root.getPropertyValue(name).trim();
+      const liveProbe=Object.assign(document.body.appendChild(document.createElement('span')),{className:'dot'});
+      const blockedProbe=Object.assign(document.body.appendChild(document.createElement('p')),{className:'rc-form-error'});
+      const answerProbe=document.querySelector('.rc-answer');
+      const roles={
+        bg:color('--bg'),panel:color('--panel'),ink:color('--ink'),line:color('--line'),
+        needs:color('--needs-you'),live:color('--live'),blocked:color('--blocked'),accent:color('--accent'),
+        body:getComputedStyle(document.body).backgroundColor,
+        decisionBand:getComputedStyle(document.querySelector('.band')).backgroundColor,
+        liveDot:getComputedStyle(liveProbe).backgroundColor,
+        blockedBar:getComputedStyle(blockedProbe).color,
+        primary:getComputedStyle(document.querySelector('.rc-go')).backgroundColor,
+        answerInk:getComputedStyle(answerProbe).color,
+        answerSoft:getComputedStyle(answerProbe).backgroundColor
+      };
+      liveProbe.remove();blockedProbe.remove();return roles;
+    })()`);
+  }
+  function channels(value) {
+    if (/^#[0-9a-f]{6}$/i.test(value)) {
+      return [value.slice(1,3),value.slice(3,5),value.slice(5,7)].map(x=>parseInt(x,16));
+    }
+    const match=value.match(/[\d.]+/g);
+    if (!match || match.length < 3) throw new Error('unreadable computed colour: '+value);
+    return match.slice(0,3).map(Number);
+  }
+  function sameColor(left,right) {
+    return JSON.stringify(channels(left)) === JSON.stringify(channels(right));
+  }
+  function contrast(left,right) {
+    const luminance=(value)=>{
+      const linear=channels(value).map(x=>x/255).map(x=>x<=.04045?x/12.92:Math.pow((x+.055)/1.055,2.4));
+      return .2126*linear[0]+.7152*linear[1]+.0722*linear[2];
+    };
+    const a=luminance(left),b=luminance(right);
+    return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+  }
+  const darkTheme=await themeRoles('dark');
+  const lightTheme=await themeRoles('light');
+  for (const [name,roles] of Object.entries({darkTheme,lightTheme})) {
+    assert(roles.needs === roles.accent, name+' does not map needs-you to the single accent role');
+    assert(sameColor(roles.decisionBand,roles.needs) && sameColor(roles.primary,roles.accent),
+      name+' does not reserve the accent for decisions and primary actions: '+JSON.stringify(roles));
+    assert(sameColor(roles.liveDot,roles.live) && sameColor(roles.blockedBar,roles.blocked),
+      name+' does not distinguish live and blocked states through their semantic roles: '+JSON.stringify(roles));
+    assert(contrast(roles.ink,roles.panel) >= 7 && contrast(roles.accent,roles.panel) >= 4.5,
+      name+' misses executive-text or accent contrast: '+JSON.stringify(roles));
+    assert(contrast(roles.answerInk,roles.answerSoft) >= 4.5,
+      name+' misses Answer control contrast: '+JSON.stringify(roles));
+  }
+  assert(darkTheme.bg !== lightTheme.bg && darkTheme.panel !== lightTheme.panel,
+    'dark and light preferences did not produce distinct rendered themes');
+  await send("Emulation.setEmulatedMedia", {features:[{name:"prefers-color-scheme",value:"light"}]}, sid);
   const dom = await evaluate(sid, `(() => {
     function block(home,id){return [...document.querySelectorAll('.rc')].find(x=>x.dataset.home===home&&x.dataset.id===id);}
     function answer(home,id){return block(home,id).querySelector('form[data-intent=answer] textarea');}

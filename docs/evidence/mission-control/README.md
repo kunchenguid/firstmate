@@ -1,5 +1,11 @@
 # Mission control board evidence
 
+`before-grok-board-desktop-light.png`, `after-grok-board-desktop-light.png`, `before-grok-board-desktop-dark.png`, and `after-grok-board-desktop-dark.png` compare the decisions-first board at 1280px before and after the Grok-inspired role-token visual system.
+`before-grok-board-mobile-light.png`, `after-grok-board-mobile-light.png`, `before-grok-board-mobile-dark.png`, and `after-grok-board-mobile-dark.png` carry the same board comparison at exactly 390px by 844px.
+`before-grok-controls-desktop-light.png`, `after-grok-controls-desktop-light.png`, `before-grok-controls-desktop-dark.png`, and `after-grok-controls-desktop-dark.png` compare the open quick-answer and free-text controls at desktop width.
+`before-grok-controls-mobile-light.png`, `after-grok-controls-mobile-light.png`, `before-grok-controls-mobile-dark.png`, and `after-grok-controls-mobile-dark.png` show those controls at exactly 390px by 844px, including visibly separate Answer, Set aside, Ask firstmate, submit, and cancel treatments.
+The earlier board had one light palette, so its dark-preference before images intentionally remain light; the corresponding after images prove that a dark system preference now changes the rendered palette rather than only recolouring an evidence fixture.
+
 `before-board.png` and `after-board.png` are the rendered mission control board before and after the calm light redesign.
 
 `before-deferred-tabs.png` and `after-deferred-tabs.png` are the same board before and after the deferred shelf and the navigation tabs, at desktop width.
@@ -96,6 +102,12 @@ The browser inspection used `chrome-devtools-axi emulate --viewport '1280x900x1'
 The 390px inspection returned five aligned field controls from 47px to 343px, a full-width 320px by 44px submit control, the grouped progress label, and `overflow: false`.
 Submitting the blank form returned a required-facts refusal from the direct reply service and displayed `answer needs required facts: Account name, Statement date, Market value` immediately above that submit control; stable field keys remain internal.
 
-`bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=14 identical_opted_out=0`.
+The Grok-inspired visual pass was verified on 2026-08-11 with `chrome-devtools-axi 0.1.27` against a synthetic board served on loopback.
+Desktop inspection used a 1280px by 900px viewport, while mobile inspection used `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`; both were repeated with explicit light and dark colour-scheme emulation.
+All four after views reported a document width equal to the viewport width, and the open control views kept quick answers, free-text Answer, Set aside, Ask firstmate, submit, and cancel visually distinct.
+The Projects view showed active and needs-you cards before one shadowless idle card, and the valid Dispatch view plus its open existing-profile editor fit at 390px with its 44px mobile inputs and submit control still available.
+The no-script fallback and control transport behavior remain covered through the executable renderer and real-browser regressions in `tests/fm-mission-control.test.sh` and `tests/fm-board-reply.test.sh`.
+
+`bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=22 identical_opted_out=0`.
 
 See [`docs/mission-control.md`](../../mission-control.md) for what the board shows and where each value comes from.

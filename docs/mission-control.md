@@ -3,7 +3,12 @@
 `bin/fm-mission-control.sh` renders the fleet's current state into one self-contained HTML board that the captain keeps open.
 It is a generator, not a server: each run writes one file, and the page reloads itself so a regenerated file appears without a click.
 
-The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, a very recent autonomous-actions feed, and a quiet System view carrying fleet health plus allowance pace.
+The board is a compact executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, a very recent autonomous-actions feed, and a quiet System view carrying fleet health plus allowance pace.
+Its neutral Grok-inspired visual system uses dark as the explicit CSS fallback and default, then follows a light system preference for bright contexts.
+The renderer's inline style is the sole board CSS owner and documents the role-token contract and semantic mappings.
+Components consume those roles instead of owning palette literals.
+Idle project cards use the quieter panel token without a shadow, while projects needing action keep the stronger needs-you edge, so the existing decisions-first scan order remains clear without hiding any project or section.
+Visual treatment never changes whether a control, fact-intake form, composer, dispatch editor, no-script section, or self-reload behavior is available.
 Its in-page controls use monochrome SVG line icons and no emoji, while an inline SVG compass mark keeps Mission Control distinct in browser tabs and bookmarks without adding an asset request.
 The script's own header and `--help` own its exact flags, environment variables, paths, and exit codes, including the two commands that set a decision aside and bring it back.
 
