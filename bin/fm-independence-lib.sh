@@ -158,6 +158,14 @@ FM_INDEPENDENCE_CRITIC_PURPOSE='review'
 # only ever weaken a claim of independence, never a finding of dependence.
 FM_INDEPENDENCE_NONMEMBER_RUN_STATUS='cancelled failed'
 
+# The statuses that mean a MEMBER run has not finished yet. These change no
+# verdict and decide no membership: a run still in flight has genuinely produced
+# no evidence, and could-not-observe is the honest value for it. They change the
+# REASON, because "this run has not got there yet" and "this run's evidence is
+# missing" call for different responses - wait, versus go and find out why
+# nothing was captured - and a reader who cannot tell them apart cannot choose.
+FM_INDEPENDENCE_INFLIGHT_RUN_STATUS='pending running'
+
 # --- the record ---------------------------------------------------------------
 #
 # One line per dimension plus one overall line, in bin/fm-verify.sh's record
@@ -522,7 +530,12 @@ FM_INDEPENDENCE_FS=$'\037'
 # Echo one row per MEMBER RUN, in the order the pipeline recorded them, with
 # FM_INDEPENDENCE_FS between the fields:
 #
-#   <run><FS><vendor><FS><model><FS><shared_sessions><FS><reviewer_sessions><FS><reviews>
+#   <run><FS><vendor><FS><model><FS><shared_sessions><FS><reviewer_sessions>
+#     <FS><reviews><FS><status>
+#
+# The status rides along so a caller can say WHY a run recorded nothing without
+# looking the run up a second time - a run still in flight and a finished run
+# that captured no reviewer are the same could-not-observe and different facts.
 #
 # This is the unit every dimension is judged on. EVERY member run gets a row,
 # including one whose reviews count is zero: a run that touched these bytes and
@@ -547,6 +560,7 @@ fm_independence_runs() {  # <member steps>
         shared[run] = $8 + 0
         sess[run] = $9 + 0
         reviews[run] = 0
+        status[run] = $11
       }
       if ($3 != p) next
       reviews[run]++
@@ -556,8 +570,8 @@ fm_independence_runs() {  # <member steps>
     END {
       for (i = 1; i <= n; i++) {
         r = order[i]
-        printf "%s%s%s%s%s%s%d%s%d%s%d\n", r, fs, vendor[r], fs, model[r], fs,
-          shared[r], fs, sess[r], fs, reviews[r]
+        printf "%s%s%s%s%s%s%d%s%d%s%d%s%s\n", r, fs, vendor[r], fs, model[r], fs,
+          shared[r], fs, sess[r], fs, reviews[r], fs, status[r]
       }
     }'
 }
@@ -577,7 +591,8 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
   local steps='' members='' dropped=0 dropped_why critic cvendor cmodel ccount
   local mkey mprovider mpool ckey cprovider cpool ckey_for=''
-  local run rvendor rmodel rshared rsess rreviews r_rank runs_n=0
+  local run rvendor rmodel rshared rsess rreviews rstatus r_rank runs_n=0
+  local r_nothing_why
   local r_process r_model r_vendor r_pool
   local r_process_why r_model_why r_vendor_why r_pool_why
   local process=NO_VERIFIER_RAN model=NO_VERIFIER_RAN vendor=NO_VERIFIER_RAN pool=NO_VERIFIER_RAN
@@ -630,9 +645,20 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     mpool=$(fm_model_pool_of "$mkey")
 
     process='' model='' vendor='' pool=''
-    while IFS="$FM_INDEPENDENCE_FS" read -r run rvendor rmodel rshared rsess rreviews; do
+    while IFS="$FM_INDEPENDENCE_FS" read -r run rvendor rmodel rshared rsess rreviews rstatus; do
       [ -n "$run" ] || continue
       runs_n=$((runs_n + 1))
+
+      # A run that recorded nothing says which KIND of nothing it is. The value
+      # is could-not-observe either way - a run in flight has produced no
+      # evidence yet, and that is the honest reading - but a reader deciding
+      # whether to wait or to go and investigate needs the two apart.
+      case " $FM_INDEPENDENCE_INFLIGHT_RUN_STATUS " in
+        *" ${rstatus:-} "*)
+          r_nothing_why="this run is still in flight (status ${rstatus:-unknown}) and has recorded no reviewing invocation yet" ;;
+        *)
+          r_nothing_why='this run recorded no reviewing invocation at all' ;;
+      esac
 
       # PROCESS. The recorded SESSIONS are the evidence, not the invocation: an
       # invocation row says a review ran, and says nothing about whose process
@@ -648,7 +674,7 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
         r_process_why="the reviewer shared $rshared session(s) with the agent that fixes its findings"
       elif [ "${rreviews:-0}" -eq 0 ] 2>/dev/null; then
         r_process=NO_VERIFIER_RAN
-        r_process_why='this run recorded no reviewing invocation at all; nothing about it verified these bytes'
+        r_process_why="$r_nothing_why; nothing about it has verified these bytes"
       elif [ "${rsess:-0}" -gt 0 ] 2>/dev/null; then
         r_process=PASS
         r_process_why="$rreviews reviewing invocation(s) ran in $rsess session(s) of their own"
@@ -663,7 +689,7 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
       # would let it disappear behind a sibling run that did review.
       if [ "${rreviews:-0}" -eq 0 ] 2>/dev/null; then
         r_model=NO_VERIFIER_RAN
-        r_model_why='this run recorded no reviewing invocation; no reviewing identity was captured for it'
+        r_model_why="$r_nothing_why; no reviewing identity was captured for it"
         r_vendor=NO_VERIFIER_RAN
         r_vendor_why=$r_model_why
         r_pool=NO_VERIFIER_RAN

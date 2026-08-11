@@ -545,6 +545,7 @@ FM_WAKE_LEDGER=         # alternate wake-outcome ledger path, default data/wake-
 FM_PIPELINE_STATE_DB=   # alternate validation-pipeline state database, default ~/.no-mistakes/state.sqlite; read-only, for the invocation-time evidence of which vendor and model reviewed a task, and could-not-observe when it cannot be read (bin/fm-independence-lib.sh)
 FM_CERTIFY_ATTEST=      # alternate head-bound attestation verifier, default bin/fm-attest.sh (bin/fm-certify.sh)
 FM_CERTIFY_PR_VERIFIER= # alternate pull-request check verifier, default bin/fm-verify.sh (bin/fm-certify.sh)
+FM_CERTIFY_LEDGER=      # alternate terminal-record reader, default bin/fm-wake-ledger.sh; read for a task whose task-local state teardown already removed (bin/fm-certify.sh)
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3

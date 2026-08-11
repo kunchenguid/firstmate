@@ -577,6 +577,86 @@ test_certified_evaluates_after_teardown() {
   pass "certified evaluates after teardown from the durable terminal record"
 }
 
+test_a_torn_down_task_names_why_its_record_could_not_be_read() {
+  local dir out rc
+  dir=$(make_case record-failure-modes no yes)
+
+  # A readable ledger that holds no record for this id is an OBSERVATION about
+  # the task, and the reason says so.
+  record_terminal_task "$dir" recorded "$dir/repo" fm/alpha \
+    || fail "record-failure: the terminal record failed"
+  out=$(certify "$dir" never-recorded 2>&1) && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "record-failure: an unrecorded task did not refuse (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "the wake ledger holds no record" \
+    "record-failure: an unrecorded task was not named as such:"$'\n'"$out"
+
+  # A ledger nobody can read is a fact about this HOST and no evidence about
+  # the task at all. It must not answer in the words above.
+  out=$(export FM_CERTIFY_LEDGER="$dir/no-such-reader"; certify "$dir" recorded 2>&1) && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "record-failure: an unreadable reader did not refuse (rc=$rc):"$'\n'"$out"
+  case "$out" in
+    *"holds no record"*)
+      fail "record-failure: a reader that could not run read as a task that never finished:"$'\n'"$out" ;;
+  esac
+  assert_contains "$out" "no executable ledger reader" \
+    "record-failure: the refusal did not name what could not be read"
+  pass "the reasons for an absent record and an unreadable ledger stay apart"
+}
+
+test_named_bytes_outrank_the_recorded_summary() {
+  local dir out rc
+  dir=$(make_case named-bytes-win no yes)
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|anthropic|claude-opus-5" "fm/beta|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): named bytes outrank the recorded summary"; return; }
+
+  # The task's own branch reviewed dependently, and that finding is on its
+  # durable record. The caller then asks about DIFFERENT bytes.
+  record_terminal_task "$dir" dependent "$dir/repo" fm/alpha \
+    || fail "named-bytes: the terminal record failed"
+
+  out=$(certify "$dir" dependent --repo "$dir/repo" --branch fm/beta) && rc=0 || rc=$?
+  # Certification is a statement about SPECIFIC bytes, so the bytes the caller
+  # named are the bytes: fm/beta reviewed independently and the record for
+  # fm/alpha must not answer in its place.
+  case "$out" in
+    *"pool:not-independent"*)
+      fail "named-bytes: another branch's recorded verdict answered for the named bytes:"$'\n'"$out" ;;
+  esac
+  assert_contains "$(squeezed "$out")" "model independent" \
+    "named-bytes: the named bytes were not derived live"
+  assert_contains "$out" "derived live" \
+    "named-bytes: the reason did not say which source answered"
+  [ "$rc" != 3 ] || fail "named-bytes: a recorded dependence contradicted bytes it was not about:"$'\n'"$out"
+
+  # The fallback still works when the caller names nothing, and says so.
+  out=$(certify "$dir" dependent) && rc=0 || rc=$?
+  [ "$rc" = 3 ] || fail "named-bytes: the record stopped answering when nothing was named (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "read back from the durable terminal record" \
+    "named-bytes: the reason did not say the record answered"
+  pass "explicitly named bytes are derived live and the record fills only what was not named"
+}
+
+test_an_underived_route_is_never_reported_as_a_route() {
+  local dir out
+  command -v jq >/dev/null 2>&1 || { pass "SKIP (jq unavailable): an underived route"; return; }
+  dir=$(make_case underived-route no yes)
+  record_terminal_task "$dir" gone "$dir/repo" fm/alpha \
+    || fail "underived-route: the terminal record failed"
+
+  # No repository path survives teardown, so the push target is never read at
+  # all. A route named from that absence would be a claim nobody observed.
+  out=$(certify "$dir" gone --json || true)
+  printf '%s' "$out" | jq -e '.landing_route == null' >/dev/null \
+    || fail "underived-route: a route was named without reading a push target:"$'\n'"$out"
+
+  # The positive form: a repository that IS read reports the route it observed.
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha --mode local-only --json || true)
+  printf '%s' "$out" | jq -e '.landing_route == "direct"' >/dev/null \
+    || fail "underived-route: an observed direct route was not reported:"$'\n'"$out"
+  pass "a route that was never read is reported as none, not as direct"
+}
+
 test_json_form_carries_every_dimension_and_the_route() {
   local dir out
   command -v jq >/dev/null 2>&1 || { pass "SKIP (jq unavailable): json form"; return; }
@@ -617,6 +697,9 @@ test_a_cancelled_run_does_not_decide_the_branch
 test_an_absent_reviewing_identity_never_becomes_evidence
 test_a_hostile_task_id_is_refused
 test_certified_evaluates_after_teardown
+test_named_bytes_outrank_the_recorded_summary
+test_an_underived_route_is_never_reported_as_a_route
+test_a_torn_down_task_names_why_its_record_could_not_be_read
 test_an_observed_attestation_failure_is_not_labelled_not_independent
 test_an_unreadable_repository_is_could_not_observe_not_a_refusal
 test_an_observed_failure_is_never_softened_by_an_unobservable_sibling

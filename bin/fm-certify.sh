@@ -91,6 +91,7 @@
 #   FM_PIPELINE_STATE_DB      validation-pipeline state database
 #   FM_CERTIFY_ATTEST         attestation verifier to run (tests)
 #   FM_CERTIFY_PR_VERIFIER    pull-request check verifier to run (tests)
+#   FM_CERTIFY_LEDGER         terminal-record reader to run (tests)
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -215,8 +216,20 @@ elif [ -n "$TASK" ]; then
   # was never task-local. That record is append-only, was written at the last
   # moment the join existed, and already carries the DERIVED critic
   # independence for exactly these bytes.
-  RECORD=$("$SCRIPT_DIR/fm-wake-ledger.sh" task-record "$TASK" 2>/dev/null) \
-    || die "no durable record for task $TASK"
+  #
+  # The reader's failure modes are held apart, because only one of them is an
+  # observation. "This task was never recorded as finished" is a fact about the
+  # task; "the ledger could not be read" is a fact about this host, and reporting
+  # the second in the first's words sends a reader to repair the wrong thing.
+  LEDGER_READER=${FM_CERTIFY_LEDGER:-$SCRIPT_DIR/fm-wake-ledger.sh}
+  [ -x "$LEDGER_READER" ] \
+    || die "the terminal record for $TASK could not be read: no executable ledger reader at $LEDGER_READER"
+  RECORD=$("$LEDGER_READER" task-record "$TASK" 2>/dev/null) && RECORD_RC=0 || RECORD_RC=$?
+  case "$RECORD_RC" in
+    0) ;;
+    1) die "no terminal record for task $TASK: the wake ledger holds no record that this task finished" ;;
+    *) die "the terminal record for $TASK could not be read: the wake ledger itself was unreadable" ;;
+  esac
   RECORD_SOURCE=terminal-record
   [ -n "$MAKER_HARNESS" ] || MAKER_HARNESS=$(record_value harness)
   [ -n "$MAKER_MODEL" ] || MAKER_MODEL=$(record_value model)
@@ -240,16 +253,25 @@ fi
 # The route is read from what the work actually did, never declared by a caller.
 
 # Echo fork-landing when this repository pushes somewhere other than where it
-# fetches, which is the shape whose landing branch is deliberately unsigned.
-# Echoes nothing when the repository cannot be read: an unreadable route is not a
-# route that excuses a predicate.
+# fetches, which is the shape whose landing branch is deliberately unsigned, and
+# direct when it was READ and pushes where it fetches.
+#
+# Echoes NOTHING when the push target could not be read at all - an unreadable
+# route is not a route that excuses a predicate, and it is equally not a route
+# that may be NAMED. "direct" asserted from an absence is the same defect one
+# level along: the ordinary terminal-record path has no repository path by
+# design, so it reads no push target whatsoever, and reporting that as a
+# concrete route would state a fact nobody observed.
 derive_landing_route() {
   local fetch push
   [ -d "$REPO" ] || return 0
   fetch=$(git -C "$REPO" remote get-url origin 2>/dev/null || true)
   push=$(git -C "$REPO" remote get-url --push origin 2>/dev/null || true)
   [ -n "$fetch" ] && [ -n "$push" ] || return 0
-  [ "$fetch" != "$push" ] || return 0
+  if [ "$fetch" = "$push" ]; then
+    printf 'direct'
+    return 0
+  fi
   printf 'fork-landing'
 }
 
@@ -268,6 +290,19 @@ add_row() {  # <predicate> <result> <reason> [route]
 "
 }
 
+# WHICH SOURCE ANSWERS THE INDEPENDENCE QUESTION, and why named bytes outrank a
+# record. Certification is a statement about SPECIFIC BYTES. When the caller
+# names both the repository and the branch, those ARE the bytes and the
+# derivation runs live against them; the terminal record is what fills in the
+# bytes the caller did not name, which is the ordinary case once teardown has
+# removed the task-local state. Letting the record win regardless would answer a
+# question about one branch with a verdict recorded for another, while the
+# attestation predicate below honours --repo and --head in the same invocation.
+IND_SOURCE=derived
+if [ -n "$RECORDED_INDEPENDENCE" ] && { [ -z "$REPO" ] || [ -z "$BRANCH" ]; }; then
+  IND_SOURCE=terminal-record
+fi
+
 # The per-step identity behind the verdict, captured at invocation time. Kept
 # beside the verdict so a reader can see WHICH steps were agent-backed and who
 # ran each one, rather than only the run-level summary derived from them.
@@ -275,28 +310,32 @@ add_row() {  # <predicate> <result> <reason> [route]
 # Loaded in THIS shell rather than through a command substitution, so the
 # derivation below inherits the block and the pipeline is read once.
 STEPS=''
-if [ -z "$RECORDED_INDEPENDENCE" ]; then
+if [ "$IND_SOURCE" = derived ]; then
   fm_independence_steps_load "$REPO" "$BRANCH" || true
   STEPS=$FM_INDEPENDENCE_STEPS_VAL
 fi
 
 # INDEPENDENCE. Always applicable.
 #
-# Derived live from the pipeline's invocation records while the bytes can still
-# be named, and otherwise read back from the terminal record that derived it the
+# Derived live from the pipeline's invocation records whenever the bytes are
+# named, and otherwise read back from the terminal record that derived it the
 # same way at teardown. Neither form takes a value from a caller: there is no
-# argument that carries an independence verdict into this command.
-if [ -n "$RECORDED_INDEPENDENCE" ]; then
+# argument that carries an independence verdict into this command. Which source
+# answered rides on the reason, so a reader can tell a live derivation from a
+# record of one made earlier.
+if [ "$IND_SOURCE" = terminal-record ]; then
   IND=$(fm_independence_from_record "$RECORDED_INDEPENDENCE" "task=$TASK source=terminal-record")
+  IND_WHENCE="read back from the durable terminal record for task $TASK"
 else
   IND=$(fm_independence_dimensions "$REPO" "$BRANCH" "$MAKER_HARNESS" "$MAKER_MODEL")
+  IND_WHENCE="derived live from the pipeline's own invocation records for these bytes"
 fi
 IND_RESULT=$(fm_independence_overall "$IND")
 IND_GAPS=$(fm_independence_gaps "$IND" | paste -sd, - 2>/dev/null || true)
 case "$IND_RESULT" in
-  PASS) add_row independence PASS "the checker was independent of the maker on every dimension" ;;
-  FAIL) add_row independence FAIL "the checker was not independent of the maker: ${IND_GAPS:-unknown}" ;;
-  *) add_row independence NO_VERIFIER_RAN "independence could not be established: ${IND_GAPS:-unknown}" ;;
+  PASS) add_row independence PASS "the checker was independent of the maker on every dimension ($IND_WHENCE)" ;;
+  FAIL) add_row independence FAIL "the checker was not independent of the maker: ${IND_GAPS:-unknown} ($IND_WHENCE)" ;;
+  *) add_row independence NO_VERIFIER_RAN "independence could not be established: ${IND_GAPS:-unknown} ($IND_WHENCE)" ;;
 esac
 
 # ATTESTATION. Not applicable on the fork-landing route.
@@ -421,13 +460,15 @@ if [ "$MODE_OUT" = json ]; then
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$ROWS" | jq -R -s --arg schema "$SCHEMA" --arg state "$CERT_STATE" \
       --arg gaps "$GAPS" --arg na "$NOT_APPLICABLE" --arg branch "$BRANCH" \
-      --arg route "${LANDING_ROUTE:-direct}" --arg dims "$IND" --arg steps "$STEPS" '
+      --arg route "$LANDING_ROUTE" --arg dims "$IND" --arg steps "$STEPS" \
+      --arg indsource "$IND_SOURCE" '
       {schema: $schema,
        state: $state,
        gap: (if $gaps == "" then null else $gaps end),
        not_applicable: (if $na == "" then [] else ($na | split(",")) end),
        branch: (if $branch == "" then null else $branch end),
-       landing_route: $route,
+       landing_route: (if $route == "" then null else $route end),
+       independence_source: $indsource,
        predicates: [ split("\n")[] | select(length > 0) | split("\t")
                      | {predicate: .[0], result: .[1], reason: .[2],
                         route: (if (.[3] // "") == "" then null else .[3] end)} ],

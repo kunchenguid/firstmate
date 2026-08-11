@@ -433,6 +433,38 @@ test_seq_reuse_across_a_state_reset_never_collapses_records() {
 # path would make the independence question look answerable while
 # under-reporting it. One case proves there is no writable path at all.
 
+test_task_record_holds_an_absent_record_apart_from_an_unreadable_ledger() {
+  local home file rc out
+  home=$(make_home task-record-reader)
+  file=$(ledger_file "$home")
+
+  # No ledger file at all. This host cannot see, which is no evidence about the
+  # task whatsoever - so it must NOT answer in the words of a task that was
+  # never recorded, and the two statuses are what keep them apart.
+  ledger "$home" task-record alpha >/dev/null 2>&1 && rc=0 || rc=$?
+  expect_code 3 "$rc" "an unreadable ledger must not read as a task with no record"
+
+  ledger "$home" task alpha --outcome landed --source declared --harness claude \
+    || fail "task-record: writing the terminal record failed"
+
+  # The ledger is readable now and genuinely holds no record for this id. That
+  # IS an observation about the task, and it is the other status.
+  ledger "$home" task-record beta >/dev/null 2>&1 && rc=0 || rc=$?
+  expect_code 1 "$rc" "a readable ledger with no record for the id must report exactly that"
+
+  out=$(ledger "$home" task-record alpha) \
+    || fail "task-record: a recorded task did not read back: $(cat "$file")"
+  case "$out" in
+    *"task=alpha"*) ;;
+    *) fail "task-record: the record's fields were not returned:"$'\n'"$out" ;;
+  esac
+  case "$out" in
+    *"harness=claude"*) ;;
+    *) fail "task-record: the maker identity was not returned:"$'\n'"$out" ;;
+  esac
+  pass "an unreadable ledger and a task with no record are different answers"
+}
+
 critic_of() {  # <ledger file> -> "<vendor> <model>"
   printf '%s %s\n' \
     "$(field_of "$1" task critic_vendor)" \
@@ -1092,6 +1124,7 @@ test_the_terminal_outcome_derivation_reads_the_task_declaration
 test_terminal_outcome_source_is_closed_and_defaults_to_assumed
 test_a_failure_that_is_never_torn_down_is_recorded_not_silent
 test_the_report_names_evidence_and_refuses_a_rate
+test_task_record_holds_an_absent_record_apart_from_an_unreadable_ledger
 test_critic_fields_resolve_from_the_pipeline_record
 test_critic_independence_is_recorded_per_dimension
 test_identity_is_derived_per_run_and_the_branch_reports_its_weakest

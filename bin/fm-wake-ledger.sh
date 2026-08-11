@@ -212,11 +212,13 @@
 #       can.
 #   fm-wake-ledger.sh task-record <id>
 #       Print the LAST terminal record's key=value fields for a task, one per
-#       line, and exit non-zero when this ledger holds none. Teardown deletes
-#       state/<id>.meta immediately after writing that record, so this is the
-#       durable home of a finished task's maker identity, delivery mode, pull
-#       request and derived critic independence. bin/fm-certify.sh reads it to
-#       certify a task whose task-local state is gone.
+#       line. Exit 1 when this ledger was read and holds no record for that id,
+#       and exit 3 when the ledger itself could not be read - a host that cannot
+#       see is not a task that never happened. Teardown deletes state/<id>.meta
+#       immediately after writing that record, so this is the durable home of a
+#       finished task's maker identity, delivery mode, pull request and derived
+#       critic independence. bin/fm-certify.sh reads it to certify a task whose
+#       task-local state is gone.
 #   fm-wake-ledger.sh derive <status-file>
 #       Print "<outcome> <outcome_source>" for a task's status log: the LAST
 #       `done:` or `failed:` line decides, and a log with neither prints
@@ -766,7 +768,7 @@ cmd_task() {
 }
 
 # Echo the key=value tail of the LAST terminal record for <id>, one field per
-# line, and return non-zero when this ledger holds none.
+# line.
 #
 # WHY A READER EXISTS AT ALL. The terminal record is written immediately before
 # teardown deletes state/<id>.meta, which makes it the only durable home for a
@@ -776,6 +778,15 @@ cmd_task() {
 # owner - a second parser is how an append-only evidence file starts being read
 # two different ways.
 #
+# TWO FAILURES, TWO STATUSES, because only one of them is an OBSERVATION:
+#
+#   1  this ledger was read and holds no terminal record for that id - a fact
+#      about the task, and the honest answer for one that never finished.
+#   3  the ledger itself could not be read - a fact about this host, and no
+#      evidence about the task at all. Returning 1 here would report a machine
+#      that cannot see as a task that never happened, which is the collapse
+#      every consumer of this file is built to refuse.
+#
 # The LAST record wins, matching every other reader here: `sweep` may record a
 # declared failure at declaration time and a later teardown records the same
 # task's release.
@@ -783,7 +794,7 @@ cmd_task_record() {
   local id=${1:-}
   [ -n "$id" ] || die "task-record needs a task id"
   fm_task_id_path_safe "$id" || die "unsafe task id: $id"
-  [ -f "$LEDGER" ] || return 1
+  [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || return 3
   LC_ALL=C awk -F"$TAB" -v want="task=$id" '
     $2 == "task" {
       match_found = 0
