@@ -14,6 +14,15 @@
     "attested": "For a criterion that genuinely cannot execute, such as a comment being accurate. This tier exists because forcing a probe where none is possible would recreate the same failure one level up. It is always MARKED and VISIBLE and never read as verified: an attested entry never reaches SATISFIED."
   },
   "not_a_replacement_for_diligence": "Every instance this register was built from was caught by a worker re-checking its own work. The probe is a floor beneath that diligence, never a substitute for it, and nothing here licenses skipping a self-check because an entry is green.",
+  "probe_bounds": {
+    "register_entry_probe_seconds": 10,
+    "decision_file_probe_seconds": 60,
+    "why_two_numbers": "The register's own typed probes read this repository and none of them is a test invocation, so 10s bounds them. A decision file's run: is bounded at 60s instead, and that number is derived rather than picked: the 2026-08-10 ruling makes cited-control the DEFAULT tier and its run is a test invocation, so a bound too small to let the pinned default finish would refuse every such closure forever, which is a park rather than a verdict.",
+    "derivation": "Measured on the machine this was written on: tests/fm-commitment-register.test.sh runs in 7.8s (three runs: 7.82, 7.82, 7.81), and a pinned cited-control probe invokes that suite TWICE - once per grep in the run - so one probe costs about 15.6s. 60s is therefore roughly 4x observed with headroom for machine load, and that ratio is what the next person changing this number is trading.",
+    "overrides": "FM_COMMITMENT_PROBE_TIMEOUT and FM_COMMITMENT_DECISION_PROBE_TIMEOUT. bin/fm-commitment-register.sh's header states the same two numbers and the same derivation, and a test pins its defaults equal to these.",
+    "a_timed_out_probe": "Reported as a TIMEOUT, distinct from every other could-not-observe cause. Could-not-observe can never wrongly pass, but it also cannot close a key, so a chronically timing-out probe would otherwise block a closure forever while reading as an ordinary open item.",
+    "session_start_runs_none_of_them": "bin/fm-session-start.sh exports FM_COMMITMENT_NO_EXECUTE=1 over its whole subtree - the bootstrap relay, fm-admission.sh, fm-fleet-snapshot.sh, and the open-decision fold's closure gate - so no probe executes on the critical path of a session. Every probe that did not run answers could-not-observe, so an entry stays surfaced and a resolution stays visibly unverified and still open: not executing is never accepting."
+  },
   "required": {
     "commitment_schema_version": "must equal this file's commitment_schema_version",
     "id": "stable slug, unique across the tracked register and the home overlay; must match the file basename",
@@ -45,7 +54,7 @@
     "control": "name of the test or artifact watched to fail first, as the 2026-08-10 ruling pins it. Required by cited-control. Surfaced, and marked when it also resolves on disk.",
     "reason": "why no probe is possible. Required by attested, and never treated as verification.",
     "deadline": "ISO date (YYYY-MM-DD). An entry still unmet after it is reported overdue. It never turns an unmet entry into a met one, and it never suppresses one.",
-    "unobserved_conditions": "array of one-sentence conditions this commitment includes that its probe does NOT observe. Use it when the recorded commitment has more than one half and only some of them have a landed artifact to probe. The covered half is reported exactly as the probe found it, and the declared-uncovered half is reported as could-not-observe, so the entry can never reach SATISFIED - and therefore never retire - on a partial answer. It can only withhold satisfaction, never grant it, which is why it is not one of the refused status words. It is not a place to record work that is merely unfinished: that is what a second entry with its own probe is for.",
+    "unobserved_conditions": "array of one-sentence conditions this commitment includes that its probe does NOT observe. Use it when the recorded commitment has more than one half and only some of them have a landed artifact to probe. The covered half is reported exactly as the probe found it, and the declared-uncovered half is reported as could-not-observe, so the entry can never reach SATISFIED - and therefore never retire - on a partial answer. It can only withhold satisfaction, never grant it, which is why it is not one of the refused status words. It is not a place to record work that is merely unfinished: that is what a second entry with its own probe is for. THE TYPE IS VALIDATED: it must be a non-empty array of non-empty strings, and anything else - a bare string, an array of objects, a null member - makes the entry INADMISSIBLE. This is the one field that can withhold satisfaction, so a malformed one would silently skip the guard and let a passing probe reach SATISFIED on a partial answer, which is the exact outcome the field exists to prevent.",
     "note": "free prose for a reader; never consumed"
   },
   "refused_keys": [
@@ -101,9 +110,10 @@
         "symbol": "shell function name",
         "defined_in": "path relative to the code root that defines it"
       },
-      "pass_when": "at least one file under bin/ other than defined_in references the symbol",
-      "fail_when": "no file under bin/ other than defined_in references it - a guard with no runtime caller",
-      "could_not_observe_when": "defined_in or bin/ cannot be read, so a definition cannot be told from a call"
+      "pass_when": "at least one file under bin/ other than defined_in CALLS the symbol - it appears at a command position on a line that is not a comment",
+      "fail_when": "no file under bin/ other than defined_in calls it - a guard with no runtime caller",
+      "could_not_observe_when": "defined_in or bin/ cannot be read, so a definition cannot be told from a call, or the declared symbol is not a plain shell function name",
+      "a_mention_is_not_a_caller": "This entry class IS \"a guard believed to close an inversion that has no runtime caller at all\", so matching any occurrence would let a comment like \"# task_base_verify_branch should be wired in here\" retire the entry while the guard still guards nothing - the register reproducing its own defect. Comment lines are dropped before the match and what remains must look like a call, not merely mention the name."
     },
     "work_owned": {
       "args": {

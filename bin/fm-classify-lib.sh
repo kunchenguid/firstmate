@@ -554,6 +554,21 @@ _fm_decision_probe_fenced() {  # <decision-file>
 # A probe that cannot run refuses the closure: could-not-observe is never a pass,
 # and accepting a resolution on an unobserved criterion is the exact failure the
 # ruling closes.
+#
+# THE ACCEPT PATH IS NOT SILENT, and the RETURN CODE is what says which path this
+# is - never the presence of output. The gate prints on acceptance too, for
+# exactly the two acceptances that rest on something other than a probe observed
+# just now: a result served from the freshness-bounded cache, which carries its
+# observation time, and an attested criterion, which is accepted as
+# ATTESTED-NOT-PROBED. If this function captured the interpreter's stdout and
+# dropped it on rc 0, the guarantee would exist only for a human running --closes
+# by hand, and the fold - the path that actually CONSUMES the answer - would close
+# the decision with no sign the verdict was not observed now. So the disclosure
+# comes back on stdout in both cases and the caller reads it; a probe that passed
+# just now prints nothing, because there is nothing to disclose about it.
+#
+# It has to be stdout rather than a variable: every caller invokes this inside a
+# command substitution, so a global set here dies with the subshell.
 decision_close_refused() {  # <task-id> <key> [home]
   local task=$1 key=$2 home=${3:-${FM_HOME:-}} bin=$FM_CLASSIFY_COMMITMENT_BIN out rc
   [ -n "$task" ] && [ -n "$key" ] || return 1
@@ -573,10 +588,13 @@ decision_close_refused() {  # <task-id> <key> [home]
   fi
   out=$(FM_HOME="$home" "$bin" --closes "$task" "$key" 2>/dev/null)
   rc=$?
-  [ "$rc" -eq 0 ] && return 1
-  # The refusal becomes the note field of a TAB-separated fold record, and it
+  # Either way the text becomes a field beside TAB-separated fold records, and it
   # carries text read out of a decision file, so a stray tab or newline there
   # would corrupt the record rather than the note.
+  if [ "$rc" -eq 0 ]; then
+    [ -z "$out" ] || printf '%s' "$out" | tr '\n\t' '  '
+    return 1
+  fi
   printf '%s' "${out:-a registered probe for this criterion did not pass}" | tr '\n\t' '  '
   return 0
 }
@@ -689,6 +707,17 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${prior:-needs-decision}"$'\t'"${refusal}"$'\n'
       else
+        # Accepted. `refusal` still holds whatever the gate disclosed about WHY
+        # - a stored observation with its time, or an attested criterion
+        # accepted without a probe - and that disclosure is surfaced rather than
+        # dropped. This function's stdout is the typed open set and an accepted
+        # key is by definition not in it, so the note goes to the reader on
+        # stderr, which every consumer of this fold either shows or logs.
+        # Discarding it would leave the fleet snapshot, the wake drain and the
+        # decision-hold read showing a clean closure with no sign the verdict
+        # was not observed just now.
+        [ -z "$refusal" ] \
+          || printf 'decision %s [key=%s] %s\n' "$task" "$key" "$refusal" >&2
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
       fi

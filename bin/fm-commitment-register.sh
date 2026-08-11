@@ -113,13 +113,33 @@
 # that register's probes are typed. It DOES execute three things, all of them
 # home-private or repo-local: a decision file's `run:` (see TRUST BOUNDARY above),
 # an entry's declared owner command, and an entry's named test. The only thing it
-# writes is the decision-probe result cache described under Environment below,
-# which no session-start path reaches: bin/fm-bootstrap.sh relays --open, and
-# --open evaluates no decision probes. Because a `run:` executes inside the task
-# worktree, a probe that writes scratch files there leaves that worktree dirty,
-# which bin/fm-teardown.sh's dirty check then refuses on - a `run:` that mutates
-# its worktree is a badly written probe, and the cache bounds how often it runs
-# but cannot make it harmless.
+# writes is the decision-probe result cache described under Environment below.
+# Because a `run:` executes inside the task worktree, a probe that writes scratch
+# files there leaves that worktree dirty, which bin/fm-teardown.sh's dirty check
+# then refuses on - a `run:` that mutates its worktree is a badly written probe,
+# and the cache bounds how often it runs but cannot make it harmless.
+#
+# SESSION START EXECUTES NO PROBE, and that is a safety requirement rather than a
+# performance one. Session start may report RECORDED state; it may never execute a
+# probe to find out. The chain is real and it is the whole chain, not just the
+# bootstrap relay: bin/fm-session-start.sh runs bin/fm-admission.sh, which runs
+# bin/fm-fleet-snapshot.sh, which calls status_open_decisions per task, which
+# reaches the closure gate, which would otherwise run arbitrary `run:` commands
+# inside task worktrees. Turning a cheap detect-only sweep into arbitrary
+# execution on the critical path of every session is the regression that gets
+# session start turned off, and then the register protects nothing.
+#
+# So bin/fm-session-start.sh exports FM_COMMITMENT_NO_EXECUTE=1 for that whole
+# subtree, and in that mode NO probe runs here - not a decision `run:`, not an
+# entry's owner command, not its named test - and no stored verdict is served in
+# place of one either, because serving a cached PASS would close a key on an
+# observation this session did not make. NOT EXECUTING IS NOT ACCEPTING: every
+# probe that did not run answers could-not-observe, so an entry stays surfaced and
+# a resolution stays visibly unverified and still open. Fail-open here would be
+# worse than the cost it avoids. A standalone bin/fm-bootstrap.sh run, a
+# wake drain, a decision-hold read, or a human running this command by hand sets
+# no such variable and probes normally, which is how an entry still retires on its
+# probe with no hand edit.
 #
 # bin/fm-bootstrap.sh relays --open at every session start, so session
 # start cannot report a clean or quiet state while a registered commitment is open,
@@ -144,6 +164,9 @@
 #       no probe is registered for the key, when its probe passes, or when it is
 #       an attested criterion (whose acceptance is printed, never silent), and
 #       non-zero otherwise with one line of evidence.
+#   Any report may be combined with --no-execute, which is FM_COMMITMENT_NO_EXECUTE=1
+#       as a flag: run no probe at all and report every entry as could-not-observe
+#       rather than finding out. See SESSION START EXECUTES NO PROBE above.
 #   fm-commitment-register.sh --help
 #
 # Exit status is the verdict, so a caller that ignores stdout still stops safely:
@@ -169,20 +192,41 @@
 #   FM_HOME                       operational home to read (default: repo root)
 #   FM_COMMITMENT_DIR             read this tracked register instead (tests)
 #   FM_COMMITMENT_HOME_DIR        read this home overlay instead (tests)
+#   FM_COMMITMENT_NO_EXECUTE      1 to run no probe at all and report every entry
+#                                 as could-not-observe (default 0). Exported by
+#                                 bin/fm-session-start.sh; see SESSION START
+#                                 EXECUTES NO PROBE above.
 #   FM_COMMITMENT_PROBE_TIMEOUT   seconds bounding one register-entry probe
 #                                 (default 10)
 #   FM_COMMITMENT_DECISION_PROBE_TIMEOUT
 #                                 seconds bounding one decision-file `run:`
-#                                 (default 60). Deliberately larger than the entry
-#                                 bound: the ruling makes cited-control the DEFAULT
-#                                 tier and its `run` is a test invocation, and a
-#                                 bound too small to let the pinned default finish
-#                                 would refuse every such closure forever, which is
-#                                 a park rather than a verdict.
+#                                 (default 60)
 #   FM_COMMITMENT_PROBE_CACHE_TTL seconds a decision-probe result stays servable
 #                                 (default 120; 0 disables the cache entirely)
 #   FM_COMMITMENT_PROBE_CACHE_DIR where those results live (default
 #                                 $FM_HOME/state/commitment-probe-cache)
+#
+# THE TWO PROBE BOUNDS, both stated wherever either is, because prose claiming
+# what the code does not do is the failure this whole file is about. The register's
+# OWN typed probes are bounded at 10s: they read this repository, and none of them
+# is a test invocation. A decision file's `run:` is bounded at 60s, and that number
+# is derived rather than picked. The 2026-08-10 ruling makes cited-control the
+# DEFAULT tier and its `run` is a test invocation, so the bound has to let the
+# pinned default finish or it refuses every such closure forever, which is a park
+# rather than a verdict. Measured on the machine this was written on:
+# tests/fm-commitment-register.test.sh runs in 7.8s (three runs: 7.82, 7.82, 7.81),
+# and a pinned cited-control probe invokes that suite TWICE - once per grep in the
+# `run` - so one probe costs about 15.6s. 60s is therefore roughly 4x observed with
+# headroom for machine load, and that ratio is what the next person changing this
+# number is trading. commitments/schema.json carries the same two numbers and the
+# same derivation under probe_bounds, and a test pins them equal.
+#
+# A PROBE THAT TIMES OUT IS REPORTED AS A TIMEOUT, distinct from every other
+# could-not-observe cause. Could-not-observe is safe because it can never wrongly
+# pass, but it also cannot close a key, so a chronically timing-out probe would
+# otherwise block a closure forever while reading as an ordinary open item. Its
+# evidence therefore leads with TIMEOUT and names the bound, so someone fixes the
+# probe rather than wondering why a key will not close.
 #
 # THE DECISION-PROBE CACHE, and the one rule it may not break. --closes runs on
 # the open-decision fold's hot path, which recomputes from the whole status stream
@@ -191,10 +235,14 @@
 # fold, per task. The cache bounds that. It may not buy the cost back with the
 # correctness this register exists to establish, so:
 #   - a served result CARRIES ITS OBSERVATION TIME in its own evidence, so an old
-#     answer can never read as a fresh one;
-#   - it is keyed on a fingerprint of the probe block, the task worktree path, and
-#     the task's status stream, so any recorded progress on the task invalidates
-#     it rather than being answered from before;
+#     answer can never read as a fresh one, and bin/fm-classify-lib.sh surfaces
+#     that evidence on the ACCEPT path too rather than discarding it;
+#   - it is keyed on what the probe's answer actually DEPENDS on: the decision
+#     file's bytes, the task worktree, and that worktree's head. Deliberately NOT
+#     on the task status file, because the open-decision fold is DRIVEN by status
+#     appends - keying on those would invalidate the entry precisely on the append
+#     where the cache was meant to help, while a worktree whose head moved past the
+#     recorded verdict would still be answered from before;
 #   - past the freshness bound it is not served at all: the probe re-runs, and if
 #     it cannot re-run the answer is could-not-observe, never the stale verdict.
 # The cache is an accelerator for an answer, never a substitute for one.
@@ -237,10 +285,17 @@ TARGET=
 CLOSES_TASK=
 CLOSES_KEY=
 
+# No probe runs at all in this mode - see SESSION START EXECUTES NO PROBE above.
+# Anything other than a literal 1 leaves probing on, so a stray or empty value
+# cannot silently disarm the register's only way of answering anything.
+NO_EXECUTE=0
+[ "${FM_COMMITMENT_NO_EXECUTE:-0}" != 1 ] || NO_EXECUTE=1
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) [ "$MODE" = human ] || die "--json, --open and --closes are different reports"; MODE=json ;;
     --open) [ "$MODE" = human ] || die "--json, --open and --closes are different reports"; MODE=open ;;
+    --no-execute) NO_EXECUTE=1 ;;
     --closes)
       [ "$MODE" = human ] || die "--json, --open and --closes are different reports"
       MODE=closes
@@ -285,8 +340,11 @@ esac
 # stall session start. With no bounding tool the probe does not run: reporting it
 # unobservable is honest, and it is also the answer that never reads as enforced.
 PROBE_TIMEOUT=${FM_COMMITMENT_PROBE_TIMEOUT:-10}
-# A decision file's `run:` gets its own, larger bound - see Environment above.
-DECISION_PROBE_TIMEOUT=${FM_COMMITMENT_DECISION_PROBE_TIMEOUT:-60}
+# A decision file's `run:` gets its own, larger bound. Both numbers and the
+# derivation behind the second one are stated under THE TWO PROBE BOUNDS above and
+# in commitments/schema.json's probe_bounds, which a test pins equal to these.
+DECISION_PROBE_TIMEOUT_DEFAULT=60
+DECISION_PROBE_TIMEOUT=${FM_COMMITMENT_DECISION_PROBE_TIMEOUT:-$DECISION_PROBE_TIMEOUT_DEFAULT}
 PROBE_CACHE_TTL=${FM_COMMITMENT_PROBE_CACHE_TTL:-120}
 PROBE_CACHE_DIR=${FM_COMMITMENT_PROBE_CACHE_DIR:-$STATE/commitment-probe-cache}
 bounding_tool() {
@@ -321,6 +379,21 @@ probe_answer() {  # <result> <reason> <evidence>
   PROBE_RESULT=$1
   PROBE_REASON=$2
   PROBE_EVIDENCE=$(sanitize "$3")
+}
+
+# A killed probe. Its own reason, and evidence that leads with the word, because
+# could-not-observe cannot close a key: a probe that always times out would
+# otherwise block a closure forever while reading as an ordinary open item.
+probe_timed_out() {  # <what> <seconds>
+  probe_answer NO_VERIFIER_RAN no_verdict_reached \
+    "TIMEOUT: $1 was stopped at its ${2}s bound rather than answering, so this is could-not-observe and cannot pass - raise the bound or make the probe finish inside it, because nothing closes until it does"
+}
+
+# The answer for every probe in no-execute mode. Could-not-observe, never a pass
+# and never an acceptance: not executing must not mean accepting.
+probe_not_executed() {  # <what>
+  probe_answer NO_VERIFIER_RAN verifier_unavailable \
+    "NOT RUN: session start executes no probe, so $1 was not executed and this reports the RECORDED state only, never an observed one"
 }
 
 # Does every harness firstmate can launch compose a session whose permission
@@ -401,8 +474,7 @@ probe_command_answers() {  # <probe-json>
   out=$(run_timed "$PROBE_TIMEOUT" "$cmd" "${PROBE_ARGV[@]+"${PROBE_ARGV[@]}"}" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    probe_answer NO_VERIFIER_RAN verification_unreachable \
-      "the declared owner $rel did not answer within ${PROBE_TIMEOUT}s"
+    probe_timed_out "the declared owner $rel" "$PROBE_TIMEOUT"
     return 0
   fi
   if [ "$rc" -ne 0 ]; then
@@ -487,8 +559,7 @@ probe_test_passes() {  # <probe-json>
   fi
   rc=$?
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    probe_answer NO_VERIFIER_RAN verification_unreachable \
-      "the named test $rel did not finish within ${PROBE_TIMEOUT}s"
+    probe_timed_out "the named test $rel" "$PROBE_TIMEOUT"
     return 0
   fi
   if [ "$rc" -ne 0 ]; then
@@ -501,14 +572,31 @@ probe_test_passes() {  # <probe-json>
 
 # Does this guard have a runtime caller? A function reachable only from its own
 # tests enforces nothing in production, however correct the function is.
+#
+# A TEXTUAL MENTION IS NOT A CALLER. This entry class is precisely "a guard
+# believed to close an inversion that has no runtime caller at all", so a plain
+# word match would let `# task_base_verify_branch should be wired in here` retire
+# the entry while the guard still guards nothing - the register reproducing its
+# own defect. Comment lines are therefore dropped before the match, and what is
+# left must look like a CALL: the symbol at a command position, not merely
+# somewhere on the line.
 probe_symbol_called() {  # <probe-json>
-  local probe=$1 symbol defined_in callers
+  local probe=$1 symbol defined_in callers call_re
   symbol=$(printf '%s' "$probe" | jq -r '.symbol // ""')
   defined_in=$(printf '%s' "$probe" | jq -r '.defined_in // ""')
   if [ -z "$symbol" ] || [ -z "$defined_in" ]; then
     probe_answer NO_VERIFIER_RAN usage_error "probe declares no symbol or no defining file"
     return 0
   fi
+  # The symbol goes into a regular expression below, so a name carrying regex
+  # syntax is refused rather than silently matching more than it names.
+  case "$symbol" in
+    *[!A-Za-z0-9_:.-]*)
+      probe_answer NO_VERIFIER_RAN usage_error \
+        "\"$symbol\" is not a plain shell function name, so a call to it cannot be told from a pattern matching one"
+      return 0
+      ;;
+  esac
   if [ ! -r "$FM_ROOT/$defined_in" ]; then
     probe_answer NO_VERIFIER_RAN verification_unreachable \
       "$defined_in is not readable, so a definition of $symbol could not be told from a call to it"
@@ -519,14 +607,23 @@ probe_symbol_called() {  # <probe-json>
       "$FM_ROOT/bin is not readable, so callers of $symbol could not be enumerated"
     return 0
   fi
+  # Command position: start of line, or after a separator that begins a new
+  # command. A definition (`name()`) does not match, because the character after
+  # the name has to be whitespace or a terminator rather than "(".
+  call_re="(^|[;&|(){}]|&&|\\|\\||\\\$\\()[[:space:]]*(if[[:space:]]+|while[[:space:]]+|until[[:space:]]+|then[[:space:]]+|else[[:space:]]+|elif[[:space:]]+|do[[:space:]]+|![[:space:]]+)*${symbol}([[:space:]]|[;&|)]|\$)"
   callers=$(
     grep -rlw -- "$symbol" "$FM_ROOT/bin" 2>/dev/null |
       grep -vF -- "$FM_ROOT/$defined_in" |
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        grep -v '^[[:space:]]*#' -- "$f" 2>/dev/null |
+          grep -qE -- "$call_re" && printf '%s\n' "$f"
+      done |
       sed "s#^$FM_ROOT/##" | sort | tr '\n' ' '
   )
   if [ -z "$callers" ]; then
     probe_answer FAIL verifier_reported_failure \
-      "$symbol is defined in $defined_in and called from nowhere under bin/, so it guards nothing at runtime"
+      "$symbol is defined in $defined_in and called from nowhere under bin/, so it guards nothing at runtime; a mention in a comment or a usage string is not a caller"
     return 0
   fi
   probe_answer PASS verified "$symbol is called from ${callers% }"
@@ -568,8 +665,7 @@ probe_work_owned() {  # <probe-json>
   show=$(cd "$FM_HOME" && run_timed "$PROBE_TIMEOUT" tasks-axi show "$id" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    probe_answer NO_VERIFIER_RAN verification_unreachable \
-      "the backlog did not answer for $id within ${PROBE_TIMEOUT}s"
+    probe_timed_out "the backlog read for $id" "$PROBE_TIMEOUT"
     return 0
   fi
   if [ "$rc" -eq 0 ] && [ -n "$show" ]; then
@@ -593,6 +689,13 @@ probe_work_owned() {  # <probe-json>
 run_probe() {  # <probe-json>
   local kind
   kind=$(printf '%s' "$1" | jq -r '.kind // ""')
+  # One gate for every kind, before any dispatch. A per-kind opt-out would make
+  # "session start executes no probe" a property of each probe's author rather
+  # than of this file, and the next kind added would have to remember it.
+  if [ "$NO_EXECUTE" -eq 1 ]; then
+    probe_not_executed "the ${kind:-unknown} probe"
+    return 0
+  fi
   case "$kind" in
     launch_permission_enforced) probe_launch_permission_enforced "$1" ;;
     command_answers) probe_command_answers "$1" ;;
@@ -708,18 +811,32 @@ task_worktree() {  # <task> -> path, or empty
 
 TAB=$'\t'
 
-# A key's fingerprint. Any change to the probe block, to which worktree it runs
-# from, or to the task's own recorded progress makes a stored result inapplicable
-# rather than merely old, so all three are in the key.
-probe_cache_fingerprint() {  # <task> <worktree>
-  local status="$STATE/$1.status" progress=no-status
+# A key's fingerprint: what the probe's answer actually DEPENDS on. That is the
+# decision file's own bytes (which subsume tier, run and control, and change
+# whenever the criterion is rewritten), the worktree the `run:` executes from, and
+# that worktree's head - a new commit is the ordinary way a criterion becomes met,
+# so a stored verdict from before it is inapplicable rather than merely old.
+#
+# The task's status stream is deliberately NOT in the key. The open-decision fold
+# is DRIVEN by status appends, so keying on them would miss on the one append
+# where the cache was supposed to help and hit only on idle tasks - and it would
+# say nothing about the worktree, where the answer actually lives.
+probe_cache_fingerprint() {  # <task> <key> <worktree>
+  local file bytes=no-decision-file head=no-head
+  file=$(decision_file "$1" "$2")
   # The redirection is guarded rather than silenced: an absent file would put a
   # shell error on stderr before any 2>/dev/null on the command could apply, and
   # this runs inside a fold that must answer rather than emit.
-  [ -r "$status" ] && progress=$(cksum < "$status" 2>/dev/null || printf 'unreadable-status')
+  [ -r "$file" ] && bytes=$(cksum < "$file" 2>/dev/null || printf 'unreadable-decision')
+  if command -v git >/dev/null 2>&1; then
+    head=$(git -C "$3" rev-parse HEAD 2>/dev/null) || head=
+    [ -n "$head" ] || head=no-head
+  else
+    head=no-git
+  fi
   # The record below is tab-separated and the fingerprint is not its last field,
-  # so a tab read out of a decision file's `run:` is folded rather than carried.
-  local fp="$DP_TIER|$DP_RUN|$DP_CONTROL|$2|$progress"
+  # so a tab in any component is folded rather than carried.
+  local fp="$bytes|$head|$3"
   printf '%s' "${fp//$'\t'/ }"
 }
 
@@ -800,13 +917,21 @@ run_decision_probe() {  # <task> <key>
       "no timeout tool is available to bound the probe for $key, so it was not run"
     return 0
   fi
+  # No execution, and no stored verdict standing in for one either. Serving a
+  # cached PASS here would let session start CLOSE a key on an observation it did
+  # not make, which is the accepting half of the same failure, so the honest
+  # answer is could-not-observe and the closure gate keeps the decision open.
+  if [ "$NO_EXECUTE" -eq 1 ]; then
+    probe_not_executed "the probe for $key"
+    return 0
+  fi
   # Everything above this line is a guard that costs nothing to re-evaluate, so
   # only the execution below is worth caching - and only it can be served from a
   # stored observation.
   stamps=$(date -u "+%s${TAB}%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) || stamps=
   now=${stamps%%"$TAB"*}
   iso=${stamps#*"$TAB"}
-  fingerprint=$(probe_cache_fingerprint "$task" "$wt")
+  fingerprint=$(probe_cache_fingerprint "$task" "$key" "$wt")
   case "$now" in
     ''|*[!0-9]*) now= ;;
     *) probe_cache_read "$task" "$key" "$fingerprint" "$now" && return 0 ;;
@@ -814,8 +939,7 @@ run_decision_probe() {  # <task> <key>
   out=$(cd "$wt" && run_timed "$DECISION_PROBE_TIMEOUT" bash -c "$DP_RUN" 2>&1)
   rc=$?
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    probe_answer NO_VERIFIER_RAN verification_unreachable \
-      "the probe for $key did not finish within ${DECISION_PROBE_TIMEOUT}s"
+    probe_timed_out "the probe for $key" "$DECISION_PROBE_TIMEOUT"
   elif [ "$rc" -eq 125 ] || [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
     probe_answer NO_VERIFIER_RAN verification_unreachable \
       "the probe for $key could not execute (exit $rc): $(printf '%s' "$out" | tail -1)"
@@ -905,6 +1029,19 @@ EOF
   if [ "$tier" != attested ]; then
     printf '%s' "$doc" | jq -e '(.probe | type) == "object" and ((.probe.kind // "") != "")' >/dev/null 2>&1 \
       || { printf 'entry declares no probe; an entry without one cannot be admitted'; return 0; }
+  fi
+  # unobserved_conditions is the only field that can WITHHOLD satisfaction, so a
+  # malformed one is the one malformation that would let a passing probe retire a
+  # half-observed commitment. A bare string, an array of objects, or a null member
+  # all make the read below produce nothing, and nothing reads as "no half was
+  # declared" - the exact outcome the field exists to prevent. So the type is
+  # validated here and a bad one makes the entry inadmissible.
+  if printf '%s' "$doc" | jq -e 'has("unobserved_conditions")' >/dev/null 2>&1; then
+    printf '%s' "$doc" | jq -e '
+      (.unobserved_conditions | type) == "array"
+      and (.unobserved_conditions | length) > 0
+      and all(.unobserved_conditions[]; type == "string" and (. | length) > 0)' >/dev/null 2>&1 \
+      || { printf 'unobserved_conditions must be a non-empty array of non-empty strings; a malformed one would silently skip the guard that stops a passing probe retiring a half-observed commitment'; return 0; }
   fi
   return 0
 }
@@ -1033,7 +1170,11 @@ evaluate_json_entry() {  # <id> <path>
   E_CONTROL=$(printf '%s' "$doc" | jq -r '.control // ""')
   E_DEADLINE=$(printf '%s' "$doc" | jq -r '.deadline // ""')
   E_NOTE=$(printf '%s' "$doc" | jq -r '.note // ""')
-  E_UNOBSERVED_CONDITIONS=$(printf '%s' "$doc" | jq -r '(.unobserved_conditions // []) | join("; ")')
+  # A malformed field is already inadmissible below; this read only has to avoid
+  # putting jq's complaint about it on the caller's stderr in the meantime.
+  E_UNOBSERVED_CONDITIONS=$(printf '%s' "$doc" \
+    | jq -r '(.unobserved_conditions // []) | join("; ")' 2>/dev/null) \
+    || E_UNOBSERVED_CONDITIONS=''
   if [ -n "$reason" ]; then
     # Inadmissible is could-not-observe, and loudly so: an entry this file cannot
     # interpret is an entry whose commitment it cannot judge.

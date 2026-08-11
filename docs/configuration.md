@@ -190,8 +190,18 @@ An absent overlay is silent, because most homes have no private commitments.
 Every state it prints is computed from that entry's probe on the spot and is never stored, so an entry retires by itself when its commitment becomes real, and no hand-written status word can satisfy one.
 
 The one thing it writes is `state/commitment-probe-cache/`, and only for the probes pinned into decision files, which are consulted on the open-decision fold's hot path rather than once per session.
-That cache is an accelerator for an answer and never a substitute for one: a stored result carries its observation time into whatever reads it, it is invalidated by any recorded progress on the task it belongs to, and past `FM_COMMITMENT_PROBE_CACHE_TTL` seconds (default 120, `0` to disable) it is not served at all.
-Session start never reaches it, because the open-set relay evaluates no decision probes.
+That cache is an accelerator for an answer and never a substitute for one: a stored result carries its observation time into whatever reads it, and past `FM_COMMITMENT_PROBE_CACHE_TTL` seconds (default 120, `0` to disable) it is not served at all.
+It is keyed on what the probe's answer depends on - the decision file's bytes, the task worktree, and that worktree's head - and deliberately not on the task's status stream, because the open-decision fold is driven by status appends, so keying on those would invalidate the entry precisely on the append where the cache was meant to help while saying nothing about the worktree the answer actually lives in.
+`bin/fm-teardown.sh` reaps a task's stored results with the task, and the directory is listed in the `AGENTS.md` state inventory.
+
+Session start executes no probe, and that is a safety requirement rather than a performance one.
+`bin/fm-session-start.sh` exports `FM_COMMITMENT_NO_EXECUTE=1` over its whole subtree, which covers the bootstrap relay of the open set and the `fm-admission.sh` to `fm-fleet-snapshot.sh` to open-decision-fold chain that reaches the closure gate, so no decision file's `run:` and no entry's owner command or named test executes on the critical path of a session.
+Not executing is not accepting: every probe that did not run answers could-not-observe, so an unmet commitment stays surfaced and a resolution whose probe was not run stays visibly unverified and still open.
+A standalone `bin/fm-bootstrap.sh` run, a wake drain, or a human running the register by hand probes normally, which is how an entry still retires on its probe with no hand edit; `--no-execute` requests the same mode explicitly.
+
+The register's own typed probes are bounded by `FM_COMMITMENT_PROBE_TIMEOUT` (default 10 seconds) and a decision file's `run:` by `FM_COMMITMENT_DECISION_PROBE_TIMEOUT` (default 60 seconds).
+The larger second bound is derived rather than picked, and `commitments/schema.json`'s `probe_bounds` carries the same two numbers and the same derivation: the 2026-08-10 ruling makes `cited-control` the default tier and its `run` is a test invocation, `tests/fm-commitment-register.test.sh` runs in 7.8 seconds here and a pinned `cited-control` probe invokes it twice, so one probe costs about 15.6 seconds and 60 is roughly 4x observed with headroom for machine load.
+A probe stopped at its bound is reported as a `TIMEOUT`, distinct from every other could-not-observe cause, because could-not-observe cannot close a key and a chronically timing-out probe would otherwise block a closure forever while reading as an ordinary open item.
 
 ## Startup memory budget (config/startup-memory-budget)
 

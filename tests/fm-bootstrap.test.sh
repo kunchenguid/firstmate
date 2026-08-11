@@ -1548,9 +1548,6 @@ JSON
   # The negative control first: with no register at all, this exact home is
   # silent. Without it, a bootstrap that printed for some unrelated reason would
   # make the case below vacuous.
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_COMMITMENT_DIR="$case_dir/empty-register" \
-    "$ROOT/bin/fm-bootstrap.sh")
   mkdir -p "$case_dir/empty-register"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_COMMITMENT_DIR="$case_dir/empty-register" \

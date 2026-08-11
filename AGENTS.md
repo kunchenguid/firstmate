@@ -125,6 +125,7 @@ state/               volatile runtime signals; gitignored
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   research-index/    derived, content-addressed prefilter over data/**/report.md; never approval or implementation authority, always safe to delete, rebuilt by bin/fm-research-scan.sh
   ruling-index/      derived, fingerprinted prefilter matching open captain decision holds against the ruling documents that name them; never closure authority, always safe to delete, rebuilt by bin/fm-ruling-reconcile.sh
+  commitment-probe-cache/  derived, freshness-bounded results of the probes pinned into data/<id>/decision-<key>.md, one file per task and key; written only by bin/fm-commitment-register.sh, reaped per task by bin/fm-teardown.sh, always safe to delete. Never a verdict of its own: a served result carries its observation time into whatever reads it, it is keyed on the decision file's bytes and the task worktree's head, and past FM_COMMITMENT_PROBE_CACHE_TTL it is not served at all
   x-inbox/           generated Relay pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated Relay durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)

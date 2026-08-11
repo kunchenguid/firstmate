@@ -346,6 +346,26 @@ JSON
 }
 JSON
 
+  # The VACUITY control for shape 3, and the reason the shape needs its own probe
+  # kind: the same command, run the way a probe that does NOT inspect the row
+  # would run it. bin/fm-decision-surface.sh owners --json exits 0 and prints a
+  # full ledger whether or not the stale row is current, so command_answers over
+  # it reports SATISFIED - the reassuring answer from a check that cannot see the
+  # thing it is about, which is failure shape 3 reproduced inside the register.
+  cat > "$dir/shape-row-unread.json" <<'JSON'
+{
+  "commitment_schema_version": 1,
+  "id": "shape-row-unread",
+  "recorded": "the same commitment as shape-stale-row, probed without reading the row",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "nothing, honestly: this probe only establishes that the composer answered",
+  "assurance": "executable",
+  "probe": {"kind": "command_answers", "command": "bin/fm-decision-surface.sh",
+            "args": ["owners", "--json"]}
+}
+JSON
+
   # 4. A dated exception that expired into prose: the deadline modifier, on an
   #    entry that is still unmet well after its date.
   cat > "$dir/shape-expired.json" <<'JSON'
@@ -386,6 +406,14 @@ JSON
   state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="shape-owned-row") | .state')
   [ "$state" = SATISFIED ] \
     || fail "the owned-row control must read SATISFIED, or command_answer_matches proves nothing (got $state)"
+
+  # Same commitment, same command, a probe that does not read the row: SATISFIED.
+  # That is what makes the UNMET above a property of INSPECTION rather than of the
+  # command, and it is the whole reason shape 3 needs command_answer_matches.
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="shape-row-unread") | .state')
+  [ "$state" = SATISFIED ] \
+    || fail "the vacuity control must read SATISFIED, or the stale-row case does not show that inspection is what decided it (got $state)"
+  pass "stale row asserts satisfied only when the probe inspects the row"
 
   state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="shape-expired") | .overdue')
   [ "$state" = true ] || fail "an entry past its deadline must be reported overdue, got $state"
@@ -468,8 +496,12 @@ make_probe_bin() {  # <name> <extra-adapter|""> -> prints bin dir
     ln -sf "$ROOT/bin/$f" "$dir/$f"
   done
   if [ -n "$2" ]; then
+    # The inserted body only has to exit 0 - the roster accepts a token once
+    # launch_template answers for it - and keeping it a fixed literal means an
+    # arm carrying a glob or a pipe cannot turn the body into a pipeline whose
+    # non-zero status would refuse the very arm the case is about.
     awk -v arm="$2" '{ print }
-      /^    kimi\) printf/ { print "    " arm ") printf %s " arm " ;;" }' \
+      /^    kimi\) printf/ { print "    " arm ") printf %s x ;;" }' \
       "$ROOT/bin/fm-launch-lib.sh" > "$dir/fm-launch-lib.sh"
   else
     cp "$ROOT/bin/fm-launch-lib.sh" "$dir/fm-launch-lib.sh"
@@ -479,8 +511,8 @@ make_probe_bin() {  # <name> <extra-adapter|""> -> prints bin dir
   cat >> "$dir/fm-launch-lib.sh" <<'SH'
 launch_permission_recorded() {
   case "$1" in
-    frobnicator) return 1 ;;
-    *) printf 'enforced' ;;
+    claude|codex|opencode|grok|pi|pi-signed|kimi) printf 'enforced' ;;
+    *) return 1 ;;
   esac
 }
 SH
@@ -527,7 +559,22 @@ JSON
   FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$extra_bin/fm-commitment-register.sh" --open >/dev/null || rc=$?
   expect_code 4 "$rc" "an unrecorded posture must take the fail-closed exit"
-  pass "a harness with no recorded posture is could-not-observe, never left out of the answer"
+
+  # The same property for an arm the derivation cannot read as a plain literal.
+  # An arm carrying an upper-case name or a glob alternation is exactly what a
+  # rename or an alias produces, and dropping it would leave nothing unrestricted
+  # and nothing unknown once the recorded adapters flip to enforced - a PASS over
+  # a harness that is still launchable.
+  local odd_bin odd_state
+  odd_bin=$(make_probe_bin unknownharness-odd 'Frobnicator|frob-*')
+  out=$(FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$odd_bin/fm-commitment-register.sh" --json)
+  odd_state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="launch-posture") | .state')
+  [ "$odd_state" = UNOBSERVED ] \
+    || fail "an arm the roster derivation cannot parse was dropped instead of reading unknown, got $odd_state"
+  assert_contains "$out" "Frobnicator" \
+    "an unparseable arm must be named in the answer, never silently excluded from it"
+  pass "unknown harness member yields could-not-observe, never a silent exclusion"
 }
 
 # --- the pinned decision-file probe block ------------------------------------
@@ -536,6 +583,7 @@ write_decision() {  # <home> <task> <key> <block-body>
   mkdir -p "$1/data/$2"
   {
     printf '# decision\n\n'
+    # shellcheck disable=SC2016  # the backticks are the pinned fence, not a substitution
     printf '```probe\n%s\n```\n' "$4"
   } > "$1/data/$2/decision-$3.md"
 }
@@ -739,10 +787,10 @@ no_backfill_for_older_decisions() {
 # result never reads as a fresh one. Both halves are driven: a served result says
 # when it was observed, and the truth it stands in for is shown to differ.
 cached_probe_result_never_reads_as_current() {
-  local dir home out rc
+  local dir home out rc wt
   dir=$(make_register cache)
   home=$(make_home cache)
-  give_worktree "$home" cachetask >/dev/null
+  wt=$(give_worktree "$home" cachetask)
   printf 'needs-decision [key=crit]: the ruled finding\n' > "$home/state/cachetask.status"
   write_decision "$home" cachetask crit 'tier: executable
 run: test -f criterion-established'
@@ -755,7 +803,7 @@ run: test -f criterion-established'
   # Satisfy the criterion, recording nothing on the task. The stored result is
   # still inside its bound, so it is served - and it says so rather than passing
   # itself off as an answer about now.
-  : > "$home/wt-cachetask/criterion-established"
+  : > "$wt/criterion-established"
   out=$(run_reg "$dir" "$home" --closes cachetask crit); rc=$?
   expect_code 3 "$rc" "a result inside its freshness bound is served"
   assert_contains "$out" "freshness bound" \
@@ -767,20 +815,109 @@ run: test -f criterion-established'
   expect_code 0 "$rc" \
     "with the cache disabled the same call must reach the current answer, or the case above proved nothing"
 
-  # Recorded progress on the task invalidates the stored result rather than being
-  # answered from before it.
+  # A status append must NOT invalidate. The open-decision fold is DRIVEN by
+  # status appends, so keying on them would miss on the one append where the
+  # cache is supposed to help and hit only on idle tasks - and it would say
+  # nothing about the worktree, where the answer actually lives.
   printf 'resolved [key=crit]: fix applied\n' >> "$home/state/cachetask.status"
   out=$(run_reg "$dir" "$home" --closes cachetask crit); rc=$?
-  expect_code 0 "$rc" "a status event on the task must invalidate the stored result"
-  pass "a cached probe result carries its observation time and is invalidated by progress"
+  expect_code 3 "$rc" \
+    "a status append invalidated the stored result; the fold is driven by those appends, so that key helps only idle tasks"
+
+  # The worktree head IS in the key: a new commit is the ordinary way a criterion
+  # becomes met, so a verdict recorded before it is inapplicable rather than old.
+  git -C "$wt" init -q
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'the commit that fixes the criterion'
+  out=$(run_reg "$dir" "$home" --closes cachetask crit); rc=$?
+  expect_code 0 "$rc" "a moved worktree head must invalidate the stored result, not be answered from before it"
+
+  # So are the decision file's own bytes: a rewritten criterion is a different
+  # question, and the previous question's answer is not an answer to it.
+  : > "$wt/criterion-established.v2"
+  out=$(run_reg "$dir" "$home" --closes cachetask crit); rc=$?
+  expect_code 0 "$rc" "control: the criterion is met right now, so the rewrite below changes what is asked"
+  write_decision "$home" cachetask crit 'tier: executable
+run: test -f criterion-never-established'
+  out=$(run_reg "$dir" "$home" --closes cachetask crit); rc=$?
+  expect_code 3 "$rc" "a rewritten decision file must invalidate the stored result rather than answering the old question"
+  pass "a cached probe result carries its observation time and is invalidated by what it depends on"
+}
+
+# The provenance has to reach the path that CONSUMES the result. render_closes
+# prints when an acceptance rests on a stored observation rather than on one made
+# just now, and if bin/fm-classify-lib.sh captured that and dropped it on rc 0 the
+# guarantee would exist only for a human running --closes by hand: the fold would
+# close the decision with no sign the verdict was not observed now.
+cached_result_carries_observation_time_on_the_accept_path() {
+  local home err out wt
+  home=$(make_home acceptnote)
+  wt=$(give_worktree "$home" accepttask)
+  : > "$wt/criterion-established"
+  write_decision "$home" accepttask crit 'tier: executable
+run: test -f criterion-established'
+  printf 'needs-decision [key=crit]: the ruled finding\n' > "$home/state/accepttask.status"
+
+  # Observe once, so the next fold is served from the store rather than running.
+  run_reg "$TMP_ROOT/acceptnote/unused" "$home" --closes accepttask crit >/dev/null 2>&1
+
+  err="$TMP_ROOT/acceptnote-stderr"
+  printf 'resolved [key=crit]: fix applied\n' >> "$home/state/accepttask.status"
+  out=$(
+    FM_HOME="$home" bash -c '
+      . "$1/bin/fm-classify-lib.sh"
+      status_open_decisions "$2"
+    ' _ "$ROOT" "$home/state/accepttask.status" 2>"$err"
+  )
+  [ -z "$out" ] || fail "a passing criterion must still close the decision, got: $out"
+  assert_contains "$(cat "$err")" "freshness bound" \
+    "the accept path discarded the observation time; the fold closed the decision with no sign the verdict was not observed now"
+  assert_contains "$(cat "$err")" "[key=crit]" \
+    "the disclosure must say which decision it is about"
+
+  # The control: a probe observed JUST NOW discloses nothing, because there is
+  # nothing about it to disclose - otherwise the case above would pass on noise.
+  rm -rf "$home/state/commitment-probe-cache"
+  : > "$err"
+  out=$(
+    FM_HOME="$home" bash -c '
+      . "$1/bin/fm-classify-lib.sh"
+      status_open_decisions "$2"
+    ' _ "$ROOT" "$home/state/accepttask.status" 2>"$err"
+  )
+  [ -z "$out" ] || fail "control: a passing criterion must still close the decision, got: $out"
+  [ ! -s "$err" ] || fail "a probe observed just now must disclose nothing: $(cat "$err")"
+
+  # And the attested acceptance is disclosed for the same reason: the ruling
+  # requires attested be marked and visible, never silently read as verified, and
+  # on this path it would otherwise close indistinguishably from a passed probe.
+  give_worktree "$home" attesttask >/dev/null
+  write_decision "$home" attesttask crit 'tier: attested
+reason: the criterion is that a comment reads accurately'
+  printf 'needs-decision [key=crit]: the ruled finding\n' > "$home/state/attesttask.status"
+  printf 'resolved [key=crit]: fix applied\n' >> "$home/state/attesttask.status"
+  : > "$err"
+  out=$(
+    FM_HOME="$home" bash -c '
+      . "$1/bin/fm-classify-lib.sh"
+      status_open_decisions "$2"
+    ' _ "$ROOT" "$home/state/attesttask.status" 2>"$err"
+  )
+  [ -z "$out" ] || fail "an attested criterion must still close the decision, got: $out"
+  assert_contains "$(cat "$err")" "ATTESTED-NOT-PROBED" \
+    "an attested closure must not be indistinguishable from a passed probe on the fold's own path"
+  pass "cached result carries observation time on the accept path"
 }
 
 # --- the fold keeps a refused resolution open --------------------------------
 
 fold_keeps_refused_resolution_open() {
-  local home out
+  local home out wt
   home=$(make_home fold)
-  give_worktree "$home" task1 >/dev/null
+  wt=$(give_worktree "$home" task1)
+  git -C "$wt" init -q
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'before the fix'
   write_decision "$home" task1 crit 'tier: executable
 run: test -f criterion-established'
 
@@ -799,10 +936,14 @@ run: test -f criterion-established'
     "the still-open decision must carry why the resolution was not accepted"
 
   # The control: satisfy the criterion, and the SAME status stream closes. The
-  # worker recording that it re-resolved is what invalidates the earlier
-  # observation; without a new event the fold may serve the previous answer, and
-  # when it does it says so rather than claiming to have looked just now.
-  : > "$home/wt-task1/criterion-established"
+  # commit that establishes the criterion is what invalidates the earlier
+  # observation - the worktree head is in the cache key precisely because that is
+  # how a criterion becomes met. Without a change to something the answer depends
+  # on the fold may serve the previous answer, and when it does it says so rather
+  # than claiming to have looked just now.
+  : > "$wt/criterion-established"
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'the commit that establishes the criterion'
   printf 'resolved [key=crit]: criterion established\n' >> "$home/state/task1.status"
   out=$(
     FM_HOME="$home" bash -c '
@@ -908,6 +1049,282 @@ run: true'
   pass "a registered probe with no interpreter refuses the closure rather than being waved through"
 }
 
+# --- session start executes no probe -----------------------------------------
+#
+# A safety requirement, not a performance one. The chain that makes it necessary
+# is real: bin/fm-session-start.sh runs bin/fm-admission.sh, which runs
+# bin/fm-fleet-snapshot.sh, which folds every task's open decisions, which reaches
+# the closure gate - which would otherwise run arbitrary `run:` commands out of
+# decision files inside task worktrees, on the critical path of every session.
+#
+# This case drives the register end of that chain: with the mode on, nothing runs,
+# and - the half that matters more - nothing is ACCEPTED either. Each half is
+# paired with the control that shows the probe really would have run and really
+# would have closed the key. tests/fm-session-start.test.sh drives the whole
+# composed chain against the real script.
+session_start_executes_no_probe() {
+  local dir home out rc ran wt marker
+  dir=$(make_register noexec)
+  home=$(make_home noexec)
+  ran="$TMP_ROOT/noexec/owner-ran"
+  mkdir -p "$TMP_ROOT/noexec"
+  cat > "$TMP_ROOT/noexec/owner.sh" <<SH
+#!/usr/bin/env bash
+: > "$ran"
+printf 'enforced\n'
+SH
+  chmod +x "$TMP_ROOT/noexec/owner.sh"
+  write_owner_entry "$dir" entry-probe "$TMP_ROOT/noexec/owner.sh"
+
+  # The control first: without the mode, this probe runs and the entry retires.
+  out=$(run_reg "$dir" "$home" --open); rc=$?
+  expect_code 0 "$rc" "control: this probe passes, so the entry must retire when it is allowed to run"
+  [ -e "$ran" ] || fail "control: the probe did not run at all, so the case below would prove nothing"
+  [ -z "$out" ] || fail "control: a satisfied entry must retire silently, got: $out"
+
+  rm -f "$ran"
+  out=$(FM_COMMITMENT_NO_EXECUTE=1 run_reg "$dir" "$home" --open); rc=$?
+  [ ! -e "$ran" ] || fail "session start executed an entry probe"
+  expect_code 4 "$rc" "an unexecuted probe must take the fail-closed exit, never the all-clear the same probe earns when it runs"
+  assert_contains "$out" "COMMITMENT: entry-probe COULD-NOT-OBSERVE" \
+    "an entry whose probe was not run must still be surfaced, as could-not-observe"
+  assert_contains "$out" "session start executes no probe" \
+    "the surfaced line must say why it was not observed"
+
+  # The decision half, through the fold that the fleet snapshot actually calls.
+  marker="$TMP_ROOT/noexec/decision-ran"
+  wt=$(give_worktree "$home" noexectask)
+  write_decision "$home" noexectask crit "tier: executable
+run: : > $marker"
+  printf 'needs-decision [key=crit]: the ruled finding\n' > "$home/state/noexectask.status"
+  printf 'resolved [key=crit]: fix applied\n' >> "$home/state/noexectask.status"
+
+  # Control: allowed to run, this `run:` executes and the key closes.
+  out=$(
+    FM_HOME="$home" bash -c '
+      . "$1/bin/fm-classify-lib.sh"
+      status_open_decisions "$2"
+    ' _ "$ROOT" "$home/state/noexectask.status" 2>/dev/null
+  )
+  [ -e "$marker" ] || fail "control: the decision probe never ran, so the case below would prove nothing"
+  [ -z "$out" ] || fail "control: a passing decision probe must close the key, got: $out"
+
+  rm -f "$marker"
+  rm -rf "$home/state/commitment-probe-cache"
+  out=$(
+    FM_HOME="$home" FM_COMMITMENT_NO_EXECUTE=1 bash -c '
+      . "$1/bin/fm-classify-lib.sh"
+      status_open_decisions "$2"
+    ' _ "$ROOT" "$home/state/noexectask.status" 2>/dev/null
+  )
+  [ ! -e "$marker" ] \
+    || fail "session start ran a decision file's run: inside a task worktree"
+  assert_contains "$out" "crit" \
+    "not executing must not mean accepting: the resolution must stay open, never be silently closed"
+  assert_contains "$out" "session start executes no probe" \
+    "the still-open decision must say the probe was not run"
+
+  # And no stored verdict stands in for one either: a cached PASS would close the
+  # key on an observation this session did not make, which is the accepting half
+  # of the same failure.
+  run_reg "$dir" "$home" --closes noexectask crit >/dev/null 2>&1
+  rm -f "$marker"
+  out=$(FM_COMMITMENT_NO_EXECUTE=1 run_reg "$dir" "$home" --closes noexectask crit); rc=$?
+  expect_code 4 "$rc" "a stored verdict must not close a key session start did not observe"
+  [ ! -e "$marker" ] || fail "the cache lookup ran the probe"
+
+  # bin/fm-session-start.sh is what puts the whole composed chain in this mode.
+  grep -q '^export FM_COMMITMENT_NO_EXECUTE=1$' "$ROOT/bin/fm-session-start.sh" \
+    || fail "bin/fm-session-start.sh does not export the mode, so nothing it composes is in it"
+  pass "session start executes no probe, and not executing is never accepting"
+}
+
+# --- the two probe bounds, and a timeout that says so ------------------------
+
+decision_probe_bound_matches_the_documented_value() {
+  local coded documented entry_coded entry_documented
+  coded=$(sed -n 's/^DECISION_PROBE_TIMEOUT_DEFAULT=\([0-9][0-9]*\)$/\1/p' "$REG" | head -1)
+  entry_coded=$(grep -m1 '^PROBE_TIMEOUT=' "$REG" | tr -dc '0-9')
+  documented=$(jq -r '.probe_bounds.decision_file_probe_seconds' "$SCHEMA_SRC")
+  entry_documented=$(jq -r '.probe_bounds.register_entry_probe_seconds' "$SCHEMA_SRC")
+
+  [ -n "$coded" ] || fail "the decision-probe bound could not be read out of $REG"
+  [ -n "$entry_coded" ] || fail "the entry-probe bound could not be read out of $REG"
+  [ "$coded" = "$documented" ] \
+    || fail "the code bounds a decision-file probe at ${coded}s and commitments/schema.json documents ${documented}s; prose claiming what the code does not do is the failure this register is about"
+  [ "$entry_coded" = "$entry_documented" ] \
+    || fail "the code bounds a register-entry probe at ${entry_coded}s and commitments/schema.json documents ${entry_documented}s"
+
+  # Both numbers are stated wherever either is, with the reason and the
+  # derivation, so the next person changing one can see what they are trading.
+  local header
+  header=$(sed -n '1,220p' "$REG")
+  assert_contains "$header" "THE TWO PROBE BOUNDS" \
+    "the script header must state both bounds, not just set them"
+  assert_contains "$header" "runs in 7.8s" \
+    "the header must record the measurement the larger bound was derived from"
+  assert_contains "$(jq -r '.probe_bounds.derivation' "$SCHEMA_SRC")" "7.8s" \
+    "commitments/schema.json must record the same derivation as the header"
+  pass "decision-file probe bound matches the documented value"
+}
+
+timed_out_probe_is_reported_as_a_timeout() {
+  local dir home out rc timeout_out unreachable_out
+  dir=$(make_register timeout)
+  home=$(make_home timeout)
+  command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || {
+    printf 'ok - a timed-out probe is reported as a timeout, distinct from other could-not-observe (skipped: no bounding tool)\n'
+    return 0
+  }
+  give_worktree "$home" slowtask >/dev/null
+  write_decision "$home" slowtask crit 'tier: executable
+run: sleep 30'
+  printf 'needs-decision [key=crit]: the ruled finding\n' > "$home/state/slowtask.status"
+
+  timeout_out=$(FM_COMMITMENT_DECISION_PROBE_TIMEOUT=1 FM_COMMITMENT_PROBE_CACHE_TTL=0 \
+    run_reg "$dir" "$home" --closes slowtask crit); rc=$?
+  expect_code 4 "$rc" "a probe stopped at its bound is could-not-observe, never a pass"
+  assert_contains "$timeout_out" "TIMEOUT" \
+    "a timed-out probe must say so plainly, or a key that never closes reads as an ordinary open item"
+  assert_contains "$timeout_out" "1s bound" \
+    "the timeout must name the bound it was stopped at, so someone can fix the probe"
+
+  # The control: a DIFFERENT could-not-observe cause must not read the same way,
+  # or "distinct" would be a claim rather than an observation.
+  write_decision "$home" orphantask crit 'tier: executable
+run: true'
+  unreachable_out=$(run_reg "$dir" "$home" --closes orphantask crit); rc=$?
+  expect_code 4 "$rc" "control: an unrunnable probe is also could-not-observe"
+  assert_not_contains "$unreachable_out" "TIMEOUT" \
+    "every could-not-observe cause reads as a timeout, so the timeout is not distinguishable"
+  pass "a timed-out probe is reported as a timeout, distinct from other could-not-observe"
+}
+
+# --- the declared-uncovered half is the one field that can withhold ----------
+#
+# unobserved_conditions is the only field that can WITHHOLD satisfaction, so a
+# malformed one is the one malformation that lets a passing probe retire a
+# half-observed commitment. Read with jq's join over a bare string or an array of
+# objects, it produces nothing, and nothing reads as "no half was declared".
+malformed_unobserved_conditions_is_inadmissible() {
+  local dir home out owner shape state err
+  dir=$(make_register malformedhalf)
+  home=$(make_home malformedhalf)
+  mkdir -p "$TMP_ROOT/malformedhalf"
+  owner="$TMP_ROOT/malformedhalf/owner.sh"
+  cat > "$owner" <<'SH'
+#!/usr/bin/env bash
+printf 'enforced\n'
+SH
+  chmod +x "$owner"
+
+  for shape in '"the second half"' '[{"half": "the second"}]' '[null]' '[]' '[""]'; do
+    cat > "$dir/half.json" <<JSON
+{
+  "commitment_schema_version": 1,
+  "id": "half",
+  "recorded": "two things must both be true",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "both halves hold",
+  "assurance": "executable",
+  "probe": {"kind": "command_answers", "command": "$owner"},
+  "unobserved_conditions": $shape
+}
+JSON
+    err="$TMP_ROOT/malformedhalf/stderr"
+    out=$(run_reg "$dir" "$home" --json 2>"$err")
+    state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="half") | .state')
+    [ "$state" = UNOBSERVED ] \
+      || fail "unobserved_conditions $shape let a passing probe reach $state on a partial answer"
+    assert_contains "$out" "unobserved_conditions must be a non-empty array" \
+      "the refusal must name the malformed field"
+    [ ! -s "$err" ] \
+      || fail "a malformed unobserved_conditions leaked jq's complaint to the caller: $(cat "$err")"
+  done
+
+  # The control: the same entry, the same passing probe, with a well-formed
+  # declaration - still UNOBSERVED, but for the reason the field exists, and a
+  # well-formed entry must not be refused as malformed.
+  cat > "$dir/half.json" <<JSON
+{
+  "commitment_schema_version": 1,
+  "id": "half",
+  "recorded": "two things must both be true",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "both halves hold",
+  "assurance": "executable",
+  "probe": {"kind": "command_answers", "command": "$owner"},
+  "unobserved_conditions": ["the second half, which has no landed artifact to probe"]
+}
+JSON
+  out=$(run_reg "$dir" "$home" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="half") | .state')
+  [ "$state" = UNOBSERVED ] || fail "control: a declared uncovered half must still withhold SATISFIED, got $state"
+  assert_not_contains "$out" "unobserved_conditions must be a non-empty array" \
+    "a well-formed declaration must not be refused as malformed"
+  pass "a malformed unobserved_conditions makes the entry inadmissible rather than skipping the guard"
+}
+
+# --- a textual mention is not a runtime caller -------------------------------
+#
+# This entry class IS "a guard with no runtime caller at all", so a probe that
+# counts any occurrence lets a comment retire the entry while the guard still
+# guards nothing - the register reproducing its own defect.
+symbol_called_does_not_count_a_mention() {
+  local dir home out state bin
+  dir=$(make_register mention)
+  home=$(make_home mention)
+  bin="$TMP_ROOT/mention/root/bin"
+  mkdir -p "$bin"
+  cat > "$bin/fm-guard-lib.sh" <<'SH'
+#!/usr/bin/env bash
+lonely_guard() { return 0; }
+SH
+  cat > "$bin/fm-mentions-only.sh" <<'SH'
+#!/usr/bin/env bash
+# lonely_guard should be wired in here one day.
+usage() { printf 'see lonely_guard for the rule this enforces\n'; }
+usage
+SH
+  cat > "$dir/guard.json" <<'JSON'
+{
+  "commitment_schema_version": 1,
+  "id": "guard",
+  "recorded": "the guard runs in production",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "some runtime caller invokes it",
+  "assurance": "executable",
+  "probe": {"kind": "symbol_called", "symbol": "lonely_guard",
+            "defined_in": "bin/fm-guard-lib.sh"}
+}
+JSON
+
+  out=$(FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$TMP_ROOT/mention/root" \
+    "$REG" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="guard") | .state')
+  [ "$state" = UNMET ] \
+    || fail "a comment and a usage string retired the entry; a mention is not a runtime caller (got $state)"
+
+  # The control: a real call in the same file, and the same probe passes. Without
+  # it, this probe could simply be one that never finds a caller.
+  cat > "$bin/fm-mentions-only.sh" <<'SH'
+#!/usr/bin/env bash
+# lonely_guard should be wired in here one day.
+if lonely_guard "$@"; then
+  printf 'guarded\n'
+fi
+SH
+  out=$(FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$TMP_ROOT/mention/root" \
+    "$REG" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="guard") | .state')
+  [ "$state" = SATISFIED ] \
+    || fail "control: a real call must satisfy the entry, or the case above proves nothing (got $state)"
+  pass "a mention in a comment or a usage string is not a runtime caller"
+}
+
 red_capable_then_retires
 three_values_are_distinct
 status_word_cannot_satisfy
@@ -922,6 +1339,12 @@ pinned_block_malformed_is_refused
 no_backfill_for_older_decisions
 closes_reaches_a_verdict_without_jq
 cached_probe_result_never_reads_as_current
+cached_result_carries_observation_time_on_the_accept_path
+session_start_executes_no_probe
+decision_probe_bound_matches_the_documented_value
+timed_out_probe_is_reported_as_a_timeout
+malformed_unobserved_conditions_is_inadmissible
+symbol_called_does_not_count_a_mention
 fold_keeps_refused_resolution_open
 fold_spends_no_subprocess_on_a_decision_without_a_probe
 fold_refuses_a_registered_probe_it_cannot_evaluate

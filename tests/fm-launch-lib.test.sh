@@ -495,6 +495,63 @@ $out"
   pass "the posture roster is derived, so an added adapter reads unknown rather than vanishing"
 }
 
+# The same property for an arm the derivation cannot read as a plain lower-case
+# alternation - which is exactly what an alias or a renamed adapter produces
+# (`Kimi)`, `k2-thinking|k2-*)`). Skipping such an arm would be the failure this
+# derivation exists to prevent, one step over: with the arm gone, once the
+# recorded adapters flip to enforced the permission probe would find nothing
+# unrestricted and nothing unknown and PASS over a harness that is still
+# launchable. launch_template's own answer is the only filter, so a token it
+# answers for is a member, with posture unknown until someone records one.
+test_posture_roster_surfaces_an_arm_it_cannot_read_as_a_literal() {
+  local patched out tok
+  patched="$TMP_ROOT/launch-lib-non-literal-arm.sh"
+  awk '{ print }
+       /^    kimi\) printf/ { print "    K2-Thinking|k2-*) printf %s x ;;" }' \
+    "$LAUNCH_LIB" > "$patched"
+
+  # A roster member is the whole first field of a line, so every check below
+  # compares fields rather than substrings: one of these tokens ends in "*", and
+  # a substring match would find it inside its own line.
+  roster_has() {  # <roster> <name>
+    printf '%s\n' "$1" | awk -v want="$2" '$1 == want { found = 1 } END { exit !found }'
+  }
+  roster_posture() {  # <roster> <name>
+    printf '%s\n' "$1" | awk -v want="$2" '$1 == want { print $2; exit }'
+  }
+
+  # The control on the fixture: the shipped roster lists neither token, or the
+  # case below would pass without proving anything.
+  local shipped
+  shipped=$(launch_permission_posture)
+  for tok in 'K2-Thinking' 'k2-*'; do
+    roster_has "$shipped" "$tok" \
+      && fail "the shipped roster already lists $tok, so this case proves nothing"
+  done
+
+  out=$(bash -c '. "$1" && launch_permission_posture' _ "$patched") \
+    || fail "the patched library could not report a posture roster at all"
+  for tok in 'K2-Thinking' 'k2-*'; do
+    [ "$(roster_posture "$out" "$tok")" = unknown ] \
+      || fail "an arm the derivation cannot read as a literal was dropped from the roster instead of reading unknown, got:
+$out"
+  done
+  local h
+  for h in "${HARNESSES[@]}"; do
+    roster_has "$out" "$h" \
+      || fail "adding a non-literal arm dropped $h from the roster"
+  done
+  # A pattern launch_template refuses is still not a member: the catch-all arm
+  # and the kind arms must not become harnesses just because the literal filter
+  # is gone.
+  for tok in '*' 'primary' 'secondmate'; do
+    roster_has "$out" "$tok" \
+      && fail "$tok entered the roster; only a token launch_template answers for is a member"
+  done
+  pass "an unparseable arm stays in the roster: unknown harness member yields could-not-observe"
+}
+
 test_permission_posture_is_declared_for_every_launchable_harness
 test_permission_posture_never_invents_enforcement
 test_posture_roster_is_derived_so_a_new_adapter_cannot_be_excluded
+test_posture_roster_surfaces_an_arm_it_cannot_read_as_a_literal

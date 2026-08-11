@@ -420,6 +420,7 @@ remote_secondmate_teardown() {
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" "$STATE/$ID.childcpu" \
     "$STATE/.$ID.open-decisions-cursor" \
     "$STATE/$ID.terminal-recorded"
+  retire_commitment_probe_cache
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -833,6 +834,26 @@ retire_attempt_record() {
   fi
   "$FM_ROOT/bin/fm-attempt.sh" retire "$ID" \
     || echo "warning: could not retire the attempt record for $ID" >&2
+}
+
+# bin/fm-commitment-register.sh stores one decision-probe result per task and
+# decision key under state/commitment-probe-cache/<task>__<key>, so a torn-down
+# task's stored verdicts go with it. Left behind, the directory would grow without
+# bound and a recycled task id could be answered from a previous task's
+# observation until the fingerprint check happened to reject it. Best-effort: a
+# cache that cannot be reaped costs a probe run, never a wrong answer, so it never
+# fails a teardown.
+retire_commitment_probe_cache() {
+  local dir safe f
+  dir=${FM_COMMITMENT_PROBE_CACHE_DIR:-$STATE/commitment-probe-cache}
+  [ -d "$dir" ] || return 0
+  safe=$(printf '%s' "$ID" | tr -c 'A-Za-z0-9._-' '_')
+  [ -n "$safe" ] || return 0
+  for f in "$dir/${safe}__"*; do
+    [ -e "$f" ] || continue
+    rm -f -- "$f" 2>/dev/null || true
+  done
+  return 0
 }
 
 # Reported after cleanup so the released PR is not silently forgotten: the task
@@ -2763,6 +2784,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.terminal-recorded" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+retire_commitment_probe_cache
 retire_attempt_record
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

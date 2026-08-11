@@ -142,6 +142,18 @@ shell_quote() {
 # arm ("*", "primary", a stray line ending in a parenthesis) cannot enter the
 # roster. A non-zero return means the roster could not be derived at all, which
 # every consumer must treat as could-not-observe rather than as an empty fleet.
+#
+# launch_template's OWN ANSWER is the only filter, deliberately. An earlier version
+# also required each arm to be a plain alternation of lower-case literals and
+# silently skipped anything else, which reintroduced the failure this derivation
+# exists to prevent one step over: an adapter written as `Kimi)` or `kimi|kimi-*)`
+# would vanish from the roster entirely, and once the recorded adapters flip to
+# enforced the permission probe would find nothing unrestricted and nothing
+# unknown and PASS over a harness that is still launchable. So every token of
+# every arm is offered to launch_template, and one it answers for is a member -
+# with posture unknown until someone records one, which is could-not-observe
+# rather than silent exclusion. One it refuses ("*", "primary", "secondmate") is
+# not an adapter and was never a roster member to lose.
 launch_harnesses() {
   local decl line arm rest tok out='' seen=' '
   decl=$(declare -f launch_template 2>/dev/null) || return 1
@@ -151,9 +163,7 @@ launch_harnesses() {
     arm=${line%)}
     arm=${arm#"${arm%%[![:space:]]*}"}
     arm=${arm%"${arm##*[![:space:]]}"}
-    # Only a plain alternation of literal words can name harnesses; anything
-    # carrying other shell syntax is a different construct that ends in ")".
-    case "$arm" in ''|*[!a-z0-9._'|'\ -]*) continue ;; esac
+    [ -n "$arm" ] || continue
     rest=$arm
     while [ -n "$rest" ]; do
       case "$rest" in

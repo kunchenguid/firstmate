@@ -1348,6 +1348,97 @@ EOF
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
+# --- session start executes no probe -----------------------------------------
+#
+# A safety requirement, not a performance one, and it is a property of the WHOLE
+# composed chain rather than of any one script: session start relays the
+# commitment register's open set through fm-bootstrap.sh, and its wake drain folds
+# every task's open decisions through fm-classify-lib.sh, which reaches the
+# register's closure gate - which would otherwise run arbitrary `run:` commands out
+# of decision files inside task worktrees, on the critical path of every session.
+# Turning a cheap detect-only digest into arbitrary execution is the regression
+# that gets session start turned off, and then the register protects nothing.
+#
+# So this case runs the REAL script over a home where every probe would leave a
+# mark, and requires that no mark appears - paired with the control that shows the
+# same probes really do run, and really do go quiet, when something other than
+# session start asks.
+test_session_start_runs_no_commitment_probe() {
+  local rec root home fakebin out register owner entry_ran decision_ran wt
+  rec=$(new_world noprobe)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+
+  register="$TMP_ROOT/noprobe/commitments"
+  mkdir -p "$register"
+  cp "$ROOT/commitments/schema.json" "$register/schema.json"
+  entry_ran="$TMP_ROOT/noprobe/entry-probe-ran"
+  owner="$TMP_ROOT/noprobe/owner.sh"
+  cat > "$owner" <<SH
+#!/usr/bin/env bash
+: > "$entry_ran"
+printf 'enforced\n'
+SH
+  chmod +x "$owner"
+  cat > "$register/leaves-a-mark.json" <<JSON
+{
+  "commitment_schema_version": 1,
+  "id": "leaves-a-mark",
+  "recorded": "the declared owner enforces this commitment",
+  "authority": "tests/fm-session-start.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "the declared owner exists and answers",
+  "assurance": "executable",
+  "probe": {"kind": "command_answers", "command": "$owner"}
+}
+JSON
+
+  decision_ran="$TMP_ROOT/noprobe/decision-probe-ran"
+  wt="$TMP_ROOT/noprobe/wt"
+  mkdir -p "$home/data/probed" "$wt"
+  printf 'worktree=%s\n' "$wt" > "$home/state/probed.meta"
+  {
+    printf '# decision\n\n'
+    # shellcheck disable=SC2016  # the backticks are the pinned fence, not a substitution
+    printf '```probe\ntier: executable\nrun: : > %s\n```\n' "$decision_ran"
+  } > "$home/data/probed/decision-crit.md"
+  printf 'needs-decision [key=crit]: the ruled finding\n' > "$home/state/probed.status"
+  printf 'resolved [key=crit]: fix applied\n' >> "$home/state/probed.status"
+
+  # The control first, and it is the whole reason the case below means anything:
+  # asked by something that is NOT session start, both probes run.
+  FM_COMMITMENT_DIR="$register" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$ROOT/bin/fm-commitment-register.sh" --open >/dev/null 2>&1
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_open_decisions "$2"
+  ' _ "$ROOT" "$home/state/probed.status" >/dev/null 2>&1
+  [ -e "$entry_ran" ] \
+    || fail "control: the entry probe never ran even when it was allowed to, so the case below proves nothing"
+  [ -e "$decision_ran" ] \
+    || fail "control: the decision probe never ran even when it was allowed to, so the case below proves nothing"
+
+  rm -f "$entry_ran" "$decision_ran"
+  rm -rf "$home/state/commitment-probe-cache"
+  out=$(FM_COMMITMENT_DIR="$register" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  [ ! -e "$entry_ran" ] \
+    || fail "session start executed a commitment entry's declared owner command"
+  [ ! -e "$decision_ran" ] \
+    || fail "session start executed a decision file's run: inside a task worktree"
+
+  # Not executing is not accepting: the entry is still surfaced, and it says why.
+  assert_contains "$out" "COMMITMENT: leaves-a-mark COULD-NOT-OBSERVE" \
+    "an entry whose probe session start declined to run must still be surfaced"
+  assert_contains "$out" "session start executes no probe" \
+    "the surfaced line must say why the commitment was not observed"
+  pass "session start executes no probe, and reports the recorded state instead"
+}
+
 # --- deferred network stage -------------------------------------------------
 
 # install_slow_gh <fakebin> <seconds>: one external-network call the digest used
@@ -2213,6 +2304,7 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_session_start_runs_no_commitment_probe
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies

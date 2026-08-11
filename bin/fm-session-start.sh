@@ -23,6 +23,11 @@
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
+# SESSION START EXECUTES NO PROBE: this script exports FM_COMMITMENT_NO_EXECUTE=1
+# over its whole subtree, so nothing it composes runs a commitment probe. See the
+# export below for the chain that makes it necessary and for why not executing is
+# not the same as accepting.
+#
 # ORDERING, and why LOCK now runs before BOOTSTRAP (the old AGENTS.md order
 # was bootstrap-then-lock):
 #
@@ -291,6 +296,22 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
 fi
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+
+# SESSION START EXECUTES NO PROBE. This is a safety requirement, not a performance
+# one, and it is set here because here is the only place that covers the WHOLE
+# subtree: fm-bootstrap.sh relays the commitment register's open set, and
+# fm-admission.sh runs fm-fleet-snapshot.sh, which folds every task's open
+# decisions, which reaches the register's closure gate - which would otherwise run
+# arbitrary `run:` commands out of decision files inside task worktrees. Turning a
+# cheap detect-only digest into arbitrary execution on the critical path of every
+# session is what gets session start turned off, and then it protects nothing.
+#
+# Not executing is NOT accepting: bin/fm-commitment-register.sh answers
+# could-not-observe for every probe it did not run, so an unmet commitment stays
+# surfaced and a resolution whose probe was not run stays visibly unverified and
+# still open. A standalone bin/fm-bootstrap.sh run, a wake drain, or a human
+# running the register by hand sets none of this and probes normally.
+export FM_COMMITMENT_NO_EXECUTE=1
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"

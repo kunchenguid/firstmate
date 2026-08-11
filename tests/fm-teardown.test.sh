@@ -3198,6 +3198,35 @@ test_ordinary_teardown_retires_the_attempt_record() {
   pass "an ordinary teardown retires the task's attempt count"
 }
 
+# bin/fm-commitment-register.sh stores one decision-probe result per task and key
+# under state/commitment-probe-cache/. Left behind, the directory grows without
+# bound and a recycled task id could be answered from a previous task's
+# observation until the fingerprint check happened to reject it.
+test_teardown_reaps_the_commitment_probe_cache() {
+  local case_dir cache
+  case_dir=$(make_case probe-cache)
+  write_meta "$case_dir" local-only ship
+  cache="$case_dir/state/commitment-probe-cache"
+  mkdir -p "$cache"
+  printf 'stored\n' > "$cache/task-x1__crit"
+  printf 'stored\n' > "$cache/task-x1__other"
+  # Another task's stored result, which this release has no business removing.
+  printf 'stored\n' > "$cache/task-x2__crit"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "probe-cache: teardown should succeed"
+
+  assert_absent "$cache/task-x1__crit" \
+    "probe-cache: the released task's stored verdict outlived it"
+  assert_absent "$cache/task-x1__other" \
+    "probe-cache: a second key's stored verdict outlived the released task"
+  [ -f "$cache/task-x2__crit" ] \
+    || fail "probe-cache: releasing one task removed another task's stored verdict"
+  pass "teardown reaps the released task's decision-probe cache and leaves other tasks' alone"
+}
+
 test_forced_teardown_keeps_the_attempt_record_and_the_count_survives() {
   local case_dir out
   case_dir=$(make_case attempt-force)
@@ -3342,5 +3371,6 @@ test_teardown_marks_an_uncorroborated_outcome_as_assumed
 test_teardown_supersedes_and_clears_a_sweep_receipt
 test_teardown_force_records_abandoned
 test_ordinary_teardown_retires_the_attempt_record
+test_teardown_reaps_the_commitment_probe_cache
 test_forced_teardown_keeps_the_attempt_record_and_the_count_survives
 test_unwritable_ledger_never_fails_teardown
