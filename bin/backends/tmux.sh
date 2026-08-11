@@ -406,8 +406,8 @@ EOF
   case "$comm" in
     '') printf 'unreadable'; return 0 ;;
   esac
-  case "${comm##*/}" in
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
+  case "$(fm_backend_tmux_classify_process_name "$comm")" in
+    shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
 }

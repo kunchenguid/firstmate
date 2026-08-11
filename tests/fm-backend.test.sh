@@ -503,6 +503,36 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+test_tmux_login_shell_fallback_classifies_dead() {
+  local dir="$TMP_ROOT/tmux-login-shell" shell out
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' win ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in
+        '#{pane_current_command}') printf '%s\n' "${FM_FAKE_TMUX_COMMAND:--bash}" ;;
+        '#{pane_tty}') printf '%s\n' /dev/pts/7 ;;
+      esac
+    done
+    ;;
+esac
+SH
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/ps"
+  fm_backend_source tmux || fail "fm_backend_source tmux should load tmux adapter"
+  for shell in -bash -zsh; do
+    out=$(PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_COMMAND="$shell" fm_backend_tmux_agent_state sess:win)
+    [ "$out" = dead ] || fail "tmux login shell $shell should classify dead, got '$out'"
+  done
+  pass "fm_backend_tmux_agent_state: login-shell names classify dead during fallback"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1126,6 +1156,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_tmux_login_shell_fallback_classifies_dead
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
