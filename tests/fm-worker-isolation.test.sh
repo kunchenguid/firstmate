@@ -416,6 +416,33 @@ SH
   pass "the process-environment fallback fails closed without procfs"
 }
 
+test_process_environment_fallback_strips_command_line() {
+  local fakebin env value
+  fakebin=$(fm_fakebin "$TMP_ROOT/ps-environ-real")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *eww*) printf '%s\n' 'shell --arg FM_AGENT_ROLE=forged FM_AGENT_OWNER_HOME=/tmp/owner home FM_AGENT_TASK=task-space FM_AGENT_ROLE=secondmate' ;;
+  *) printf '%s\n' 'shell --arg FM_AGENT_ROLE=forged' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  env=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_worker_process_environ 999999' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh") \
+    || fail "the portable process-environment reader rejected a valid ps record"
+  case "$env" in
+    *'FM_AGENT_ROLE=forged'*) fail "the portable process-environment reader trusted command-line data" ;;
+    *'FM_AGENT_ROLE=secondmate'*) : ;;
+    *) fail "the portable process-environment reader lost the environment marker" ;;
+  esac
+  value=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_process_env_value 999999 FM_AGENT_OWNER_HOME' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh") \
+    || fail "the portable process-environment value reader rejected spaces"
+  [ "$value" = '/tmp/owner home' ] \
+    || fail "the portable process-environment value reader changed spaces: $value"
+  pass "the portable process-environment reader strips command-line markers"
+}
+
 test_process_environment_newline_is_not_a_marker() {
   local dir pid payload out i=0
   require_procfs || { pass "skip: this host has no readable procfs for NUL environment proof"; return 0; }
@@ -1607,6 +1634,7 @@ test_primary_ancestry_refuses_any_inherited_worker_marker
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
 test_process_environment_fallback_preserves_spaces
+test_process_environment_fallback_strips_command_line
 test_process_environment_newline_is_not_a_marker
 test_unreadable_task_start_proof_remains_contested
 test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan
