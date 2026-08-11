@@ -75,6 +75,14 @@ for id in "$@"; do
   done
 done
 
+for id in "$@"; do
+  meta="$STATE/$id.meta"
+  if [ ! -f "$meta" ] || [ -L "$meta" ] || ! grep -q '^kind=secondmate$' "$meta" 2>/dev/null; then
+    printf 'error: endpoint metadata does not identify a secondmate: %s\n' "$id" >&2
+    exit 2
+  fi
+done
+
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-stow-delegate.XXXXXX") || exit 1
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
 cleanup() { rm -rf -- "$TMP"; }

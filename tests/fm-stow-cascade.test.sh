@@ -466,6 +466,33 @@ test_live_agent_receipt_is_returned_when_ready() {
   pass "a correlated secondmate receipt is returned without waiting out the bound"
 }
 
+test_delegate_rejects_non_secondmate_batch_atomically() {
+  local home out rc pending_count
+  home=$(new_primary delegate-kind-refusal)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" 'sess:fm-domain'
+  fm_write_meta "$home/state/worker.meta" \
+    'window=sess:fm-worker' \
+    'worktree=/tmp/worker' \
+    'project=alpha' \
+    'harness=claude' \
+    'kind=crewmate'
+  make_delegate_stubs
+
+  set +e
+  out=$(run_delegate "$home" pending 1 domain worker)
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "a mixed endpoint-kind batch should be refused"
+  [ ! -s "$TMP_ROOT/delegate-send.log" ] \
+    || fail "the refused batch dispatched a stow request"
+  pending_count=$(find "$home/state/pending-replies" -type f ! -name '.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$pending_count" = 0 ] \
+    || fail "the refused batch created $pending_count pending receipts"
+  [ -z "$out" ] || fail "the refused batch emitted successful result stanzas"
+  pass "a non-secondmate endpoint refuses the entire delegate batch before side effects"
+}
+
 # run_delegate_remote <home> <ssh-mode> <timeout> <id>...: drive the delegate
 # against a remote (ssh) secondmate route with no FM_ROOT_OVERRIDE, so
 # fm-send.sh's remote leg resolves fm-on.sh's tracked-command check against
@@ -528,4 +555,5 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report
 test_no_cascade_without_secondmates_or_from_a_secondmate_home
 test_live_agent_receipt_wait_is_bounded
 test_live_agent_receipt_is_returned_when_ready
+test_delegate_rejects_non_secondmate_batch_atomically
 test_ambiguous_remote_delivery_preserves_pending_receipt
