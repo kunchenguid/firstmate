@@ -266,6 +266,27 @@ test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
   pass "run wrapper forwards only stale-cache rebuild sources to immutable-baseline instruction refresh"
 }
 
+test_run_compact_without_completion_refreshes_before_finishing_startup() {
+  local root="$TMP_ROOT/run-compact-incomplete" out status=0 refresh_line bootstrap_line
+  make_run_primary "$root"
+  printf '%s\n' 'INCOMPLETE_START_AGENTS=current' > "$root/AGENTS.md"
+
+  out=$(run_hook_pi "$root" --source compact </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper compact without completion proof"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "compact skipped full startup when no completed startup could be proven"
+  assert_contains "$out" "INCOMPLETE_START_AGENTS=current" \
+    "compact after an incomplete startup did not conservatively inject current instructions"
+  refresh_line=$(printf '%s\n' "$out" | grep -n '^CURRENT AGENTS.md - INSTRUCTION REFRESH$' | head -1 | cut -d: -f1)
+  bootstrap_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
+  [ -n "$refresh_line" ] && [ -n "$bootstrap_line" ] && [ "$refresh_line" -lt "$bootstrap_line" ] \
+    || fail "compact recovery did not emit current instructions before the bulky digest"
+  assert_absent "$root/state/.session-start-agents-baseline" \
+    "compact recovery fabricated a true-start instruction baseline"
+
+  pass "run wrapper refreshes a compact even when startup completion is unproven"
+}
+
 test_run_clear_without_completion_finishes_startup() {
   local root="$TMP_ROOT/run-clear-incomplete" out status=0
   make_run_primary "$root"
@@ -436,6 +457,7 @@ test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
+test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge

@@ -32,7 +32,8 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMUX_SOCKET="fm-sessionstart-instruction-refresh-$$"
 TMUX_SESSION="instruction-refresh"
-LAB="${TMPDIR:-/tmp}/fm-sessionstart-instruction-refresh-live-e2e.$$"
+LAB=${TMPDIR:-/tmp}
+LAB="${LAB%/}/fm-sessionstart-instruction-refresh-live-e2e.$$"
 PROJECT="$LAB/project"
 HOME_DIR="$LAB/home"
 NONCE=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
@@ -40,6 +41,10 @@ OLD_MARKER="AGENTS_MARKER=old-$NONCE"
 NEW_MARKER="AGENTS_MARKER=new-$NONCE"
 READY_MARKER="INSTRUCTION_REFRESH_READY=$NONCE"
 TEST_REF=${FM_SESSIONSTART_INSTRUCTION_REFRESH_REF:-HEAD}
+TEST_COMMIT=$(git -C "$ROOT" rev-parse --verify "$TEST_REF^{commit}" 2>/dev/null) || {
+  printf 'not ok - could not resolve isolated test ref %s\n' "$TEST_REF" >&2
+  exit 2
+}
 EXPECTATION=${FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT:-updated}
 case "$EXPECTATION" in
   updated|stale) ;;
@@ -108,8 +113,8 @@ command -v git >/dev/null 2>&1 || fail "git not found"
 
 mkdir -p "$LAB"
 git clone --quiet --no-hardlinks "$ROOT" "$PROJECT" || fail "could not create isolated Firstmate checkout"
-git -C "$PROJECT" checkout -q -B main "$TEST_REF" \
-  || fail "could not check out isolated test ref $TEST_REF"
+git -C "$PROJECT" checkout -q -B main "$TEST_COMMIT" \
+  || fail "could not check out isolated test ref $TEST_REF ($TEST_COMMIT)"
 git -C "$PROJECT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main \
   || fail "could not set the isolated checkout's default branch"
 git -C "$PROJECT" config user.email fmtest@example.invalid
@@ -137,7 +142,7 @@ git -C "$PROJECT" commit -q -m "test: initial instruction contract" || fail "cou
 printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$PROJECT/.pi/settings.json"
 
 tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$PROJECT" -x 220 -y 55 \
-  -e "FM_HOME=$HOME_DIR" -e "FM_ROOT_OVERRIDE=$PROJECT" \
+  -e "FM_HOME=$HOME_DIR" -e "FM_ROOT_OVERRIDE=$PROJECT" -e "FM_GATE_REFUSE_BYPASS=1" \
   pi --no-tools -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts" \
   || fail "could not start isolated Pi session"
 

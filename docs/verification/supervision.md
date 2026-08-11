@@ -64,8 +64,8 @@ The third is recorded below.
 Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec`.
-The interactive TUI remains on the tracked nudge floor through `AGENTS.md` and the Ahoy fallback; Firstmate ships no global hook and does not depend on one.
+Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
+The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -104,7 +104,7 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 
 This is live coverage only for Pi compaction.
 The portable session-start tests cover the baseline and source-routing behavior.
-The current cross-harness rebuild audit remains source-derived where a live harness path is unavailable.
+Pi compaction is the only supported stale-cache refresh pair. Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook
 

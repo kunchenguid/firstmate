@@ -2038,7 +2038,7 @@ $(hash_file_for_test "$root/AGENTS.md")" ] \
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
-test_codex_clear_and_compact_reemit_the_drifted_contract() {
+test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh() {
   local rec root home fakebin startup baseline clear_out compact_out
   rec=$(new_world codex-instruction-refresh)
   IFS='|' read -r root home fakebin <<EOF
@@ -2049,20 +2049,59 @@ EOF
   printf '%s\n' 'CODEX_TEST_INSTRUCTION=original' > "$root/AGENTS.md"
 
   startup=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
-  assert_contains "$startup" "primary harness: codex" "codex fixture did not select the codex refresh policy"
+  assert_contains "$startup" "primary harness: codex" "codex fixture did not select the codex run tier"
   baseline=$(cat "$home/state/.session-start-agents-baseline")
   printf '%s\n' 'CODEX_TEST_INSTRUCTION=updated' > "$root/AGENTS.md"
 
   clear_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear)
   compact_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
-  assert_contains "$clear_out" "CODEX_TEST_INSTRUCTION=updated" \
-    "a drifted Codex clear did not emit the replacement instructions"
-  assert_contains "$compact_out" "CODEX_TEST_INSTRUCTION=updated" \
-    "a drifted Codex compact did not emit the replacement instructions"
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "Codex clear claimed an instruction-refresh channel unavailable to the tracked transport"
+  assert_not_contains "$compact_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "Codex compact claimed an instruction-refresh channel unavailable to the tracked transport"
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
-    || fail "a Codex rebuild rewrote the true-start baseline"
+    || fail "an unsupported Codex rebuild rewrote the true-start baseline"
 
-  pass "Codex clear and compact use the immutable true-start baseline to re-emit the current contract"
+  pass "Codex reset sources do not claim an unavailable instruction-refresh channel"
+}
+
+test_agents_baseline_requires_sha256_and_successful_completion() {
+  local rec root home fakebin compact_out
+  rec=$(new_world agents-baseline-failures)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' 'AGENTS_SHA_TEST=original' > "$root/AGENTS.md"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/shasum"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/sha256sum"
+  chmod +x "$fakebin/shasum" "$fakebin/sha256sum"
+
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "startup recorded a non-SHA-256 instruction baseline when both SHA-256 tools failed"
+  printf '%s\n' 'AGENTS_SHA_TEST=updated' > "$root/AGENTS.md"
+  compact_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_out" "AGENTS_SHA_TEST=updated" \
+    "a missing SHA-256 baseline did not conservatively refresh a supported rebuild"
+
+  rm -f "$fakebin/shasum" "$fakebin/sha256sum" "$home/state/.session-start-complete"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\${*: -1}" in
+  "$home/state/.session-start-complete") exit 1 ;;
+esac
+exec /bin/mv "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  assert_absent "$home/state/.session-start-complete" \
+    "startup published completion despite the atomic completion write failure"
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "startup recorded an instruction baseline after completion publication failed"
+
+  pass "instruction baselines require SHA-256 and successful startup completion"
 }
 
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
@@ -2361,7 +2400,8 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
-test_codex_clear_and_compact_reemit_the_drifted_contract
+test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
+test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
 echo "# fm-session-start.test.sh: all assertions passed"

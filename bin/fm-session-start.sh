@@ -530,6 +530,24 @@ hash_file() {
   fi
 }
 
+hash_file_sha256() {
+  local file=$1 digest
+  [ -f "$file" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 "$file" 2>/dev/null | awk '
+      length($1) == 64 && $1 !~ /[^[:xdigit:]]/ { print "sha256:" $1; found=1; exit }
+      END { if (!found) exit 1 }
+    ') && [ -n "$digest" ] && { printf '%s\n' "$digest"; return 0; }
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum "$file" 2>/dev/null | awk '
+      length($1) == 64 && $1 !~ /[^[:xdigit:]]/ { print "sha256:" $1; found=1; exit }
+      END { if (!found) exit 1 }
+    ') && [ -n "$digest" ] && { printf '%s\n' "$digest"; return 0; }
+  fi
+  return 1
+}
+
 # The baseline describes instructions this true session started with, not the
 # most recently emitted instructions. It is intentionally immutable for this
 # lock owner: every later stale-context rebuild needs the current file again.
@@ -550,20 +568,19 @@ agents_baseline_drifted() {  # <active-lock-pid>
   [ -f "$AGENTS_BASELINE_FILE" ] && [ ! -L "$AGENTS_BASELINE_FILE" ] || return 0
   baseline_pid=$(sed -n '1p' "$AGENTS_BASELINE_FILE" 2>/dev/null || true)
   baseline_hash=$(sed -n '2p' "$AGENTS_BASELINE_FILE" 2>/dev/null || true)
-  current_hash=$(hash_file "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
+  current_hash=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
   [ -n "$current_hash" ] || return 0
   [ "$baseline_pid" = "$lock_pid" ] && [ "$baseline_hash" = "$current_hash" ] && return 1
   return 0
 }
 
 # Only run-tier source pairs with both a stale native instruction cache and a
-# working Firstmate delivery path arrive here. Claude and OpenCode fresh-read,
-# while the other affected harnesses have no safe compact delivery path yet.
+# working Firstmate delivery path arrive here. Claude fresh-reads on reset, and
+# Codex has no tracked interactive reset delivery path.
 agents_refresh_required() {  # <active-lock-pid>
   local lock_pid=$1
-  [ "$REEMIT" -eq 1 ] || return 1
   case "$PRIMARY_HARNESS:$SESSION_SOURCE" in
-    codex:clear|codex:compact|pi:compact|pi-signed:compact) ;;
+    pi:compact|pi-signed:compact) ;;
     *) return 1 ;;
   esac
   agents_baseline_drifted "$lock_pid"
@@ -597,7 +614,7 @@ pi_extension_loaded() {
 
 AGENTS_START_HASH=
 if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
-  AGENTS_START_HASH=$(hash_file "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
+  AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
 fi
 
 if [ "$REEMIT" -eq 1 ]; then
@@ -909,6 +926,7 @@ section near the top of it governs what may still be read from disk.
 EOF
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+  COMPLETION_RECORDED=0
   COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$COMPLETION_PID" in
     ''|*[!0-9]*) COMPLETION_PID= ;;
@@ -917,12 +935,12 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
     && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \
     && mv -f "$COMPLETION_TMP" "$COMPLETION_FILE" 2>/dev/null; then
-    :
+    COMPLETION_RECORDED=1
   else
     [ -z "$COMPLETION_TMP" ] || rm -f "$COMPLETION_TMP" 2>/dev/null || true
     printf '\nSESSION_START_COMPLETION: not recorded - the next clear or compact will run a full startup.\n'
   fi
-  if [ "$SESSION_SOURCE" = startup ] && [ -n "$COMPLETION_PID" ] && [ -n "$AGENTS_START_HASH" ]; then
+  if [ "$SESSION_SOURCE" = startup ] && [ "$COMPLETION_RECORDED" -eq 1 ] && [ -n "$AGENTS_START_HASH" ]; then
     if ! write_agents_baseline "$COMPLETION_PID" "$AGENTS_START_HASH"; then
       printf '\nSESSION_START_AGENTS_BASELINE: not recorded - a later supported rebuild will re-emit AGENTS.md.\n'
     fi
