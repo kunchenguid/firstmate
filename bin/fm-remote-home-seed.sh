@@ -78,6 +78,7 @@ for arg in "$@"; do
   fi
 done
 if [ "$NO_PROJECTS" -eq 1 ]; then
+  # An explicit --no-projects provisions a valid projectless remote home.
   [ "${#PROJECT_NAMES[@]}" -eq 0 ] || die "--no-projects cannot be combined with project names"
 else
   [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
@@ -135,6 +136,9 @@ done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"
+# Bash 3.2 treats an empty array expansion as unset under set -u.
+# --no-projects is valid, so skip the expansion instead of masking that state.
+if [ "${#PROJECT_NAMES[@]}" -gt 0 ]; then
 for project in "${PROJECT_NAMES[@]}"; do
   SRC="$PROJECTS/$project"
   [ -d "$SRC/.git" ] || die "project clone is unavailable: $SRC"
@@ -158,6 +162,7 @@ EOF
   printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
   PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
 done
+fi
 
 {
   printf 'schema=fm-remote-home-provision.v1\n'

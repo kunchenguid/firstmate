@@ -827,6 +827,7 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),

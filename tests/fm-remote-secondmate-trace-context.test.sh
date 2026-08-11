@@ -162,6 +162,9 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" --no-projects >/dev/null \
   || fail "remote seed did not provision the traced route"
+[ ! -s "$REMOTE_HOME/data/projects.md" ] \
+  || fail "--no-projects remote seed published a project registry entry"
+pass "remote seed accepts an explicit empty project list and publishes no project records"
 
 # --- disabled: the remote route must stay byte-identically untraced ----------
 freeze_parent_session
