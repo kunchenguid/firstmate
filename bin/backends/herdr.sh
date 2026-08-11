@@ -2180,17 +2180,22 @@ fm_backend_herdr_relaunch_missing_task_serialized() {  # <session> <workspace> <
   remaining=$(printf '%s' "$tabs" | jq -r --arg label "$label" --arg replacement "$new_tab" \
     '[.result.tabs[]? | select(.label == $label and .tab_id != $replacement)] | length' 2>/dev/null)
   new_present=$(printf '%s' "$tabs" | jq -r --arg tab "$new_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null)
+  task_tabs_valid=0
   if [ "$exact_count" -eq 1 ]; then
-    [ "$remaining" = 1 ] && printf '%s' "$tabs" | jq -e --arg label "$label" --arg tab "$recorded_tab" \
-      '[.result.tabs[]? | select(.label == $label and .tab_id == $tab)] | length == 1' >/dev/null 2>&1
-  else
-    [ "$remaining" = 0 ]
+    if [ "$remaining" = 1 ] && printf '%s' "$tabs" | jq -e --arg label "$label" --arg tab "$recorded_tab" \
+      '[.result.tabs[]? | select(.label == $label and .tab_id == $tab)] | length == 1' >/dev/null 2>&1; then
+      task_tabs_valid=1
+    fi
+  elif [ "$remaining" = 0 ]; then
+    task_tabs_valid=1
   fi
-  [ "$?" -eq 0 ] && [ "$new_present" = 1 ] || {
+  if [ "$task_tabs_valid" -eq 1 ] && [ "$new_present" = 1 ]; then
+    :
+  else
     fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: replacement Herdr tab '$new_tab' did not leave exactly one task tab; refusing recovery" >&2
     return 1
-  }
+  fi
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || {
     fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: could not verify replacement Herdr pane '$new_pane'; refusing recovery" >&2
