@@ -548,6 +548,7 @@ EOF
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" pi
   make_fake_tmux_secondmate_recovery "$fakebin"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$spawned"
@@ -594,6 +595,7 @@ EOF
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" pi
   make_fake_herdr_secondmate_recovery "$fakebin"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$state"
