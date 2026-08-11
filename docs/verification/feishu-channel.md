@@ -29,14 +29,14 @@ Command:
 
 ```text
 $ bash tests/fm-feishu-channel.test.sh
-ok - current-Pi Feishu ingress, session fences, direct Assistant egress, correlation, and safety state
+ok - current-Pi Feishu ingress, persistence ordering, fences, egress recovery, and private-state validation
 ok - local Pi bridge registers only the explicit pairing and binding control surface
-ok - no-Agent transport preserves ready/drop/history semantics, direct argv text, idempotent retry, and receipts
+ok - no-Agent transport fails closed and preserves bounded single-flight delivery
 ```
 
 This test uses private disposable homes, persisted fake Pi session headers, a fake current-session extension boundary, and one fake `lark-cli` executable.
-It covers one-at-a-time durable ingress, simultaneous TUI and Feishu ordering, busy steer and follow-up semantics, exact ACK recovery, wrong-session suspension, explicit generation rebind, lock loss, deduplication, authorization, quarantine, direct settled Assistant output, fixed skip rules, whole-message secret refusal, URL-preserving chunking, exact source reply, stable ambiguous retry, exact decision correlation, and shell-inert argv delivery.
-It asserts that a remote slash-like string remains ordinary message text and that no sentinel shell effect occurs.
+It covers one-at-a-time durable ingress, simultaneous TUI and Feishu ordering, busy steer and follow-up semantics, exact ACK and interrupted-publication recovery, wrong-session suspension, explicit generation rebind, lock loss, deduplication, authorization, quarantine, durable outbound-registration recovery, fixed skip rules, whole-message secret refusal, URL-preserving chunking, exact source reply, stable ambiguous retry, exact decision correlation, terminal-proof validation, and shell-inert argv delivery.
+It asserts that a remote slash-like string remains ordinary message text, that every Feishu-originated non-allowlisted tool effect needs an exact one-time local confirmation, and that no sentinel shell effect occurs.
 The fake boundary creates no Pi process, AgentSession, RPC process, SDK session, or Pi-session writer.
 
 ## Pi extension type compatibility
