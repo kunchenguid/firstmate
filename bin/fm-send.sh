@@ -120,12 +120,20 @@ fm_send_id_from_meta() {  # <meta-file>
 # clear is loud rather than silent, because the alternative is a corrupted steer.
 # Muse and TraeX both restore the interrupted prompt into their composer after
 # Escape; clear only those empirically verified adapters before another steer.
+fm_send_backend_key() {  # <key>
+  if [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ]; then
+    fm_backend_source herdr && fm_backend_herdr_traex_send_key "$STATE" "$T" "$1"
+  else
+    fm_backend_send_key "$TARGET_BACKEND" "$T" "$1" "$EXPECTED_LABEL"
+  fi
+}
+
 fm_send_clear_after_interrupt() {  # <key>
   local key=$1
   [ "$key" = Escape ] || return 0
   case "$TARGET_HARNESS" in muse*|traex) : ;; *) return 0 ;; esac
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
+  if ! fm_send_backend_key C-u; then
     echo "error: Escape reached $T, but the worker composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
@@ -407,12 +415,20 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  if [ "$TARGET_BACKEND" = herdr ] && [ "$TARGET_HARNESS" = traex ]; then
+    case "$semantic_key" in
+      Enter|enter)
+        echo "error: TraeX Enter is reserved for the verified spawn trust owner; use a text steer or the adapter recovery command" >&2
+        exit 1
+        ;;
+    esac
+  fi
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+  elif ! fm_send_backend_key "$key"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi

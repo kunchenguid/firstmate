@@ -2932,6 +2932,30 @@ fm_backend_herdr_traex_identity_probe() {  # <session> <pane>
   [ "$presence" != dead ] || FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=dead
 }
 
+fm_backend_herdr_traex_control_ready() {  # <state-dir> <target>
+  local state=$1 target=$2 session pane
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  fm_backend_herdr_traex_ready_lifecycle "$state" "$session" "$pane" || return 1
+  fm_backend_herdr_traex_identity_probe "$session" "$pane"
+  case "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" in
+    live)
+      [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT" = traex ]
+      ;;
+    no-agent|dead)
+      fm_backend_herdr_traex_reconcile_current "$state" "$session" "$pane" >/dev/null 2>&1 || true
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_traex_send_key() {  # <state-dir> <target> <key>
+  fm_backend_herdr_traex_control_ready "$1" "$2" || return 1
+  fm_backend_herdr_send_key "$2" "$3"
+}
+
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
@@ -3099,8 +3123,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   local transition_state=${7:-} identity agent status record
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ -n "$transition_state" ] \
-     && ! fm_backend_herdr_traex_ready_lifecycle \
-       "$transition_state" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+     && ! fm_backend_herdr_traex_control_ready "$transition_state" "$target"; then
     printf 'unknown'
     return 0
   fi
@@ -4212,6 +4235,118 @@ fm_backend_herdr_traex_reconcile_current() {  # <state-dir> <session> <pane>
         ;;
     esac
   fi
+  return 1
+}
+
+FM_BACKEND_HERDR_TRAEX_RESUME_POLLS=${FM_BACKEND_HERDR_TRAEX_RESUME_POLLS:-40}
+FM_BACKEND_HERDR_TRAEX_RESUME_INTERVAL=${FM_BACKEND_HERDR_TRAEX_RESUME_INTERVAL:-0.1}
+
+fm_backend_herdr_traex_resume() {  # <state-dir> <task-id> <session-id|--last>
+  local state=$1 id=$2 selector=$3 session pane gen meta worktree project
+  local worktree_real project_real git_top git_real current_gen current pane_out foreground foreground_real
+  local command i=0 polls interval identity_state
+  case "$selector" in
+    --last) command='env FM_TRAEX_HARNESS=traex traex resume -y --last' ;;
+    ''|--*|*[!A-Za-z0-9._-]*)
+      echo "error: TraeX resume selector must be a session id, thread name, or --last" >&2
+      return 1
+      ;;
+    *) command="env FM_TRAEX_HARNESS=traex traex resume -y $selector" ;;
+  esac
+  fm_backend_herdr_traex_meta_for_id "$state" "$id" || {
+    echo "error: TraeX resume requires exact ordinary-worker metadata for task $id" >&2
+    return 1
+  }
+  [ "$FM_BACKEND_HERDR_TRAEX_READY" = 1 ] || {
+    echo "error: TraeX resume requires a previously ready lifecycle for task $id" >&2
+    return 1
+  }
+  session=$FM_BACKEND_HERDR_TRAEX_SESSION
+  pane=$FM_BACKEND_HERDR_TRAEX_PANE
+  fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane" \
+    && [ "$FM_BACKEND_HERDR_TRAEX_ID" = "$id" ] || {
+      echo "error: TraeX resume lifecycle binding does not match task $id" >&2
+      return 1
+    }
+  fm_backend_herdr_traex_reconcile_current "$state" "$session" "$pane" >/dev/null 2>&1 || {
+    echo "error: TraeX resume could not reconcile the recorded endpoint for task $id" >&2
+    return 1
+  }
+  fm_backend_herdr_traex_transition_lock_acquire "$state" "$id" || return 1
+  if ! fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane" \
+     || [ "$FM_BACKEND_HERDR_TRAEX_ID" != "$id" ] \
+     || [ "$FM_BACKEND_HERDR_TRAEX_READY" != 1 ]; then
+    fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+    echo "error: TraeX resume lifecycle binding changed for task $id" >&2
+    return 1
+  fi
+  gen=$FM_BACKEND_HERDR_TRAEX_GEN
+  meta="$state/$id.meta"
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree 2>/dev/null || true)
+  project=$(fm_backend_meta_exact_value "$meta" project 2>/dev/null || true)
+  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || worktree_real=
+  project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || project_real=
+  git_top=$(git -C "$worktree_real" rev-parse --show-toplevel 2>/dev/null || true)
+  git_real=$(CDPATH='' cd -- "$git_top" 2>/dev/null && pwd -P) || git_real=
+  if [ -z "$worktree_real" ] || [ -z "$project_real" ] \
+     || [ "$worktree_real" = "$project_real" ] || [ "$git_real" != "$worktree_real" ]; then
+    fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+    echo "error: TraeX resume recorded worktree is not the exact isolated task root for $id" >&2
+    return 1
+  fi
+  current_gen=$(fm_busy_current_gen "$state" "$id" 2>/dev/null || true)
+  current=$(fm_busy_record_read "$state" "$id" 2>/dev/null || true)
+  if [ "$current_gen" != "$gen" ] || [[ "$current" != 'idle herdr-traex '* ]]; then
+    fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+    echo "error: TraeX resume requires the exact inactive bound lifecycle for task $id" >&2
+    return 1
+  fi
+  fm_backend_herdr_traex_identity_probe "$session" "$pane"
+  if [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" != no-agent ]; then
+    identity_state=$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE
+    fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+    echo "error: TraeX resume requires the recorded live pane to be an agent-less shell; observed $identity_state" >&2
+    return 1
+  fi
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null || true)
+  foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null || true)
+  foreground_real=$(CDPATH='' cd -- "$foreground" 2>/dev/null && pwd -P) || foreground_real=
+  if [ "$foreground_real" != "$worktree_real" ]; then
+    fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+    echo "error: TraeX resume pane is not in task $id's recorded isolated worktree" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_cli "$session" pane run "$pane" "$command" >/dev/null 2>&1; then
+    fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+    echo "error: TraeX resume command could not be submitted for task $id" >&2
+    return 1
+  fi
+  fm_backend_herdr_traex_transition_lock_release "$state" "$id" || true
+  polls=$FM_BACKEND_HERDR_TRAEX_RESUME_POLLS
+  interval=$FM_BACKEND_HERDR_TRAEX_RESUME_INTERVAL
+  case "$polls" in ''|*[!0-9]*|0) polls=40 ;; esac
+  while [ "$i" -lt "$polls" ]; do
+    fm_backend_herdr_traex_identity_probe "$session" "$pane"
+    if [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE" = live ] \
+       && [ "$FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT" = traex ]; then
+      pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null || true)
+      foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null || true)
+      foreground_real=$(CDPATH='' cd -- "$foreground" 2>/dev/null && pwd -P) || foreground_real=
+      [ "$foreground_real" = "$worktree_real" ] || {
+        echo "error: resumed TraeX identity left task $id's recorded isolated worktree" >&2
+        return 1
+      }
+      fm_backend_herdr_traex_reconcile_current "$state" "$session" "$pane" >/dev/null 2>&1 || {
+        echo "error: resumed TraeX lifecycle could not be reconciled for task $id" >&2
+        return 1
+      }
+      printf 'resumed %s harness=traex backend=herdr target=%s:%s\n' "$id" "$session" "$pane"
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  echo "error: TraeX resume command was submitted for task $id, but its bound native identity was not observed" >&2
   return 1
 }
 

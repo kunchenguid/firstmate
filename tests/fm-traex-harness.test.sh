@@ -81,6 +81,12 @@ case "$cmd $sub" in
     if [ "$pane" = w1:p2 ] && [ "$text" = 'treehouse get' ]; then
       printf '%s\n' "$worktree" > "${FM_FAKE_CWD_FILE:?}"
     fi
+    case "$text" in
+      'env FM_TRAEX_HARNESS=traex traex resume -y '*)
+        printf '%s\n' "$text" >> "$launch.resume"
+        [ "${FM_FAKE_RESUME_REGISTER:-1}" = 1 ] && printf idle > "$phase_file"
+        ;;
+    esac
     ;;
   "pane get")
     pane=${3:-}
@@ -98,6 +104,7 @@ case "$cmd $sub" in
     ;;
   "pane send-keys")
     key=${4:-}
+    printf '%s\n' "$key" >> "$launch.keys"
     if [ "$key" = enter ]; then
       case "$phase" in
         shell)
@@ -195,6 +202,8 @@ make_spawn_case() {  # <name>
   : > "$dir/herdr.log"
   : > "$dir/launch.log"
   : > "$dir/launch.log.composer"
+  : > "$dir/launch.log.keys"
+  : > "$dir/launch.log.resume"
   printf shell > "$dir/phase"
   printf '%s\n' "$dir|$home|$project|$wt|$fakebin|$id"
 }
@@ -250,6 +259,34 @@ run_traex_send() {  # <text>
     PATH="$FAKEBIN_DIR:$PATH" \
     env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     "$ROOT/bin/fm-send.sh" "$TASK_ID" "$1" 2>&1
+}
+
+run_traex_key() {  # <key>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_SEND_SETTLE=0 \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    "$ROOT/bin/fm-send.sh" "$TASK_ID" --key "$1" 2>&1
+}
+
+run_traex_resume() {  # <session-id|--last>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_BACKEND_HERDR_TRAEX_RESUME_POLLS=2 FM_BACKEND_HERDR_TRAEX_RESUME_INTERVAL=0 \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    "$ROOT/bin/fm-traex-resume.sh" "$TASK_ID" "$1" 2>&1
 }
 
 run_traex_reconcile() {
@@ -587,6 +624,145 @@ test_send_refuses_unready_or_invalid_lifecycle_before_typing() {
   after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
   [ "$after" = "$before" ] || fail "malformed-lifecycle TraeX steer typed before validation"
   pass "traex steering validates exact readiness and lifecycle before typing"
+}
+
+test_blocked_trust_enter_is_reserved_for_spawn_owner() {
+  local rec out status
+  rec=$(make_spawn_case blocked-key)
+  read_spawn_case "$rec"
+  out=$(FM_FAKE_TRUST_RULE=wrong FM_BACKEND_HERDR_TRAEX_START_POLLS=2 \
+    FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 run_traex_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail "blocked trust fixture unexpectedly launched"
+  : > "$CASE_DIR/launch.log.keys"
+  out=$(run_traex_key Enter)
+  status=$?
+  [ "$status" -ne 0 ] || fail "metadata-routed Enter accepted a blocked TraeX trust screen"
+  assert_contains "$out" 'reserved for the verified spawn trust owner' \
+    "blocked TraeX Enter refusal did not name its owner"
+  [ ! -s "$CASE_DIR/launch.log.keys" ] \
+    || fail "blocked TraeX trust screen received a key outside the spawn owner"
+  assert_absent "$CASE_DIR/trust-count" \
+    "blocked TraeX trust screen was accepted outside structural provenance verification"
+  pass "traex trust Enter remains exclusive to the verified spawn owner"
+}
+
+test_key_routing_requires_live_bound_identity() {
+  local rec out status verdict
+  rec=$(make_spawn_case key-routing)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for key routing should succeed: $out"
+  : > "$CASE_DIR/launch.log.keys"
+
+  out=$(run_traex_key Enter)
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX Enter bypassed the trust owner after launch"
+  [ ! -s "$CASE_DIR/launch.log.keys" ] || fail "refused TraeX Enter reached Herdr"
+
+  out=$(run_traex_key Escape)
+  status=$?
+  expect_code 0 "$status" "live bound TraeX Escape should succeed: $out"
+  [ "$(cat "$CASE_DIR/launch.log.keys")" = $'escape\nctrl+u' ] \
+    || fail "TraeX Escape did not route with its verified composer clear: $(cat "$CASE_DIR/launch.log.keys")"
+
+  : > "$CASE_DIR/launch.log.keys"
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf shell > "$CASE_DIR/phase"
+  out=$(run_traex_key C-c)
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX key reached a clean-exit shell"
+  [ ! -s "$CASE_DIR/launch.log.keys" ] || fail "clean-exit TraeX shell received a key"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "clean-exit key refusal did not reconcile stopped-worker state: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "clean-exit key refusal did not route disappearance through completion ownership"
+  pass "traex keys require exact live binding and preserve interrupt clearing"
+}
+
+test_clean_exit_shell_refuses_steer_before_typing() {
+  local rec out status before after verdict
+  rec=$(make_spawn_case clean-exit-steer)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for clean-exit steering should succeed: $out"
+  before=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+  printf shell > "$CASE_DIR/phase"
+  out=$(run_traex_send 'must not become a shell command')
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX steer accepted an agent-less shell"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "TraeX steer typed into an agent-less shell"
+  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+  [ "$verdict" = 'idle herdr-traex' ] \
+    || fail "clean-exit steer refusal did not reconcile stopped-worker state: $verdict"
+  assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+    "clean-exit steer refusal lost the native-working completion"
+  pass "traex steering refuses clean-exit shells before input mutation"
+}
+
+test_same_session_resume_preserves_marker_and_binding() {
+  local rec out status command
+  rec=$(make_spawn_case resume-success)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for resume should succeed: $out"
+  printf shell > "$CASE_DIR/phase"
+  out=$(run_traex_resume 11111111-2222-3333-4444-555555555555)
+  status=$?
+  expect_code 0 "$status" "bound same-session TraeX resume should succeed: $out"
+  assert_contains "$out" "resumed $TASK_ID harness=traex backend=herdr" \
+    "TraeX resume did not report its verified binding"
+  command=$(cat "$CASE_DIR/launch.log.resume")
+  [ "$command" = 'env FM_TRAEX_HARNESS=traex traex resume -y 11111111-2222-3333-4444-555555555555' ] \
+    || fail "TraeX resume lost its private marker or autonomous mode: $command"
+  [ "$(cat "$CASE_DIR/phase")" = idle ] \
+    || fail "TraeX resume returned before native registration"
+  pass "traex same-session resume preserves marker and exact ownership"
+}
+
+test_resume_refuses_mismatched_worktree_and_lifecycle_bindings() {
+  local rec out status meta tmp binding
+  rec=$(make_spawn_case resume-worktree-mismatch)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for resume worktree refusal should succeed: $out"
+  printf shell > "$CASE_DIR/phase"
+  meta="$HOME_DIR/state/$TASK_ID.meta"
+  tmp="$meta.next"
+  awk -v replacement="worktree=$PROJECT_DIR" \
+    '{ if ($0 ~ /^worktree=/) print replacement; else print }' "$meta" > "$tmp"
+  mv "$tmp" "$meta"
+  out=$(run_traex_resume --last)
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX resume accepted a mismatched recorded worktree"
+  assert_contains "$out" 'recorded worktree is not the exact isolated task root' \
+    "TraeX resume worktree refusal was not explicit"
+  [ ! -s "$CASE_DIR/launch.log.resume" ] \
+    || fail "TraeX resume mutated the pane after worktree mismatch"
+
+  rec=$(make_spawn_case resume-lifecycle-mismatch)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for resume lifecycle refusal should succeed: $out"
+  printf shell > "$CASE_DIR/phase"
+  binding=$(find "$HOME_DIR/state/.traex-herdr-bindings" -type f -print -quit)
+  printf 'v1 id=%s gen=stale-gen\n' "$TASK_ID" > "$binding"
+  out=$(run_traex_resume --last)
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX resume accepted a mismatched lifecycle binding"
+  assert_contains "$out" 'lifecycle binding does not match' \
+    "TraeX resume lifecycle refusal was not explicit"
+  [ ! -s "$CASE_DIR/launch.log.resume" ] \
+    || fail "TraeX resume mutated the pane after lifecycle mismatch"
+  pass "traex resume refuses mismatched worktree and lifecycle ownership"
 }
 
 test_start_observation_persists_lifecycle_before_return() {
@@ -1015,6 +1191,11 @@ test_unsupported_tmux_refuses_before_endpoint
 test_secondmate_and_raw_launch_refuse
 test_non_traex_raw_shell_launch_remains_supported
 test_send_refuses_unready_or_invalid_lifecycle_before_typing
+test_blocked_trust_enter_is_reserved_for_spawn_owner
+test_key_routing_requires_live_bound_identity
+test_clean_exit_shell_refuses_steer_before_typing
+test_same_session_resume_preserves_marker_and_binding
+test_resume_refuses_mismatched_worktree_and_lifecycle_bindings
 test_start_observation_persists_lifecycle_before_return
 test_active_send_requires_post_submit_composer_clearance
 test_send_persists_working_before_delivery_ack

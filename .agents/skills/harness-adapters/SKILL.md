@@ -414,7 +414,7 @@ It is not a primary, secondmate, watcher owner, away-mode supervisor, remote coo
 | Autonomy | `-y` / `--dangerously-bypass-approvals-and-sandbox`. This does not suppress the separate fresh-directory trust chooser. |
 | Trust dialog | Herdr manifest rule `directory_trust_prompt`, with `1. Yes, continue` preselected. Firstmate requires the live `foreground_cwd` to equal the isolated task root; Herdr's immutable pane-creation `cwd` must equal either that root or the exact source project from which ordinary `treehouse get` entered it. Only when those identities and the rule/default text agree does Firstmate send one Enter, then require native `working`; a key-send result alone is never success. |
 | Composer | Bare `❯` row, already covered by Herdr's shared structural composer owner. |
-| Resume | `traex resume <session-id>` or `traex resume --last`, launched from the same isolated task worktree; preserve `-y` when resuming manually if the installed CLI requires the autonomous mode again. |
+| Resume | `FM_HOME=<this-firstmate-home> bin/fm-traex-resume.sh <task-id> <session-id>` or `... <task-id> --last`. The owner requires the exact inactive lifecycle binding and agent-less recorded Herdr pane in the same isolated task worktree, then launches `traex resume -y` with `FM_TRAEX_HARNESS=traex` and verifies the native TraeX identity before success. |
 
 A fresh worktree may show directory trust even with `-y`.
 Do not hand-edit TraeX's global trust/config store and do not send Enter merely because the pane is blocked.
@@ -428,7 +428,7 @@ Reconnect level reconciliation closes a missed working-to-idle transition once, 
 
 For stopped-worker recovery, keep the existing isolated task worktree and exact Herdr endpoint ownership rules.
 A live registered TraeX pane is `alive`; a structurally missing pane is `missing`; a restored agent-less shell is `dead`; unreadable registration remains `unreadable`.
-If the TUI exited cleanly and its session id is available, resume it in the same task worktree; otherwise relaunch the verified TraeX template with the same brief plus the bounded progress note.
+If the TUI exited cleanly and its session id is available, use `fm-traex-resume.sh` so resume cannot lose adapter detection or cross the recorded worktree/lifecycle binding; otherwise relaunch the verified TraeX template with the same brief plus the bounded progress note.
 Never allocate a second task worktree while the first is unaccounted for.
 
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
