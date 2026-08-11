@@ -475,6 +475,7 @@ test_delegate_rejects_non_secondmate_batch_atomically() {
     'worktree=/tmp/worker' \
     'project=alpha' \
     'harness=claude' \
+    'kind=secondmate' \
     'kind=crewmate'
   make_delegate_stubs
 

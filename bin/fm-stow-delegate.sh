@@ -44,6 +44,8 @@ fi
 
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 BOUND=${FM_STOW_CASCADE_TIMEOUT:-60}
 case "$BOUND" in
@@ -77,7 +79,7 @@ done
 
 for id in "$@"; do
   meta="$STATE/$id.meta"
-  if [ ! -f "$meta" ] || [ -L "$meta" ] || ! grep -q '^kind=secondmate$' "$meta" 2>/dev/null; then
+  if [ ! -f "$meta" ] || [ -L "$meta" ] || [ "$(fm_meta_get "$meta" kind)" != secondmate ]; then
     printf 'error: endpoint metadata does not identify a secondmate: %s\n' "$id" >&2
     exit 2
   fi
