@@ -937,6 +937,7 @@ test_legacy_detached_return_boundary_rechecks_external_changes() {
   local case_dir rc
   setup_legacy_squash_case legacy-detached-boundary-change
   case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" config status.showUntrackedFiles no
   add_treehouse_returning_worktree "$case_dir"
 
   set +e
@@ -1182,6 +1183,7 @@ test_legacy_detached_squash_dirty_and_untracked_refuse() {
   setup_legacy_squash_case legacy-detached-untracked
   case_dir=$LEGACY_SQUASH_CASE
   printf '%s\n' untracked > "$case_dir/wt/untracked.txt"
+  git -C "$case_dir/project" config status.showUntrackedFiles no
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?

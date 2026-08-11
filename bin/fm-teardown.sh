@@ -26,8 +26,10 @@
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Legacy Herdr ship records whose already-closed endpoint is represented by exactly one window_detached_20260810 incident marker may retire only after their task binding, backend identity, canonical project and worktree paths, registered worktree, exact fm/<task-id> branch, and branch head all agree.
-# When such a branch is no longer reachable after a squash merge, a separate proof compares its complete unreached candidate patch byte-for-byte with the canonical recorded PR's merged commit, verifies that merge is still on the PR's default target, and records the proof before retiring metadata.
-# The detached endpoint is never contacted, the compatibility path rejects --force, and it never deletes the preserved branch ref or commits.
+# When such a branch is no longer reachable after a squash merge, a separate proof compares its complete unreached candidate patch byte-for-byte with the canonical recorded PR's single-parent merge commit, verifies the recorded target is still the canonical default and the merge remains on it, and reruns that proof at the worktree-return boundary.
+# The compatibility path inspects every untracked path regardless of status.showUntrackedFiles, never contacts the detached endpoint, and rejects --force.
+# Before returning only the worktree, it writes an identity-bound retirement note and archives any recorded task scratch so an interrupted return can resume without losing task metadata.
+# It preserves the task branch ref and commits throughout retirement.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -1134,7 +1136,7 @@ legacy_detached_return_boundary_check() {
   validate_legacy_detached_candidate "$WT" "$PROJ" "$ID" || return 1
   current_hash=$(git hash-object "$META" 2>/dev/null) || return 1
   [ "$current_hash" = "$LEGACY_DETACHED_META_HASH" ] || return 1
-  dirty=$(git -C "$WT" status --porcelain 2>/dev/null) || return 1
+  dirty=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) || return 1
   [ -z "$dirty" ]
 }
 
@@ -1394,7 +1396,7 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
