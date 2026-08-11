@@ -837,9 +837,11 @@ fm_busy_grok_tail_busy() {
 # verified adapter contribution. Agy 1.1.8 has a Stop hook but no verified
 # semantic turn-start event, so the stable ASCII `esc to cancel` footer remains
 # its narrowly scoped current-state source until a complete lifecycle replaces
-# it. FM_BUSY_REGEX retains the same operator override as the Grok fallback.
+# it. Only the bottom nonblank row is live footer geometry; transcript text and
+# command output above it are never state. FM_BUSY_REGEX retains the same
+# operator override as the Grok fallback.
 fm_busy_agy_tail_busy() {
-  grep -v '^[[:space:]]*$' | tail -12 \
+  grep -v '^[[:space:]]*$' | tail -1 \
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT:-esc to cancel}}"
 }
 

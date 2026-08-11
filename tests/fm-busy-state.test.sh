@@ -315,7 +315,11 @@ esc to cancel')
   [ "$out" = "idle agy-regex" ] || fail "Agy idle tail must classify 'idle agy-regex', got '$out'"
   out=$(fm_busy_classify tmux w1 agy t1 "$state" 'Ctrl+c:cancel')
   [ "$out" = "idle agy-regex" ] || fail "a Grok footer must not classify Agy busy, got '$out'"
-  pass "the Agy fallback is regex-scoped to Agy and classifies only Agy tasks"
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" 'previous output: esc to cancel
+? for shortcuts                              Gemini 3.6 Flash · low')
+  [ "$out" = "idle agy-regex" ] \
+    || fail "Agy transcript text above an idle footer must not classify busy, got '$out'"
+  pass "the Agy fallback is harness-scoped and reads only the live footer"
 }
 
 # --- kimi verification gate -----------------------------------------------------

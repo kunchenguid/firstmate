@@ -1203,8 +1203,10 @@ launch_template() {
   esac
 }
 
+VERIFIED_LAUNCH=1
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    VERIFIED_LAUNCH=0
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -2867,9 +2869,21 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+# A verified worker must not inherit another harness's identity marker:
+# fm-harness.sh intentionally trusts verified markers before ancestry, so a
+# retained parent marker (Cursor's or Agy's) would classify the child and its
+# tools as the parent harness. Clearing at this launch boundary covers every
+# fm-spawn-started session; fm-harness.sh's marker ordering covers hand-started
+# ones.
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  cursor)
+    LAUNCH="env -u ANTIGRAVITY_AGENT $LAUNCH"
+    ;;
+  agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    ;;
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

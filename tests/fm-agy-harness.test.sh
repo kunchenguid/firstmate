@@ -60,6 +60,8 @@ test_separated_composer_is_structural() {
   [ -z "$state" ] || fail "bare shell prompt was accepted as Agy structure"
   state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)"$'\n────────────────────\n>\n────────────────────')
   [ -z "$state" ] || fail "a stale Agy footer authorized a later separator pair"
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)"$'\n$ ')
+  [ -z "$state" ] || fail "a stale Agy composer above a returned shell prompt read as $state"
   pass "Agy composer classification requires the complete separated container"
 }
 

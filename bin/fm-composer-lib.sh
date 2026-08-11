@@ -1443,7 +1443,7 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
 fm_composer_separated_state() {  # <capture> [cursor-row]
   [ "${FM_COMPOSER_HARNESS:-}" = agy ] || return 1
   local capture=$1 cursor=${2:-} plain line trimmed rule_probe
-  local row=0 previous_separator=-1 top=-1 bottom=-1 footer=0 content="" content_row
+  local row=0 previous_separator=-1 top=-1 bottom=-1 footer=0 footer_row=-1 content="" content_row
   plain=$(printf '%s\n' "$capture" | fm_composer_strip_ansi)
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
@@ -1456,12 +1456,18 @@ fm_composer_separated_state() {  # <capture> [cursor-row]
         top=$previous_separator
         bottom=$row
         footer=0
+        footer_row=-1
       fi
       previous_separator=$row
     elif [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ] \
          && [ $((row - bottom)) -le 8 ]; then
       case "$trimmed" in
-        *'? for shortcuts'*|*'esc to cancel'*) footer=1 ;;
+        *'? for shortcuts'*|*'esc to cancel'*)
+          if [ "$footer" -eq 0 ]; then
+            footer=1
+            footer_row=$row
+          fi
+          ;;
       esac
     fi
     row=$((row + 1))
@@ -1492,6 +1498,10 @@ EOF
           content=$content_row
         fi
       fi
+    elif [ "$row" -gt "$footer_row" ]; then
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+      [ -z "$trimmed" ] || return 1
     fi
     row=$((row + 1))
   done <<EOF
