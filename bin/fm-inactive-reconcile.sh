@@ -13,9 +13,9 @@
 # FM_INACTIVE_RECONCILE_BUDGET_SECS bound (default 10, valid 1..30) and resumes
 # after its last visited child on the next scan.
 #
-# It considers only a direct ordinary crewmate whose durable activity is older
-# than that interval and whose last status is not captain-held.
-# It then uses fm-crew-state.sh as the sole current-state source.
+# It considers only a direct ordinary crewmate whose newest meta, status, or
+# turn-ended mtime is older than that interval and whose last status is not
+# captain-held. It then uses fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
@@ -29,9 +29,15 @@
 # only after its corresponding inactive-outcome wake is handled.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
-# The scan never invokes gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a
-# state *.check.sh.
-# It reads only durable local state and fm-crew-state.sh.
+# New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
+# state, outcome_key, origin, phase, pr, created_epoch, and notice_emitted; the
+# fingerprint binds task id, terminal state, PR text, and sanitized last status.
+# Pending atomically becomes reported after parent append or presented after
+# main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
+# and its cursor records the last child visited within the aggregate budget.
+#
+# The scan reads only durable local state and fm-crew-state.sh; it never invokes
+# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
 
