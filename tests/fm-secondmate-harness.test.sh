@@ -62,6 +62,8 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
+# shellcheck source=/dev/null
+FM_STATE_OVERRIDE="$TMP_ROOT/lock-state" . "$ROOT/bin/fm-wake-lib.sh"
 
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
@@ -1426,6 +1428,7 @@ test_bootstrap_rereads_after_partial_propagation() {
 
 test_config_push_propagates_reports_without_ff_or_nudge() {
   local w c1 sm_real old_head out err status out2 tmp log instruction
+  local lock ready release holder push_pid waiting_out waiting_err n
   w=$(new_world config-push-basic)
   c1=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$c1"
@@ -1480,6 +1483,35 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   [ ! -s "$err" ] || fail "clean config push wrote unexpected stderr: $(cat "$err")"
   assert_contains "$(cat "$log")" "[fm-from-firstmate]" \
     "config reread must use the marked routed secondmate path"
+
+  printf '{"default":{"harness":"claude"}}\n' > "$w/home/config/crew-dispatch.json"
+  lock="$w/sm/config/.fm-inherit-crew-dispatch.json.lock"
+  ready="$w/config-push-lock.ready"
+  release="$w/config-push-lock.release"
+  waiting_out="$w/config-push-lock.out"
+  waiting_err="$w/config-push-lock.err"
+  (
+    fm_lock_acquire_wait "$lock"
+    : > "$ready"
+    while [ ! -e "$release" ]; do sleep 0.05; done
+    fm_lock_release "$lock"
+  ) &
+  holder=$!
+  n=0
+  while [ ! -e "$ready" ] && [ "$n" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
+  [ -e "$ready" ] || fail "config-push lock holder did not become ready"
+  run_config_push "$w" "$log" > "$waiting_out" 2> "$waiting_err" &
+  push_pid=$!
+  sleep 0.2
+  kill -0 "$push_pid" 2>/dev/null || fail "config push did not wait for the crew-dispatch lock"
+  [ "$(cat "$w/sm/config/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] \
+    || fail "config push changed crew-dispatch while another writer held its lock"
+  : > "$release"
+  wait "$holder" || fail "config-push lock holder failed"
+  wait "$push_pid" || fail "config push failed after the crew-dispatch lock was released"
+  [ "$(cat "$w/sm/config/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] \
+    || fail "config push did not publish crew-dispatch after the lock was released"
+  [ ! -s "$waiting_err" ] || fail "locked config push wrote unexpected stderr: $(cat "$waiting_err")"
 
   : > "$log"
   out2=$(run_config_push "$w" "$log" 2>"$err"); status=$?

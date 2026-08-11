@@ -54,14 +54,18 @@
 #            turn; the runner exists to hold it outside one.
 # requests   Normalize a captured result into one JSON record per line, through
 #            bin/fm-board-request-parse.pl.
-# apply      Firstmate's answer collector. It reads a durably captured result,
-#            preserves each validated answer as compact structured JSON, and
-#            invokes fm-decision-hold.sh resolve-board for the named captain
-#            hold. The board service never calls this command. A malformed,
-#            stale, remotely-owned, or unapplyable answer returns a clear failure
-#            without acknowledging its process-event result or changing the
-#            decision state, so it remains available for firstmate to report and
-#            retry.
+# apply      Firstmate's collector for Answer and crew-dispatch edit requests.
+#            It preserves each validated answer as compact structured JSON and
+#            invokes fm-decision-hold.sh resolve-board for the named captain hold.
+#            A dispatch edit is passed to fm-crew-dispatch.sh, which identifies an
+#            existing profile, validates the complete candidate with bootstrap's
+#            dispatch validator, and atomically writes only a valid candidate.
+#            The result is appended to private board state so the next board
+#            regeneration can show the applied assignment or clear refusal.
+#            The board service never calls this command. A malformed, stale,
+#            remotely-owned, or unapplyable request returns a clear failure
+#            without acknowledging its process-event result or changing its
+#            target, so it remains available for firstmate to report and retry.
 #
 # AUTHORITY: none. A board control performs no action; it records a request.
 # Every record this adapter emits is captain INTENT for firstmate to adjudicate
@@ -117,7 +121,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PARSER="$SCRIPT_DIR/fm-board-request-parse.pl"
 SERVER="$SCRIPT_DIR/fm-board-reply-server.py"
 DECISION_HOLD="$SCRIPT_DIR/fm-decision-hold.sh"
+CREW_DISPATCH="$SCRIPT_DIR/fm-crew-dispatch.sh"
 REQUEST_DIR="$STATE/board-reply"
+DISPATCH_RESULTS="$REQUEST_DIR/dispatch-results.ndjson"
 DEFAULT_PORT=${FM_BOARD_REPLY_PORT:-4321}
 WAIT_SECONDS=${FM_BOARD_REPLY_WAIT_SECONDS:-0}
 POLL_MS=${FM_BOARD_REPLY_POLL_MS:-250}
@@ -598,8 +604,25 @@ answer_home() {  # <board-home>
   printf '%s\n' "$SECONDMATE_REGISTRY_MATCH_HOME"
 }
 
+record_dispatch_result() {  # <request-json> <ok-json> <message> <assignment-json-or-null>
+  local request=$1 ok=$2 message=$3 assignment=$4 body
+  [ ! -L "$DISPATCH_RESULTS" ] || die "dispatch result log is unsafe"
+  body=$(jq -nc --arg ts "$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --argjson request "$request" --argjson ok "$ok" --arg message "$message" \
+    --argjson assignment "$assignment" \
+    '{ts:$ts,request_id:$request.request_id,scope:$request.scope,
+      rule_id:($request.rule_id // null),profile_id:$request.profile_id,model:$request.model,
+      expected_rule_revision:$request.expected_rule_revision,
+      expected_profile_revision:$request.expected_profile_revision,
+      effort:$request.effort,ok:$ok,message:$message,assignment:$assignment}') \
+    || return 1
+  if ! printf '%s\n' "$body" >> "$DISPATCH_RESULTS"; then return 1; fi
+  chmod 0600 "$DISPATCH_RESULTS" || return 1
+}
+
 cmd_apply() {
-  local file=${1-} records record kind intent home id target_home reason staged applied=0 failed=0
+  local file=${1-} records record kind intent home id target_home reason staged assignment message prior
+  local applied=0 failed=0
   [ "$#" -eq 1 ] || usage
   [ -f "$file" ] || die "result file does not exist: $file"
   [ -f "$PARSER" ] || die "request validator not found: $PARSER"
@@ -630,6 +653,57 @@ cmd_apply() {
         ;;
     esac
     intent=$(printf '%s' "$record" | jq -r '.intent // ""')
+    if [ "$intent" = dispatch ]; then
+      [ -f "$CREW_DISPATCH" ] || die "dispatch lifecycle command not found: $CREW_DISPATCH"
+      prior=''
+      if [ -f "$DISPATCH_RESULTS" ] && [ ! -L "$DISPATCH_RESULTS" ]; then
+        prior=$(jq -R -s --argjson request "$record" '
+          [split("\n")[] | select(length > 0) | (fromjson? // empty)
+            | select(.ok == true and .request_id == $request.request_id)] | last // empty
+        ' "$DISPATCH_RESULTS" 2>/dev/null) || die "could not read prior dispatch results"
+      fi
+      if [ -n "$prior" ]; then
+        if jq -ne --argjson prior "$prior" --argjson request "$record" '
+            [$prior.scope, ($prior.rule_id // null), $prior.profile_id, $prior.model, $prior.effort,
+             $prior.expected_rule_revision, $prior.expected_profile_revision]
+            == [$request.scope, ($request.rule_id // null), $request.profile_id, $request.model, $request.effort,
+                $request.expected_rule_revision, $request.expected_profile_revision]' >/dev/null; then
+          message=$(printf '%s' "$prior" | jq -r '.message')
+          printf '%s\n' "$message"
+          applied=$((applied + 1))
+          continue
+        fi
+        printf 'unapplyable dispatch edit: request identity was already used for another assignment\n' >&2
+        failed=$((failed + 1))
+        continue
+      fi
+      staged=$(umask 077; mktemp "$REQUEST_DIR/.dispatch.XXXXXX") || die "could not stage dispatch edit"
+      if ! printf '%s' "$record" | jq -cS . > "$staged"; then
+        rm -f -- "$staged"
+        printf 'unapplyable dispatch edit: could not preserve its structured payload\n' >&2
+        failed=$((failed + 1))
+        continue
+      fi
+      if assignment=$("$CREW_DISPATCH" apply "$FM_HOME/config/crew-dispatch.json" "$staged" 2>&1); then
+        message=$(printf '%s' "$assignment" | jq -r '
+          "Assignment updated: " + .harness + " / " + .model + " / " + .effort + "."' 2>/dev/null) \
+          || message="Assignment updated."
+        record_dispatch_result "$record" true "$message" "$assignment" \
+          || die "could not record dispatch edit result"
+        printf '%s\n' "$message"
+        applied=$((applied + 1))
+      else
+        reason=${assignment%%$'\n'*}
+        [ -n "$reason" ] || reason="dispatch candidate was refused"
+        message="Crew dispatch unchanged - $reason"
+        record_dispatch_result "$record" false "$message" null \
+          || die "could not record dispatch edit refusal"
+        printf 'unapplyable dispatch edit: %s\n' "$reason" >&2
+        failed=$((failed + 1))
+      fi
+      rm -f -- "$staged"
+      continue
+    fi
     [ "$intent" = answer ] || continue
     home=$(printf '%s' "$record" | jq -r '.home // ""')
     id=$(printf '%s' "$record" | jq -r '.id // ""')
@@ -657,7 +731,7 @@ cmd_apply() {
 $records
 EOF
   [ "$failed" -eq 0 ] || return 1
-  printf 'applied board answers: %s\n' "$applied"
+  printf 'applied board requests: %s\n' "$applied"
 }
 
 cmd_classify() {

@@ -42,6 +42,11 @@ The after images keep the new-work intake visually separate from the continuing 
 `after-answer-fact-desktop.png` and `after-answer-fact-mobile.png` show the same durable-record acknowledgement after a structured fact submission, with the remaining decision and new-work surfaces still fitting at both widths.
 `after-answer-rejected-desktop.png` and `after-answer-rejected-mobile.png` show a refused oversized answer remaining open, editable, and explicitly marked `Not sent` rather than receiving an acknowledgement.
 
+`after-dispatch-list-desktop.png` and `after-dispatch-list-mobile.png` show a 13-rule crew dispatch file in the System view, including a long natural-language task type, a two-profile quota array, provider labels, visible configured fallback profiles, independence summaries, the collapsed rationale controls, and the link to model-provider allowance and pace.
+`after-dispatch-edit-desktop.png` and `after-dispatch-edit-mobile.png` show the bounded existing-profile model and effort editor open for that long rule.
+`after-dispatch-success-desktop.png` and `after-dispatch-success-mobile.png` show the regenerated board confirming the validated assignment `codex / gpt-5.6 / xhigh`.
+`after-dispatch-rejected-desktop.png` and `after-dispatch-rejected-mobile.png` show the same board after `codex:max` was rejected, with the source file left unchanged and the reason visible beside the rule.
+
 All image evidence here is rendered from synthetic fixture homes rather than a live fleet.
 The local-report pair reproduces only the reported card label and local path, never the report contents; the other fixtures carry no private project, decision, or PR data.
 The fixtures pin the render clock so the comparisons are not affected by the day they were captured.
@@ -75,6 +80,16 @@ Chrome's accessibility snapshot exposed the before card as a link to the nonexis
 The new-work intake evidence was verified on 2026-08-09 with Chrome and `chrome-devtools-axi 0.1.27` against the same synthetic fixture before and after the change.
 The browser inspection used `chrome-devtools-axi emulate --viewport '1280x844x1'` and `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`.
 The 390px inspection returned `{"w":390,"h":844,"overflow":false}`, and the real-browser regressions in `tests/fm-mission-control.test.sh` and `tests/fm-board-reply.test.sh` confirmed that both composers fit without horizontal overflow, remain visually distinct, and submit through separate intents.
+
+The dispatch evidence was verified on 2026-08-11 with Chrome and `chrome-devtools-axi 0.1.27` against a synthetic 13-rule dispatch file served through the live board-reply service.
+The browser inspection used a 1280 by 900 desktop viewport and `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'` for the phone viewport.
+Both widths reported no horizontal overflow, exposed the configured rule and default fallback profiles without expanding a disclosure, and exposed reciprocal links between Dispatch and model-provider allowance.
+Each rule's complete task type appears once as its wrapping heading; the recaptured short-rule evidence confirms there is no duplicate description line.
+Opening the same control-enabled file through `file://` reported zero visible Dispatch editors while leaving the complete read-only Dispatch section visible.
+Every mobile input and selector measured 44px high, the submit control measured 44px high, and the adjacent Cancel control retained its separate text-link treatment.
+A real board request addressed stable rule and profile identities, changed only the selected array profile, the shared validator accepted `codex:xhigh`, and the regenerated board displayed the new model and effort.
+A second real board request proposed `codex:max`; the shared validator refused it, a byte comparison confirmed `crew-dispatch.json` was unchanged, and the regenerated board displayed that refusal at both widths.
+The live-board reload inspection discarded a persisted draft after its stable identity or revision stopped resolving, and the focused behavior regression accepts replay only for a prior successful request with the same complete identity-bound payload.
 
 The fact-intake evidence was verified on 2026-08-10 with Chrome and `chrome-devtools-axi 0.1.27` against a synthetic grouped portfolio reconciliation.
 The browser inspection used `chrome-devtools-axi emulate --viewport '1280x900x1'` and `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`.

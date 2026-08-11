@@ -82,7 +82,15 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   An incomplete decision reads `incomplete` with the specific gaps as its hint, because a decision that reaches Captain's Call unanswerable is a fleet health problem rather than a decision waiting on the captain; [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns the checklist.
   It sits in the closing strip, so every fleet health item is also announced in a bar above the primary sections rather than left for the captain to scroll to.
   That bar names the count as blocked or failed while those are the only kind present, and widens to fleet health items once a held secondmate item or an incomplete decision joins them.
-- **Allowance & pace** integrates the local Token Dashboard into the System view rather than repeating its numbers in a separate dashboard-shaped panel.
+- **Dispatch** shows the live `config/crew-dispatch.json` in the System view without making the board a second schema owner.
+  It states whether the optional file is absent, valid, invalid, or unavailable and says that the verdict was checked during the current render.
+  Each natural-language rule and the default show their profile count, harness, model, effort, optional provider, quota-array shape, independence and fallback summary, every configured fallback assignment, and a collapsed rationale when one exists.
+  The full condition stays readable without sharing a horizontal row with the assignment, so a long task type cannot push the model out of view at phone width.
+  Raw JSON remains available only in an expandable shelf.
+  The canonical schema and all field semantics remain in [`docs/configuration.md`](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
+  The view also notes that secondmate homes receive this same file when inherited configuration is pushed.
+- **Model-provider allowance & pace** integrates the local Token Dashboard into the System view rather than repeating its numbers in a separate dashboard-shaped panel.
+  Reciprocal links connect this provider-budget surface with Dispatch directly above it without adding routing or selection logic.
   Each primary allowance window leads with current remaining allowance, then keeps pace against the reset, observed cycle history, and projected runway or exhaustion in one compact card.
   Recent automatic balancing is a quiet collapsed shelf under those cards, so its activity remains visible without becoming another monitoring feed.
   Mission Control consumes normalized allowance windows, bounded history, pace thresholds, and the safe balancing summary from the Token Dashboard API, adding a narrowed live Grok window set from `quota-axi` only while that source has no Grok windows.
@@ -129,13 +137,26 @@ A board request is evidence of the captain's intent, not an authenticated captai
 Firstmate does with it exactly what it would have done had the captain said the same words in chat, under its own contract in `AGENTS.md`: an approval that needs the captain's explicit word still gets confirmed with the captain first, a merge still happens only if firstmate's own checks pass, and nothing destructive, irreversible, or security-sensitive is ever executed from a tap.
 The surface is reachable by anything that can reach the service serving it, so being able to reach it is never treated as authorization for any of that.
 
-There are six controls, and each row offers only what it can actually resolve:
+There are six general controls plus the System view's bounded Dispatch editor, and each row offers only what it can actually resolve:
 
 - **Approve merge** and **Reply**, on a PR awaiting the captain.
 - **Answer** and **Set aside**, on a decision the captain holds in a backlog.
 - **Answer** alone on a task-level open decision, because there is no backlog row behind it and therefore no hold kind to change.
 - **Start something new**, as a board-level one-shot request for something to look into or build.
 - **Ask firstmate**, as the board-level continuing conversation for a question or follow-up.
+- **Change assignment**, on an existing dispatch rule or the default, limited to the model and effort of one existing profile.
+
+The Dispatch editor appears only when `--controls` is enabled and the direct board-reply service proves it is live.
+It never appears through the legacy Lavish bridge, a plain static server, or `file://`.
+The profile selector chooses only among profiles already present in the selected rule or default, and v1 cannot add, delete, reorder, change an id, change `when`, or change a harness.
+Submitting it records one `dispatch` request through the shared board vocabulary and does not edit configuration in the page or service.
+Firstmate collects that request with `bin/fm-procevent-board-reply.sh apply`, which delegates the candidate to `bin/fm-crew-dispatch.sh` before acknowledging its wake.
+That command resolves the canonical stable rule and profile ids, checks their rendered revisions, changes only the requested existing profile, validates the complete candidate with the same dispatch validator bootstrap uses, and atomically promotes only a valid file.
+A stale rule, malformed profile array, unverified harness already present in the candidate, or unsupported effort leaves the file unchanged.
+An open assignment draft retains the stable ids and revisions it began with and is discarded after regeneration if either object changed, so it can never bind itself to a newly occupying position.
+The collector treats a repeated request as successful only when its request id and complete stable target payload match an already recorded successful result.
+The collector records the applied assignment or refusal in private board state, and the next board regeneration shows that outcome beside the same task type.
+An explicit per-task harness, model, or effort at spawn remains higher precedence than this default file.
 
 Start something new and Ask firstmate are deliberately separate surfaces.
 The new-work composer is a visually distinct intake card, while Ask firstmate retains the conversation and its replies.
@@ -199,7 +220,7 @@ Once the board-reply wake is armed, firstmate collects its captured Answer recor
 
 [`bin/fm-procevent-board-reply.sh`](../bin/fm-procevent-board-reply.sh) owns the reply service, arming the wake, posting firstmate's replies into the board conversation, and turning what was recorded into validated requests.
 [`bin/fm-board-request-parse.pl`](../bin/fm-board-request-parse.pl) is the single owner of the board message vocabulary in both directions and of every fail-closed rule, shared by both transports, and the service validates a message at its door with that same program over the same bytes it is about to store.
-Its captain-to-firstmate intents are `merge`, `reply`, `answer`, `defer`, `ask`, and `file`.
+Its captain-to-firstmate intents are `merge`, `reply`, `answer`, `defer`, `ask`, `file`, and `dispatch`.
 A legacy `answer` carries its free-text `note` unchanged.
 A fielded fact `answer` keeps that same intent and carries a `facts` object keyed by the stable field keys, the form's `required_keys`, and an optional overflow `note`.
 The shared parser is the only required-key validator and rejects an incomplete structured answer by its stable keys, while the fielded form translates that refusal back to the recorded human labels before showing it to the captain.
@@ -232,10 +253,10 @@ A launch agent or unit that inherits no `FM_HOME` resolves them against the trac
 Arming has no precondition and is safe in any order: the request log is append-only and never consumed, so requests accepted while nothing is armed are picked up whole by a later arm.
 A request recorded by the service becomes an ordinary durable `check` wake through the same `state/procevent/` framework every other source uses, so firstmate's normal wake drain picks it up with no second notification path.
 At that wake, a validated `file` record surfaces its `note` unchanged for firstmate's ordinary `AGENTS.md` intake process.
-For an `answer`, firstmate runs `bin/fm-procevent-board-reply.sh apply <result-file>` before acknowledging the captured generation.
-The collector preserves the parser's field values and overflow note as compact JSON, validates them against the filed decision, and delegates closure to `bin/fm-decision-hold.sh resolve-board` and its existing `resolve` ordering.
-A refusal leaves the captured request available and does not change the decision state, so firstmate can report the reason and retry without losing the answer.
-The transport does no automatic backlog filing, project matching, task classification, or dispatch.
+For an `answer` or `dispatch`, firstmate runs `bin/fm-procevent-board-reply.sh apply <result-file>` before acknowledging the captured generation.
+The collector preserves an answer's field values and overflow note as compact JSON, validates them against the filed decision, and delegates closure to `bin/fm-decision-hold.sh resolve-board` and its existing `resolve` ordering, while a dispatch request goes through the bounded shared validator and apply boundary.
+A refusal leaves the captured request available and does not change the target state, so firstmate can report the reason and retry without losing the request.
+The transport does no automatic backlog filing, project matching, task classification, or task dispatch.
 
 `bin/fm-procevent-board-reply.sh say-source <source-id> <text>|-` is how firstmate answers a board-reply wake into its originating board's conversation, while `say <board.html> <text>|-` is the board-path form and `reply-log-path <board.html>` prints where that conversation is kept.
 A reply is validated by the same program over the same bytes, under its own marker and its own single permitted intent, and direction is taken from the leading marker so neither side can claim the other's.
@@ -332,6 +353,8 @@ Fleet prose is checked to stay escaped inside the attributes a control carries.
 A real-browser regression also covers exact and fallback Answer prompts, explicit quick answers beside the free-text path, fielded fact intake and its fallback cases, structured submission with overflow context, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
 It renders two fresh board copies from one durable request log and measures the recorded quiet banners, answered-row ordering, shared composer, Deferred shelf, exact cross-home identity, and quick-answer controls at 1280px and 390px.
 It also proves that a quick answer and a typed answer emit the same validated `answer` intent with only their note text differing.
+
+`tests/fm-crew-dispatch.test.sh` covers stable rule and profile ids, stale revisions, position-independent targeting, successful-request replay, request-id collisions, complete candidate validation, visible fallback assignments, the reciprocal allowance relationship, and read-only versus direct-service edit availability.
 
 `tests/fm-board-reply.test.sh` covers the direct transport with no Lavish anywhere.
 It re-proves every fail-closed rule at the service door and again at wake time, refuses a cross-site write and a non-loopback bind, holds captain text that looks like the wire format inside its own field, and pins the properties the cursor design rests on: a delta discarded before capture is re-derived byte for byte, a capture truncated before its end sentinel records no cursor and loses nothing, a captured delta advances the cursor so nothing is announced twice, a request accepted before arming survives to the next arm, one retried attempt is recorded once, and a broken cursor escalates exactly once with rebase as the recovery.

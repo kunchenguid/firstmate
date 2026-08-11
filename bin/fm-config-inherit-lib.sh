@@ -440,7 +440,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest reason rc dispatch_lock dispatch_lock_dir
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -495,11 +495,50 @@ propagate_inheritable_config() {
         fi
       fi
     fi
+    dispatch_lock=
+    if [ "$item" = crew-dispatch.json ] \
+        && { [ -f "$src" ] || [ -e "$dest" ] || [ -L "$dest" ]; }; then
+      if ! mkdir -p "$dest_config" 2>/dev/null || [ ! -d "$dest_config" ] || [ -L "$dest_config" ]; then
+        reason="destination config directory is unsafe"
+        warn_inheritable_config_error "$item" "$dest_config" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+      dispatch_lock_dir=$(cd "$dest_config" 2>/dev/null && pwd -P) || {
+        reason="destination config directory is unsafe"
+        warn_inheritable_config_error "$item" "$dest_config" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      }
+      if ! type fm_lock_acquire_wait >/dev/null 2>&1 || ! type fm_lock_release >/dev/null 2>&1; then
+        FM_STATE_OVERRIDE=${FM_STATE_OVERRIDE:-$dispatch_lock_dir}
+        # shellcheck source=bin/fm-wake-lib.sh
+        . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-wake-lib.sh"
+      fi
+      if ! type fm_lock_acquire_wait >/dev/null 2>&1 || ! type fm_lock_release >/dev/null 2>&1; then
+        reason="portable lock helpers are unavailable"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+      dispatch_lock="$dispatch_lock_dir/.fm-inherit-crew-dispatch.json.lock"
+      if ! fm_lock_acquire_wait "$dispatch_lock"; then
+        reason="failed to lock destination"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+    fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
+        [ -z "$dispatch_lock" ] || fm_lock_release "$dispatch_lock" || true
         continue
       fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
@@ -519,6 +558,7 @@ propagate_inheritable_config() {
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
+        [ -z "$dispatch_lock" ] || fm_lock_release "$dispatch_lock" || true
         continue
       fi
       # Primary has no value for this item: mirror the absence downstream.
@@ -533,6 +573,7 @@ propagate_inheritable_config() {
     else
       record_inheritable_config_result "$item" unchanged ""
     fi
+    [ -z "$dispatch_lock" ] || fm_lock_release "$dispatch_lock" || true
   done
   return "$rc"
 }

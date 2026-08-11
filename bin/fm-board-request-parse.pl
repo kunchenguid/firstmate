@@ -35,8 +35,8 @@
 #
 # What it emits, one compact JSON object per line:
 #   {"kind":"contract",...}      always first; states that nothing below is authority
-#   {"kind":"request",...}       a validated captain request: intent, home, id, key, note,
-#                                  and structured facts when the answer carries them
+#   {"kind":"request",...}       a validated captain request: intent, home, target fields,
+#                                  note, structured facts, or a bounded dispatch edit
 #   {"kind":"reply",...}         a validated firstmate board reply: intent, note. Display only.
 #   {"kind":"message",...}       prose carrying no board marker at all
 #   {"kind":"unrecognized",...}  anything else, with a reason. Never acted on.
@@ -188,6 +188,7 @@ sub duplicate_object_key {
 }
 
 my $SAFE_ID = qr/\A[A-Za-z0-9._-]{1,120}\z/;
+my $STABLE_ID = qr/\A[A-Za-z0-9][A-Za-z0-9._-]{0,119}\z/;
 
 # Exactly which fields each intent may carry, per direction. An intent is refused
 # outright if it carries anything else, so a field that means nothing for that
@@ -198,7 +199,11 @@ my %SPEC = (
   answer => {need => [],             allow => ["id", "key", "note", "facts", "required_keys"], either => ["id", "key"]},
   defer  => {need => ["id"],         allow => ["id", "key"]},
   ask    => {need => ["note"],       allow => ["note"]},
-  file   => {need => ["note"],       allow => ["note"]},
+  file     => {need => ["note"], allow => ["note"]},
+  dispatch => {need => ["scope", "profile_id", "model", "effort", "request_id",
+                       "expected_rule_revision", "expected_profile_revision"],
+               allow => ["scope", "rule_id", "profile_id", "model", "effort", "request_id",
+                         "expected_rule_revision", "expected_profile_revision"]},
 );
 
 # Firstmate speaking back to the board carries its words and nothing else. There
@@ -288,6 +293,55 @@ for my $line (@records) {
     $out{$f} = $val;
   }
   next if $out{kind} eq "";
+
+  # A dispatch request identifies one existing profile without carrying the
+  # dispatch schema or any selection logic. The executable dispatch validator
+  # checks the resulting whole-file candidate before it can be written.
+  if ($direction eq "request" && $intent eq "dispatch") {
+    if (($obj->{home} // "") ne "main") { $bad->("dispatch edits apply only to the main home"); next; }
+    my $scope = $obj->{scope};
+    if (!defined($scope) || ref($scope) || ($scope ne "rule" && $scope ne "default")) {
+      $bad->("dispatch scope must be rule or default"); next;
+    }
+    my $request_id = $obj->{request_id};
+    if (!defined($request_id) || ref($request_id) || $request_id !~ $SAFE_ID) {
+      $bad->("dispatch request identity is not usable"); next;
+    }
+    $out{request_id} = $request_id;
+    for my $field ("expected_rule_revision", "expected_profile_revision") {
+      my $value = $obj->{$field};
+      if (!defined($value) || ref($value) || $value !~ /\A[0-9a-f]{64}\z/) {
+        $bad->("dispatch revision is not usable"); $out{kind} = ""; last;
+      }
+      $out{$field} = $value;
+    }
+    next if $out{kind} eq "";
+    for my $field ("model", "effort") {
+      my $value = $obj->{$field};
+      my $maximum = $field eq "model" ? 300 : 20;
+      if (!defined($value) || ref($value) || length($value) > $maximum
+          || $value =~ /[\x00-\x1f]/) {
+        $bad->("dispatch $field is not safe text"); $out{kind} = ""; last;
+      }
+      $out{$field} = $value;
+    }
+    next if $out{kind} eq "";
+    if ($scope eq "rule") {
+      my $rule_id = $obj->{rule_id};
+      if (!defined($rule_id) || ref($rule_id) || $rule_id !~ $STABLE_ID) {
+        $bad->("dispatch rule identity is not usable"); next;
+      }
+      $out{rule_id} = $rule_id;
+    } elsif (exists $obj->{rule_id}) {
+      $bad->("default dispatch edit does not carry rule_id"); next;
+    }
+    my $profile_id = $obj->{profile_id};
+    if (!defined($profile_id) || ref($profile_id) || $profile_id !~ $STABLE_ID) {
+      $bad->("dispatch profile identity is not usable"); next;
+    }
+    $out{profile_id} = $profile_id;
+    $out{scope} = $scope;
+  }
 
   if (exists $obj->{note}) {
     my $note = $obj->{note};

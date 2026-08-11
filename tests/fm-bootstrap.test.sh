@@ -806,7 +806,7 @@ make_routine_bootstrap_fixture() {
   fm_git_identity
   mkdir -p "$home/config" "$home/state"
   printf '%s\n' codex > "$home/config/crew-harness"
-  printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex"}}],"default":{"harness":"claude","effort":"low"}}' \
+  printf '%s\n' '{"rules":[{"id":"normal","when":"normal work","use":{"id":"normal-codex","harness":"codex"}}],"default":{"id":"default-claude","harness":"claude","effort":"low"}}' \
     > "$home/config/crew-dispatch.json"
   git init -q -b main "$root"
   {
@@ -995,7 +995,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"id":"fresh","when":"fresh news","use":{"id":"fresh-grok","harness":"grok"},"why":"current context"},{"id":"big","when":"big feature","use":[{"id":"big-claude","harness":"claude","model":"claude-sonnet-5","effort":"high"},{"id":"big-codex","harness":"codex","model":"gpt-5.5","effort":"high"}]},{"id":"legacy","when":"legacy feature","use":[{"id":"legacy-claude","harness":"claude"},{"id":"legacy-codex","harness":"codex"}],"select":"quota-balanced"}],"default":[{"id":"default-pi","harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"id":"default-grok","harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -1039,16 +1039,16 @@ unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harn
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
-pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
-pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+pi max effort is accepted^{"rules":[{"id":"deep","when":"deep coding","use":{"id":"deep-pi","harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+pi-signed max effort is accepted^{"rules":[{"id":"signed","when":"signed coding","use":{"id":"signed-pi","harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
-kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
+kimi model profile is accepted^{"rules":[{"id":"kimi","when":"kimi work","use":{"id":"kimi-profile","harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
-array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
-array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
-one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
-default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"grok"}]}^empty^
-one-element default array is accepted^{"default":[{"harness":"codex"}]}^empty^
+array use with quota-balanced is accepted^{"rules":[{"id":"big","when":"big feature","use":[{"id":"big-claude","harness":"claude","model":"claude-sonnet-5","effort":"high"},{"id":"big-codex","harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
+array use without select is accepted^{"rules":[{"id":"big","when":"big feature","use":[{"id":"big-claude","harness":"claude"},{"id":"big-codex","harness":"codex"}]}]}^empty^
+one-element array use is accepted^{"rules":[{"id":"focused","when":"focused feature","use":[{"id":"focused-claude","harness":"claude"}]}]}^empty^
+default array is accepted^{"default":[{"id":"default-pi","harness":"pi","model":"anthropic/claude-sonnet-5"},{"id":"default-grok","harness":"grok"}]}^empty^
+one-element default array is accepted^{"default":[{"id":"default-codex","harness":"codex"}]}^empty^
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model, effort, and provider must be non-empty strings when present
@@ -1058,9 +1058,13 @@ empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid confi
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model, effort, and provider must be non-empty strings when present
-explicit provider tokens are accepted^{"rules":[{"when":"visual work","use":[{"harness":"codex","model":"gpt-5","provider":"vendor-one"}]}],"default":[{"harness":"claude","provider":"vendor-two"}]}^empty^
-outage fallback profiles are accepted^{"rules":[{"when":"visual work","use":[{"harness":"codex","provider":"vendor-one"}],"fallback":[{"harness":"claude","effort":"high","provider":"vendor-two"}]}],"default_fallback":[{"harness":"claude"}]}^empty^
-independent review flag is accepted^{"rules":[{"when":"review or audit","use":[{"harness":"claude","provider":"vendor-two"}],"independent":true}]}^empty^
+explicit provider tokens are accepted^{"rules":[{"id":"visual","when":"visual work","use":[{"id":"visual-codex","harness":"codex","model":"gpt-5","provider":"vendor-one"}]}],"default":[{"id":"default-claude","harness":"claude","provider":"vendor-two"}]}^empty^
+outage fallback profiles are accepted^{"rules":[{"id":"visual","when":"visual work","use":[{"id":"visual-codex","harness":"codex","provider":"vendor-one"}],"fallback":[{"id":"visual-claude-fallback","harness":"claude","effort":"high","provider":"vendor-two"}]}],"default_fallback":[{"id":"default-claude-fallback","harness":"claude"}]}^empty^
+independent review flag is accepted^{"rules":[{"id":"review","when":"review or audit","use":[{"id":"review-claude","harness":"claude","provider":"vendor-two"}],"independent":true}]}^empty^
+missing rule id is flagged^{"rules":[{"when":"visual work","use":{"id":"visual-codex","harness":"codex"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs a stable id
+duplicate rule ids are flagged^{"rules":[{"id":"same","when":"visual work","use":{"id":"visual-codex","harness":"codex"}},{"id":"same","when":"docs","use":{"id":"docs-claude","harness":"claude"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - rule ids must be unique
+missing profile id is flagged^{"rules":[{"id":"visual","when":"visual work","use":{"harness":"codex"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each profile needs a stable id
+duplicate profile ids are flagged^{"rules":[{"id":"visual","when":"visual work","use":[{"id":"same","harness":"codex"},{"id":"same","harness":"claude"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile ids must be unique
 empty fallback array is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - fallback needs at least one profile
 fallback profile without harness is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[{"model":"gpt-5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each fallback profile needs harness
 unverified fallback harness is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[{"harness":"spaceship"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
