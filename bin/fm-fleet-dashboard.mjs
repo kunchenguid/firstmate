@@ -548,7 +548,6 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   const decisions = [];
   const ours = [];
   const reviewing = [];
-  const renderedOurIds = new Set();
 
   for (const record of records) {
     if (!record.structured || record.state === "done") {
@@ -631,9 +630,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       });
     }
 
-    // A current ship backlog title naming "PR N" is PR-stage evidence even
-    // when pr= was never registered. Status-event URLs remain excluded because
-    // they are historical; missing registration yields an unknown row, not a URL.
+    // A current ship backlog title naming "PR N" plus task metadata is PR-stage
+    // evidence even when pr= was never registered. Backlog prose alone and
+    // status-event URLs are historical context, not evidence of a live PR row.
     const stageMatch = currentRecord?.kind === "ship"
       ? cleanProse(currentRecord.title).match(/\bPR\s*#?(\d+)\b/i)
       : null;
@@ -657,27 +656,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           ? "our PR recorded in task metadata and not yet landed in the backlog"
           : `current ship backlog record names PR ${prNumber ?? "unknown"}, but task metadata never registered it; last recorded: ${recorded}`,
       });
-      renderedOurIds.add(task.id);
     }
-  }
-
-  for (const record of currentRecordsById.values()) {
-    const stageMatch = record.kind === "ship" ? cleanProse(record.title).match(/\bPR\s*#?(\d+)\b/i) : null;
-    if (!stageMatch || renderedOurIds.has(record.id)) {
-      continue;
-    }
-    ours.push({
-      tag: "OURS",
-      name: cleanProse(record.title) || record.id,
-      id: record.id,
-      project: record.repo ?? null,
-      prose: `CI unknown · readiness unknown · URL unknown · PR ${stageMatch[1]} was never registered`,
-      note: null,
-      age: sinceAge(record.since),
-      live: false,
-      raw: record.raw,
-      why: `current ship backlog record names PR ${stageMatch[1]}, but no task metadata or PR registration exists`,
-    });
   }
 
   for (const relationship of reviews.relationships) {

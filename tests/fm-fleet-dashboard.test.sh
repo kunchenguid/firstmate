@@ -134,6 +134,7 @@ EOF
 
 ## Queued
 - [ ] launch-page - Ship the launch page blocked-by: deploy-window (repo: firstmate) (kind: ship) (since 2026-08-01)
+- [ ] queued-pr-note - PR 3999: Prepare a follow-up after another PR lands (repo: firstmate) (kind: ship) (since 2026-08-02)
 
 ## Done
 - [x] merged-task - Ship the merged thing (repo: firstmate) (kind: ship) (merged 2026-07-31)
@@ -280,21 +281,17 @@ test_pr_truthfulness_regressions() {
   local home fakebin out
   home=$(make_home pr-truth)
   write_live_fixture "$home"
-  sed -i.bak '/## Queued/i\
-- [ ] backlog-only-pr - PR 4003: Ship without task metadata (repo: firstmate) (kind: ship) (since 2026-08-02)\
-' "$home/data/backlog.md"
-  rm "$home/data/backlog.md.bak"
   fakebin=$(make_fakebin "$home")
 
   out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "truthfulness render failed"
-  assert_contains "$out" "OUR PRS IN REVIEW (3)" "an unregistered PR-stage task is absent"
+  assert_contains "$out" "OUR PRS IN REVIEW (2)" "the PR review section contains a false or missing row"
   assert_contains "$out" "CI green · changes requested" \
     "CI and review readiness are not independent dimensions"
   assert_contains "$out" "CI unknown · readiness unknown" \
     "missing registration was rendered as a false CI state"
   assert_contains "$out" "was never registered" "missing registration has no visible reason"
-  assert_contains "$out" "PR 4003: Ship without task metadata" \
-    "a PR-stage backlog record without task metadata was silently dropped"
+  assert_not_contains "$out" "PR 3999" \
+    "a queued backlog record that merely names a PR was misreported as our PR in review"
   assert_not_contains "$out" "github.com/pedromuller-del/firstmate/pull/4002" \
     "the cockpit fabricated a URL for an unregistered PR"
   pass "PR rows preserve unknown registration and independent CI/readiness truth"
