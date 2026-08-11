@@ -2076,13 +2076,27 @@ kimi_composer_is_empty() {
   [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
+kimi_capture_has_trust_dialog() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq 'Trust this folder?'
+}
+
 kimi_wait_for_ready() {
   local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  local trust_accepts=0 trust_max=${FM_KIMI_TRUST_ACCEPTS:-3}
   while [ "$i" -lt "$max" ]; do
     pane=$(kimi_capture)
     if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
        || kimi_composer_is_empty; then
       return 0
+    fi
+    # Kimi 0.34.0+ gates an untrusted workspace on its folder-trust picker
+    # before any banner or composer renders. The picker preselects "Trust this
+    # folder", so one Enter grants exactly the workspace trust this spawn needs;
+    # the choice persists under ~/.kimi-code/workspace-trust for later spawns.
+    # Older versions never show the picker and skip this branch entirely.
+    if [ "$trust_accepts" -lt "$trust_max" ] && kimi_capture_has_trust_dialog "$pane"; then
+      spawn_send_key "$T" Enter
+      trust_accepts=$((trust_accepts + 1))
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -2700,7 +2714,11 @@ fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    if kimi_capture_has_trust_dialog "$(kimi_capture)"; then
+      kimi_spawn_fail "kimi folder-trust dialog could not be accepted before brief delivery"
+    else
+      kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    fi
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."

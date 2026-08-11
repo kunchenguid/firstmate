@@ -40,6 +40,9 @@ fake_screen() {
     delivered)
       printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
       ;;
+    trust-dialog)
+      printf 'Trust this folder?\n↑↓ navigate · Enter select · Esc exit\n\n%s\n\n ❯ Trust this folder\n   Enable project MCP servers. Remembered for this folder.\n\n   Don'"'"'t trust\n   Exit Kimi Code. Asked again next launch.\n' "$FM_FAKE_PANE_PATH"
+      ;;
     *)
       printf 'shell starting\n$ \n'
       ;;
@@ -84,7 +87,16 @@ case "${1:-}" in
       *' Enter '*)
         case "$state" in
           launched)
-            if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
+            if [ "${FM_FAKE_KIMI_TRUST_DIALOG:-no}" = yes ]; then
+              # The launch-submit Enter goes to the shell; Kimi 0.34.0+ then
+              # presents its folder-trust picker before any ready signal.
+              printf 'trust-dialog\n' > "$FM_FAKE_KIMI_STATE"
+            elif [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
+              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            fi
+            ;;
+          trust-dialog)
+            if [ "${FM_FAKE_KIMI_TRUST_STUCK:-no}" != yes ]; then
               printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
             fi
             ;;
@@ -163,6 +175,8 @@ run_spawn() {
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KIMI_TRUST_DIALOG="${FM_FAKE_KIMI_TRUST_DIALOG:-no}" \
+    FM_FAKE_KIMI_TRUST_STUCK="${FM_FAKE_KIMI_TRUST_STUCK:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
@@ -503,6 +517,37 @@ test_kimi_readiness_gate_precedes_pointer() {
   pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
 }
 
+test_kimi_trust_dialog_is_accepted_before_delivery() {
+  local id rec out rc
+  id="kimi-trust-z9-$$"
+  rec=$(make_spawn_case trust-accept "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_KIMI_TRUST_DIALOG=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "kimi spawn behind the 0.34.0 trust dialog should succeed"
+  assert_contains "$out" "spawned $id harness=kimi" "kimi trust-dialog spawn did not report success"
+  [ -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was not delivered after trust acceptance"
+  pass "fm-spawn: kimi accepts the 0.34.0 folder-trust dialog and delivers the brief"
+}
+
+test_kimi_unaccepted_trust_dialog_fails_loudly() {
+  local id rec out rc
+  id="kimi-trust-stuck-za-$$"
+  rec=$(make_spawn_case trust-stuck "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST_DIALOG=yes FM_FAKE_KIMI_TRUST_STUCK=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unaccepted kimi trust dialog should fail the spawn"
+  assert_contains "$out" "kimi folder-trust dialog could not be accepted" \
+    "unaccepted kimi trust dialog lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent while the trust dialog was still up"
+  assert_grep 'failed: kimi folder-trust dialog could not be accepted' "$HOME_DIR/state/$id.status" \
+    "unaccepted kimi trust dialog did not leave a supervisor-visible failure"
+  pass "fm-spawn: kimi never sends the brief pointer past an unaccepted trust dialog"
+}
+
 test_kimi_detection_uses_ancestry_after_markers() {
   local dir fakebin cfg out
   dir="$TMP_ROOT/detection"
@@ -669,6 +714,8 @@ test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
+test_kimi_trust_dialog_is_accepted_before_delivery
+test_kimi_unaccepted_trust_dialog_fails_loudly
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines

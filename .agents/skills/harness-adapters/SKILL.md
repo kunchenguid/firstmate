@@ -357,7 +357,7 @@ The tracked Claude hook entries whose event Grok already covers through its own 
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
 
-## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
+## kimi (VERIFIED 2026-07-25, kimi 0.29.1; folder-trust handling live-verified 2026-08-11 on kimi 0.34.0)
 
 Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back to the executable `$HOME/.kimi-code/bin/kimi`.
 
@@ -371,7 +371,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None on a clean first launch in a fresh pooled worktree. |
+| Trust dialog | Kimi 0.34.0+ shows a `Trust this folder?` picker on the first launch in an untrusted workspace, before any banner or composer renders. It preselects `Trust this folder`, and one Enter accepts it; the choice persists per workspace root under `$HOME/.kimi-code/workspace-trust/`, so later spawns in the same worktree skip it. `fm-spawn.sh` detects the picker during its ready wait and sends that Enter itself, bounded by `FM_KIMI_TRUST_ACCEPTS` (default 3); a picker that never clears fails the spawn loudly and the brief pointer is never sent past it. Kimi older than 0.34.0 shows no picker and needs nothing. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; detection relies on process ancestry command name `kimi`. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
