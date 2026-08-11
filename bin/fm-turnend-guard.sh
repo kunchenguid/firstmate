@@ -153,10 +153,14 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 2
 fi
 
-# Succeed when a CURRENT unresolved-ancestry fault is recorded, printing the
-# owner pid it deferred to, or nothing when the record names no usable owner
-# (the auto-arm writes the literal "none" for a decline with no recorded owner
-# to defer to, such as a missing or malformed lock).
+# Succeed when a CURRENT unresolved-ancestry fault is recorded, printing the lock
+# condition the auto-arm actually observed followed by the owner pid it deferred
+# to. Only the live-owner condition carries a pid, because it is the only one
+# whose pid names a genuine competing session; the auto-arm deliberately withholds
+# the pid for a shared-infrastructure lock and for an unclaimable one, so this
+# banner can never present a shared-daemon pid or an already-dead pid as a live
+# competing session. A record from an older hook carries no condition field, so a
+# bare pid is read as the live-owner case it could only have described.
 # The record is durable and self-healing, so it can outlive the
 # condition it describes: it is only rewritten when the auto-arm fires again and
 # hits the same fault, and only removed when a later firing claims or refuses
@@ -168,8 +172,8 @@ fi
 # bounded window for it, so a fault genuinely current for this turn is recorded
 # well within EPOCH_FRESH. Its own recorded updated_at is used rather than the
 # file mtime, because that is the value the writer commits atomically.
-fresh_unresolved_ancestry_owner() {
-  local record owner at age
+fresh_unresolved_ancestry_fault() {
+  local record owner condition at age
   [ -s "$UNRESOLVED_RECORD" ] || return 1
   record=$(cat "$UNRESOLVED_RECORD" 2>/dev/null) || return 1
   record=${record%%$'\n'*}
@@ -180,17 +184,30 @@ fresh_unresolved_ancestry_owner() {
     none) owner='' ;;
     ''|*[!0-9]*) return 1 ;;
   esac
+  condition=''
+  case "$record" in
+    *condition=*)
+      condition=${record#*condition=}
+      condition=${condition%% *}
+      ;;
+  esac
+  case "$condition" in
+    live-owner|infra-lock|unclaimable) ;;
+    '') [ -n "$owner" ] && condition=live-owner || condition=unclaimable ;;
+    *) return 1 ;;
+  esac
+  [ "$condition" = live-owner ] || owner=''
   case "$record" in *updated_at=*) ;; *) return 1 ;; esac
   at=${record#*updated_at=}
   at=${at%% *}
   case "$at" in ''|*[!0-9]*) return 1 ;; esac
   age=$(( $(date +%s) - at ))
   [ "$age" -ge 0 ] && [ "$age" -lt "$EPOCH_FRESH" ] || return 1
-  printf '%s' "$owner"
+  printf '%s %s' "$condition" "$owner"
 }
 
 block_stop() {
-  local afk x_mode reason rule unresolved_owner
+  local afk x_mode reason rule unresolved_fault unresolved_condition unresolved_owner
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -210,13 +227,21 @@ block_stop() {
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
-      if unresolved_owner=$(fresh_unresolved_ancestry_owner); then
-        if [ -n "$unresolved_owner" ]; then
-          printf '●  Cause: the automatic arm cannot resolve its own session, so it reads this home as owned by another live session (recorded owner pid %s) and refuses on every turn. It will not recover on its own.\n' \
-            "$unresolved_owner"
-        else
-          printf '●  Cause: the automatic arm cannot resolve its own session, so it cannot prove it owns this home and refuses on every turn. It will not recover on its own.\n'
-        fi
+      if unresolved_fault=$(fresh_unresolved_ancestry_fault); then
+        unresolved_condition=${unresolved_fault%% *}
+        unresolved_owner=${unresolved_fault#* }
+        case "$unresolved_condition" in
+          live-owner)
+            printf '●  Cause: the automatic arm cannot resolve its own session, so it reads this home as owned by another live session (recorded owner pid %s) and refuses on every turn. It will not recover on its own.\n' \
+              "$unresolved_owner"
+            ;;
+          infra-lock)
+            printf '●  Cause: the automatic arm cannot resolve its own session, and this home lock still records Claude Code shared infrastructure rather than any session, so it refuses on every turn. A session start must rewrite the lock; it will not recover on its own.\n'
+            ;;
+          *)
+            printf '●  Cause: the automatic arm cannot resolve its own session, so it cannot prove it owns this home and refuses on every turn. It will not recover on its own.\n'
+            ;;
+        esac
       fi
     fi
     printf '●  %s\n' "$reason"

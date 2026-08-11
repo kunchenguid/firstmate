@@ -747,11 +747,23 @@ test_open_captain_decision_stale_is_bounded_not_wedged() {
   printf '%s' "$open" | grep -F 'api-shape' >/dev/null \
     || fail "the fleet-wide open-decision fold lost the decision while its pane was absorbed: '$open'"
 
+  # And visible to the OTHER consumer of the same durable state. The watcher's
+  # absorb decision folds through the cursor bin/fm-wake-drain.sh shares, so the
+  # drain's own fold must still report the same open decision after the watcher
+  # has advanced that cursor past the line which opened it. An implementation
+  # that advanced the offset without persisting the open set would satisfy every
+  # assertion above and lose the decision here.
+  open=$(scan_open_decisions_incremental "$state")
+  printf '%s' "$open" | grep -F 'api-shape' >/dev/null \
+    || fail "the wake drain's incremental fold lost the decision after the watcher advanced the shared cursor: '$open'"
+
   # Divergence: once the decision is resolved the pane is an ordinary quiet crew
   # again, so the suppression must end rather than persist.
   printf 'resolved [key=api-shape]: keep v1\n' >> "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
   [ -z "$(scan_open_decisions "$state")" ] || fail "a resolved decision stayed open in the fold"
+  [ -z "$(scan_open_decisions_incremental "$state")" ] \
+    || fail "a resolved decision stayed open in the wake drain's incremental fold"
   status_idle_is_declared "$statusf" \
     && fail "a resolved decision kept the pane on the declared-idle cadence"
   unset FM_FAKE_CREW_STATE
@@ -1008,6 +1020,70 @@ test_open_captain_decision_dead_holder_recheck_names_the_exited_agent() {
   grep -F "awaiting external" "$out" >/dev/null \
     && fail "a dead decision-holder's recheck was mislabeled an external wait: $(cat "$out")"
   pass "the long recheck for a decision-holder whose agent exited names the exit, not the unanswered decision"
+}
+
+# Run the away daemon's own startup migration over <state> in an isolated shell.
+# The daemon's main loop is skipped when it is sourced rather than executed, so
+# this drives the real reconcile through its real entry point without starting a
+# blocking daemon.
+away_daemon_migrate_pause_markers() {  # <state>
+  bash -c '
+    set -u
+    . "$1"
+    migrate_watcher_pause_markers "$2"
+  ' _ "$ROOT/bin/fm-supervise-daemon.sh" "$1"
+}
+
+# The AFK round trip owns the same durable markers the watcher does, so the two
+# must agree on what clearing pause tracking means. When the away daemon
+# reconciles a decision-holder's markers it drops the pause and stale state; if
+# it left the one-shot death record behind, the returning watcher would find a
+# crew it has never surfaced already marked as surfaced, and absorb a dead crew
+# for a whole re-surface window. A crew that writes needs-decision: and then dies
+# must not become invisible, by any route.
+test_open_captain_decision_dead_crew_survives_an_afk_round_trip() {
+  local dir state fakebin out capture_file statusf window key pid
+  local pane_hash sig
+  dir=$(make_case open-decision-afk-roundtrip); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'idle bare shell after agent exit' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'needs-decision [key=api-shape]: keep v1 or break it\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  seed_surfaced_dead_decision_holder "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    || fail "the dead decision-holder did not surface its death once: $(cat "$out")"
+  [ -e "$state/.decision-dead-$key" ] || fail "the one-shot death marker was not recorded"
+  [ -e "$state/.paused-$key" ] || fail "the dead holder was not put on the bounded cadence"
+
+  # Away: the daemon takes over supervision and reconciles the watcher's markers.
+  away_daemon_migrate_pause_markers "$state" \
+    || fail "the away daemon's pause-marker migration failed"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "the away daemon did not reconcile the watcher's pause tracking"
+  [ ! -e "$state/.decision-dead-$key" ] \
+    || fail "the away daemon cleared pause tracking but left the one-shot death record behind"
+
+  # Back: the crew is still dead and this watcher has surfaced nothing, so the
+  # death must surface again rather than be absorbed as already handled.
+  rm -f "$state/.watcher-down"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "a still-dead decision-holder was silently absorbed after an AFK round trip: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the returning watcher printed no stale wake for the still-dead crew: $(cat "$out")"
+  pass "a dead decision-holder is not made invisible by an AFK round trip"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -2195,6 +2271,7 @@ test_open_captain_decision_park_then_die_still_surfaces
 test_open_captain_decision_class_ends_when_the_crew_moves_again
 test_open_captain_decision_death_surfaces_once_across_an_unknown_read
 test_open_captain_decision_dead_holder_recheck_names_the_exited_agent
+test_open_captain_decision_dead_crew_survives_an_afk_round_trip
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

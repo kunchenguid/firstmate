@@ -1626,7 +1626,7 @@ test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record() {
   : > "$dir/state/task1.meta"
   record="$dir/state/.claude-autoarm-unresolved-ancestry"
 
-  printf 'owner_pid=424242 updated_at=1\n' > "$record"
+  printf 'owner_pid=424242 condition=live-owner updated_at=1\n' > "$record"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
   expect_code 2 "$status" "a stale fault record must not change whether the guard blocks"
   assert_contains "$out" "Stop-owned auto-arm did not claim" "the generic unclaimed line must still be reported"
@@ -1640,12 +1640,48 @@ test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record() {
 
   # Divergence: the same record written for THIS Stop event is exactly what the
   # banner exists to name, so the freshness bound must not silence it.
-  printf 'owner_pid=424242 updated_at=%s\n' "$(date +%s)" > "$record"
+  printf 'owner_pid=424242 condition=live-owner updated_at=%s\n' "$(date +%s)" > "$record"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
   expect_code 2 "$status" "a current fault record must not change whether the guard blocks"
   assert_contains "$out" "cannot resolve its own session" "a current fault must be named as the cause"
   assert_contains "$out" "424242" "a current fault must name the recorded owner pid"
   pass "fm-turnend-guard --claude: the unresolvable-session cause is named only while its record is current"
+}
+
+# The record carries which lock condition the auto-arm actually declined on, and
+# only a verified live competing owner may be rendered as one. A shared-daemon
+# pid or an already-dead pid presented as "owned by another live session" is a
+# confident misdiagnosis, and the freshness bound cannot catch it because that
+# bounds the record's own age, never the pid's liveness.
+test_hook_claude_mode_banner_never_calls_a_non_live_pid_a_live_session() {
+  local dir out status record condition
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unresolved-condition")
+  : > "$dir/state/task1.meta"
+  record="$dir/state/.claude-autoarm-unresolved-ancestry"
+
+  for condition in infra-lock unclaimable; do
+    printf 'owner_pid=none condition=%s updated_at=%s\n' "$condition" "$(date +%s)" > "$record"
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "a recorded $condition fault must not change whether the guard blocks"
+    assert_contains "$out" "cannot resolve its own session" "a current $condition fault must still be named as the cause"
+    case "$out" in
+      *"owned by another live session"*)
+        fail "a $condition fault was reported as a competing live session: $out" ;;
+    esac
+  done
+
+  # An infrastructure lock names the one repair that actually clears it.
+  printf 'owner_pid=none condition=infra-lock updated_at=%s\n' "$(date +%s)" > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+  assert_contains "$out" "shared infrastructure" "an infrastructure lock must be named as the lock condition"
+
+  # A record written before the condition field existed could only ever have
+  # described the live-owner case, so a bare pid still reads that way.
+  printf 'owner_pid=424242 updated_at=%s\n' "$(date +%s)" > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+  assert_contains "$out" "owned by another live session" "a legacy bare-pid record lost its live-owner meaning"
+  assert_contains "$out" "424242" "a legacy bare-pid record lost the owner pid"
+  pass "fm-turnend-guard --claude: only a verified live competing owner is reported as one"
 }
 
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
@@ -1730,4 +1766,5 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget
 test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record
+test_hook_claude_mode_banner_never_calls_a_non_live_pid_a_live_session
 test_hook_claude_mode_secondmate_reblocks_like_primary
