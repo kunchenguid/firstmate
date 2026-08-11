@@ -404,7 +404,7 @@ test_treehouse_lease_lifecycle() {
     --mode no-mistakes --yolo off 2>&1); status=$?
   expect_code 1 "$status" "failed Treehouse acquisition should abort"
   assert_contains "$out" "treehouse fixture acquisition failed" "spawn discarded Treehouse acquisition diagnostics"
-  assert_contains "$out" "treehouse get did not enter a worktree within 60s" "spawn dropped its public acquisition error"
+  assert_contains "$out" "treehouse get failed to acquire a worktree lease for task lease-error-jj0" "spawn dropped its public acquisition error"
 
   mkdir -p "$home/data/lease-nonzero-kk1"
   printf 'brief\n' > "$home/data/lease-nonzero-kk1/brief.md"
