@@ -71,10 +71,10 @@
 #   fm-certify.sh <task-id> [--json]
 #       Certify a task from its own durable record: its live task state while it
 #       has any, and its terminal ledger record once teardown has removed that.
-#   fm-certify.sh --repo <path> --branch <name> [--maker-harness H]
-#                 [--maker-model M] [--mode MODE] [--head SHA] [--pr URL] [--json]
-#       Certify explicit bytes. Every argument names WHICH BYTES to look at or
-#       WHO MADE them; none of them can assert a result.
+#   fm-certify.sh <task-id> [--repo <path>] [--branch <name>]
+#                 [--head SHA] [--pr URL] [--json]
+#       Certify explicit bytes. Every option names WHICH BYTES to look at;
+#       none of them can assert a result or applicability.
 #   fm-certify.sh --help
 #
 # Exit status is the verdict, so a caller that ignores stdout still stops safely:
@@ -140,9 +140,6 @@ while [ "$#" -gt 0 ]; do
     --json) MODE_OUT=json; shift ;;
     --repo) [ "$#" -ge 2 ] || die "--repo needs a value"; REPO=$2; shift 2 ;;
     --branch) [ "$#" -ge 2 ] || die "--branch needs a value"; BRANCH=$2; shift 2 ;;
-    --maker-harness) [ "$#" -ge 2 ] || die "--maker-harness needs a value"; MAKER_HARNESS=$2; shift 2 ;;
-    --maker-model) [ "$#" -ge 2 ] || die "--maker-model needs a value"; MAKER_MODEL=$2; shift 2 ;;
-    --mode) [ "$#" -ge 2 ] || die "--mode needs a value"; MODE=$2; shift 2 ;;
     --head) [ "$#" -ge 2 ] || die "--head needs a value"; HEAD=$2; shift 2 ;;
     --pr) [ "$#" -ge 2 ] || die "--pr needs a value"; PR=$2; shift 2 ;;
     # There is deliberately no argument that sets a predicate result, an
@@ -405,6 +402,8 @@ if [ "$MODE" = local-only ]; then
   add_row pr-checks NOT_APPLICABLE \
     "this route lands locally and opens no pull request, so no check rollup exists to read" \
     local-only
+elif [ -z "$MODE" ]; then
+  add_row pr-checks NO_VERIFIER_RAN "the delivery route could not be determined, so pull-request check applicability could not be established"
 elif [ -z "$PR" ]; then
   add_row pr-checks NO_VERIFIER_RAN "no pull request was recorded, so no check rollup could be read"
 else

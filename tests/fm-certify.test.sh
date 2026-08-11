@@ -38,6 +38,8 @@ make_case() {  # <name> [fork: yes|no] [declare-mapping: yes|no]
   if [ "$fork" = yes ]; then
     git -C "$dir/repo" remote set-url --push origin https://example.invalid/fork.git
   fi
+  printf 'project=%s\nworktree=%s\nmode=local-only\nharness=claude\nmodel=opus\n' \
+    "$dir/repo" "$dir/repo" > "$dir/state/subject.meta"
   printf '%s\n' "$dir"
 }
 
@@ -46,12 +48,44 @@ make_case() {  # <name> [fork: yes|no] [declare-mapping: yes|no]
 squeezed() { printf '%s' "$1" | tr -s ' '; }
 
 certify() {  # <case_dir> [args...]
-  local dir=$1
+  local dir=$1 task=subject
   shift
+  if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    task=$1
+    shift
+  fi
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
   FM_STATE_OVERRIDE="$dir/state" FM_PIPELINE_STATE_DB="$dir/pipeline.sqlite" \
   FM_CERTIFY_ATTEST="${FM_CERTIFY_ATTEST:-}" \
-    "$CERTIFY" "$@"
+    "$CERTIFY" "$task" "$@"
+}
+
+test_mode_is_derived_from_the_durable_record() {
+  local dir out
+  dir=$(make_case derived-mode yes yes)
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): mode is derived from the durable record with no caller override"; return; }
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha || true)
+  assert_contains "$out" "pr-checks(local-only)" \
+    "derived mode: the durable local-only route did not make pull-request checks not applicable"
+  pass "mode is derived from the durable record with no caller override"
+}
+
+test_underivable_mode_is_could_not_observe() {
+  local dir out
+  dir=$(make_case underivable-mode yes yes)
+  printf 'project=%s\nworktree=%s\nharness=claude\nmodel=opus\n' \
+    "$dir/repo" "$dir/repo" > "$dir/state/subject.meta"
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha || true)
+  assert_contains "$(squeezed "$out")" "pr-checks could-not-observe the delivery route could not be determined" \
+    "underivable mode: the missing delivery route was not reported could-not-observe"
+  case "$out" in
+    *"pr-checks(local-only)"*)
+      fail "underivable mode: an unknown route was reported not-applicable:"$'\n'"$out" ;;
+  esac
+  pass "underivable mode reads could-not-observe and never not-applicable"
 }
 
 # --- the three observation values, each reachable ----------------------------
@@ -64,8 +98,7 @@ test_an_independent_checker_certifies() {
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
     || { pass "SKIP (python3 unavailable): an independent checker certifies"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 0 ] || fail "certified: an independent checker did not certify (rc=$rc):"$'\n'"$out"
   assert_contains "$out" "state=LANDED_AND_CERTIFIED" \
     "certified: the certified state was not reported"
@@ -82,8 +115,7 @@ test_a_shared_pool_refuses_and_names_the_dimension() {
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|anthropic|claude-fable-5" \
     || { pass "SKIP (python3 unavailable): a shared pool refuses"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 3 ] || fail "shared pool: expected an observed-unmet refusal (3), got $rc:"$'\n'"$out"
   assert_contains "$out" "state=LANDED_WITH_VERIFICATION_GAP" \
     "shared pool: the gap state was not reported"
@@ -100,8 +132,7 @@ test_missing_verifier_identity_refuses_as_unobserved() {
   local dir out rc
   dir=$(make_case unobserved yes yes)
   # No pipeline record at all for these bytes: the identity was never captured.
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/never-validated \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/never-validated) && rc=0 || rc=$?
   [ "$rc" = 4 ] || fail "unobserved: expected a could-not-observe refusal (4), got $rc:"$'\n'"$out"
   assert_contains "$out" "state=LANDED_WITH_VERIFICATION_GAP" \
     "unobserved: the gap state was not reported"
@@ -124,8 +155,7 @@ test_undeclared_mapping_refuses_rather_than_inferring() {
   # The reviewing vendor "openai" differs from the making vendor's name, and
   # the registry declares no mapping relating the two vocabularies. Differing
   # names are NOT evidence of two vendors.
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 4 ] || fail "undeclared: expected a could-not-observe refusal (4), got $rc:"$'\n'"$out"
   assert_contains "$out" "vendor:could-not-observe" \
     "undeclared: the vendor dimension was not named as unobservable"
@@ -147,8 +177,7 @@ test_a_review_with_no_recorded_session_is_could_not_observe() {
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol||none" \
     || { pass "SKIP (python3 unavailable): an unrecorded session is could-not-observe"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 4 ] || fail "unsessioned: expected a could-not-observe refusal (4), got $rc:"$'\n'"$out"
   assert_contains "$out" "process:could-not-observe" \
     "unsessioned: a review with no recorded session was not could-not-observe"
@@ -175,8 +204,7 @@ test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one() {
     "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|openai|gpt-5.6-sol||none" \
     || { pass "SKIP (python3 unavailable): an unobserved run is not masked"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 4 ] || fail "sibling: a masked unobserved run certified (rc=$rc):"$'\n'"$out"
   assert_contains "$out" "process:could-not-observe" \
     "sibling: a run with no recorded session was masked by one that had them"
@@ -196,8 +224,7 @@ test_a_run_that_never_reached_the_review_step_weakens_the_branch() {
     "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|||none" \
     || { pass "SKIP (python3 unavailable): a run that never reviewed weakens the branch"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 4 ] || fail "never-reviewed: a run with no reviewing invocation certified anyway (rc=$rc):"$'\n'"$out"
   assert_contains "$out" "process:could-not-observe" \
     "never-reviewed: a run that never reviewed was dropped instead of weakening the branch"
@@ -222,8 +249,7 @@ test_a_cancelled_run_does_not_decide_the_branch() {
     "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|anthropic|claude-opus-5|review||cancelled" \
     || { pass "SKIP (python3 unavailable): a cancelled run does not decide the branch"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 0 ] || fail "cancelled: a cancelled run decided a certifiable branch (rc=$rc):"$'\n'"$out"
   case "$out" in
     *"pool:not-independent"*)
@@ -250,8 +276,7 @@ test_an_absent_reviewing_identity_never_becomes_evidence() {
   fm_test_pipeline_db "$sessioned/pipeline.sqlite" "$sessioned/repo" "fm/alpha||" \
     || { pass "SKIP (python3 unavailable): an absent identity never fabricates a dependence"; return; }
 
-  out=$(certify "$sessioned" --repo "$sessioned/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  out=$(certify "$sessioned" --repo "$sessioned/repo" --branch fm/alpha || true)
   case "$(squeezed "$out")" in
     *"process not-independent"*)
       fail "absent identity: a dependence was fabricated from an unrecorded identity:"$'\n'"$out" ;;
@@ -271,8 +296,7 @@ test_an_absent_reviewing_identity_never_becomes_evidence() {
   unsessioned=$(make_case absent-identity-unsessioned yes yes)
   fm_test_pipeline_db "$unsessioned/pipeline.sqlite" "$unsessioned/repo" "fm/alpha||||none" \
     || fail "absent identity: the unsessioned fixture failed"
-  out=$(certify "$unsessioned" --repo "$unsessioned/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  out=$(certify "$unsessioned" --repo "$unsessioned/repo" --branch fm/alpha || true)
   case "$(squeezed "$out")" in
     *"not-independent"*)
       fail "absent identity: a run with no identity and no session reported a dependence:"$'\n'"$out" ;;
@@ -295,8 +319,7 @@ test_an_observed_attestation_failure_is_not_labelled_not_independent() {
   printf '#!/bin/sh\necho "no note covers those bytes"\nexit 1\n' > "$dir/attest"
   chmod +x "$dir/attest"
 
-  out=$(FM_CERTIFY_ATTEST="$dir/attest" certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only --head deadbeef) && rc=0 || rc=$?
+  out=$(FM_CERTIFY_ATTEST="$dir/attest" certify "$dir" --repo "$dir/repo" --branch fm/alpha --head deadbeef) && rc=0 || rc=$?
   [ "$rc" = 3 ] || fail "attestation-unmet: expected an observed-unmet refusal (3), got $rc:"$'\n'"$out"
   assert_contains "$out" "gap=attestation:unmet" \
     "attestation-unmet: the gap did not name the predicate neutrally"
@@ -320,7 +343,7 @@ test_an_unreadable_repository_is_could_not_observe_not_a_refusal() {
   chmod +x "$dir/attest"
 
   out=$(FM_CERTIFY_ATTEST="$dir/attest" certify "$dir" --repo "$dir/repo-moved-away" \
-    --branch fm/alpha --maker-harness claude --maker-model opus --mode local-only \
+    --branch fm/alpha \
     --head deadbeef || true)
   assert_contains "$(squeezed "$out")" "attestation could-not-observe" \
     "unreadable: an unenterable repository was not could-not-observe"
@@ -345,8 +368,7 @@ test_an_observed_failure_is_never_softened_by_an_unobservable_sibling() {
   dims=$(make_case observed-over-unobservable yes no)
   fm_test_pipeline_db "$dims/pipeline.sqlite" "$dims/repo" "fm/alpha|openai|gpt-5.6-sol|review|1" \
     || { pass "SKIP (python3 unavailable): an observed failure is never softened"; return; }
-  out=$(certify "$dims" --repo "$dims/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dims" --repo "$dims/repo" --branch fm/alpha) && rc=0 || rc=$?
   [ "$rc" = 3 ] || fail "asymmetry: an observed dependence was softened to unmeasured (rc=$rc):"$'\n'"$out"
   assert_contains "$out" "process:not-independent" \
     "asymmetry: the observed dependence was not named"
@@ -359,8 +381,7 @@ test_an_observed_failure_is_never_softened_by_an_unobservable_sibling() {
   printf '#!/bin/sh\necho "no note covers those bytes"\nexit 1\n' > "$certify_fold/attest"
   chmod +x "$certify_fold/attest"
   out=$(FM_CERTIFY_ATTEST="$certify_fold/attest" certify "$certify_fold" \
-    --repo "$certify_fold/repo" --branch fm/never-validated \
-    --maker-harness claude --maker-model opus --mode local-only --head deadbeef) && rc=0 || rc=$?
+    --repo "$certify_fold/repo" --branch fm/never-validated --head deadbeef) && rc=0 || rc=$?
   [ "$rc" = 3 ] || fail "asymmetry: an observed unmet predicate reported as unmeasured (rc=$rc):"$'\n'"$out"
   assert_contains "$out" "attestation:unmet" \
     "asymmetry: the observed unmet predicate was not named in the gap"
@@ -377,8 +398,7 @@ test_not_applicable_is_carried_with_its_route() {
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
     || { pass "SKIP (python3 unavailable): not-applicable carries its route"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha) && rc=0 || rc=$?
 
   # A fork-landing branch is deliberately unsigned, so its missing attestation
   # is the route working as designed - not a gap in the evidence.
@@ -410,12 +430,10 @@ test_not_applicable_is_distinct_from_unobserved_on_the_same_predicate() {
   fm_test_pipeline_db "$direct/pipeline.sqlite" "$direct/repo" "fm/alpha|openai|gpt-5.6-sol" \
     || fail "distinct: the direct-route fixture failed"
 
-  fork_out=$(certify "$fork" --repo "$fork/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  fork_out=$(certify "$fork" --repo "$fork/repo" --branch fm/alpha || true)
   # The SAME predicate on a route that CAN be signed and simply was not read:
   # that is could-not-observe, and it must read differently from the fork case.
-  direct_out=$(certify "$direct" --repo "$direct/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  direct_out=$(certify "$direct" --repo "$direct/repo" --branch fm/alpha || true)
 
   assert_contains "$(squeezed "$fork_out")" "attestation not-applicable" \
     "distinct: the fork route did not report not-applicable"
@@ -434,7 +452,7 @@ test_no_argument_can_assert_a_certification_result() {
   # There must be no way to hand this command a verdict. Each of these would be
   # a writable escape hatch out of the predicate it exists to enforce.
   for flag in --certified --state --independence --independent --not-applicable \
-      --skip-independence --assume-independent; do
+      --skip-independence --assume-independent --mode --maker-harness --maker-model; do
     out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha "$flag" yes 2>&1) \
       && fail "unassertable: $flag was accepted, so certification is still writable"
     case "$out" in
@@ -452,8 +470,7 @@ test_historical_records_are_never_backfilled() {
   # verifier identity was never captured. It must stay could-not-observe rather
   # than acquiring a plausible identity, because a backfilled guess is
   # indistinguishable from a real observation afterwards.
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/from-before \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/from-before || true)
   assert_contains "$out" "process:could-not-observe" \
     "historical: a run with no recorded identity did not stay could-not-observe"
   case "$out" in
@@ -664,8 +681,7 @@ test_the_provenance_never_names_a_source_nobody_consulted() {
   # than that it is never set.
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
     || { pass "SKIP (python3 unavailable): provenance names only a consulted source"; return; }
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha --mode local-only \
-    --maker-harness claude --maker-model opus || true)
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha || true)
   assert_contains "$out" "derived live" \
     "provenance: a read that did happen was not reported as a derivation"
   pass "the provenance names a source only when that source was actually consulted"
@@ -681,8 +697,7 @@ test_an_unreadable_run_status_is_not_read_as_still_running() {
     "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|||none||none" \
     || { pass "SKIP (python3 unavailable): an unreadable run status"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha || true)
   case "$out" in
     *"still in flight"*)
       fail "unreadable status: a run whose state is unknown was reported as merely still going:"$'\n'"$out" ;;
@@ -696,8 +711,7 @@ test_an_unreadable_run_status_is_not_read_as_still_running() {
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
     "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|||none||running" \
     || fail "unreadable status: the running fixture failed"
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only || true)
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha || true)
   assert_contains "$out" "still in flight (status running)" \
     "unreadable status: a genuinely in-flight run stopped saying so"
   pass "a run whose status could not be read is not reported as still running"
@@ -717,7 +731,7 @@ test_an_underived_route_is_never_reported_as_a_route() {
     || fail "underived-route: a route was named without reading a push target:"$'\n'"$out"
 
   # The positive form: a repository that IS read reports the route it observed.
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha --mode local-only --json || true)
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha --json || true)
   printf '%s' "$out" | jq -e '.landing_route == "direct"' >/dev/null \
     || fail "underived-route: an observed direct route was not reported:"$'\n'"$out"
   pass "a route that was never read is reported as none, not as direct"
@@ -730,8 +744,7 @@ test_json_form_carries_every_dimension_and_the_route() {
   fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|anthropic|claude-fable-5" \
     || { pass "SKIP (python3 unavailable): json form"; return; }
 
-  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
-    --maker-harness claude --maker-model opus --mode local-only --json || true)
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha --json || true)
   printf '%s' "$out" | jq -e '.state == "LANDED_WITH_VERIFICATION_GAP"' >/dev/null \
     || fail "json: the state was not carried:"$'\n'"$out"
   printf '%s' "$out" | jq -e '[.independence[].dimension] == ["process","model","vendor","pool","overall"]' >/dev/null \
@@ -753,6 +766,8 @@ test_json_form_carries_every_dimension_and_the_route() {
   pass "the machine form carries every dimension, the gap, the route, and per-step identity"
 }
 
+test_mode_is_derived_from_the_durable_record
+test_underivable_mode_is_could_not_observe
 test_an_independent_checker_certifies
 test_a_shared_pool_refuses_and_names_the_dimension
 test_missing_verifier_identity_refuses_as_unobserved
