@@ -19,11 +19,22 @@
 # the task onto a trunk missing the code it edits. Neither single ref satisfies
 # both roles, so both are resolved, recorded, and stated separately.
 #
-# Sourced by bin/fm-spawn.sh (resolves and records them) and bin/fm-brief.sh
-# (states them to the worker). Depends on bin/fm-ff-lib.sh for default_branch
-# and primary_head_commit, and on bin/fm-landed-lib.sh for the
-# fetch-url-versus-push-url comparison both libraries reason about and for the
-# name of the ref that holds the fork trunk when the local branch lags.
+# Sourced by bin/fm-spawn.sh (resolves and records them), bin/fm-brief.sh
+# (states them to the worker), and bin/fm-pr-check.sh (compares a pull request
+# against the venue the spawn recorded). It sources bin/fm-landed-lib.sh itself,
+# for the fetch-url-versus-push-url comparison both libraries reason about and
+# for the name of the ref that holds the fork trunk when the local branch lags,
+# and bin/fm-timeout-lib.sh, for the bound on its one external read.
+#
+# IT SPLITS IN TWO ALONG THE ONE DEPENDENCY IT DOES NOT SOURCE. Everything that
+# reads a ref - task_base_resolve, task_base_upstream_ref, task_base_venue,
+# task_base_verify_branch - reaches default_branch and primary_head_commit from
+# bin/fm-ff-lib.sh, so a caller of those must source that lib first. The
+# identity half - task_base_venue_identity and task_base_venue_identity_alias -
+# is string and ssh-config work over a URL and needs nothing else, and
+# bin/fm-pr-check.sh sources this lib for that half alone. Bash resolves
+# function names at call time, so a caller reaching past its half gets a
+# runtime `default_branch: command not found` rather than a failure to source.
 #
 # task_base_resolve <repo-dir> sets, and clears first:
 #   TASK_BASE_SLOT          slot base commit SHA
@@ -62,6 +73,8 @@ TASK_BASE_VENUE='' TASK_BASE_VENUE_URL=''
 
 # shellcheck source=bin/fm-landed-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-landed-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
 # Name the remote-tracking ref that holds the UPSTREAM trunk, when this repo
 # contributes somewhere other than where it pushes. Two shapes are recognized:
@@ -218,8 +231,15 @@ task_base_venue_identity() {  # <url>
 # two accounts at the same forge, and it names the venue "gh-work/owner/repo"
 # while every pull request raised at that repository is "github.com/owner/repo".
 # The alias is addressing, not identity, exactly like the port stripped above.
-# Resolution is LOCAL and read-only: `ssh -G` prints the effective client
-# configuration and contacts nothing.
+#
+# Resolution reads configuration rather than the forge: `ssh -G` prints the
+# effective client configuration and opens no connection to the repository. It
+# is NOT inert, though - it evaluates any `Match exec` block in the user's
+# ssh_config, which runs a shell command, and it can resolve names under
+# CanonicalizeHostname. This sits on the landing path, where an unbounded read
+# would stall every arm and every merge routed through bin/fm-pr-check.sh, so it
+# goes through the repo's own hard bound and an expired read simply yields no
+# alternative identity.
 #
 # This is an ALTERNATIVE identity, never a replacement. A caller compares
 # against the literal identity AND this one, because a configuration that
@@ -228,6 +248,9 @@ task_base_venue_identity() {  # <url>
 # Prints the resolved identity, or returns 1 when there is nothing to resolve: a
 # non-SSH transport, no ssh to ask, a host name that is not a plain alias, or a
 # host that resolves to itself.
+TASK_BASE_SSH_CONFIG_TIMEOUT=${FM_TASK_BASE_SSH_CONFIG_TIMEOUT:-5}
+case "$TASK_BASE_SSH_CONFIG_TIMEOUT" in ''|*[!0-9]*|0) TASK_BASE_SSH_CONFIG_TIMEOUT=5 ;; esac
+
 task_base_venue_identity_alias() {  # <url>
   local url=${1-} rest host resolved identity
   case $url in
@@ -250,7 +273,8 @@ task_base_venue_identity_alias() {  # <url>
     '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
   esac
   command -v ssh >/dev/null 2>&1 || return 1
-  resolved=$(ssh -G "$host" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }') || return 1
+  resolved=$(fm_run_timed "$TASK_BASE_SSH_CONFIG_TIMEOUT" ssh -G "$host" 2>/dev/null \
+    | awk '$1 == "hostname" { print $2; exit }') || return 1
   [ -n "$resolved" ] && [ "$resolved" != "$host" ] || return 1
   identity=$(task_base_venue_identity "$url") || return 1
   printf '%s/%s\n' "$resolved" "${identity#*/}" | tr '[:upper:]' '[:lower:]'

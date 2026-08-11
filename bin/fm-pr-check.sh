@@ -119,19 +119,22 @@ fi
 # contradiction, so the recorded contribution_venue_url= is also compared with
 # its alias resolved. It is an ADDITIONAL accepted spelling and never a
 # replacement: the owner and repository still have to agree, so the fork-versus-
-# upstream contradiction this guard exists for is refused either way.
+# upstream contradiction this guard exists for is refused either way. The
+# resolution reads the local ssh configuration, so it runs only in the one
+# branch that needs it - never for a task with no venue, the unresolved
+# sentinel, or a venue that already matches literally.
 VENUE=$(grep '^contribution_venue=' "$RECORD" | tail -1 | cut -d= -f2- || true)
 VENUE_URL=$(grep '^contribution_venue_url=' "$RECORD" | tail -1 | cut -d= -f2- || true)
 PR_VENUE=$(printf '%s/%s' "$HOST" "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')
-VENUE_ALIAS=
-[ -z "$VENUE_URL" ] || VENUE_ALIAS=$(task_base_venue_identity_alias "$VENUE_URL" || true)
 if [ -z "$VENUE" ]; then
   printf 'venue: unchecked (task %s records no contribution venue)\n' "$ID"
 elif [ "$VENUE" = unresolved ]; then
   printf 'venue: unchecked (task %s recorded its contribution venue as unresolved)\n' "$ID"
 elif [ "$VENUE" = "$PR_VENUE" ]; then
   printf 'venue: %s matches the recorded contribution venue\n' "$PR_VENUE"
-elif [ -n "$VENUE_ALIAS" ] && [ "$VENUE_ALIAS" = "$PR_VENUE" ]; then
+elif [ -n "$VENUE_URL" ] \
+  && VENUE_ALIAS=$(task_base_venue_identity_alias "$VENUE_URL") \
+  && [ "$VENUE_ALIAS" = "$PR_VENUE" ]; then
   printf 'venue: %s matches the recorded contribution venue %s, whose host is an ssh alias for it\n' \
     "$PR_VENUE" "$VENUE"
 else

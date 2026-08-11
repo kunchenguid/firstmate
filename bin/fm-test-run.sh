@@ -914,6 +914,15 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
+    bin/fm-task-base-lib.sh)
+      # A task's two base references and the venue identity derived from them.
+      # tests/fm-task-base.test.sh owns the derivation (pure-contract-unit), and
+      # bin/fm-pr-check.sh sources this lib for the venue guard whose ssh-alias
+      # coverage lives in tests/fm-pr-check-security.test.sh (pr-forge). The
+      # basename scan finds only the first, so the second is named here.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' pr-forge
+      ;;
     bin/fm-nm-run-lib.sh|bin/fm-timeout-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
