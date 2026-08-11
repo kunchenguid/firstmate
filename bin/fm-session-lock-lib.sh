@@ -200,6 +200,37 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# True when $1 is a live process that is one of Claude Code's shared
+# infrastructure processes rather than a session.
+#
+# This exists for the MIGRATION window, and a session lock is the one place that
+# window must not be waved through. Before infrastructure was excluded from
+# harness identity, the daemon was itself a valid contiguous match, so
+# fm_harness_ancestry_pid could return the shared daemon's pid and a home's
+# state/.lock could legitimately hold it. After the exclusion that recorded pid
+# fails fm_harness_pid_alive, which alone would make the lock read as a dead
+# owner - and a dead owner is claimable. A fleet self-update lands on every home
+# at once, so that would open the same window everywhere simultaneously, and the
+# failure it permits is the exact one this lock exists to prevent: two live
+# sessions both believing they own one home. So an infrastructure pid is
+# recognized as STALE BUT NOT CLAIMABLE - not a valid session owner, and not
+# evidence any hook may arm on. The record is left for the ordinary session-start
+# lock acquisition to replace with a real session pid.
+fm_harness_pid_is_infra() {  # <pid>
+  local pid=$1 comm args base argv0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_harness_is_infra "$args" || return 1
+  base=$(basename -- "$comm")
+  printf '%s' "$base" | grep -qE "$FM_HARNESS_RE" && return 0
+  argv0=${args%% *}
+  fm_harness_path_name "$comm" >/dev/null && return 0
+  fm_harness_path_name "$argv0" >/dev/null && return 0
+  return 1
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args

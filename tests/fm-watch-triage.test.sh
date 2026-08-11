@@ -881,6 +881,135 @@ test_open_captain_decision_class_ends_when_the_crew_moves_again() {
   pass "the open-decision cadence ends when the crew moves again, while the decision itself stays open"
 }
 
+# Seed a decision-holder whose agent has already exited, and drive one bounded
+# watcher pass so the death is surfaced and the one-shot marker recorded. Leaves
+# the durable state a later phase continues from, and returns with the queue
+# acknowledged and the watcher-downtime recovery state consumed.
+seed_surfaced_dead_decision_holder() {  # <state> <fakebin> <out> <capture-file> <window>
+  local state=$1 fakebin=$2 out=$3 capture_file=$4 window=$5 pid
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; return 1; }
+  grep -F "stale: $window" "$out" >/dev/null || return 1
+  ack_stopped_cycle "$state" || return 1
+  rm -f "$state/.watcher-down"
+  return 0
+}
+
+# The death of a decision-holder is surfaced exactly ONCE. fm_backend_agent_alive
+# answers `unknown` for every ambiguous, unreadable or unverified read, not only
+# for a genuinely indeterminate one, so a transient backend read must not retire
+# the one-shot marker: if it did, the next confident `dead` read would surface the
+# same death again, and a flapping backend would end an armed cycle every time -
+# the exact symptom this class exists to remove.
+test_open_captain_decision_death_surfaces_once_across_an_unknown_read() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case open-decision-dead-flap); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'idle bare shell after agent exit' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'needs-decision [key=api-shape]: keep v1 or break it\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  seed_surfaced_dead_decision_holder "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    || fail "the dead decision-holder did not surface its death once: $(cat "$out")"
+  [ -e "$state/.decision-dead-$key" ] || fail "the one-shot death marker was not recorded"
+
+  # Phase 2: an AMBIGUOUS read of the same unchanged pane. A foreground command
+  # that is neither a shell nor a harness is exactly what the backend reports as
+  # ambiguous, which reaches this classifier as `unknown`.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=node FM_FAKE_CREW_STATE='state: unknown · source: none · unreadable' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "an ambiguous liveness read re-surfaced an already-surfaced death: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ -e "$state/.decision-dead-$key" ] \
+    || fail "an ambiguous liveness read retired the one-shot death marker"
+  [ ! -s "$out" ] || fail "an ambiguous liveness read printed a wake: $(cat "$out")"
+  rm -f "$state/.watcher-down"
+
+  # Phase 3: confidently dead again. Without the marker this is a second surface.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "the same death surfaced a second time after an ambiguous read: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a re-confirmed death printed a second wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a re-confirmed death enqueued a second wake"
+  pass "a decision-holder's death surfaces exactly once even when liveness reads flap through unknown"
+}
+
+# Once the holder's agent has exited, the long recheck must name what firstmate
+# can actually do. Telling it to answer the decision and close the key would
+# restart nothing, which is the same defect as calling a captain decision an
+# external wait: a wake reason naming the wrong action.
+test_open_captain_decision_dead_holder_recheck_names_the_exited_agent() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case open-decision-dead-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'idle bare shell after agent exit' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'needs-decision [key=api-shape]: keep v1 or break it\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  seed_surfaced_dead_decision_holder "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    || fail "the dead decision-holder did not surface its death once: $(cat "$out")"
+
+  # Age the decision past the re-surface window and clear the throttle, so the
+  # next pass is the long recheck rather than another first surface.
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  rm -f "$state/.paused-resurfaced-$key"
+  : > "$out"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "the dead decision-holder never reached its long recheck: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the recheck printed no stale wake: $(cat "$out")"
+  grep -F "agent has EXITED" "$out" >/dev/null \
+    || fail "the recheck for a dead decision-holder did not say its agent had exited: $(cat "$out")"
+  grep -F "FIRSTMATE owes this crew the answer" "$out" >/dev/null \
+    && fail "the recheck told firstmate to answer a decision whose holder had exited: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a dead decision-holder's recheck was mislabeled an external wait: $(cat "$out")"
+  pass "the long recheck for a decision-holder whose agent exited names the exit, not the unanswered decision"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -2064,6 +2193,8 @@ test_open_captain_decision_stale_is_bounded_not_wedged
 test_open_captain_decision_dead_crew_still_surfaces
 test_open_captain_decision_park_then_die_still_surfaces
 test_open_captain_decision_class_ends_when_the_crew_moves_again
+test_open_captain_decision_death_surfaces_once_across_an_unknown_read
+test_open_captain_decision_dead_holder_recheck_names_the_exited_agent
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

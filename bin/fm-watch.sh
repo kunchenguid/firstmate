@@ -352,7 +352,9 @@ busy_turn_over_age() {  # <task>
 # outside firstmate, and the recheck asks whether that wait still holds. An open
 # captain decision is the opposite: firstmate itself owes the answer, so the
 # recheck names the decision key rather than telling firstmate to confirm an
-# external wait it is not waiting on.
+# external wait it is not waiting on. Once that decision holder's own death has
+# been surfaced, answering the decision would restart nothing, so the recheck
+# names the exited agent instead of asking for an answer.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason dkey what
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -366,7 +368,10 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   dkey=$(status_parked_decision_key "$statusf") || dkey=''
-  if [ -n "$dkey" ]; then
+  if [ -n "$dkey" ] && [ -e "$STATE/.decision-dead-$key" ]; then
+    what="open decision key=$dkey, holder's agent exited"
+    reason="stale: $win (open decision key=$dkey ${age}s, and this crew's agent has EXITED - answering the decision restarts nothing; inspect the window and respawn or retire the crew, then close the key with fm-send --resolve-key $dkey)"
+  elif [ -n "$dkey" ]; then
     what="open decision key=$dkey"
     reason="stale: $win (parked ${age}s on open decision key=$dkey - FIRSTMATE owes this crew the answer, rechecked on a long cadence not a wedge; answer it and close the key with fm-send --resolve-key $dkey)"
   else
@@ -430,9 +435,12 @@ pause_state_class() {  # <window> <task>
     # is written the moment the pane goes on the bounded cadence. A crew that
     # writes needs-decision: and then dies must never become invisible, so the
     # death gets its own surface - once, tracked by .decision-dead-<key>, after
-    # which the pane returns to the bounded cadence rather than spamming. The
-    # marker is cleared as soon as the agent is seen alive again, so a restarted
-    # crew that dies a second time surfaces again.
+    # which the pane returns to the bounded cadence rather than spamming.
+    # Only a CONFIDENT live verdict retires that marker. fm_backend_agent_alive
+    # answers unknown for every ambiguous, unreadable or unverified read as well
+    # as for a genuinely indeterminate one, so retiring on anything but alive
+    # would let a flapping backend re-surface the same death every cycle - the
+    # very every-cycle-ends symptom this class exists to remove.
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" = dead ]; then
@@ -442,7 +450,7 @@ pause_state_class() {  # <window> <task>
           printf 'dead'
           return
         fi
-      else
+      elif [ "$agent_alive" = alive ]; then
         rm -f "$STATE/.decision-dead-$key"
       fi
     fi

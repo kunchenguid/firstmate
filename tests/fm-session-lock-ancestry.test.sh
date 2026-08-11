@@ -531,6 +531,51 @@ test_e2e_competing_live_session_stays_silently_inert() {
   pass "session-lock e2e: a genuine competing live session is refused and clears any stale fault record"
 }
 
+# A home locked before harness identity was narrowed can hold the shared daemon's
+# pid, because the daemon was itself a valid contiguous match then. After the
+# narrowing that pid is no longer a live harness, and a lock whose owner is not
+# live is CLAIMABLE - so a different live session's Stop hook could take a home
+# another live session is working in. A fleet self-update lands on every home at
+# once, so this would open that window everywhere simultaneously. It must be
+# stale but NOT claimable: recognized as no valid session owner, and no grounds
+# to arm, left for the ordinary session-start acquisition to replace.
+test_e2e_pre_upgrade_daemon_pid_lock_is_stale_but_not_claimable() {
+  local dir infra recorded
+  dir="$TMP_ROOT/e2e-daemon-pid-lock"
+  make_primary_home "$dir"
+  bash -c 'exec -a "claude daemon run --json-path /tmp/fixture-daemon.json" sleep 60' &
+  infra=$!
+  FM_FIXTURE_LOCK_PID="$infra" run_fixture_tree "$dir" "$NAMED_CLAUDE"
+  kill "$infra" 2>/dev/null || true
+  wait "$infra" 2>/dev/null || true
+  expect_code 0 "$(hook_rc "$dir")" "a lock recording shared infrastructure must leave the hook inert"
+  [ ! -e "$dir/state/arm-ran" ] \
+    || fail "a Stop hook armed a home whose lock records Claude's shared infrastructure"
+  recorded=$(tr -d '[:space:]' < "$dir/state/.lock" 2>/dev/null || true)
+  [ "$recorded" = "$infra" ] \
+    || fail "a pre-upgrade infrastructure lock was claimed by a Stop hook: .lock now holds '$recorded'"
+  pass "session-lock e2e: a pre-upgrade lock recording shared infrastructure is stale but never claimable"
+}
+
+# The fault record exists so a permanently unclaimable home cannot look like
+# routine silence. The live-recorded-owner branch is not the only decline a
+# daemon-hosted firing reaches: a home whose lock is missing or malformed
+# declines just as permanently, with the same unknowable ownership and the same
+# frozen epoch ledger, so it must be diagnosed the same way.
+test_e2e_unresolvable_ancestry_is_recorded_on_a_malformed_lock() {
+  local dir
+  dir="$TMP_ROOT/e2e-unresolvable-malformed-lock"
+  make_primary_home "$dir"
+  FM_FIXTURE_LOCK_PID=not-a-pid run_fixture_tree "$dir" /bin/bash
+  expect_code 0 "$(hook_rc "$dir")" "a malformed lock must leave the hook inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a malformed lock was armed on anyway"
+  [ -s "$dir/$UNRESOLVED_MARKER" ] \
+    || fail "an unresolvable firing declining on a malformed lock left no durable record"
+  grep -q 'owner_pid=none' "$dir/$UNRESOLVED_MARKER" \
+    || fail "the record invented an owner it never deferred to: $(cat "$dir/$UNRESOLVED_MARKER")"
+  pass "session-lock e2e: an unresolvable firing records the fault on a malformed lock too"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
@@ -539,6 +584,8 @@ test_daemon_worker_chain_is_never_session_ancestry
 test_harness_above_the_daemon_is_never_this_sessions_ancestry
 test_e2e_version_named_session_claims_the_home
 test_e2e_unresolvable_ancestry_is_recorded_not_silent
+test_e2e_unresolvable_ancestry_is_recorded_on_a_malformed_lock
 test_e2e_competing_live_session_stays_silently_inert
+test_e2e_pre_upgrade_daemon_pid_lock_is_stale_but_not_claimable
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

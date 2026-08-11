@@ -153,8 +153,11 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 2
 fi
 
-# Print the recorded owner pid of a CURRENT unresolved-ancestry fault, or
-# return 1. The record is durable and self-healing, so it can outlive the
+# Succeed when a CURRENT unresolved-ancestry fault is recorded, printing the
+# owner pid it deferred to, or nothing when the record names no usable owner
+# (the auto-arm writes the literal "none" for a decline with no recorded owner
+# to defer to, such as a missing or malformed lock).
+# The record is durable and self-healing, so it can outlive the
 # condition it describes: it is only rewritten when the auto-arm fires again and
 # hits the same fault, and only removed when a later firing claims or refuses
 # with a resolvable ancestry. A record left by a transient or already-corrected
@@ -173,7 +176,10 @@ fresh_unresolved_ancestry_owner() {
   case "$record" in owner_pid=*) ;; *) return 1 ;; esac
   owner=${record#owner_pid=}
   owner=${owner%% *}
-  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  case "$owner" in
+    none) owner='' ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
   case "$record" in *updated_at=*) ;; *) return 1 ;; esac
   at=${record#*updated_at=}
   at=${at%% *}
@@ -205,8 +211,12 @@ block_stop() {
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
       if unresolved_owner=$(fresh_unresolved_ancestry_owner); then
-        printf '●  Cause: the automatic arm cannot resolve its own session, so it reads this home as owned by another live session (recorded owner pid %s) and refuses on every turn. It will not recover on its own.\n' \
-          "$unresolved_owner"
+        if [ -n "$unresolved_owner" ]; then
+          printf '●  Cause: the automatic arm cannot resolve its own session, so it reads this home as owned by another live session (recorded owner pid %s) and refuses on every turn. It will not recover on its own.\n' \
+            "$unresolved_owner"
+        else
+          printf '●  Cause: the automatic arm cannot resolve its own session, so it cannot prove it owns this home and refuses on every turn. It will not recover on its own.\n'
+        fi
       fi
     fi
     printf '●  %s\n' "$reason"
