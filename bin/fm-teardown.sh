@@ -60,33 +60,38 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# ALSO REFUSES while a no-mistakes run this task owns is still alive, because
-# teardown deletes state/<id>.meta - the only record that attributes a run to a
-# task (nm_watch_run=, written by bin/fm-nm-watch.sh) - and the backlog row with
-# it. A run left behind at that point has no owner: it keeps re-notifying on the
-# park reminder cascade forever with nobody able to say whose it is, and holds a
-# daemon slot while it waits. Two such runs sat parked for over a day here,
-# re-notified 33 and 27 times, one of them belonging to a task already torn down.
-# Refusing rather than reaping is deliberate: aborting a run that may still be
-# doing useful work is irreversible, and teardown already refuses rather than
-# discard work it cannot prove is finished.
-# A run counts as this task's from exactly two sources - the recorded
-# nm_watch_run= id, and the repository's active run when it reports the task
-# worktree's own branch - so a run the captain started elsewhere is never
-# touched; nm_task_run_ids below owns why the branch comparison is load-bearing.
-# A run whose state cannot be determined (no-mistakes absent, query failure or
-# timeout, a status this build does not know) is reported as a warning naming the
-# run id and does NOT refuse: a false refusal would push the operator to --force,
-# which also skips the dirty and unlanded-work checks.
-# The single exception to the refusal is the run that is finished work rather
-# than work in progress: the recorded nm_watch_run= whose own recorded PR/MR the
-# provider reports as merged. Nothing in no-mistakes ends such a watch, so
-# teardown ends it and says so instead of refusing over it; nm_settle_task_runs
-# owns how narrow that is, and bin/fm-poll-lib.sh's fm_poll_end_watch_run owns
-# why a landed PR retires its watch at all.
-# --force reaps instead of refusing (`no-mistakes axi abort --run <id>`), since
-# forced teardown is the one path that both has explicit discard authority and
-# would otherwise be the surest way to create an orphan.
+# Teardown does NOT refuse over a live no-mistakes run this task owns. That
+# refusal existed here until 2026-08-11 and was withdrawn by the captain's
+# ruling, recorded in the upstream sync's decision record, so this file matches
+# upstream: a run with an autonomous step still under way is left alone, and the
+# task's records are removed around it. The cost is known and accepted - deleting
+# state/<id>.meta deletes the only record that attributes a run to a task
+# (nm_watch_run=, written by bin/fm-nm-watch.sh), so a run left behind has no
+# owner and keeps re-notifying on the park reminder cascade with nobody able to
+# say whose it is (two such runs sat parked for over a day here, re-notified 33
+# and 27 times). Attribution now rests on bin/fm-bootstrap.sh's nm_orphan_scan,
+# which finds such runs afterwards rather than preventing them, and only for the
+# runs THIS home armed: its ledger is written by bin/fm-nm-watch.sh, so a
+# branch-matched pipeline run that no watch ever armed is outside it and is
+# covered here only by conclude_task_no_mistakes_run's already-parked case.
+# Do not reintroduce a refusal here without a new captain ruling.
+# What teardown still does with the runs it can attribute to this task - by the
+# recorded nm_watch_run= id, or by the repository's active run reporting the task
+# worktree's own branch, so a run the captain started elsewhere is never touched
+# (nm_task_run_ids below owns why the branch comparison is load-bearing):
+#   - names every live one it is leaving behind, on the way out, because that
+#     line is the last place the run is attributable at all;
+#   - warns the same way about a run whose state cannot be determined
+#     (no-mistakes absent, query failure or timeout, a status this build does not
+#     know), rather than guessing it is finished;
+#   - ends the recorded nm_watch_run= whose own recorded PR/MR the provider
+#     reports as merged. Nothing in no-mistakes ends such a watch, and it holds
+#     no work and edits no code, so ending it is finishing it; nm_settle_task_runs
+#     owns how narrow that is, and bin/fm-poll-lib.sh's fm_poll_end_watch_run
+#     owns why a landed PR retires its watch at all.
+# --force additionally reaps (`no-mistakes axi abort --run <id>`), since forced
+# teardown is the one path that both has explicit discard authority and would
+# otherwise be the surest way to create an orphan.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, discards secondmate child work for kind=secondmate, and aborts the
@@ -1367,9 +1372,9 @@ validate_worktree_teardown_safety() {
 }
 
 # --- no-mistakes runs this task owns ---------------------------------------
-# See the script header for why teardown refuses over a live run and reaps only
-# under --force. Everything below decides two things: which runs are THIS task's,
-# and whether each of them is still alive.
+# See the script header for what teardown does with a live run and why it reaps
+# only under --force. Everything below decides two things: which runs are THIS
+# task's, and whether each of them is still alive.
 NM_BIN="${FM_NM_BIN:-no-mistakes}"
 NM_QUERY_TIMEOUT_SECS="${FM_NM_QUERY_TIMEOUT_SECS:-20}"
 case "$NM_QUERY_TIMEOUT_SECS" in ''|0|*[!0-9]*) NM_QUERY_TIMEOUT_SECS=20 ;; esac
@@ -1462,8 +1467,8 @@ nm_run_liveness() {  # <run-id>
 # answers for the REPOSITORY, so a run the captain started on another branch of
 # the same clone is what comes back whenever the task's own branch has none.
 # bin/fm-crew-state.sh's nm_runs_status_for_branch header owns the verified
-# record of that CLI behavior. Without the comparison teardown would refuse over
-# - and under --force abort - a run that was never its own.
+# record of that CLI behavior. Without the comparison teardown would report - and
+# under --force abort - a run that was never its own.
 nm_task_run_ids() {
   local recorded out branch run_branch run_id
   recorded=$(meta_value "$META" nm_watch_run)
@@ -1558,10 +1563,12 @@ task_status_is_terminal_run() {  # <axi-status-output> <run-id>
   return 1
 }
 
-# Refuse (or, under --force, reap) the runs this task still owns, so its record
-# is never deleted while a run that only this record could attribute is alive.
+# Settle the runs this task still owns before its record is deleted: end the
+# watch run that has nothing left to watch, reap under --force, and name every
+# other live one on the way out. It never refuses - see the script header for
+# the ruling that removed the refusal and for what carries attribution now.
 nm_settle_task_runs() {
-  local ids id state rc live_status live_branch out recorded refused=0
+  local ids id state rc live_status live_branch out recorded
   case "$KIND" in
     secondmate) return 0 ;;
   esac
@@ -1579,10 +1586,9 @@ nm_settle_task_runs() {
     case "$rc" in
       "$NM_RUN_TERMINAL") continue ;;
       "$NM_RUN_UNKNOWN")
-        # Not a refusal: teardown must stay possible where no-mistakes is absent
-        # or unreachable, and a false refusal would push the operator to --force,
-        # which also skips the dirty and unlanded-work checks. Printing the id is
-        # what keeps the run attributable after the meta that named it is gone.
+        # Never guessed to be finished: teardown must stay possible where
+        # no-mistakes is absent or unreachable, and printing the id is what keeps
+        # the run attributable after the meta that named it is gone.
         echo "teardown: WARNING: cannot determine the state of no-mistakes run $id owned by task $ID; if it is still alive, reap it with: $NM_BIN axi abort --run $id" >&2
         continue
         ;;
@@ -1592,7 +1598,10 @@ nm_settle_task_runs() {
       # --force is the captain's explicit discard authority, and forced teardown
       # is exactly where an orphan is otherwise born: the record naming the run
       # is about to be deleted along with the work it was validating.
-      out=$(nm_axi abort --run "$id")
+      # The abort's own exit status is deliberately ignored: what it PRINTED is
+      # classified below, and an unreachable daemon must warn, never abort the
+      # teardown itself under set -e.
+      out=$(nm_axi abort --run "$id") || true
       case "$out" in
         *'aborted: true'*)
           echo "teardown: aborted no-mistakes run $id (${live_status:-alive}${live_branch:+ on $live_branch}) owned by task $ID"
@@ -1604,24 +1613,26 @@ nm_settle_task_runs() {
       continue
     fi
 
-    # Backstop for the one live run that is finished work rather than work in
-    # progress: the escalate-only watch whose PR/MR has already landed. Nothing
-    # in no-mistakes ends such a run - a parked watch stops polling, so the merge
-    # never reaches it - and bin/fm-poll-lib.sh's fm_poll_end_watch_run, which
-    # owns that reasoning, ends it at the merge the armed poll observes. This
-    # catches the merge that poll never saw: a poll that was never armed or was
-    # already disarmed, an ending that failed, or a merge firstmate learned about
-    # some other way.
-    # Deliberately narrow, so the refusal below keeps its full reach:
+    # The one live run that is finished work rather than work in progress: the
+    # escalate-only watch whose PR/MR has already landed. Nothing in no-mistakes
+    # ends such a run - a parked watch stops polling, so the merge never reaches
+    # it - and bin/fm-poll-lib.sh's fm_poll_end_watch_run, which owns that
+    # reasoning, ends it at the merge the armed poll observes. This catches the
+    # merge that poll never saw: a poll that was never armed or was already
+    # disarmed, an ending that failed, or a merge firstmate learned about some
+    # other way.
+    # Deliberately narrow, because ending a run is irreversible:
     #   - only the id the meta records as this task's watch run, never the
     #     branch-matched active run, which can be a gate run doing real work;
     #   - only when the provider says this task's own recorded PR/MR is merged,
-    #     so a watch that still has something to watch refuses exactly as before;
-    #   - and an ending that does not take falls straight through to the refusal.
+    #     so a watch that still has something to watch is left running;
+    #   - and an ending that does not take is reported rather than assumed.
     # A watch run whose PR has landed holds no work and edits no code, so ending
     # it is finishing it, not discarding it - which is why this needs no --force.
     if [ "$id" = "$recorded" ] && nm_recorded_pr_is_merged; then
-      out=$(nm_axi abort --run "$id")
+      # Same as the --force abort above: the printed answer is what decides,
+      # so a failed call warns instead of ending the teardown under set -e.
+      out=$(nm_axi abort --run "$id") || true
       case "$out" in
         *'aborted: true'*|*'no active run with that id'*)
           echo "teardown: ended no-mistakes watch run $id (${live_status:-alive}${live_branch:+ on $live_branch}) owned by task $ID: its PR/MR has merged, so the watch had nothing left to watch"
@@ -1631,16 +1642,15 @@ nm_settle_task_runs() {
       echo "teardown: WARNING: could not end no-mistakes watch run $id owned by task $ID after its PR/MR merged; reap it with: $NM_BIN axi abort --run $id" >&2
     fi
 
-    echo "REFUSED: no-mistakes run $id is still ${live_status:-alive}${live_branch:+ on $live_branch} and belongs to task $ID." >&2
-    echo "Tearing down now would delete the only record naming it, leaving a run nobody can attribute." >&2
-    echo "Read it with '$NM_BIN axi status --run $id' (or '$NM_BIN parked'), answer its gate, or end it with '$NM_BIN axi abort --run $id', then tear down again." >&2
-    echo "Do not reach for --force to get past this: --force also skips the dirty and unlanded-work checks." >&2
-    refused=1
+    # Left running on purpose. This line is the last moment the run is
+    # attributable to this task, so it names the run, its state, and the command
+    # that ends it; after this teardown the only thing that still finds it is
+    # bin/fm-bootstrap.sh's nm_orphan_scan.
+    echo "teardown: WARNING: no-mistakes run $id is still ${live_status:-alive}${live_branch:+ on $live_branch} and belongs to task $ID, whose records are being removed now; read it with '$NM_BIN axi status --run $id' (or '$NM_BIN parked'), or end it with '$NM_BIN axi abort --run $id'" >&2
   done <<EOF
 $ids
 EOF
 
-  [ "$refused" -eq 0 ] || return 1
   return 0
 }
 
@@ -2778,8 +2788,9 @@ fi
 
 # After the work checks and before anything destructive: the worktree and its
 # branch must still exist for a branch-matched run to be recognized as this
-# task's, and the refusal has to land before the meta that names the run is gone.
-nm_settle_task_runs || exit 1
+# task's, and every line this prints has to land while the meta still names the
+# run. It never refuses, so it never blocks the teardown below.
+nm_settle_task_runs
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a

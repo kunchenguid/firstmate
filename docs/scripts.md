@@ -120,7 +120,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-nm-orphan-scan.sh`   | Report a no-mistakes run this home armed that is parked with no live task left to answer it |
 | `fm-pr-merge.sh`         | Record PR/MR metadata, then merge through the detected provider seam                 |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, refuse while the task's own no-mistakes run is alive, conclude a run parked with nobody left to answer it, retire secondmate homes, close the task's backlog row |
+| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, conclude a run parked with nobody left to answer it, end the watch run whose PR has landed, retire secondmate homes, close the task's backlog row |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |

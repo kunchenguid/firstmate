@@ -61,24 +61,25 @@
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 #
-# Also covers the live no-mistakes run teardown must not orphan: deleting the
-# meta deletes nm_watch_run=, the only record attributing a run to a task, so a
-# run left alive at teardown has no owner and keeps re-notifying forever.
-#   (n1) recorded nm_watch_run= still running        -> REFUSE, meta preserved
-#   (n2) active run on the task's own branch         -> REFUSE
-#   (n3) active run on ANOTHER branch of same repo   -> ALLOW, never inspected
-#   (n4) same, under --force                         -> never aborted
-#   (n5) recorded run already completed              -> ALLOW, never aborted
-#   (n6) run state undeterminable                    -> WARN with the id, ALLOW
-#   (n7) live own run under --force                  -> aborted, then ALLOW
-# And the one live run that is finished work rather than work in progress: the
-# recorded watch run whose own PR/MR has already merged. Nothing in no-mistakes
-# ends such a run, so teardown ends it instead of refusing over it - narrowly,
-# which is what (n9) to (n11) hold in place.
-#   (n8)  recorded watch run live, its PR merged     -> ENDED, then ALLOW
-#   (n9)  recorded watch run live, PR still open     -> REFUSE (unchanged)
-#   (n10) branch-matched run live, PR merged         -> REFUSE, never ended
-#   (n11) PR merged but the ending fails             -> REFUSE, run not orphaned
+# Also covers what teardown does with a live no-mistakes run it can attribute to
+# the task. It does NOT refuse: that refusal was withdrawn by the captain's
+# ruling of 2026-08-11 (see bin/fm-teardown.sh's header), so this file matches
+# upstream and the run is left alive while the task's records go away. These
+# cases pin the accepted cost in place, so reintroducing a refusal is a visible
+# decision rather than a quiet one.
+#   (n1) recorded nm_watch_run= still running        -> ALLOW, run named on exit
+#   (n2) active run on ANOTHER branch of same repo   -> ALLOW, never inspected
+#   (n3) same, under --force                         -> never aborted
+#   (n4) recorded run already completed              -> ALLOW, never aborted
+#   (n5) run state undeterminable                    -> WARN with the id, ALLOW
+#   (n6) live own run under --force                  -> aborted, then ALLOW
+# And the one live run teardown does end: the recorded watch run whose own PR/MR
+# has already merged, which holds no work and edits no code. Nothing in
+# no-mistakes ends such a run. The ending stays narrow, which is what (n8) to
+# (n9) hold in place.
+#   (n7) recorded watch run live, its PR merged      -> ENDED, then ALLOW
+#   (n8) branch-matched run live, PR merged          -> never ended, still ALLOW
+#   (n9) PR merged but the ending fails              -> WARN, still ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1699,8 +1700,13 @@ SH
 }
 
 # --- live no-mistakes runs owned by the task --------------------------------
+# The captain ruled on 2026-08-11 that a live run never blocks teardown, so
+# there is no case here asserting a refusal, and the previous
+# test_branch_matched_live_run_refuses is gone with the behavior it pinned.
+# What is left is the accepted cost, asserted explicitly: teardown completes,
+# and the last line naming the run is the last time anything can attribute it.
 
-test_recorded_live_watch_run_refuses() {
+test_recorded_live_watch_run_never_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-recorded-live)
   write_meta "$case_dir" direct-PR ship
@@ -1712,19 +1718,18 @@ test_recorded_live_watch_run_refuses() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "nm-recorded-live: teardown should refuse while the recorded run is alive"
+  expect_code 0 "$rc" "nm-recorded-live: a live recorded run must not block teardown: $(cat "$case_dir/stderr")"
   assert_grep "no-mistakes run 01KRUNLIVE0001 is still running" "$case_dir/stderr" \
-    "nm-recorded-live: the refusal did not name the run and its status"
+    "nm-recorded-live: teardown dropped the run id silently on the way out"
   assert_grep "axi abort --run 01KRUNLIVE0001" "$case_dir/stderr" \
-    "nm-recorded-live: the refusal did not say how to end the run"
+    "nm-recorded-live: the warning did not say how to end the run"
   assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
-    "nm-recorded-live: teardown aborted a run it was only supposed to refuse over"
-  [ -f "$case_dir/state/task-x1.meta" ] \
-    || fail "nm-recorded-live: teardown deleted the record that attributes the run"
-  pass "a live no-mistakes run recorded for the task refuses teardown instead of being orphaned"
+    "nm-recorded-live: teardown aborted a live run without --force"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-recorded-live: teardown did not complete"
+  pass "a live recorded run is named on the way out and never blocks teardown"
 }
 
-test_branch_matched_live_run_refuses() {
+test_branch_matched_live_run_never_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-branch-live)
   write_meta "$case_dir" no-mistakes ship
@@ -1736,10 +1741,13 @@ test_branch_matched_live_run_refuses() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "nm-branch-live: teardown should refuse over the branch's own live run"
+  expect_code 0 "$rc" "nm-branch-live: a live run on the task's own branch must not block teardown: $(cat "$case_dir/stderr")"
   assert_grep "01KRUNLIVE0002 is still running on fm/task-x1" "$case_dir/stderr" \
-    "nm-branch-live: the refusal did not identify the branch-matched run"
-  pass "a live gate run on the task's own branch refuses teardown even with no recorded run id"
+    "nm-branch-live: teardown did not identify the branch-matched run it left alive"
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-branch-live: teardown aborted a run that may still be doing real work"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-branch-live: teardown did not complete"
+  pass "a live gate run on the task's own branch never blocks teardown"
 }
 
 # The negative case that makes the branch comparison load-bearing: `axi status`
@@ -1879,7 +1887,7 @@ test_landed_pr_ends_the_recorded_watch_run() {
   pass "a live watch run whose PR/MR has merged is ended by teardown instead of blocking it"
 }
 
-test_unlanded_pr_still_refuses_over_the_watch_run() {
+test_unlanded_pr_leaves_the_watch_run_running() {
   local case_dir rc
   case_dir=$(make_case nm-watch-open)
   write_meta "$case_dir" direct-PR ship
@@ -1893,14 +1901,13 @@ test_unlanded_pr_still_refuses_over_the_watch_run() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "nm-watch-open: a watch run on a PR that has not landed must still refuse teardown"
+  expect_code 0 "$rc" "nm-watch-open: an unlanded PR must not block teardown either: $(cat "$case_dir/stderr")"
   assert_grep "no-mistakes run 01KRUNOPEN0001 is still running" "$case_dir/stderr" \
-    "nm-watch-open: the refusal did not name the run"
+    "nm-watch-open: teardown did not name the watch run it left alive"
   assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
     "nm-watch-open: teardown ended a watch run that still had something to watch"
-  [ -f "$case_dir/state/task-x1.meta" ] \
-    || fail "nm-watch-open: teardown deleted the record that attributes the run"
-  pass "a watch run whose PR has not landed still refuses teardown, exactly as before"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-watch-open: teardown did not complete"
+  pass "a watch run whose PR has not landed is left running rather than ended"
 }
 
 test_landed_pr_never_ends_a_branch_matched_run() {
@@ -1919,13 +1926,15 @@ test_landed_pr_never_ends_a_branch_matched_run() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "nm-watch-gate-run: a branch-matched run must still refuse teardown when the PR has merged"
+  expect_code 0 "$rc" "nm-watch-gate-run: teardown must complete over a branch-matched run: $(cat "$case_dir/stderr")"
   assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
     "nm-watch-gate-run: teardown ended a run that was never recorded as this task's watch"
+  assert_grep "01KRUNGATE0001 is still running" "$case_dir/stderr" \
+    "nm-watch-gate-run: teardown left the run alive without naming it"
   pass "a landed PR never ends a run this task owns only by branch match"
 }
 
-test_failed_ending_still_refuses() {
+test_failed_ending_warns_and_completes() {
   local case_dir rc
   case_dir=$(make_case nm-watch-end-fails)
   write_meta "$case_dir" direct-PR ship
@@ -1956,14 +1965,13 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "nm-watch-end-fails: an ending that did not take must fall through to the refusal"
+  expect_code 0 "$rc" "nm-watch-end-fails: a failed ending must not block teardown: $(cat "$case_dir/stderr")"
   assert_grep "could not end no-mistakes watch run 01KRUNSTUCK001" "$case_dir/stderr" \
     "nm-watch-end-fails: the failed ending was not reported"
   assert_grep "no-mistakes run 01KRUNSTUCK001 is still running" "$case_dir/stderr" \
-    "nm-watch-end-fails: teardown proceeded over a run it failed to end"
-  [ -f "$case_dir/state/task-x1.meta" ] \
-    || fail "nm-watch-end-fails: teardown deleted the record that attributes the run"
-  pass "an ending that does not take still refuses rather than orphaning the run"
+    "nm-watch-end-fails: teardown left the run alive without naming it a second time"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-watch-end-fails: teardown did not complete"
+  pass "an ending that does not take is reported, and teardown still completes"
 }
 
 # Flat (non-projected) Herdr endpoint whose fake pane exists until a locked
@@ -3199,17 +3207,17 @@ EOF
 }
 
 test_local_only_fork_remote_allows
-test_recorded_live_watch_run_refuses
-test_branch_matched_live_run_refuses
+test_recorded_live_watch_run_never_refuses
+test_branch_matched_live_run_never_refuses
 test_other_branch_live_run_is_not_this_tasks
 test_forced_teardown_never_aborts_another_branchs_run
 test_terminal_recorded_run_allows_teardown
 test_undeterminable_run_warns_without_refusing
 test_force_reaps_the_tasks_live_run
 test_landed_pr_ends_the_recorded_watch_run
-test_unlanded_pr_still_refuses_over_the_watch_run
+test_unlanded_pr_leaves_the_watch_run_running
 test_landed_pr_never_ends_a_branch_matched_run
-test_failed_ending_still_refuses
+test_failed_ending_warns_and_completes
 test_teardown_moves_github_pr_row_to_done
 test_teardown_records_codebase_mr_via_note
 test_teardown_reports_backlog_write_failure_loudly
