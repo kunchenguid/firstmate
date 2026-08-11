@@ -267,10 +267,9 @@ meta_incarnation() { # <meta>
     printf '%s\n' "$incarnation"
     return
   fi
-  if [ "$(uname)" = Darwin ]; then
-    identity=$(stat -f '%d:%i:%m:%c' "$meta" 2>/dev/null || true)
-  else
-    identity=$(stat -c '%d:%i:%Y:%Z' "$meta" 2>/dev/null || true)
+  identity=$(meta_field "$meta" tasktmp)
+  if [ -z "$identity" ]; then
+    identity="$(meta_field "$meta" window)|$(meta_field "$meta" worktree)"
   fi
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
 }
@@ -321,8 +320,11 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
   append_once "$destination" "$line"
 }
 
-reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload state_rc=0
+reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  kind=$(meta_field "$meta" kind)
+  [ "$kind" = secondmate ] && return 0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
@@ -362,8 +364,17 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
+reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
+  local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  reconcile_direct_child_locked "$id" "$meta" "$self" "$timeout" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
-  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id kind remaining rc
+  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -374,8 +385,6 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
     esac
     [ "$(date +%s)" -lt "$deadline" ] || return 3
     write_scan_marker "$id" || return 1
-    kind=$(meta_field "$meta" kind)
-    [ "$kind" = secondmate ] && continue
     remaining=$((deadline - $(date +%s)))
     [ "$remaining" -gt 0 ] || return 3
     reconcile_direct_child "$id" "$meta" "$self" "$remaining" || {

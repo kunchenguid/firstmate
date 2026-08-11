@@ -193,6 +193,77 @@ test_reused_task_id_reports_each_incarnation() {
   pass "reused task ids retain per-incarnation terminal receipts"
 }
 
+# Legacy metadata has no generation, so its stable per-spawn temp root preserves
+# the same receipt identity across supported atomic metadata rewrites.
+test_legacy_metadata_rewrite_keeps_receipt_identity() {
+  local meta tmp
+  make_world legacy-rewrite; bind_secondmate remote
+  write_child "$MATE" child 'failed: terminal' spawn-old
+  meta="$MATE/state/child.meta"
+  tmp="$MATE/state/.child.meta.legacy"
+  awk '$0 !~ /^spawn_gen=/' "$meta" > "$tmp"
+  printf 'tasktmp=/tmp/fm-child\n' >> "$tmp"
+  mv "$tmp" "$meta"
+  age "$meta"
+
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  awk '{ print }' "$meta" > "$tmp"
+  mv "$tmp" "$meta"
+  age "$meta"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail "legacy metadata rewrite changed the terminal receipt identity"
+  [ "$(grep -c 'inactive-outcome-mate-child-failed' "$MATE/state/parent-replies.status")" = 1 ] \
+    || fail "legacy metadata rewrite duplicated the parent report"
+  pass "legacy metadata rewrites preserve terminal receipt identity"
+}
+
+# Reconciliation snapshots terminal state and incarnation under the same task
+# lifecycle lock used by relaunch metadata publication.
+test_relaunch_cannot_replace_metadata_during_state_snapshot() {
+  local recon_pid update_pid record i
+  make_world relaunch-race; bind_secondmate remote
+  write_child "$MATE" child 'failed: terminal' spawn-old
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_RACE_WORLD:?}/state-started"
+while [ ! -e "$FM_RACE_WORLD/state-release" ]; do sleep 0.05; done
+printf 'state: failed · source: fake\n'
+SH
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh"
+
+  FM_RACE_WORLD="$WORLD" run_reconcile "$MATE" --startup &
+  recon_pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$WORLD/state-started" ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$WORLD/state-started" ] || fail "reconciliation did not begin its state snapshot"
+
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    meta="$FM_STATE_OVERRIDE/child.meta"
+    lock=$(fm_meta_lock_path "$meta")
+    fm_lock_acquire_wait "$lock"
+    awk '\''{ sub(/^spawn_gen=.*/, "spawn_gen=spawn-new"); print }'\'' "$meta" > "$meta.tmp"
+    mv "$meta.tmp" "$meta"
+    printf "working: replacement active\n" > "$FM_STATE_OVERRIDE/child.status"
+    : > "$2/meta-updated"
+    fm_lock_release "$lock"
+  ' _ "$ROOT" "$WORLD" &
+  update_pid=$!
+  i=0
+  while [ "$i" -lt 10 ] && [ ! -e "$WORLD/meta-updated" ]; do sleep 0.05; i=$((i + 1)); done
+  : > "$WORLD/state-release"
+  wait "$recon_pid" || fail "reconciliation failed during relaunch race"
+  wait "$update_pid" || fail "metadata replacement failed during relaunch race"
+
+  record=$(find "$MATE/state/terminal-outcomes" -type f -name '*.reported' | head -1)
+  [ -n "$record" ] || fail "terminal snapshot did not produce a receipt"
+  grep -Fxq 'incarnation=spawn-old' "$record" \
+    || fail "terminal result was attributed to replacement metadata"
+  pass "relaunch cannot replace metadata during terminal snapshot"
+}
+
 # Heartbeat backoff state is deliberately irrelevant to the independent cadence.
 test_heartbeat_cap_does_not_delay_reconciliation() {
   make_world heartbeat; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
@@ -347,6 +418,8 @@ test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
 test_remote_parent_reply_is_idempotent
 test_reused_task_id_reports_each_incarnation
+test_legacy_metadata_rewrite_keeps_receipt_identity
+test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
