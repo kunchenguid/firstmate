@@ -8,6 +8,7 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
+CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -286,6 +287,220 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+# Production-scale regression for snapshot-local reuse of raw no-mistakes
+# queries. Eleven task records preserve the observed 7 ship / 1 scout /
+# 3 secondmate mix. Five branched ships reduce to three exact
+# common-dir/branch/HEAD identities: scale-a and scale-b each have a duplicate,
+# while scale-c has one task. The fake returns heads absent from the repository
+# for both query forms, so the unchanged fail-closed head proof must reject every
+# row before each task independently falls back to its own status and endpoint.
+test_snapshot_reuses_raw_no_mistakes_queries_per_identity() {
+  local home repo wt_b wt_c wt_detached mate fakebin calls stderr_file expected_raw actual_raw
+  local before_manifest after_manifest out first_out second_out primary_calls coarse_calls total_calls branch branch_calls
+  home=$(make_home snapshot-query-reuse)
+  repo="$home/projects/scale-repo"
+  wt_b="$home/projects/scale-b"
+  wt_c="$home/projects/scale-c"
+  wt_detached="$home/projects/scale-detached"
+  mate="$TMP_ROOT/snapshot-query-reuse-mate"
+  calls="$TMP_ROOT/private-scale-call-ledger"
+  stderr_file="$TMP_ROOT/private-scale-stderr"
+  expected_raw="$TMP_ROOT/scale-expected-current-state"
+  actual_raw="$TMP_ROOT/scale-actual-current-state"
+  first_out="$TMP_ROOT/scale-first.json"
+  second_out="$TMP_ROOT/scale-second.json"
+
+  fm_git_init_commit "$repo"
+  git -C "$repo" branch -M scale-a
+  git -C "$repo" worktree add -q -b scale-b "$wt_b"
+  git -C "$repo" worktree add -q -b scale-c "$wt_c"
+  git -C "$repo" worktree add -q --detach "$wt_detached"
+  mkdir -p "$home/projects/plain" "$home/projects/scout"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf '09-mate\n' > "$mate/.fm-secondmate-home"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$mate/data/backlog.md"
+  printf -- '- 09-mate - scale fixture (home: %s; scope: scale fixture; projects: firstmate; added 2026-08-11)\n' \
+    "$mate" > "$home/data/secondmates.md"
+
+  fm_write_meta "$home/state/01-ship-a-blocked.meta" \
+    "window=firstmate:fm-01-ship-a-blocked" "worktree=$repo" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/02-ship-a-done.meta" \
+    "window=firstmate:fm-02-ship-a-done" "worktree=$repo" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/03-ship-b-decision.meta" \
+    "window=firstmate:fm-03-ship-b-decision" "worktree=$wt_b" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/04-ship-b-failed.meta" \
+    "window=firstmate:fm-04-ship-b-failed" "worktree=$wt_b" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/05-ship-c-working.meta" \
+    "window=firstmate:fm-05-ship-c-working" "worktree=$wt_c" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/06-ship-detached.meta" \
+    "window=firstmate:fm-06-ship-detached" "worktree=$wt_detached" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/07-ship-plain.meta" \
+    "window=firstmate:fm-07-ship-plain" "worktree=$home/projects/plain" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/08-scout.meta" \
+    "window=firstmate:fm-08-scout" "worktree=$home/projects/scout" "project=firstmate" \
+    "harness=claude" "kind=scout" "mode=scout"
+  fm_write_meta "$home/state/09-mate.meta" \
+    "window=firstmate:fm-09-mate" "worktree=$mate" "project=$mate" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "home=$mate" "projects=firstmate"
+  fm_write_meta "$home/state/10-secondmate.meta" \
+    "window=firstmate:fm-10-secondmate" "worktree=$home/projects/plain" "project=firstmate" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "home=$home/projects/plain"
+  fm_write_meta "$home/state/11-secondmate.meta" \
+    "window=firstmate:fm-11-secondmate" "worktree=$home/projects/scout" "project=firstmate" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "home=$home/projects/scout"
+
+  for branch in \
+    01-ship-a-blocked 02-ship-a-done 03-ship-b-decision 04-ship-b-failed \
+    05-ship-c-working 06-ship-detached 07-ship-plain 08-scout; do
+    record_claude_idle "$home/state" "$branch"
+  done
+  printf 'blocked [key=network]: task a remains independently blocked\n' > "$home/state/01-ship-a-blocked.status"
+  printf 'done: task a duplicate is independently complete\n' > "$home/state/02-ship-a-done.status"
+  printf 'needs-decision [key=shape]: task b awaits its own decision\n' > "$home/state/03-ship-b-decision.status"
+  printf 'failed: task b duplicate failed independently\n' > "$home/state/04-ship-b-failed.status"
+  printf 'working: task c keeps its own current event\n' > "$home/state/05-ship-c-working.status"
+  printf 'paused: detached task keeps its own external wait\n' > "$home/state/06-ship-detached.status"
+  printf 'done: plain task keeps its own terminal state\n' > "$home/state/07-ship-plain.status"
+  printf 'done: scout report complete\n' > "$home/state/08-scout.status"
+  printf 'working: registered mate remains independently current\n' > "$home/state/09-mate.status"
+  printf 'blocked [key=mate-block]: secondmate block stays task-local\n' > "$home/state/10-secondmate.status"
+  printf 'done: secondmate terminal event stays task-local\n' > "$home/state/11-secondmate.status"
+
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+case "${1:-}" in
+  axi)
+    [ "${2:-}" = status ] || exit 0
+    branch=$(git symbolic-ref --quiet --short HEAD)
+    head=$(git rev-parse HEAD)
+    printf 'primary\t%s\t%s\t%s\n' "$common" "$branch" "$head" >> "${FM_FAKE_NM_CALLS:?}"
+    sleep "${FM_FAKE_NM_LATENCY:-0.04}"
+    printf 'branch: %s\nhead: %s\nstatus: running\n' "$branch" "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
+    ;;
+  runs)
+    printf 'coarse\t%s\n' "$common" >> "${FM_FAKE_NM_CALLS:?}"
+    sleep "${FM_FAKE_NM_LATENCY:-0.04}"
+    printf 'running scale-a %s 2026-08-11\n' "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
+    printf 'running scale-b %s 2026-08-11\n' "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
+    printf 'running scale-c %s 2026-08-11\n' "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes"
+  : > "$calls"
+
+  snapshot_home_manifest() {  # <home> [<additional-home>]
+    local manifest_home
+    for manifest_home in "$@"; do
+      printf 'HOME %s\n' "$manifest_home"
+      (
+        cd "$manifest_home" || exit 1
+        find . -type d -print | LC_ALL=C sort
+        find . -type f -print | LC_ALL=C sort | while IFS= read -r file; do
+          cksum "$file"
+        done
+      )
+    done
+  }
+  before_manifest=$(snapshot_home_manifest "$home" "$mate")
+
+  export FM_FAKE_NM_CALLS="$calls"
+  export FM_FAKE_NM_LATENCY=0.04
+  export FM_FAKE_NM_UNPROVABLE_HEAD=ffffffffffffffffffffffffffffffffffffffff
+  if git -C "$repo" rev-parse --verify "${FM_FAKE_NM_UNPROVABLE_HEAD}^{commit}" >/dev/null 2>&1; then
+    fail "scale fixture's rejected no-mistakes head unexpectedly exists in the repository"
+  fi
+  : > "$expected_raw"
+  for branch in \
+    01-ship-a-blocked 02-ship-a-done 03-ship-b-decision 04-ship-b-failed \
+    05-ship-c-working 06-ship-detached 07-ship-plain 08-scout 09-mate \
+    10-secondmate 11-secondmate; do
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$CREW_STATE" "$branch" >> "$expected_raw"
+  done
+
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-11T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1786449600 \
+    "$SNAPSHOT" --json 2> "$stderr_file") \
+    || fail "scale snapshot public read failed"
+  [ ! -s "$stderr_file" ] || fail "scale snapshot leaked private diagnostics: $(cat "$stderr_file")"
+  printf '%s' "$out" > "$first_out"
+  printf '%s' "$out" | jq -r '.tasks[].current_state.raw' > "$actual_raw"
+  cmp -s "$expected_raw" "$actual_raw" \
+    || fail "snapshot-local query reuse changed task-local public current-state bytes"
+
+  primary_calls=$(awk -F '\t' '$1 == "primary" {n++} END {print n+0}' "$calls")
+  coarse_calls=$(awk -F '\t' '$1 == "coarse" {n++} END {print n+0}' "$calls")
+  total_calls=$(wc -l < "$calls" | tr -d ' ')
+  [ "$primary_calls" -eq 3 ] \
+    || fail "expected one primary query per exact identity, got $primary_calls: $(cat "$calls")"
+  [ "$coarse_calls" -eq 1 ] \
+    || fail "expected one coarse query per canonical repository, got $coarse_calls: $(cat "$calls")"
+  [ "$total_calls" -eq 4 ] || fail "unexpected no-mistakes query shape: $(cat "$calls")"
+  for branch in scale-a scale-b scale-c; do
+    branch_calls=$(awk -F '\t' -v branch="$branch" '$1 == "primary" && $3 == branch {n++} END {print n+0}' "$calls")
+    [ "$branch_calls" -eq 1 ] || fail "primary identity $branch was queried $branch_calls times"
+  done
+
+  printf '%s' "$out" | jq -e '
+    def task($id): (.tasks[] | select(.id == $id));
+    .schema == "fm-fleet-snapshot.v1"
+      and ([.tasks[].id] == [
+        "01-ship-a-blocked", "02-ship-a-done", "03-ship-b-decision",
+        "04-ship-b-failed", "05-ship-c-working", "06-ship-detached",
+        "07-ship-plain", "08-scout", "09-mate", "10-secondmate", "11-secondmate"
+      ])
+      and ([.tasks[].kind] | map(select(. == "ship")) | length) == 7
+      and ([.tasks[].kind] | map(select(. == "scout")) | length) == 1
+      and ([.tasks[].kind] | map(select(. == "secondmate")) | length) == 3
+      and task("01-ship-a-blocked").current_state.state == "blocked"
+      and task("02-ship-a-done").current_state.state == "done"
+      and task("03-ship-b-decision").current_state.state == "parked"
+      and task("04-ship-b-failed").current_state.state == "failed"
+      and task("05-ship-c-working").current_state.state == "working"
+      and all(.tasks[:5][]; .current_state.source == "status-log")
+      and task("01-ship-a-blocked").hints.blocked_event == true
+      and task("03-ship-b-decision").hints.pending_decision == true
+      and all(.tasks[]; .endpoint.exists == true)
+      and (.secondmate_current.records[] | select(.id == "09-mate")
+        | .registered == true and .provenance.summary_valid == true)
+  ' >/dev/null || fail "scale snapshot changed ordering, task truth, endpoint truth, decisions, or registered-home validity: $out"
+  printf '%s' "$out" | jq -e --arg private "$calls" '
+    [.. | strings | select(contains($private) or contains("FM_FAKE_NM_LATENCY"))] | length == 0
+  ' >/dev/null || fail "snapshot exposed private query or performance state"
+
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-11T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1786449600 \
+    "$SNAPSHOT" --json 2> "$stderr_file") \
+    || fail "repeat scale snapshot public read failed"
+  [ ! -s "$stderr_file" ] || fail "repeat scale snapshot leaked private diagnostics: $(cat "$stderr_file")"
+  printf '%s' "$out" > "$second_out"
+  cmp -s "$first_out" "$second_out" \
+    || fail "separate public snapshots with identical inputs were not byte-for-byte equivalent"
+  [ "$(awk -F '\t' '$1 == "primary" {n++} END {print n+0}' "$calls")" -eq 3 ] \
+    || fail "a later snapshot reused primary query data from an earlier snapshot"
+  [ "$(awk -F '\t' '$1 == "coarse" {n++} END {print n+0}' "$calls")" -eq 1 ] \
+    || fail "a later snapshot reused coarse query data from an earlier snapshot"
+
+  after_manifest=$(snapshot_home_manifest "$home" "$mate")
+  [ "$before_manifest" = "$after_manifest" ] \
+    || fail "public crew-state or fleet snapshot reads wrote to an operational home"
+  pass "fleet snapshot reuses only raw no-mistakes queries while preserving every task and home verdict"
 }
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
@@ -875,6 +1090,7 @@ test_large_backlog_crosses_argv_limit_via_public_interface
 test_large_task_status_crosses_argv_limit_via_public_interface
 test_large_task_metadata_crosses_argv_limit_via_public_interface
 test_fixture_snapshot_json
+test_snapshot_reuses_raw_no_mistakes_queries_per_identity
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

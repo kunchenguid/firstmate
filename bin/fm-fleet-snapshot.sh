@@ -177,6 +177,51 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
+# Raw no-mistakes query reuse lives only for this process tree. Each invocation
+# creates a fresh private directory outside the operational home, passes it only
+# to its task-local current-state readers, and removes it on every normal or
+# signalled exit. If private temporary storage is unavailable, reads retain the
+# prior uncached behavior and failure semantics.
+NM_SNAPSHOT_CACHE_DIR=
+NM_SNAPSHOT_CACHE_TOKEN=
+snapshot_nm_cache_cleanup() {
+  local owner=
+  [ -n "$NM_SNAPSHOT_CACHE_DIR" ] || return 0
+  [ -f "$NM_SNAPSHOT_CACHE_DIR/.owner" ] && [ ! -L "$NM_SNAPSHOT_CACHE_DIR/.owner" ] \
+    || return 0
+  IFS= read -r owner < "$NM_SNAPSHOT_CACHE_DIR/.owner" 2>/dev/null || return 0
+  [ "$owner" = "$NM_SNAPSHOT_CACHE_TOKEN" ] || return 0
+  rm -rf -- "$NM_SNAPSHOT_CACHE_DIR"
+  NM_SNAPSHOT_CACHE_DIR=
+}
+snapshot_nm_cache_init() {
+  local base=${TMPDIR:-/tmp} base_real home_real
+  base_real=$(cd "$base" 2>/dev/null && pwd -P) || base_real=
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
+  case "$base_real" in
+    "$home_real"|"$home_real"/*)
+      base=/tmp
+      base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 0
+      case "$base_real" in "$home_real"|"$home_real"/*) return 0 ;; esac
+      ;;
+  esac
+  NM_SNAPSHOT_CACHE_DIR=$(umask 077; mktemp -d "$base/fm-nm-snapshot.XXXXXX" 2>/dev/null) \
+    || NM_SNAPSHOT_CACHE_DIR=
+  [ -n "$NM_SNAPSHOT_CACHE_DIR" ] || return 0
+  NM_SNAPSHOT_CACHE_TOKEN="$$:$RANDOM"
+  if ! (umask 077; printf '%s\n' "$NM_SNAPSHOT_CACHE_TOKEN" > "$NM_SNAPSHOT_CACHE_DIR/.owner"); then
+    rm -rf -- "$NM_SNAPSHOT_CACHE_DIR"
+    NM_SNAPSHOT_CACHE_DIR=
+    NM_SNAPSHOT_CACHE_TOKEN=
+    return 0
+  fi
+  trap snapshot_nm_cache_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+snapshot_nm_cache_init
+
 bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
@@ -217,6 +262,8 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
+      FM_NM_SNAPSHOT_CACHE_DIR="$NM_SNAPSHOT_CACHE_DIR" \
+      FM_NM_SNAPSHOT_CACHE_TOKEN="$NM_SNAPSHOT_CACHE_TOKEN" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
