@@ -1249,6 +1249,9 @@ case "$ARG3" in
 esac
 
 if [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" = cursor ]; then
+  if [ "$HARNESS" != cursor ]; then
+    LAUNCH=$(launch_template cursor "$KIND") || exit 1
+  fi
   HARNESS=cursor
 fi
 
@@ -2439,19 +2442,33 @@ EOF
         '.cursor/hooks/fm-busy-turnend.sh idle-session-end' <<'PY'
 import json
 import os
+import re
 import stat
 import sys
 
 source, destination, busy, stop, session_end = sys.argv[1:]
+firstmate_script = ".cursor/hooks/fm-busy-turnend.sh"
+firstmate_target = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:\./)?\.cursor/hooks/fm-busy-turnend\.sh(?![A-Za-z0-9_./-])"
+)
 with open(source, encoding="utf-8") as handle:
     document = json.load(handle)
 hooks = document.setdefault("hooks", {})
 if not isinstance(hooks, dict):
     raise SystemExit("Cursor hooks must be a JSON object")
-for event, command in (("beforeSubmitPrompt", busy), ("stop", stop), ("sessionEnd", session_end)):
-    entries = hooks.setdefault(event, [])
+for event, entries in hooks.items():
     if not isinstance(entries, list):
         raise SystemExit(f"Cursor {event} hooks must be arrays")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        command = entry.get("command")
+        if isinstance(command, str) and firstmate_target.search(command):
+            raise SystemExit(
+                f"Cannot install Firstmate Cursor hooks: existing {event} hook targets {firstmate_script}"
+            )
+for event, command in (("beforeSubmitPrompt", busy), ("stop", stop), ("sessionEnd", session_end)):
+    entries = hooks.setdefault(event, [])
     entries.append({"command": command})
 with open(destination, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))

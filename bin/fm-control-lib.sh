@@ -391,6 +391,11 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
     installed="$state/$id.cursor-$(basename "$path").installed"
     [ ! -e "$backup" ] || { [ -f "$backup" ] && [ ! -L "$backup" ]; } || return 1
     [ -f "$installed" ] && [ ! -L "$installed" ] || return 1
+    if [ "$(basename "$path")" = fm-busy-turnend.sh ] && [ -e "$path" ]; then
+      cmp -s "$path" "$installed" \
+        || { [ -e "$backup" ] && cmp -s "$path" "$backup"; } \
+        || return 1
+    fi
   done
   for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
     if [ "$(basename "$path")" = hooks.json ]; then

@@ -73,6 +73,10 @@ SH
 set -u
 printf 'arg=%s\n' "$@" >> "$FM_FAKE_CURSOR_ARGS_LOG"
 printf 'cursor_agent=%s\n' "${CURSOR_AGENT:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
+printf 'claudecode=%s\n' "${CLAUDECODE:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
+printf 'pi_coding_agent=%s\n' "${PI_CODING_AGENT:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
+printf 'grok_agent=%s\n' "${GROK_AGENT:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
+printf 'fm_pi_harness=%s\n' "${FM_PI_HARNESS:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
 exit 0
 SH
   chmod +x "$fakebin/cursor-agent"
@@ -95,9 +99,21 @@ make_spawn_case() {
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
 }
 
+publish_spawn_fixture() {
+  local proj=$1 wt=$2 default status
+  status=$(git -C "$wt" status --porcelain)
+  [ -n "$status" ] || return 0
+  default=$(git -C "$proj" symbolic-ref --short HEAD)
+  git -C "$wt" add -A
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm fixture
+  git -C "$wt" push -q origin "HEAD:refs/heads/$default"
+}
+
 run_cursor_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
   local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5
   shift 5
+  publish_spawn_fixture "$proj" "$wt"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -305,13 +321,15 @@ PY
 }
 
 test_raw_cursor_binary_uses_verified_adapter() {
-  local rec case_dir home proj wt fakebin id out status
+  local rec case_dir home proj wt fakebin id out status launch
   rec=$(make_spawn_case raw-binary)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
-  out=$(run_raw_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
-    --mode local-only --yolo on)
+  out=$(CLAUDECODE=claude PI_CODING_AGENT=pi GROK_AGENT=grok \
+    FM_PI_HARNESS=pi-signed CURSOR_AGENT=cursor \
+    run_raw_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+      --mode local-only --yolo on)
   status=$?
   expect_code 0 "$status" "raw cursor-agent spawn should succeed: $out"
   assert_contains "$out" "spawned $id harness=cursor" \
@@ -322,6 +340,27 @@ EOF
     "raw cursor-agent did not establish hook transaction ownership"
   assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
     "raw cursor-agent did not install supervision hooks"
+  launch=$(cat "$home/launch.log")
+  assert_contains "$launch" "$fakebin/cursor-agent" \
+    "raw cursor-agent did not resolve the verified executable"
+  python3 - "$home/cursor-agent.log" <<'PY' || fail "raw cursor-agent did not inherit verified launch invariants"
+import sys
+
+observed = open(sys.argv[1], encoding="utf-8").read().splitlines()
+for marker in (
+    "cursor_agent=",
+    "claudecode=",
+    "pi_coding_agent=",
+    "grok_agent=",
+    "fm_pi_harness=",
+):
+    assert marker in observed, (marker, observed)
+assert "arg=raw-brief" not in observed, observed
+assert any(
+    item.startswith("arg=\u2063FIRSTMATE_OP: v1 launch-brief: brief")
+    for item in observed
+), observed
+PY
   fm_control_cursor_hooks_restore "$wt" "$home/state" "$id" \
     || fail "raw cursor-agent hook transaction could not be restored"
   fm_control_cursor_hooks_restore "$wt" "$home/state" "$id" \
@@ -385,16 +424,54 @@ test_control_tables() {
 }
 
 test_cursor_composer_placeholder_requires_cursor_glyph() {
-  # shellcheck source=bin/fm-tmux-lib.sh
-  . "$ROOT/bin/fm-tmux-lib.sh"
-  [ "$(fm_tmux_composer_row_state '│ Add a follow-up │' 1 0)" = pending ] \
+  local caps plain_placeholder cursor_placeholder
+  # shellcheck source=bin/fm-composer-lib.sh
+  . "$ROOT/bin/fm-composer-lib.sh"
+  caps=$'styled=1\ncursor=1\nidentity=1\nrows=0'
+  plain_placeholder=$'╭────────────────────╮\n│ Add a follow-up    │\n╰────────────────────╯'
+  cursor_placeholder=$'╭────────────────────╮\n│ → Add a follow-up  │\n╰────────────────────╯'
+  [ "$(fm_composer_classify_screen "$caps" "$plain_placeholder" 1)" = pending ] \
     || fail "ordinary Add a follow-up text was treated as an empty composer"
   [ "$(FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
-    fm_tmux_composer_row_state '│ → Add a follow-up │' 1 0)" = empty ] \
+    fm_composer_classify_screen "$caps" "$cursor_placeholder" 1)" = empty ] \
     || fail "Cursor's idle Add a follow-up placeholder was not recognized"
-  [ "$(fm_tmux_composer_row_state '→' 0 0)" = unknown ] \
+  [ "$(fm_composer_classify_screen "$caps" '→' 0)" = unknown ] \
     || fail "bare Cursor arrow weakened dead-shell injection safety"
   pass "cursor placeholder classification requires the prompt glyph"
+}
+
+test_cursor_spawn_refuses_existing_hook_target_collision() {
+  local rec case_dir home proj wt fakebin id out status expected_hooks expected_script
+  rec=$(make_spawn_case hook-target-collision)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh user"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'pre-existing user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  expected_hooks="$case_dir/expected-hooks.json"
+  expected_script="$case_dir/expected-hook.sh"
+  cp "$wt/.cursor/hooks.json" "$expected_hooks"
+  cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_script"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Cursor spawn replaced an existing hook target"
+  assert_contains "$out" "existing beforeSubmitPrompt hook targets .cursor/hooks/fm-busy-turnend.sh" \
+    "Cursor hook-target collision refusal was not explicit"
+  cmp -s "$expected_hooks" "$wt/.cursor/hooks.json" \
+    || fail "Cursor hook-target collision modified hooks.json"
+  cmp -s "$expected_script" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    || fail "Cursor hook-target collision replaced the user hook script"
+  assert_absent "$home/state/$id.cursor-hooks.json" \
+    "Cursor hook-target collision claimed transaction ownership"
+  assert_absent "$home/state/$id.cursor-hooks.json.installed" \
+    "Cursor hook-target collision recorded an installed snapshot"
+  assert_absent "$home/state/$id.busy-gen" \
+    "Cursor hook-target collision left busy state armed"
+  assert_absent "$home/launch.log" \
+    "Cursor hook-target collision launched the harness"
+  pass "Cursor spawn refuses an existing Firstmate hook-script target"
 }
 
 test_cursor_hooks_restore_existing_files() {
@@ -584,7 +661,7 @@ test_cursor_hook_backup_is_atomic() {
 $rec
 EOF
   mkdir -p "$wt/.cursor/hooks"
-  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"user-before"}]}}' > "$wt/.cursor/hooks.json"
   expected_hooks="$case_dir/expected-hooks.json"
   cp "$wt/.cursor/hooks.json" "$expected_hooks"
   ln -s "$case_dir/unsafe-hook" "$wt/.cursor/hooks/fm-busy-turnend.sh"
@@ -637,8 +714,8 @@ EOF
   pass "aborted Cursor spawn retains recovery sidecars when restoration fails"
 }
 
-test_same_cursor_relaunch_preserves_preexisting_hook_script() {
-  local rec case_dir home proj wt fakebin id out status expected_script
+test_same_cursor_relaunch_refuses_divergent_hook_script() {
+  local rec case_dir home proj wt fakebin id out status expected_script expected_live
   rec=$(make_spawn_case cursor-relaunch)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -655,14 +732,18 @@ EOF
   git -C "$wt" check-ignore -q -- .cursor/hooks/fm-busy-turnend.sh \
     && fail "cursor spawn ignored a pre-existing user hook script"
   printf '%s\n' 'divergent live hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  expected_live="$case_dir/expected-live-hook.sh"
+  cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_live"
   out=$(run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
   status=$?
-  expect_code 0 "$status" "same-Cursor relaunch should succeed: $out"
+  [ "$status" -ne 0 ] || fail "same-Cursor relaunch overwrote a divergent hook script"
+  assert_contains "$out" "could not retire cursor wiring" \
+    "same-Cursor relaunch did not report its fail-closed refusal"
+  cmp -s "$expected_live" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    || fail "same-Cursor relaunch overwrote the divergent live hook script"
   cmp -s "$expected_script" "$home/state/$id.cursor-fm-busy-turnend.sh" \
-    || fail "same-Cursor relaunch did not preserve the pre-existing hook script as its new backup"
-  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
-    "same-Cursor relaunch failed to install its replacement hook script"
-  pass "same-Cursor relaunch restores before replacing hook wiring"
+    || fail "same-Cursor relaunch overwrote the pre-existing hook-script backup"
+  pass "same-Cursor relaunch refuses a divergent installed hook script"
 }
 
 test_failed_same_cursor_relaunch_remains_retryable() {
@@ -893,12 +974,13 @@ test_spawn_refuses_secondmate
 test_control_tables
 test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph
+test_cursor_spawn_refuses_existing_hook_target_collision
 test_cursor_hooks_restore_existing_files
 test_cursor_hook_restore_preserves_user_hook_edits
 test_cursor_hook_restore_refuses_edited_generated_entry
 test_cursor_hook_backup_is_atomic
 test_spawn_abort_retains_cursor_backups_when_restore_fails
-test_same_cursor_relaunch_preserves_preexisting_hook_script
+test_same_cursor_relaunch_refuses_divergent_hook_script
 test_failed_same_cursor_relaunch_remains_retryable
 test_cursor_restore_recreates_removed_preexisting_hook_script
 test_spawn_abort_preserves_cursor_recovery_for_durable_task
