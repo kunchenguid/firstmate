@@ -41,6 +41,23 @@ pgid_of() { ps -p "$1" -o pgid= 2>/dev/null | tr -d '[:space:]'; }
 
 ppid_of() { ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]'; }
 
+# The pid that adopts an orphan on THIS machine. It is 1 on a plain host, but a
+# systemd user session (and any other child-subreaper ancestor) adopts orphans
+# itself, so hard-coding 1 makes this suite fail on an ordinary Linux desktop
+# for a reason that has nothing to do with the leak under test. Discover it the
+# only way that is always right: orphan a throwaway process exactly the way the
+# worker is orphaned, and read who took it.
+reaper_pid() {
+  local probe reaper
+  probe=$( ( set -m; nohup sleep 5 >/dev/null 2>&1 < /dev/null & echo $! ) )
+  case "$probe" in ''|*[!0-9]*) printf '1\n'; return 0 ;; esac
+  sleep 1
+  reaper=$(ppid_of "$probe")
+  kill "$probe" 2>/dev/null || true
+  case "$reaper" in ''|*[!0-9]*) printf '1\n' ;; *) printf '%s\n' "$reaper" ;; esac
+}
+REAPER_PID=$(reaper_pid)
+
 # Wait up to <seconds> for <pid> to exit; 0 when it did.
 wait_gone() { # <pid> <seconds>
   local pid=$1 deadline=$(( $(date +%s) + $2 ))
@@ -110,8 +127,8 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
-[ "$(ppid_of "$WORKER")" = 1 ] ||
-  fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
+[ "$(ppid_of "$WORKER")" = "$REAPER_PID" ] ||
+  fail "the fixture worker is not orphaned to this machine's reaper (pid $REAPER_PID), so this case does not reproduce the leak"
 
 # The exact teardown shape that leaked in production: a fixture cleanup removes
 # the worker's state root and then stops only the single recorded worker pid -
