@@ -17,6 +17,7 @@ export const CAPTAIN_INBOX_DEFAULT_MAX_MESSAGES = 100;
 
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_RETRY_MS = 20;
+const LOCK_STALE_MS = 5 * 60 * 1000;
 const MESSAGE_ID_RE = /^ci_v1_[a-f0-9]{32}$/;
 
 function asResolved(path) {
@@ -232,6 +233,20 @@ function sleep(milliseconds) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 }
 
+async function reclaimLockIfStale(lockPath) {
+  let entry;
+  try {
+    entry = await lstat(lockPath);
+  } catch {
+    return;
+  }
+  if (!entry.isDirectory() || entry.isSymbolicLink()) return;
+  if (Date.now() - entry.mtimeMs < LOCK_STALE_MS) return;
+  // The lock's holder is presumed dead (crash/SIGKILL never ran the finally
+  // handler that removes it); an EEXIST-blocked mkdir below reclaims it.
+  await rm(lockPath, { recursive: true, force: true }).catch(() => {});
+}
+
 async function acquireLock(paths, create) {
   if (create) {
     await ensureStoreDirectory(paths);
@@ -249,6 +264,7 @@ async function acquireLock(paths, create) {
       return;
     } catch (error) {
       if (!error || error.code !== "EEXIST") throw error;
+      await reclaimLockIfStale(paths.lock);
       if (Date.now() >= deadline) {
         throw new Error("Captain's Inbox is busy; retry the request");
       }

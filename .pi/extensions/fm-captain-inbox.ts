@@ -4,7 +4,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { classifyFirstmateCurrentOperationalText } from "./lib/fm-operational-input.ts";
 import {
   captureCaptainResponse,
-  isPrimaryCaptainInboxSession,
   resolveCaptainInboxPaths,
 } from "./lib/fm-captain-inbox-store.mjs";
 
@@ -99,8 +98,7 @@ export default function (pi: ExtensionAPI) {
     if (
       !completed ||
       settled.mode !== "tui" ||
-      (typeof settled.isIdle === "function" && !settled.isIdle()) ||
-      !isPrimaryCaptainInboxSession(paths)
+      (typeof settled.isIdle === "function" && !settled.isIdle())
     ) {
       return;
     }
