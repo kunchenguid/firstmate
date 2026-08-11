@@ -22,7 +22,10 @@ install_pi_watch_extension_fixture() {
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-ingress.ts" "$repo/.pi/extensions/lib/fm-primary-ingress.ts"
   mkdir -p "$repo/bin"
+  cp "$ROOT/bin/fm-feishu-state.d.mts" "$repo/bin/fm-feishu-state.d.mts"
+  cp "$ROOT/bin/fm-feishu-state.mjs" "$repo/bin/fm-feishu-state.mjs"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   chmod +x "$repo/bin/fm-operational-input.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
@@ -1324,8 +1327,11 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
-await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+const denied = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (denied !== "read-only") {
+  console.error(`unexpected missing-lock result: ${denied}`);
+  process.exit(1);
+}
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);

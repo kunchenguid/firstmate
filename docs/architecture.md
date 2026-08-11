@@ -269,6 +269,30 @@ Because a terminal event's id is derived from its identity tuple rather than gen
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
 
+## Feishu current-Pi channel
+
+The optional Feishu channel has three owners and no second Agent authority.
+The dedicated `bin/fm-feishu-transport.mjs` process owns only continuous `lark-cli` event and message I/O, readiness, reconnect, history overlap, and transport health.
+`bin/fm-feishu-state.mjs` is the single schema and state-machine owner for private pairing, exact binding generations, ordered ingress, ACKs, direct-Assistant outbox records, attempts, receipts, correlation, quarantine, and local alerts.
+`.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-primary-ingress.ts` are the only components allowed to inject authorized Feishu text into the current live Pi session.
+
+The extension binds canonical `FM_HOME`, stable home identity, full persisted Pi session UUID and file, session and header cwd, verified Firstmate lock ancestry, exact P2P chat, and binding generation.
+It calls only the current extension API's `sendUserMessage`, so no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
+The same coordinator durably orders TUI text and images, Feishu text, watcher input, and turn-end input, submits one item at a time until Pi observes acceptance, and records its ACK only after the user message is present in the persisted session.
+The privacy-safe marker in Pi context carries source and delivery identity, while open IDs and chat IDs remain private state and the TUI renders only a source badge.
+
+The transport buffers live NDJSON while startup or reconnect history overlaps, commits authorized unique messages by Feishu event ID and `message_id`, and marks dispatch healthy only after reconciliation.
+It executes fixed argv directly and has no Agent or Pi-session access.
+A drop diagnostic, reconnect, event storm, malformed event, disk failure, authorization mismatch, or unsupported message type becomes durable health or quarantine evidence rather than an in-memory success.
+
+Direct egress is a deterministic settlement projection rather than a second reasoning path.
+At `agent_settled`, the extension registers only the final Assistant text, skips fixed non-output cases, refuses the whole message on fixed credential patterns, and applies deterministic URL-preserving chunking.
+The transport uses stable chunk idempotency keys, pre-send attempts, receipts, bounded same-key ambiguous retries, and an explicit uncertain state after the platform window.
+Reply-to receipts provide the only decision correlation, so an unrelated Feishu message cannot resolve an open decision.
+
+The operator contract, supported MVP, local commands, scopes, and failure recovery live in [`docs/feishu-channel.md`](feishu-channel.md).
+The agent-only response and local-confirmation procedure lives in [`.agents/skills/feishu-channel/SKILL.md`](../.agents/skills/feishu-channel/SKILL.md).
+
 ## Project memory belongs to projects
 
 Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
