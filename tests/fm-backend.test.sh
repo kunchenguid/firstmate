@@ -999,6 +999,33 @@ test_teardown_conformance_old_vs_new() {
   pass "fm-teardown.sh: treehouse return remains compatible while tmux cleanup uses exact selectors"
 }
 
+test_tmux_kill_exact_retains_cleanup_on_empty_label() {
+  local dir fb out status
+  dir="$TMP_ROOT/tmux-kill-exact-empty-label"; mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  printf 'tmux'
+  for arg in "$@"; do printf '\x1f%s' "$arg"; done
+  printf '\n'
+} >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  list-windows) printf '@1\t\n' ;;
+  kill-window) : ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
+  : > "$dir/log"
+  out=$(PATH="$dir/fakebin:$PATH" FM_TMUX_LOG="$dir/log" \
+    bash -c '. "$0/bin/backends/tmux.sh"; fm_backend_tmux_kill_exact firstmate @1 fm-task' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact tmux cleanup accepted a matching window with an empty label: $out"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''kill-window' \
+    "exact tmux cleanup killed a window whose matching record had an empty label"
+  pass "fm_backend_tmux_kill_exact: empty matching labels retain cleanup"
+}
+
 # --- backend selection loudly refuses an unknown backend --------------------
 
 test_spawn_refuses_unknown_backend_flag() {
@@ -1134,6 +1161,7 @@ test_send_tmux_contract
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
+test_tmux_kill_exact_retains_cleanup_on_empty_label
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env

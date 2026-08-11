@@ -2174,6 +2174,31 @@ test_endpoint_confirmed_gone_gates_on_structured_presence() {
   pass "endpoint confirmed-gone: only structured not-found permits record removal and ambiguous identity refuses"
 }
 
+test_kill_tab_exact_retains_cleanup_on_empty_label() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/kill-exact-empty-label"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"t1","label":""}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"other","label":"fm-other"}]}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_presentation_session_lock_path() { printf "/tmp/fm-herdr-empty-label-test-lock"; }
+      fm_lock_try_acquire() { return 0; }
+      fm_lock_release() { return 0; }
+      rc=0
+      fm_backend_herdr_kill_tab_exact firstmate ws1 t1 fm-task || rc=$?
+      [ "$rc" -ne 0 ] || exit 10
+      fm_backend_herdr_kill_tab_exact firstmate ws1 t1 fm-task
+    ' "$ROOT" 2>&1)
+  status=$?
+  expect_code 0 "$status" "exact Herdr cleanup should reject an empty matching tab label but accept an absent tab: $out"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab\x1f''close' \
+    "exact Herdr cleanup closed a tab whose matching record had an empty label"
+  pass "fm_backend_herdr_kill_tab_exact: empty matching labels retain cleanup while absent IDs prove gone"
+}
+
 test_projection_seeded_prune_refuses_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
@@ -4284,6 +4309,7 @@ test_projection_close_failed_removal_rolls_back_the_reposition
 test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
+test_kill_tab_exact_retains_cleanup_on_empty_label
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes

@@ -2859,7 +2859,8 @@ fm_backend_herdr_kill() {  # <target>
 }
 
 fm_backend_herdr_kill_tab_exact() {  # <session> <workspace-id> <tab-id> <label>
-  local session=$1 workspace_id=$2 tab_id=$3 expected_label=$4 tabs label lock_path attempt=0 lock_held=0
+  local session=$1 workspace_id=$2 tab_id=$3 expected_label=$4 tabs label lock_path attempt=0 lock_held=0 match_count
+  [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] || return 1
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
@@ -2882,20 +2883,37 @@ fm_backend_herdr_kill_tab_exact() {  # <session> <workspace-id> <tab-id> <label>
     fm_lock_release "$lock_path" || true
     return 1
   }
-  label=$(printf '%s' "$tabs" | jq -r --arg id "$tab_id" '.result.tabs[]? | select(.tab_id == $id) | .label' 2>/dev/null) || {
+  match_count=$(printf '%s' "$tabs" | jq -er --arg id "$tab_id" '[.result.tabs[] | select(.tab_id == $id)] | length' 2>/dev/null) || {
     fm_lock_release "$lock_path" || true
     return 1
   }
-  case "$label" in
-    *$'\n'*)
+  case "$match_count" in
+    0)
+      fm_lock_release "$lock_path" || true
+      return 0
+      ;;
+    1) ;;
+    *)
       fm_lock_release "$lock_path" || true
       return 1
       ;;
   esac
-  if [ -z "$label" ]; then
+  label=$(printf '%s' "$tabs" | jq -er --arg id "$tab_id" '
+    .result.tabs[]
+    | select(.tab_id == $id)
+    | select((.label | type) == "string")
+    | select((.label | length) > 0)
+    | .label
+  ' 2>/dev/null) || {
     fm_lock_release "$lock_path" || true
-    return 0
-  fi
+    return 1
+  }
+  case "$label" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      fm_lock_release "$lock_path" || true
+      return 1
+      ;;
+  esac
   if [ "$label" != "$expected_label" ]; then
     fm_lock_release "$lock_path" || true
     return 1

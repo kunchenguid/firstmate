@@ -394,7 +394,10 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
 }
 
 fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
-  local session=$1 tab_id=$2 expected_label=$3 tabs name session_state
+  local session=$1 tab_id=$2 expected_label=$3 tabs name session_state match_count
+  case "$tab_id" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   if fm_backend_zellij_session_state "$session"; then
     session_state=0
   else
@@ -404,10 +407,21 @@ fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
   fi
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
-  name=$(printf '%s' "$tabs" | jq -r --argjson id "$tab_id" '.[]? | select(.tab_id == $id) | .name' 2>/dev/null) || return 1
+  match_count=$(printf '%s' "$tabs" | jq -er --argjson id "$tab_id" '[.[] | select(.tab_id == $id)] | length' 2>/dev/null) || return 1
+  case "$match_count" in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  name=$(printf '%s' "$tabs" | jq -er --argjson id "$tab_id" '
+    .[]
+    | select(.tab_id == $id)
+    | select((.name | type) == "string")
+    | select((.name | length) > 0)
+    | .name
+  ' 2>/dev/null) || return 1
   case "$name" in
-    '') return 0 ;;
-    *$'\n'*) return 1 ;;
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
   esac
   fm_backend_zellij_tab_matches_label "$session" "$tab_id" "$expected_label" || return 1
   fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || return 1

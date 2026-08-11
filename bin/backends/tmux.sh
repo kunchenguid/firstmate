@@ -114,12 +114,23 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 }
 
 fm_backend_tmux_kill_exact() {
-  local session=$1 window_id=$2 expected_label=$3 found
+  local session=$1 window_id=$2 expected_label=$3 found match_count
   [ -n "$session" ] && [ -n "$window_id" ] || return 1
   local windows
   windows=$(tmux list-windows -t "$session" -F '#{window_id}\t#{window_name}' 2>/dev/null) || return 1
-  found=$(printf '%s\n' "$windows" | awk -F '\t' -v id="$window_id" '$1 == id { print $2 }')
-  [ -n "$found" ] || return 0
+  match_count=$(printf '%s\n' "$windows" | awk -F '\t' -v id="$window_id" '$1 == id { count++ } END { print count + 0 }') || return 1
+  case "$match_count" in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  if ! found=$(printf '%s\n' "$windows" | awk -F '\t' -v id="$window_id" '$1 == id { if (NF != 2) exit 2; print $2 }'); then
+    return 1
+  fi
+  [ -n "$found" ] || return 1
+  case "$found" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
   [ "$found" = "$expected_label" ] || return 1
   tmux kill-window -t "$session:$window_id" >/dev/null 2>&1 || return 1
   windows=$(tmux list-windows -t "$session" -F '#{window_id}\t#{window_name}' 2>/dev/null) || return 1

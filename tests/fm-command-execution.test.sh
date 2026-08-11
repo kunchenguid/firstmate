@@ -14,7 +14,7 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 CRABBOX_LOG="$TMP_ROOT/crabbox.log"
 : > "$CRABBOX_LOG"
 chmod 600 "$CRABBOX_LOG"
-export CRABBOX_LOG CRABBOX_RUN_STATUS=0 CRABBOX_STOP_STATUS=0 CRABBOX_NONOBJECT=0
+export CRABBOX_LOG CRABBOX_RUN_STATUS=0 CRABBOX_STOP_STATUS=0 CRABBOX_NONOBJECT=0 CRABBOX_MULTIDOC=0
 
 cat > "$FAKEBIN/crabbox" <<'SH'
 #!/usr/bin/env bash
@@ -39,7 +39,9 @@ case "${1:-}" in
     exit "${CRABBOX_RUN_STATUS:-0}"
     ;;
   status)
-    if [ "${CRABBOX_NONOBJECT:-0}" = 1 ]; then
+    if [ "${CRABBOX_MULTIDOC:-0}" = 1 ]; then
+      printf '{}\n{}\n'
+    elif [ "${CRABBOX_NONOBJECT:-0}" = 1 ]; then
       printf '["not-an-object"]\n'
     else
       printf '{"id":"%s","cost":12.5,"expires_at":"2099-01-02T03:04:05Z","state":"running"}\n' "${3:-}"
@@ -253,6 +255,18 @@ assert_absent "$STATE/provider-json.execution-provider.json" 'non-object provide
 export CRABBOX_NONOBJECT=0
 run_cli provider-json release
 expect_code 0 "$RUN_STATUS" 'provider JSON task lease releases'
+
+write_crabbox_meta provider-multidoc provider-multidoc-profile
+run_cli provider-multidoc run --lease lease-multidoc -- printf provider-multidoc
+expect_code 0 "$RUN_STATUS" 'multi-document provider task run succeeds'
+export CRABBOX_MULTIDOC=1
+run_cli provider-multidoc inspect
+[ "$RUN_STATUS" -ne 0 ] || fail 'multi-document provider JSON was accepted'
+assert_contains "$RUN_STDERR" 'did not return a JSON object' 'multi-document provider JSON refusal is explicit'
+assert_absent "$STATE/provider-multidoc.execution-provider.json" 'multi-document provider JSON was not stored'
+export CRABBOX_MULTIDOC=0
+run_cli provider-multidoc release
+expect_code 0 "$RUN_STATUS" 'multi-document provider task lease releases'
 
 # Canonical metadata and private artifacts reject malformed and symlinked state.
 write_local_meta bad-meta

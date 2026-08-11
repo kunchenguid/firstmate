@@ -847,6 +847,28 @@ test_kill_tab_exact_retains_cleanup_on_session_inspection_failure() {
   pass "fm_backend_zellij_kill_tab_exact: retains cleanup on session inspection failure"
 }
 
+test_kill_tab_exact_retains_cleanup_on_empty_name() {
+  local dir fb out status
+  dir="$TMP_ROOT/kill-exact-empty-name"; mkdir -p "$dir/responses"
+  printf '[{"tab_id":3,"name":""}]\n' > "$dir/responses/1.out"
+  printf '[{"tab_id":4,"name":"fm-other"}]\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '
+      . "$0/bin/backends/zellij.sh"
+      rc=0
+      fm_backend_zellij_kill_tab_exact firstmate 3 fm-zghost || rc=$?
+      [ "$rc" -ne 0 ] || exit 10
+      fm_backend_zellij_kill_tab_exact firstmate 3 fm-zghost
+    ' "$ROOT" 2>&1)
+  status=$?
+  expect_code 0 "$status" "exact zellij cleanup should reject an empty matching tab name but accept an absent tab: $out"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "exact zellij cleanup closed a tab whose matching record had an empty name"
+  pass "fm_backend_zellij_kill_tab_exact: empty matching names retain cleanup while absent IDs prove gone"
+}
+
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
@@ -1355,6 +1377,7 @@ test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
 test_kill_tab_exact_retains_cleanup_on_session_inspection_failure
+test_kill_tab_exact_retains_cleanup_on_empty_name
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send

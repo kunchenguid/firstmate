@@ -280,7 +280,7 @@ fm_exec_store_snapshot() {
     rm -f "$tmp"
     return "$status"
   fi
-  if ! jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+  if ! jq -s -e 'length == 1 and (.[0] | type == "object")' "$tmp" >/dev/null 2>&1; then
     rm -f "$tmp"
     fm_exec_die "provider inspect did not return a JSON object"
   fi
