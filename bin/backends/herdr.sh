@@ -1880,11 +1880,53 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 
 # OMP 17.2.12 leaves its Herdr agent registration at `idle` after `/exit` has
 # returned to the task's nested worktree shell. This proof recognizes only that
-# adapter's exact stale-registration shape: one foreground process, its pid is
-# the foreground process group, both reported names are the same recognized
-# shell, and the OS process has no child. Any transient prompt helper or
-# unreadable field keeps the registration live/unknown for the next poll.
+# adapter's exact stale-registration shape after a generation-matching
+# `session_stop` marker: one foreground process, its pid is the foreground
+# process group, both reported names are the same recognized shell, and the OS
+# process has no child. Any missing terminal evidence, transient prompt helper,
+# or unreadable field keeps the registration live/unknown for the next poll.
+fm_backend_herdr_meta_value() {
+  local meta=$1 key=$2
+  awk -F= -v key="$key" '$1 == key { value=$0; sub(/^[^=]*=/, "", value) } END { if (value != "") print value }' "$meta" 2>/dev/null
+}
+
+fm_backend_herdr_omp_stop_evidence() {
+  local session=$1 pane=$2 state target meta id='' matched=0
+  local window backend harness raw_launch generation marker
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  target="$session:$pane"
+  [ -d "$state" ] && [ ! -L "$state" ] || return 2
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    window=$(fm_backend_herdr_meta_value "$meta" window)
+    [ "$window" = "$target" ] || continue
+    backend=$(fm_backend_herdr_meta_value "$meta" backend)
+    [ "$backend" = herdr ] || continue
+    harness=$(fm_backend_herdr_meta_value "$meta" harness)
+    [ "$harness" = omp ] || continue
+    raw_launch=$(fm_backend_herdr_meta_value "$meta" raw_launch)
+    [ "$raw_launch" != 1 ] || return 2
+    [ "$matched" -eq 0 ] || return 2
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in
+      ''|*[!A-Za-z0-9._-]*) return 2 ;;
+    esac
+    matched=1
+  done
+  [ "$matched" -eq 1 ] || return 2
+  [ -f "$state/$id.busy-gen" ] && [ ! -L "$state/$id.busy-gen" ] || return 2
+  [ -f "$state/$id.omp-session-stop" ] && [ ! -L "$state/$id.omp-session-stop" ] || return 2
+  generation=$(cat "$state/$id.busy-gen" 2>/dev/null) || return 2
+  marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null) || return 2
+  case "$generation:$marker" in
+    *[!A-Za-z0-9._:-]*|:*) return 2 ;;
+  esac
+  [ "$generation" = "$marker" ] || return 2
+}
+
 fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
+  fm_backend_herdr_omp_stop_evidence "$1" "$2" || return 2
   fm_backend_herdr_pane_idle_shell_sample "$1" "$2" >/dev/null
 }
 

@@ -334,12 +334,12 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Skill invocation | No separate verified command; use natural language. |
 
 OMP is distributed as a Bun script.
-Detection accepts only the positive `OMPCODE=1` marker, the exact `omp` executable, or Bun whose script argv has the exact `omp` basename; later prompt text never counts.
+Detection accepts only the positive `OMPCODE=1` marker, the exact `omp` executable, or exact Bun whose script path resolves to the canonical installed OMP executable; later prompt text never counts.
 A Firstmate-launched OMP worker inherited `CLAUDECODE`, so `OMPCODE=1` must precede foreign markers and the launch template removes known foreign harness markers.
-The shared `fm-spawn.sh` launch boundary clears the known primary markers before the resolved worker starts, then restores only the selected OMP or Pi-family marker where that adapter requires one, including raw escape-hatch commands.
+The shared `fm-spawn.sh` launch boundary clears the known primary markers before the resolved canonical worker starts, then restores only the selected OMP or Pi-family marker where that adapter requires one; `RAW_LAUNCH=1` remains an unverified escape hatch with no marker restoration or OMP wiring.
 Launch keeps the encoded brief as one positional message, loads one per-task extension from `state/`, and starts with no observed trust or permission dialog.
 Herdr reports native `working` and `idle` states for OMP.
-OMP 17.2.12 leaves its Herdr registration at `idle` after `/exit` returns to the nested worktree shell, so the Herdr backend treats only the separately proven one-process shell shape as agent-free.
+OMP 17.2.12 leaves its Herdr registration at `idle` after `/exit` returns to the nested worktree shell, so the Herdr backend treats only a generation-matching `state/<id>.omp-session-stop` marker plus the separately proven one-process shell shape as agent-free.
 Relaunch uses Firstmate's deterministic brief-based replacement; no private-session resume contract is required.
 
 **Primary-session guard fact.**

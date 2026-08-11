@@ -60,8 +60,9 @@ Scoping the second source to the foreground process group rather than to the pan
 The same scoping covers multi-process launchers without a special case, so the Pi Launcher path is attributed through its `pi-signed` wrapper and `pi` engine even though its title is the exact foreground command `pi-launcher`.
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
-OMP runs as a Bun script, so the foreground probe exports only its script argument as an identity candidate and accepts it only when that path has the exact `omp` basename; later prompt arguments that merely mention OMP are never process identity.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
+OMP runs as a Bun script, so the foreground probe exports only its script argument as an identity candidate and accepts it only when that path resolves to the canonical installed OMP executable; later prompt arguments that merely mention OMP are never process identity.
+Raw launches remain ordinary unverified commands: their recorded raw-launch metadata never opts them into OMP liveness, control, busy, or input handling.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.

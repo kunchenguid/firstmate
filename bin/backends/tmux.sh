@@ -247,7 +247,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
-        # OMP's long-lived process is Bun with the exact `omp` script basename as argv[1].
+        # OMP's long-lived process is Bun with argv[1] resolving to the canonical installed OMP executable.
         # Export that one verified identity candidate, never later prompt text.
         case "${comm##*/}" in
           bun)

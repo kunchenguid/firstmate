@@ -512,7 +512,7 @@ fm_harness_pid_alive() {
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
   fm_harness_lock_process_matches "$comm" "$args"
 }
 

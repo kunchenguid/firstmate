@@ -268,6 +268,38 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_bare_bun_lock_holder_remains_live() {
+  local dir fakebin
+  dir="$TMP_ROOT/bare-bun-lock-holder"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' bun ;;
+  700:args=) printf '%s\n' 'bun /tmp/omp' ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  if ! lib_eval "$fakebin" 'fm_harness_pid_alive 700'; then
+    fail "a bare Bun OMP lock holder was treated as stale"
+  fi
+  if lib_eval "$fakebin" 'fm_harness_process_matches bun "bun /tmp/omp"'; then
+    fail "the bare Bun lock fallback widened generic harness identity"
+  fi
+  pass "session-lock: bare Bun remains live only through the lock-specific fallback"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -409,6 +441,7 @@ test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_owner_selection_is_harness_specific
 test_competing_version_named_session_is_seen_as_live
+test_bare_bun_lock_holder_remains_live
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

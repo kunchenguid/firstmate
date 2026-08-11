@@ -3531,16 +3531,26 @@ test_herdr_no_metadata_omp_requires_current_identity() {
 # licenses close-and-replace on a live worktree, while a missed husk leaves a
 # reclaimable tab stranded forever.
 
-# omp_agent_state_verdict <dir> <agent> <status> <process-info-json> [ps-rows]:
+# omp_agent_state_verdict <dir> <agent> <status> <process-info-json> [ps-rows]
+#   [ps-stat] [recorded-harness] [stop-marker]:
 # drive fm_backend_herdr_pane_agent_state over a canned presence read, agent
 # registration, and pane process-info, backed by a fake operating-system
 # process table. ps-rows is the `-axo pid=,ppid=` table (default: pid 4242 as a
 # lone child of init); every pid in it answers `-o comm=` as a login zsh except
 # 5150, the Bun runtime a live OMP worker keeps in its pane.
-omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows] [ps-stat] [recorded-harness]
+omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows] [ps-stat] [recorded-harness] [stop-marker]
   local dir=$1 agent=$2 status=$3 info=$4 rows=${5:-'1 0
-4242 1'} stat=${6:-S+} recorded_harness=${7:-} log resp fb
-  mkdir -p "$dir/responses"
+4242 1'} stat=${6:-S+} recorded_harness=${7:-} stop_marker=${8:-} log resp fb state
+  state="$dir/state"
+  mkdir -p "$dir/responses" "$state"
+  if [ "$recorded_harness" = omp ]; then
+    printf '%s\n' 'window=lab:w1:p1' 'backend=herdr' 'harness=omp' > "$state/task.meta"
+    printf '%s\n' g123 > "$state/task.busy-gen"
+    case "$stop_marker" in
+      observed) printf '%s\n' g123 > "$state/task.omp-session-stop" ;;
+      stale) printf '%s\n' stale > "$state/task.omp-session-stop" ;;
+    esac
+  fi
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/1.out"
   if [ "$agent" = __agent_not_found__ ]; then
@@ -3574,6 +3584,7 @@ SH
   chmod +x "$dir/ps"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_STATE_OVERRIDE="$state" \
     FM_FAKE_PS_ROWS="$dir/ps-rows" FM_FAKE_PS_STAT="$stat" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state lab w1:p1 "$1"' "$ROOT" "$recorded_harness"
 }
@@ -3632,25 +3643,40 @@ SH
   pass "fm_backend_herdr_composer_state: an exited OMP husk is rejected without recorded metadata"
 }
 
-test_omp_idle_registration_over_a_lone_shell_is_no_agent() {
+test_omp_idle_registration_without_stop_evidence_stays_unknown() {
   local out
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-idle" omp idle "$(omp_lone_shell_process_info 4242)")
-  [ "$out" = no-agent ] \
-    || fail "an OMP registration left idle over the bare worktree shell must be a reclaimable husk, got '$out'"
+  [ "$out" = unknown ] \
+    || fail "a metadata-free OMP registration without stop evidence must stay indeterminate, got '$out'"
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-done" omp "done" "$(omp_lone_shell_process_info 4242)")
-  [ "$out" = no-agent ] \
-    || fail "the same stale OMP registration reported done must also be a husk, got '$out'"
-  pass "herdr agent state: a stale OMP registration over the bare worktree shell classifies no-agent"
+  [ "$out" = unknown ] \
+    || fail "a metadata-free done OMP registration without stop evidence must stay indeterminate, got '$out'"
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-canonical-husk-missing" omp idle \
+    "$(omp_lone_shell_process_info 4242)" '1 0
+4242 1' 'S+' omp missing)
+  [ "$out" = unknown ] \
+    || fail "a canonical OMP lone shell without stop evidence must stay indeterminate, got '$out'"
+  pass "herdr agent state: missing OMP stop evidence never authorizes recovery"
 }
 
 test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent() {
   local out
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-canonical-husk-idle" omp idle \
     "$(omp_lone_shell_process_info 4242)" '1 0
-4242 1' 'S+' omp)
+4242 1' 'S+' omp observed)
   [ "$out" = no-agent ] \
     || fail "canonical OMP over the verified lone shell must be a husk, got '$out'"
   pass "herdr agent state: canonical OMP accepts only a strictly proven lone-shell exit"
+}
+
+test_canonical_omp_idle_registration_with_stale_stop_evidence_stays_unknown() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-canonical-husk-stale" omp idle \
+    "$(omp_lone_shell_process_info 4242)" '1 0
+4242 1' 'S+' omp stale)
+  [ "$out" = unknown ] \
+    || fail "a canonical OMP lone shell with stale stop evidence must stay indeterminate, got '$out'"
+  pass "herdr agent state: stale OMP stop evidence never authorizes recovery"
 }
 
 test_omp_idle_registration_over_a_running_bun_stays_live() {
@@ -3675,7 +3701,7 @@ test_omp_idle_registration_over_a_shell_with_a_child_stays_live() {
   local out
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-live-child" omp idle "$(omp_lone_shell_process_info 4242)" '1 0
 4242 1
-5150 4242')
+5150 4242' 'S+' omp observed)
   [ "$out" = live ] \
     || fail "a pane shell that still has a child process must not be declared agent-free, got '$out'"
   pass "herdr agent state: a pane shell with a surviving child stays live rather than reclaimable"
@@ -3684,7 +3710,8 @@ test_omp_idle_registration_over_a_shell_with_a_child_stays_live() {
 test_omp_idle_registration_with_mismatched_shell_pid_stays_live() {
   local out info
   info='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":5150,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}'
-  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-shell-pid-mismatch" omp idle "$info")
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-shell-pid-mismatch" omp idle "$info" '1 0
+4242 1' 'S+' omp observed)
   [ "$out" = live ] \
     || fail "an OMP husk proof must reject a foreground process that is not the reported shell pid, got '$out'"
   pass "herdr agent state: a mismatched shell pid stays live rather than reclaimable"
@@ -3693,7 +3720,7 @@ test_omp_idle_registration_with_mismatched_shell_pid_stays_live() {
 test_omp_idle_registration_over_a_running_childless_shell_stays_live() {
   local out
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-running-shell" omp idle "$(omp_lone_shell_process_info 4242)" '1 0
-4242 1' 'R+')
+4242 1' 'R+' omp observed)
   [ "$out" = live ] \
     || fail "a running childless shell must not be declared an OMP husk, got '$out'"
   pass "herdr agent state: a running childless shell stays live rather than reclaimable"
@@ -5084,8 +5111,9 @@ test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp
 test_herdr_presence_is_checked_before_process_identity
 test_herdr_no_metadata_omp_requires_current_identity
 test_composer_state_rejects_exited_omp_husk
-test_omp_idle_registration_over_a_lone_shell_is_no_agent
+test_omp_idle_registration_without_stop_evidence_stays_unknown
 test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent
+test_canonical_omp_idle_registration_with_stale_stop_evidence_stays_unknown
 test_omp_idle_registration_over_a_running_bun_stays_live
 test_omp_idle_registration_over_a_shell_with_a_child_stays_live
 test_omp_idle_registration_with_mismatched_shell_pid_stays_live
