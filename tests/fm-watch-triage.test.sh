@@ -786,6 +786,101 @@ test_open_captain_decision_dead_crew_still_surfaces() {
   pass "a crew that dies holding an open captain decision still surfaces"
 }
 
+# The transition the dead-at-first-sight case above cannot cover: a crew that
+# opens a decision while ALIVE goes on the bounded cadence immediately, and the
+# pause marker that records it is written the moment it does. Rechecking liveness
+# only at first sight would therefore make every later death invisible for up to
+# a whole re-surface window, and supervision would report a healthy parked crew
+# while nothing was running. The liveness recheck runs on every cadence pass, so
+# dying LATER surfaces just as promptly.
+test_open_captain_decision_park_then_die_still_surfaces() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case open-decision-park-then-die); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'awaiting a decision from firstmate' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'working: implementing\nneeds-decision [key=api-shape]: keep v1 or break it\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "awaiting a decision from firstmate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase 1: parked and ALIVE. The pane goes on the bounded cadence and the
+  # watcher keeps supervising, exactly as the bounded case above asserts.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "a live crew parked on an open captain decision ended the supervision cycle: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ -e "$state/.paused-$key" ] || fail "the live parked crew was never put on the bounded pause cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "the live parked crew enqueued a wake during absorb"
+  # Killing phase 1's watcher leaves durable watcher-downtime recovery state,
+  # which any next watcher resurfaces on sight. That is correct and covered by
+  # fm-watcher-lock.test.sh; here it would just mask the death under test.
+  rm -f "$state/.watcher-down"
+  : > "$out"
+
+  # Phase 2: the SAME durable state, but the agent has since exited - the pane
+  # falls back to a bare shell. Nothing about the status log changed, so only a
+  # fresh liveness read can notice.
+  printf 'idle bare shell after agent exit' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "a crew that died AFTER parking on an open decision never surfaced: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the late death of a decision-holder printed no stale wake: $(cat "$out")"
+  pass "a crew that parks on an open captain decision and dies later still surfaces its death"
+}
+
+# The open-decision class must be BOUNDED to a crew that is still parked. The
+# decision itself is closed only by an explicit resolution for its key, but the
+# crew's own status advancing past the line that opened it proves the crew is
+# moving again - and a crew answered directly in its pane rather than through
+# fm-send --resolve-key leaves that key open forever. Without the bound, such a
+# crew would be exempt from wedge detection permanently, and its later done:
+# would be absorbed by the terminal-stale backstop that exists to catch exactly
+# an absorbed or missed signal.
+test_open_captain_decision_class_ends_when_the_crew_moves_again() {
+  local dir state statusf open
+  dir=$(make_case open-decision-bound); state="$dir/state"
+  statusf="$state/parked.status"
+  printf 'working: implementing\nneeds-decision [key=api-shape]: keep v1 or break it\n' > "$statusf"
+  status_idle_is_declared "$statusf" \
+    || fail "a crew parked on its own open decision was not put on the declared-idle cadence"
+
+  # Answered in the pane, so the key was never closed - but the crew moved.
+  printf 'working: resuming after the answer\n' >> "$statusf"
+  status_idle_is_declared "$statusf" \
+    && fail "a resumed crew stayed exempt from wedge detection on an unclosed decision key"
+  open=$(scan_open_decisions "$state")
+  printf '%s' "$open" | grep -F 'api-shape' >/dev/null \
+    || fail "the crew moving on silently closed a decision only a resolution may close: '$open'"
+
+  # And the terminal-stale backstop must see the completion rather than absorb it.
+  printf 'done: shipped\n' >> "$statusf"
+  status_idle_is_declared "$statusf" \
+    && fail "a completed crew's terminal status was absorbed by an unclosed decision key"
+  open=$(scan_open_decisions "$state")
+  printf '%s' "$open" | grep -F 'api-shape' >/dev/null \
+    || fail "a later done: line silently closed a still-open decision: '$open'"
+  pass "the open-decision cadence ends when the crew moves again, while the decision itself stays open"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -1967,6 +2062,8 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_open_captain_decision_stale_is_bounded_not_wedged
 test_open_captain_decision_dead_crew_still_surfaces
+test_open_captain_decision_park_then_die_still_surfaces
+test_open_captain_decision_class_ends_when_the_crew_moves_again
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

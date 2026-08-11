@@ -1614,6 +1614,40 @@ test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget() {
   pass "fm-turnend-guard --claude: a frozen auto-arm epoch still advances the bounded budget to its attended fail-open"
 }
 
+# The unresolved-ancestry record is durable and self-healing, so it can outlive
+# the condition it describes. A record left by a fault that has since been
+# corrected must not be used to explain a LATER, different failure, nor to name
+# an owner pid that has long since died - that turns a correct diagnosis into a
+# confident misdiagnosis. It is read only while its own recorded updated_at is
+# within the same freshness bound the epoch ledger is read under.
+test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record() {
+  local dir out status record
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unresolved-freshness")
+  : > "$dir/state/task1.meta"
+  record="$dir/state/.claude-autoarm-unresolved-ancestry"
+
+  printf 'owner_pid=424242 updated_at=1\n' > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a stale fault record must not change whether the guard blocks"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "the generic unclaimed line must still be reported"
+  case "$out" in
+    *"cannot resolve its own session"*)
+      fail "a long-stale fault record was used to diagnose an unrelated failure: $out" ;;
+  esac
+  case "$out" in
+    *424242*) fail "the banner named an owner pid from a long-stale fault record: $out" ;;
+  esac
+
+  # Divergence: the same record written for THIS Stop event is exactly what the
+  # banner exists to name, so the freshness bound must not silence it.
+  printf 'owner_pid=424242 updated_at=%s\n' "$(date +%s)" > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a current fault record must not change whether the guard blocks"
+  assert_contains "$out" "cannot resolve its own session" "a current fault must be named as the cause"
+  assert_contains "$out" "424242" "a current fault must name the recorded owner pid"
+  pass "fm-turnend-guard --claude: the unresolvable-session cause is named only while its record is current"
+}
+
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
   local dir pid out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
@@ -1695,4 +1729,5 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget
+test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record
 test_hook_claude_mode_secondmate_reblocks_like_primary

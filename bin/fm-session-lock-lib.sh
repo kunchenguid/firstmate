@@ -48,16 +48,49 @@ fm_harness_path_name() {  # <path>
 # report a "harness ancestry" that provably excludes the session that fired it.
 FM_HARNESS_INFRA_SUBCOMMANDS='daemon bg-pty-host bg-spare'
 
-# True when full argument string $1 is one of those shared infrastructure
-# processes. Anchored on the FIRST argument after argv[0] so a real session can
-# never be misread as infrastructure because its prompt text happens to contain
-# one of these words - a crewmate launch brief is passed as argv.
-fm_harness_is_infra() {  # <args>
-  local args=$1 rest sub name
+# The subset of those that is also a hard BOUNDARY for the ancestry walk below,
+# rather than merely transparent to it. A session-hosted hook chain legitimately
+# passes THROUGH a bg-pty-host or bg-spare worker on its way up to its own
+# session, so those must stay transparent or a real session would stop being
+# found. The per-user daemon is different: it is one process shared by every
+# session and every home, and nothing above it is below any session. Reaching it
+# without having already matched a session therefore proves the caller is in the
+# shared infrastructure chain, so the walk must stop there UNRESOLVED instead of
+# climbing on and latching onto whatever harness happens to sit above the daemon
+# and reporting it as this session's own ancestry - the exact gap-crossing the
+# walk otherwise forbids, and the one that would let a hook arm a home it cannot
+# prove it owns.
+FM_HARNESS_INFRA_BOUNDARY_SUBCOMMANDS='daemon'
+
+# Print the FIRST argument after argv[0] in full argument string $1, or return 1
+# when there is none. Anchoring on that one token is what keeps the infrastructure
+# tests below safe: a real session can never be misread as infrastructure because
+# its prompt text happens to contain one of these words - a crewmate launch brief
+# is passed as argv.
+fm_harness_subcommand() {  # <args>
+  local args=$1 rest
   rest=${args#* }
   [ "$rest" != "$args" ] || return 1
-  sub=${rest%% *}
+  printf '%s' "${rest%% *}"
+}
+
+# True when full argument string $1 is one of those shared infrastructure
+# processes.
+fm_harness_is_infra() {  # <args>
+  local sub name
+  sub=$(fm_harness_subcommand "$1") || return 1
   for name in $FM_HARNESS_INFRA_SUBCOMMANDS; do
+    [ "$sub" = "$name" ] && return 0
+  done
+  return 1
+}
+
+# True when full argument string $1 is an infrastructure process the pre-match
+# ancestry climb must terminate on rather than pass through.
+fm_harness_is_infra_boundary() {  # <args>
+  local sub name
+  sub=$(fm_harness_subcommand "$1") || return 1
+  for name in $FM_HARNESS_INFRA_BOUNDARY_SUBCOMMANDS; do
     [ "$sub" = "$name" ] && return 0
   done
   return 1
@@ -110,6 +143,15 @@ fm_harness_process_matches() {  # <comm> <args>
 # into an unrelated harness further up the real process tree - for example the
 # live session that launched a test as its own subprocess.
 #
+# The pre-match climb has one hard stop of its own: the shared per-user daemon.
+# Excluding infrastructure from fm_harness_process_matches makes it transparent
+# to that climb rather than a boundary, so without this the walk would pass
+# straight through a bg-spare/bg-pty-host/daemon chain and report whatever sits
+# ABOVE the daemon as this session's ancestry - the same gap crossing, reached
+# from a different direction. Reaching the daemon before any session has matched
+# proves the caller is in the shared infrastructure chain, where this session is
+# simply not visible, so the walk terminates UNRESOLVED.
+#
 # For every harness except Claude the innermost match is the session, which is
 # where e.g. Pi's shared signed-wrapper ancestry actually holds the lock: a
 # "pi-signed" launcher can be the direct parent of the inner "pi" engine pid that
@@ -130,6 +172,8 @@ fm_harness_ancestry_pids() {
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
     elif [ "$extending" -eq 1 ]; then
+      break
+    elif fm_harness_is_infra_boundary "$args"; then
       break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

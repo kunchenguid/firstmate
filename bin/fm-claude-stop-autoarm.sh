@@ -128,7 +128,16 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
     ''|*[!0-9]*) exit 0 ;;
   esac
   if fm_harness_pid_alive "$LOCK_PID"; then
-    fm_harness_ancestry_pids >/dev/null 2>&1 || record_unresolved_ancestry "$LOCK_PID"
+    # The record must describe the CURRENT condition, not the worst one ever
+    # seen: resolving this firing's own ancestry and finding a different live
+    # session is a correct, fully diagnosed refusal, so any earlier fault record
+    # is stale here and would make the guard name an unresolvable-session cause
+    # that no longer holds.
+    if fm_harness_ancestry_pids >/dev/null 2>&1; then
+      rm -f "$UNRESOLVED" 2>/dev/null || true
+    else
+      record_unresolved_ancestry "$LOCK_PID"
+    fi
     exit 0
   fi
   RECOVER_SESSION_LOCK=1

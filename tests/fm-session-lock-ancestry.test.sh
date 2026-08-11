@@ -285,6 +285,64 @@ SH
   pass "session-lock: claude's shared daemon and its background workers are never a session"
 }
 
+# Excluding the infrastructure subcommands from harness identity makes them
+# TRANSPARENT to the ancestry climb, not a boundary: the walk climbs freely
+# until its FIRST match, so a hook firing in the shared-daemon chain would walk
+# straight past bg-spare, bg-pty-host and `claude daemon run` and latch onto
+# whatever harness happens to sit ABOVE the daemon, reporting an unrelated
+# session as its own ancestry. That is the same gap crossing
+# test_harness_beyond_a_gap_never_owns_the_lock forbids, reached from the other
+# direction, and it would let the hook arm a home it cannot prove it owns. The
+# fixture above places `bash -l` above the daemon, which cannot show this; here a
+# real session sits there, and it is also the session that holds the lock.
+test_harness_above_the_daemon_is_never_this_sessions_ancestry() {
+  local dir fakebin pids
+  dir="$TMP_ROOT/harness-above-daemon"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  300:comm=) printf '%s\n' '2.1.227' ;;
+  300:args=) printf '%s\n' 'claude bg-spare --bg-spare /tmp/cc/spare/x.claim.sock' ;;
+  300:ppid=) printf '%s\n' 310 ;;
+  310:comm=) printf '%s\n' '2.1.227' ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host --bg-pty-host /tmp/cc/pty/x.sock 200 50' ;;
+  310:ppid=) printf '%s\n' 320 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' '/home/u/.local/bin/claude daemon run --json-path /home/u/.claude/daemon.json' ;;
+  320:ppid=) printf '%s\n' 400 ;;
+  400:comm=) printf '%s\n' claude ;;
+  400:args=) printf '%s\n' 'claude --dangerously-skip-permissions' ;;
+  400:ppid=) printf '%s\n' 410 ;;
+  410:comm=) printf '%s\n' bash ;;
+  410:args=) printf '%s\n' 'bash -l' ;;
+  410:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 300 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '400\n' > "$dir/state/.lock"
+
+  pids=$(lib_eval "$fakebin" 'fm_harness_ancestry_pids' || true)
+  [ -z "$pids" ] \
+    || fail "the walk resolved an ancestry from inside the shared daemon chain: '$pids'"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    && fail "a firing inside the shared daemon chain claimed to own the session lock"
+  pass "session-lock: a harness above the shared daemon is never read as this session's ancestry"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -453,6 +511,12 @@ test_e2e_competing_live_session_stays_silently_inert() {
   local dir other
   dir="$TMP_ROOT/e2e-competing-live-session"
   make_primary_home "$dir"
+  # A fault record left by an EARLIER firing that genuinely could not resolve its
+  # own session. This firing can, so the condition the record describes no longer
+  # holds and the record must not survive to make the guard name an
+  # unresolvable-session cause for a correctly diagnosed competing-session
+  # refusal.
+  printf 'owner_pid=1 updated_at=1\n' > "$dir/$UNRESOLVED_MARKER"
   "$NAMED_CLAUDE" -c 'sleep 60; :' &
   other=$!
   FM_FIXTURE_LOCK_PID="$other" run_fixture_tree "$dir" "$NAMED_CLAUDE"
@@ -463,8 +527,8 @@ test_e2e_competing_live_session_stays_silently_inert() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$other" ] \
     || fail "a competing live session's lock was taken over"
   [ ! -e "$dir/$UNRESOLVED_MARKER" ] \
-    || fail "a genuine competing-session refusal was misrecorded as an unresolved-ancestry fault"
-  pass "session-lock e2e: a genuine competing live session is refused without a fault record"
+    || fail "a genuine competing-session refusal kept an unresolved-ancestry fault record: $(cat "$dir/$UNRESOLVED_MARKER")"
+  pass "session-lock e2e: a genuine competing live session is refused and clears any stale fault record"
 }
 
 test_version_named_session_is_identified_on_both_platforms
@@ -472,6 +536,7 @@ test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_daemon_worker_chain_is_never_session_ancestry
+test_harness_above_the_daemon_is_never_this_sessions_ancestry
 test_e2e_version_named_session_claims_the_home
 test_e2e_unresolvable_ancestry_is_recorded_not_silent
 test_e2e_competing_live_session_stays_silently_inert
