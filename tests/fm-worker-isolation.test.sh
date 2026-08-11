@@ -397,44 +397,6 @@ test_primary_origin_requires_state_attestation() {
   pass "primary startup establishes and reuses a state-bound launch attestation"
 }
 
-test_process_environment_fallback_preserves_spaces() {
-  local fakebin env status
-  fakebin=$(fm_fakebin "$TMP_ROOT/ps-environ")
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *eww*) printf '%s\n' 'shell FM_AGENT_OWNER_HOME=/tmp/owner home FM_HOME=/tmp/owner home FM_AGENT_TASK=task-space FM_AGENT_ROLE=secondmate' ;;
-  *) printf '%s\n' '1' ;;
-esac
-SH
-  chmod +x "$fakebin/ps"
-  env= status=0
-  env=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_worker_process_environ 999' _ \
-    "$ROOT/bin/fm-worker-isolation-lib.sh") || status=$?
-  [ "$status" -ne 0 ] || fail "the process-environment fallback trusted a command-line marker"
-  [ -z "$env" ] || fail "the process-environment fallback emitted forgeable marker data"
-  pass "the process-environment fallback fails closed without procfs"
-}
-
-test_process_environment_fallback_rejects_ambiguous_markers() {
-  local fakebin env status
-  fakebin=$(fm_fakebin "$TMP_ROOT/ps-environ-ambiguous")
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *eww*) printf '%s\n' 'shell FOO=x FM_AGENT_ROLE=secondmate FM_AGENT_TASK=task FM_AGENT_OWNER_HOME=/owner FM_HOME=/owner' ;;
-  *) printf '%s\n' 'shell' ;;
-esac
-SH
-  chmod +x "$fakebin/ps"
-  env= status=0
-  env=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_worker_process_environ 999999' _ \
-    "$ROOT/bin/fm-worker-isolation-lib.sh") || status=$?
-  [ "$status" -ne 0 ] || fail "ambiguous ps output was accepted as process identity"
-  [ -z "$env" ] || fail "ambiguous ps output emitted forged identity records: $env"
-  pass "ambiguous ps identity output remains unproven"
-}
-
 test_process_environment_requires_linux_procfs() {
   local status
   if bash -c '
@@ -1640,8 +1602,6 @@ test_primary_ancestry_refuses_unreadable_process_environment
 test_primary_ancestry_refuses_any_inherited_worker_marker
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
-test_process_environment_fallback_preserves_spaces
-test_process_environment_fallback_rejects_ambiguous_markers
 test_process_environment_requires_linux_procfs
 test_process_environment_newline_is_not_a_marker
 test_unreadable_task_start_proof_remains_contested

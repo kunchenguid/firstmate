@@ -426,6 +426,13 @@ teardown_slot_returning_recovery_line() {  # <meta> <worktree> <task-id>
   echo "teardown: RECOVERY: run 'treehouse list' and confirm whether ${2:-the recorded slot} is still leased to $3. If it is, delete the 'slot_returning=1' line from $1 and re-run teardown; if the slot was already returned, replace that line with 'slot_returned=1'. docs/worker-isolation.md owns the manual reclaim path." >&2
 }
 
+teardown_unresolved_lease_recovery_line() {
+  local meta=$1 id=$2 holder candidate
+  holder=$(meta_value "$meta" slot_lease_holder)
+  candidate=$(meta_value "$meta" slot_worktree_candidate)
+  echo "teardown: RECLAIM: run 'treehouse list' to find the slot leased to ${holder:-$id}${candidate:+ (spawn saw candidate path $candidate)} and return it with 'treehouse return --force <slot>'; docs/worker-isolation.md owns the reclaim path." >&2
+}
+
 # Retire the task branch only once the slot is provably back in the pool.
 # Detaching and deleting it BEFORE the return would strip the very identity
 # fm_assert_task_branch_matches_meta checks, so a retryable return failure
@@ -590,14 +597,53 @@ teardown_file_digest() {
 }
 
 teardown_remove_owned_file() {
-  local path=$1 expected_inode=$2 expected_digest=$3 actual_inode actual_digest
+  local path=$1 expected_inode=$2 expected_digest=$3
+  local identity quarantine dir identity_inode identity_digest
   [ "${TEARDOWN_TASK_LOCK_HELD:-0}" = 1 ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  actual_inode=$(teardown_file_inode "$path") || return 1
-  [ "$actual_inode" = "$expected_inode" ] || return 1
-  actual_digest=$(teardown_file_digest "$path") || return 1
-  [ "$actual_digest" = "$expected_digest" ] || return 1
-  rm -f -- "$path"
+  [ -n "$expected_inode" ] && [ -n "$expected_digest" ] || return 1
+  dir=${path%/*}
+  [ "$dir" = "$path" ] && dir=.
+  identity="$dir/.fm-owned.$$.${RANDOM}.identity"
+  quarantine="$dir/.fm-owned.$$.${RANDOM}.quarantine"
+  [ ! -e "$identity" ] && [ ! -L "$identity" ] || return 1
+  [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 1
+  ln "$path" "$identity" 2>/dev/null || return 1
+  if ! [ -f "$identity" ] || [ -L "$identity" ] || ! [ "$path" -ef "$identity" ]; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  identity_inode=$(teardown_file_inode "$identity") || {
+    rm -f -- "$identity"
+    return 1
+  }
+  if [ "$identity_inode" != "$expected_inode" ]; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  identity_digest=$(teardown_file_digest "$identity") || {
+    rm -f -- "$identity"
+    return 1
+  }
+  if [ "$identity_digest" != "$expected_digest" ]; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  if ! mv "$path" "$quarantine" 2>/dev/null; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  if [ "$quarantine" -ef "$identity" ]; then
+    rm -f -- "$quarantine" "$identity"
+    return $?
+  fi
+  if [ ! -e "$path" ] && [ ! -L "$path" ] \
+     && [ -f "$quarantine" ] && [ ! -L "$quarantine" ] \
+     && ln "$quarantine" "$path" 2>/dev/null; then
+    rm -f -- "$quarantine" || true
+  fi
+  rm -f -- "$identity" || true
+  return 1
 }
 
 teardown_remove_spawn_owned_hook() {
@@ -1329,7 +1375,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
 
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
-  local child_slot_returned child_slot_returning child_slot_path
+  local child_slot_returned child_slot_returning child_slot_lease_state child_slot_path
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1342,6 +1388,12 @@ validate_firstmate_home_children_removal() {
     [ -n "$child_kind" ] || child_kind=ship
     child_slot_returned=$(meta_value "$child_meta" slot_returned)
     child_slot_returning=$(meta_value "$child_meta" slot_returning)
+    child_slot_lease_state=$(meta_value "$child_meta" slot_lease_state)
+    if [ "$child_slot_lease_state" = unresolved ] && [ -z "$child_wt" ]; then
+      echo "REFUSED: child $child_id never resolved its pooled-slot path; preserving child state and reclaim evidence" >&2
+      teardown_unresolved_lease_recovery_line "$child_meta" "$child_id"
+      return 1
+    fi
     if [ "$child_slot_returning" = 1 ]; then
       child_slot_path=$(meta_value "$child_meta" home)
       [ -n "$child_slot_path" ] || child_slot_path=$child_wt
@@ -1404,7 +1456,7 @@ teardown_remove_child_home_locked() {
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
-  local child_slot_returned child_slot_returning child_slot_lock_path child_slot_path child_task_lock_path
+  local child_slot_returned child_slot_returning child_slot_lease_state child_slot_lock_path child_slot_path child_task_lock_path
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1423,6 +1475,12 @@ cleanup_firstmate_home_children() {
     [ -n "$child_kind" ] || child_kind=ship
     child_slot_returned=$(meta_value "$child_meta" slot_returned)
     child_slot_returning=$(meta_value "$child_meta" slot_returning)
+    child_slot_lease_state=$(meta_value "$child_meta" slot_lease_state)
+    if [ "$child_slot_lease_state" = unresolved ] && [ -z "$child_wt" ]; then
+      echo "REFUSED: child $child_id never resolved its pooled-slot path; preserving child state and reclaim evidence" >&2
+      teardown_unresolved_lease_recovery_line "$child_meta" "$child_id"
+      return 1
+    fi
     if [ "$child_slot_returning" = 1 ]; then
       child_slot_path=$(meta_value "$child_meta" home)
       [ -n "$child_slot_path" ] || child_slot_path=$child_wt
@@ -1776,7 +1834,7 @@ if [ "$KIND" != secondmate ]; then
     # make the task permanently untearable.
     TEARDOWN_SLOT_RETAINED=1
     echo "teardown: task $ID never resolved a pooled slot path; its durable treehouse lease is RETAINED, not returned." >&2
-    echo "teardown: RECLAIM: run 'treehouse list' to find the slot leased to ${TOP_SLOT_LEASE_HOLDER:-$ID}${TOP_SLOT_WT_CANDIDATE:+ (spawn saw candidate path $TOP_SLOT_WT_CANDIDATE)} and return it with 'treehouse return --force <slot>'; docs/worker-isolation.md owns the reclaim path." >&2
+    teardown_unresolved_lease_recovery_line "$META" "$ID"
   else
     if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
       fm_slot_lock_acquire "$WT" || {

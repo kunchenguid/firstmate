@@ -346,6 +346,8 @@ spawn_abort_recovery_meta() {
       echo "model=${MODEL:-default}"
       echo "effort=${EFFORT:-default}"
       [ "${BACKEND:-tmux}" = tmux ] || echo "backend=${BACKEND:-tmux}"
+      [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
+      [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
       if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
         echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
         echo "claude_hook_digest=$SPAWN_CLAUDE_HOOK_DIGEST"
@@ -576,32 +578,66 @@ spawn_artifact_matches_or_absent() {
 }
 
 spawn_remove_owned_artifact() {
-  local path=$1 expected_inode=$2 expected_digest=$3 actual_inode actual_digest
-  [ -n "$path" ] || return 1
-  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
-    return 0
-  fi
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ -n "$expected_inode" ] || return 1
-  actual_inode=$(spawn_artifact_inode "$path") || return 1
-  [ "$actual_inode" = "$expected_inode" ] || return 1
-  [ -n "$expected_digest" ] || return 1
-  actual_digest=$(spawn_artifact_digest "$path") || return 1
-  [ "$actual_digest" = "$expected_digest" ] || return 1
-  rm -f -- "$path"
+  spawn_remove_artifact_bound "$1" "$2" "$3"
 }
 
 spawn_remove_unproven_artifact() {
-  local path=$1 expected_inode=$2 actual_inode
+  spawn_remove_artifact_bound "$1" "$2" ""
+}
+
+spawn_remove_artifact_bound() {
+  local path=$1 expected_inode=$2 expected_digest=${3:-}
+  local identity quarantine dir identity_inode identity_digest
   [ -n "$path" ] || return 1
   if [ ! -e "$path" ] && [ ! -L "$path" ]; then
     return 0
   fi
-  [ -n "$expected_inode" ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  actual_inode=$(spawn_artifact_inode "$path") || return 1
-  [ "$actual_inode" = "$expected_inode" ] || return 1
-  rm -f -- "$path"
+  [ -n "$expected_inode" ] || return 1
+  dir=${path%/*}
+  [ "$dir" = "$path" ] && dir=.
+  identity="$dir/.fm-owned.$$.${RANDOM}.identity"
+  quarantine="$dir/.fm-owned.$$.${RANDOM}.quarantine"
+  [ ! -e "$identity" ] && [ ! -L "$identity" ] || return 1
+  [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 1
+  ln "$path" "$identity" 2>/dev/null || return 1
+  if ! [ -f "$identity" ] || [ -L "$identity" ] || ! [ "$path" -ef "$identity" ]; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  identity_inode=$(spawn_artifact_inode "$identity") || {
+    rm -f -- "$identity"
+    return 1
+  }
+  if [ "$identity_inode" != "$expected_inode" ]; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  if [ -n "$expected_digest" ]; then
+    identity_digest=$(spawn_artifact_digest "$identity") || {
+      rm -f -- "$identity"
+      return 1
+    }
+    if [ "$identity_digest" != "$expected_digest" ]; then
+      rm -f -- "$identity"
+      return 1
+    fi
+  fi
+  if ! mv "$path" "$quarantine" 2>/dev/null; then
+    rm -f -- "$identity"
+    return 1
+  fi
+  if [ "$quarantine" -ef "$identity" ]; then
+    rm -f -- "$quarantine" "$identity"
+    return $?
+  fi
+  if [ ! -e "$path" ] && [ ! -L "$path" ] \
+     && [ -f "$quarantine" ] && [ ! -L "$quarantine" ] \
+     && ln "$quarantine" "$path" 2>/dev/null; then
+    rm -f -- "$quarantine" || true
+  fi
+  rm -f -- "$identity" || true
+  return 1
 }
 
 spawn_discard_grok_auth_provisional() {
@@ -1504,11 +1540,16 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
+  local meta=$1 old_backend old_target old_session old_pane old_state old_slot_state target_session target_pane
   HERDR_RECOVERY_BACKEND=""
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
   HERDR_RECOVERY_PANE_ID=""
+  old_slot_state=$(awk -F= '$1 == "slot_lease_state" { print $2; exit }' "$meta" 2>/dev/null || true)
+  if [ "$old_slot_state" = unresolved ]; then
+    echo "error: existing task $ID has an unresolved pooled-slot lease; reconcile its recovery record before retrying" >&2
+    return 1
+  fi
   old_backend=$(fm_backend_of_meta "$meta")
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
@@ -2005,36 +2046,33 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
-  spawn_create_new_artifact "$TURNEND" SPAWN_TURNEND_INODE SPAWN_TURNEND_DIGEST </dev/null || exit 1
-  SPAWN_TURNEND_CREATED=1
+  spawn_create_new_artifact "$TURNEND" SPAWN_TURNEND_INODE SPAWN_TURNEND_DIGEST SPAWN_TURNEND_CREATED </dev/null || exit 1
   case "$HARNESS" in
     claude*)
       spawn_preflight_real_directory_path "$WT/.claude" || exit 1
       spawn_ensure_real_directory_path "$WT/.claude" || exit 1
-      spawn_create_new_artifact "$WT/.claude/settings.local.json" SPAWN_CLAUDE_HOOK_INODE SPAWN_CLAUDE_HOOK_DIGEST <<EOF || exit 1
+      spawn_create_new_artifact "$WT/.claude/settings.local.json" SPAWN_CLAUDE_HOOK_INODE SPAWN_CLAUDE_HOOK_DIGEST SPAWN_CLAUDE_HOOK_CREATED <<EOF || exit 1
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
-      SPAWN_CLAUDE_HOOK_CREATED=1
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       spawn_preflight_real_directory_path "$WT/.opencode/plugins" || exit 1
       spawn_ensure_real_directory_path "$WT/.opencode/plugins" || exit 1
-      spawn_create_new_artifact "$WT/.opencode/plugins/fm-turn-end.js" SPAWN_OPENCODE_HOOK_INODE SPAWN_OPENCODE_HOOK_DIGEST <<EOF || exit 1
+      spawn_create_new_artifact "$WT/.opencode/plugins/fm-turn-end.js" SPAWN_OPENCODE_HOOK_INODE SPAWN_OPENCODE_HOOK_DIGEST SPAWN_OPENCODE_HOOK_CREATED <<EOF || exit 1
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
     if (event.type === "session.idle") await \$\`touch $TURNEND\`
   },
 })
 EOF
-      SPAWN_OPENCODE_HOOK_CREATED=1
       exclude_path '.opencode/plugins/fm-turn-end.js'
       ;;
     pi*)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-      spawn_create_new_artifact "$STATE/$ID.pi-ext.ts" SPAWN_PI_EXT_INODE SPAWN_PI_EXT_DIGEST <<EOF || exit 1
+      spawn_create_new_artifact "$STATE/$ID.pi-ext.ts" SPAWN_PI_EXT_INODE SPAWN_PI_EXT_DIGEST SPAWN_PI_EXT_CREATED <<EOF || exit 1
 // Firstmate turn-end signal; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
@@ -2044,7 +2082,6 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
-      SPAWN_PI_EXT_CREATED=1
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
