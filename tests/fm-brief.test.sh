@@ -354,9 +354,12 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
-# Pin the rebase-equivalence gate itself. Clearing it is a precondition for
-# reporting a PR, so a heredoc edit that dropped it would otherwise remove the
-# gate from every generated brief with this suite still green.
+# Pin that the rebase-equivalence comparison is ABSENT from the generated brief.
+# Asking a worker for that verdict was tried and retired: it cannot obtain
+# either head, so the instruction could only ever report could-not-observe. No
+# gate runs anywhere now - the comparison is a firstmate-invoked diagnostic - so
+# a heredoc edit that reintroduced it here would put back an instruction that
+# structurally cannot pass.
 test_no_mistakes_dod_pins_rebase_equivalence_gate() {
   local home id brief
   home="$TMP_ROOT/rebase-equivalence-home"

@@ -24,7 +24,8 @@ The predicate, its verdict vocabulary, and why it is neither a tip-to-tip diff n
 >
 > **What would actually close this:** the pipeline retaining its pre-push head, so the content it validated remains nameable after the push.
 > That is a change in the validation tool, not in this repository, and until it exists the defect stays open.
-> This is recorded in firstmate's unenforced-commitment register so that shipping a diagnostic does not make the defect read as closed.
+> The defect is recorded as backlog item `rebase-drop-defect-remains-unprevented`, filed by firstmate with the full history and its closing condition, and blocked by `unenforced-commitment-register` so it migrates into that register when the register lands.
+> It is not in the register, because the register does not exist yet.
 
 Date: 2026-08-10.
 Git: 2.53.0.
@@ -38,7 +39,7 @@ Neither loss was reported by any pipeline signal; both were caught only by compa
 
 The push step itself is not reachable from this repository.
 `no-mistakes` is a single compiled binary (`~/.no-mistakes/bin/no-mistakes`, 24 MB, v1.40.3 at the date above), and its configuration schema exposes agent selection, timeouts, per-step `auto_fix` counts (including `rebase`), intent extraction, and test-evidence storage - no custom step, pre-push hook, or validation plugin.
-So this repository owns the comparison and the refusal, and it runs at pull-request intake in `bin/fm-pr-check.sh` rather than being asked of the worker.
+So this repository owns the comparison, and it runs only when a person invokes it: nothing in the delivery path calls it, and neither `bin/fm-pr-check.sh` nor `bin/fm-pr-merge.sh` can refuse, block, or delay a request because of it.
 
 ## Where the validated head comes from
 
@@ -97,7 +98,8 @@ snapshot source           : exit 0, "armed: state/task-a.check.sh"
 
 Firstmate's watcher records the last `head_sha` each run had while it had NOT yet pushed, keyed by run id, with the observation time - a tail rather than a trigger, because poll timing cannot reliably catch the exact pre-push boundary.
 Firstmate takes it rather than the worker, because the party being checked must not supply the evidence; it is a mechanical copy of the pipeline's own record about its own run.
-A run with no snapshot is could-not-observe: intake refuses and arms nothing, and snapshots are never back-filled, since a fabricated record is indistinguishable from a real one afterwards.
+This was withdrawn with the gate, and the machinery is gone: nothing consumed the snapshot once the gate went, so a watcher tick spawning an interpreter and a database read every fifteen seconds wrote files nobody read into a directory nothing pruned.
+Wiring the diagnostic to read it instead was rejected, because a stale snapshot would put a silently wrong head into a report a human treats as considered, and a diagnostic that carries a wrong head is worse than one that reports less.
 
 Those objects are reachable, because the pipeline's repository is an ordinary local-path remote in every initialized clone:
 
@@ -289,13 +291,13 @@ The comparison was made where both facts are readable and where the authority to
 A worker cannot see the validated bytes: they are in the pipeline's gate repository, not its clone.
 Three separate defects reduced to that one structural fact, and the third of them left the check able to report `PASS` without ever comparing, so the gate moved to `bin/fm-pr-check.sh` rather than being patched a fourth time.
 
-`bin/fm-run-record-lib.sh` reads the run record, `mode=ro` and deliberately without `immutable=1` since the pipeline writes that file concurrently.
-The outcome is three-valued, and only a genuine mismatch refuses:
+The run-record reader that fed this gate was removed with it, since nothing consumed it afterwards.
+Its outcome WAS three-valued, and none of this runs any more:
 
-- bytes carried: intake proceeds and arms the merge watch as before;
-- bytes dropped: intake refuses, names the losing paths, and does NOT arm the watch;
-- no recorded run: not this gate's business, since the request was never produced by a pipeline rebase, so it passes through untouched - `direct-PR` delivery has no run row at all;
-- comparison unavailable: reported prominently, and never silently converted into a pass.
+- bytes carried: intake proceeded and armed the merge watch as before;
+- bytes dropped: intake refused, named the losing paths, and did not arm the watch;
+- no recorded run: passed through untouched, since the request was never produced by a pipeline rebase - `direct-PR` delivery has no run row at all;
+- comparison unavailable: refused, so that a warning followed by an armed watch could not read as a pass.
 
 Watched red before it was trusted green, against one reconstructed dropping rebase, with the gate the only difference between the two runs:
 
@@ -365,4 +367,4 @@ A final case asserts every outcome prints a verdict line and exits with that ver
 
 `tests/fm-brief.test.sh` pins the gate's ABSENCE from the generated no-mistakes brief.
 Asking a worker for this verdict was tried and retired: it cannot obtain either head, so the instruction could only ever report could-not-observe.
-`tests/fm-pr-intake-equivalence.test.sh` pins the intake gate instead - the snapshot tail, a missing snapshot refusing and arming nothing, a dropping push refused with its path named, a faithful push armed, an unrecorded request passing through, and could-not-observe refusing rather than arming.
+`tests/fm-pr-check-security.test.sh` pins that neither intake nor merge can block on head comparison again, on the exact state that used to brick delivery.

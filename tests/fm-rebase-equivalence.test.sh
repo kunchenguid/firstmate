@@ -605,6 +605,9 @@ git_do "$SRC" push -q "$GATE" "$V:refs/heads/fm/work"
 
 WORKER="$TMP_ROOT/worker"
 git clone -q --no-local "$FORGE" "$WORKER"
+# Requests are addressed by URL because a bare number names no repository, so
+# the check cannot prove any source is the one the request belongs to.
+git -C "$WORKER" config "url.$FORGE.insteadOf" 'https://github.com/o/r.git'
 
 for absent in "$D" "$V"; do
   if git -C "$WORKER" cat-file -e "$absent^{commit}" 2>/dev/null; then
@@ -612,17 +615,17 @@ for absent in "$D" "$V"; do
   fi
 done
 
-run_check_pr "$WORKER" "$B" "$V" 7 --candidate-base origin/main --validated-remote "$GATE"
+run_check_pr "$WORKER" "$B" "$V" 'https://github.com/o/r/pull/7' --candidate-base origin/main --validated-remote "$GATE"
 expect_code 3 "$RC" 'a dropping candidate fetched from the forge must be refused'
 assert_contains "$OUT" 'dropped-content' 'the fetched candidate must be compared, not skipped'
 assert_contains "$OUT" 'core.sh' 'the losing path must be named'
 pass 'a head that exists only on the forge is fetched and refused'
 
-run_check_pr "$WORKER" "$B" "$V" 8 --candidate-base origin/main --validated-remote "$GATE"
+run_check_pr "$WORKER" "$B" "$V" 'https://github.com/o/r/pull/8' --candidate-base origin/main --validated-remote "$GATE"
 expect_code 0 "$RC" 'a faithful candidate fetched from the forge must pass'
 pass 'a faithful head fetched from the forge still passes'
 
-run_check_pr "$WORKER" "$B" "$V" 9 --candidate-base origin/main --validated-remote "$GATE"
+run_check_pr "$WORKER" "$B" "$V" 'https://github.com/o/r/pull/9' --candidate-base origin/main --validated-remote "$GATE"
 expect_code 2 "$RC" 'an unfetchable request must be could-not-observe'
 assert_contains "$OUT" 'cannot fetch the candidate head' 'the unreachable candidate must say so'
 pass 'a candidate that cannot be fetched refuses instead of passing'
@@ -797,6 +800,7 @@ git_do "$PIPE_SRC" push -q "$PIPE_FORGE" "$PT:refs/heads/main" "$PC:refs/pull/3/
 
 PIPE_WORKER="$TMP_ROOT/pipeline-worker"
 git clone -q --no-local "$PIPE_FORGE" "$PIPE_WORKER"
+git -C "$PIPE_WORKER" config "url.$PIPE_FORGE.insteadOf" 'https://github.com/pipe/proj.git'
 git_do "$PIPE_WORKER" checkout -q -b work "$PB"
 printf 'alpha\nbravo\ncharlie\nfoo(a)\n' > "$PIPE_WORKER/core.sh"
 PW=$(commit_all "$PIPE_WORKER" 'local: the branch as this clone still holds it')
@@ -809,7 +813,7 @@ fi
 # fix commits are not here, so the pipeline's own accepted rewrite would read as
 # dropped content. It is no longer merely wrong, it is refused outright, which
 # is what makes the false refusal impossible rather than less likely.
-run_check_pr "$PIPE_WORKER" "$PB" "$PW" 3 --candidate-base origin/main
+run_check_pr "$PIPE_WORKER" "$PB" "$PW" 'https://github.com/pipe/proj/pull/3' --candidate-base origin/main
 expect_code 2 "$RC" "a forge candidate must refuse a validated head read from this clone"
 assert_contains "$OUT" '--validated-remote' \
   'the refusal must name the authoritative source it requires'
@@ -818,7 +822,7 @@ assert_not_contains "$OUT" 'dropped-content' \
 
 RC=0
 OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$PV" \
-  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main 2>&1) || RC=$?
+  --validated-remote "$PIPE" --candidate-pr 'https://github.com/pipe/proj/pull/3' --candidate-base origin/main 2>&1) || RC=$?
 expect_code 0 "$RC" 'the head the run record names must clear a faithful push'
 assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
   'a pipeline fix that rewrote a validated line must not read as dropped content'
@@ -835,14 +839,14 @@ pass 'the validated head is taken from the pipeline, so its own fixes are not re
 
 RC=0
 OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head HEAD \
-  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main --validated-remote "$GATE" 2>&1) || RC=$?
+  --validated-remote "$PIPE" --candidate-pr 'https://github.com/pipe/proj/pull/3' --candidate-base origin/main --validated-remote "$GATE" 2>&1) || RC=$?
 expect_code 2 "$RC" 'a symbolic validated head cannot name a commit on the pipeline side'
 assert_contains "$OUT" 'full commit id' 'the refusal must say what the run record supplies'
 
 ABSENT_OID=$(printf '%s' "$PW" | tr '0-9a-f' '1-9a-f0')
 RC=0
 OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$ABSENT_OID" \
-  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main --validated-remote "$GATE" 2>&1) || RC=$?
+  --validated-remote "$PIPE" --candidate-pr 'https://github.com/pipe/proj/pull/3' --candidate-base origin/main --validated-remote "$GATE" 2>&1) || RC=$?
 expect_code 2 "$RC" 'a validated head no side holds must be could-not-observe'
 assert_contains "$OUT" 'cannot fetch the validated head' 'the unfetchable validated head must say so'
 assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
@@ -862,7 +866,7 @@ assert_contains "$OUT" 'missing required --candidate-head or --candidate-pr' \
   'the missing candidate must be named'
 RC=0
 OUT=$("$CHECK" --repo "$WORKER" --validated-base "$B" --validated-head "$V" \
-  --candidate-head "$V" --candidate-pr 8 2>&1) || RC=$?
+  --candidate-head "$V" --candidate-pr 'https://github.com/o/r/pull/8' 2>&1) || RC=$?
 expect_code 2 "$RC" 'naming two candidates must be could-not-observe'
 RC=0
 OUT=$("$CHECK" --repo "$WORKER" --validated-base "$B" --validated-head "$V" \
@@ -897,5 +901,33 @@ for scenario in 3 0 2; do
   expect_code "$scenario" "$RC" 'the exit status must match the verdict printed'
 done
 pass 'every outcome prints a verdict line and exits with its own status'
+
+# --- a bare request number names no repository -------------------------------
+#
+# Every forge publishes the same head namespace for every repository, so a bare
+# number resolves against whichever repository the fallback source happens to
+# be. Measured against this repo, where origin fetches upstream while requests
+# are opened on the fork, that returned a confident DROPPED verdict over 12
+# paths of an unrelated project's request. A verdict about code nobody asked
+# about is worse than no verdict, so the numeric form is refused outright.
+
+REPO=$(new_repo bare-number)
+B=$(git -C "$REPO" rev-parse HEAD)
+printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$REPO/core.sh"
+V=$(commit_all "$REPO" 'validated: one addition')
+
+# The validated side is made obtainable so the refusal is reached for the
+# NUMBER's sake and not merely because some earlier input was missing.
+BARE_GATE="$TMP_ROOT/bare-gate.git"
+git init -q --bare -b main "$BARE_GATE"
+git_do "$REPO" push -q "$BARE_GATE" "$V:refs/heads/fm/work"
+
+RC=0
+OUT=$("$CHECK" --repo "$REPO" --validated-base "$B" --validated-head "$V" \
+  --validated-remote "$BARE_GATE" --candidate-pr 7 2>&1) || RC=$?
+expect_code 2 "$RC" 'a bare request number must be could-not-observe'
+assert_contains "$OUT" 'names no repository' 'the refusal must say why a number is not enough'
+assert_not_contains "$OUT" 'DROPPED' 'a bare number must never produce a comparison verdict'
+pass 'bare candidate-pr number refuses without repository identity'
 
 printf 'all rebase-equivalence tests passed\n'

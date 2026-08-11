@@ -2620,15 +2620,15 @@ SH
 # validated-head snapshot made fm-pr-check.sh refuse, and because
 # bin/fm-pr-merge.sh routes through it the request became permanently
 # unmergeable with no recovery path, since snapshots are never back-filled. The
-# gate was withdrawn; this pins that neither script can block on it again, with
-# a run recorded for the request and no snapshot anywhere - the exact state that
-# used to brick.
+# gate was withdrawn; this pins that neither script can block on it again. It
+# asserts the structural facts rather than reconstructing the old precondition:
+# intake emits no comparison verdict, the merge path carries no comparison
+# residue at all, and the merge actually reaches the forge.
 test_head_comparison_never_blocks_a_merge() {
   local dir state
   dir=$(make_case head-comparison-never-blocks)
   state="$dir/home/state"
   write_task_meta "$dir"
-  rm -rf "$state/run-snapshot"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \

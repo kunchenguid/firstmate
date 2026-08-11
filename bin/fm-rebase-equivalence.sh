@@ -133,7 +133,19 @@ VERDICT_PASS=0
 VERDICT_CANNOT=2
 VERDICT_DROPPED=3
 
+# Released from a trap rather than at one call site: the ref exists from the
+# fetch onward, and every refusal between there and the resolve would otherwise
+# exit with it still present, accumulating one ref per validated commit in what
+# is a SHARED object store for a gate worktree and pinning its objects.
+VALIDATED_REF=
+release_validated_ref() {
+  [ -n "$VALIDATED_REF" ] || return 0
+  git -C "$REPO" update-ref -d "$VALIDATED_REF" 2>/dev/null || true
+  VALIDATED_REF=
+}
+
 cannot_observe() {  # <reason>
+  release_validated_ref
   printf 'REBASE-EQUIVALENCE: CANNOT-OBSERVE %s\n' "$1"
   exit "$VERDICT_CANNOT"
 }
@@ -371,7 +383,15 @@ if [ -n "$CANDIDATE_PR" ]; then
     fi
     CANDIDATE_SOURCES+=("$PR_URL_SOURCE")
   else
-    CANDIDATE_SOURCES+=("${CANDIDATE_REMOTE:-origin}")
+    # A bare request number names no repository, so there is nothing to prove a
+    # source against. Falling back to a configured remote is exactly the
+    # collision this section exists to close: every forge publishes the same
+    # head namespace for every repository, so the number resolves against
+    # WHICHEVER repository that remote happens to be - here origin fetches
+    # upstream while requests are opened on the fork. That returned a confident
+    # DROPPED verdict over 12 paths of an unrelated project's request. A
+    # verdict about code nobody asked about is worse than no verdict.
+    cannot_observe "--candidate-pr $CANDIDATE_PR is a bare number, which names no repository; pass the request URL so the source can be proven to be the repository it belongs to"
   fi
 
   CANDIDATE_REF="refs/fm-rebase-equivalence/candidate/$PR_NUMBER"
@@ -436,15 +456,9 @@ resolve() {  # <ref>
 # the objects stay reachable for the rest of this run. Keeping one ref per
 # validated commit would accumulate forever in what is, for a gate worktree, the
 # SHARED object store, pinning every fetched object against gc.
-_release_validated_ref() {
-  [ -n "${VALIDATED_REF:-}" ] || return 0
-  git -C "$REPO" update-ref -d "$VALIDATED_REF" 2>/dev/null || true
-  VALIDATED_REF=
-}
 
 VH=$(resolve "$VALIDATED_HEAD") \
-  || { _release_validated_ref; cannot_observe "cannot resolve --validated-head: $VALIDATED_HEAD"; }
-_release_validated_ref
+  || cannot_observe "cannot resolve --validated-head: $VALIDATED_HEAD"
 CH=$(resolve "$CANDIDATE_HEAD") \
   || cannot_observe "cannot resolve --candidate-head: $CANDIDATE_HEAD"
 
@@ -491,7 +505,7 @@ VB=$(git -C "$REPO" merge-base "$VB_TRUNK" "$VH" 2>/dev/null) \
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-rebase-equiv.XXXXXX") \
   || cannot_observe "cannot create a working directory"
-trap 'rm -rf "$WORK"' EXIT INT TERM
+trap 'release_validated_ref; rm -rf "$WORK"' EXIT INT TERM
 
 # The validated contribution's footprint. --no-renames keeps both sides
 # measuring the same way, so a rename detected on one side only cannot read as
