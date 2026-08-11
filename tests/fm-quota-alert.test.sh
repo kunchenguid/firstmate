@@ -270,6 +270,7 @@ test_quota_sources_never_reach_dispatch_selection() {
   # The reminder READS config/crew-dispatch.json to know which launch identities
   # exist, which is what lets it name the alternatives. What it must never do is
   # run a spawn or write a dispatch decision back.
+  # shellcheck disable=SC2016  # the literal $DISPATCH is the pattern, not a variable
   grep -v '^[[:space:]]*#' "$ROOT/bin/fm-quota-alert.sh" | grep -qE 'fm-spawn|fm-dispatch|> *"?\$DISPATCH' \
     && fail "the quota reminder must not dispatch or rewrite the dispatch config"
   pass "quota readings never reach dispatch selection"

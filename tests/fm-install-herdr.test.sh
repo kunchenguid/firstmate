@@ -181,6 +181,7 @@ test_ci_wires_installers_and_required_lane() {
   # partitions against, not the pre-sharding spelling.
   assert_grep 'FM_SERIAL_LANE: portable-serial-' "$CI" \
     "portable CI must run the serial remainder"
+  # shellcheck disable=SC2016  # a fixed-string match on the literal workflow text
   assert_grep 'lane "$FM_SERIAL_LANE"' "$CI" \
     "portable CI must invoke the serial remainder through its sharded lane name"
   assert_grep 'fm-test-run.sh --check-coverage' "$CI" \
