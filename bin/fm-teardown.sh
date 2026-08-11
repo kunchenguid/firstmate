@@ -2614,6 +2614,11 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
+elif [ "$BACKEND" = cmux ]; then
+  fm_backend_kill_published "$BACKEND" "$T" "fm-$ID" || {
+    echo "error: exact cmux workspace close could not be confirmed for $ID; retaining every durable task record for retry" >&2
+    exit 1
+  }
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi

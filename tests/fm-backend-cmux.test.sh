@@ -1324,6 +1324,34 @@ test_kill_workspace_exact_searches_all_windows() {
   pass "fm_backend_cmux_kill_workspace_exact: searches every window before exact cleanup"
 }
 
+test_published_kill_retries_after_unconfirmed_close() {
+  local dir fb title result
+  dir="$TMP_ROOT/published-kill-retry"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-published-retry)
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "bbbbbbbb-0000-0000-0000-000000000000" other
+  cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 5 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "bbbbbbbb-0000-0000-0000-000000000000" other
+  cmux_windows_response "$dir" 6 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 7 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "bbbbbbbb-0000-0000-0000-000000000000" other
+  cmux_windows_response "$dir" 9 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 10 \
+    "bbbbbbbb-0000-0000-0000-000000000000" other
+  fb=$(make_cmux_fakebin "$dir")
+  result=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; set +e; fm_backend_kill_published cmux "aaaaaaaa-0000-0000-0000-000000000000:cccccccc-0000-0000-0000-000000000000" fm-published-retry; first=$?; fm_backend_kill_published cmux "aaaaaaaa-0000-0000-0000-000000000000:cccccccc-0000-0000-0000-000000000000" fm-published-retry; second=$?; printf "%s %s" "$first" "$second"' "$ROOT")
+  [ "$result" = '1 0' ] || fail "published cmux cleanup returned '$result', expected first failure and successful retry"
+  [ "$(grep -c $'\x1fclose-workspace\x1f--workspace\x1faaaaaaaa-0000-0000-0000-000000000000' "$dir/log")" -eq 2 ] \
+    || fail "published cmux cleanup did not retry the exact workspace close"
+  pass "fm_backend_kill_published: retains an unconfirmed close and succeeds on exact retry"
+}
+
 test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
@@ -1454,6 +1482,7 @@ test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_workspace_exact_searches_all_windows
+test_published_kill_retries_after_unconfirmed_close
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend

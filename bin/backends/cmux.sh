@@ -1012,6 +1012,13 @@ fm_backend_cmux_kill_workspace_exact() {  # <workspace-id> <expected-label>
   [ "$location_rc" -eq 2 ]
 }
 
+fm_backend_cmux_kill_published() {
+  local target=${1:-} expected_label=${2:-}
+  [ -n "$expected_label" ] || return 1
+  fm_backend_cmux_parse_target "$target" || return 1
+  fm_backend_cmux_kill_workspace_exact "$FM_BACKEND_CMUX_WORKSPACE" "$expected_label"
+}
+
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace
 # whose title is scoped to this firstmate home, by TITLE - never by trusting a
 # stored uuid, since workspace ids do NOT survive an app relaunch (finding #5).

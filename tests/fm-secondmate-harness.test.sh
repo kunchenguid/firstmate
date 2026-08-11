@@ -547,6 +547,29 @@ test_spawn_invalid_workspace_config_refused() {
   pass "B4b spawn: an invalid present workspace-execution config refuses launch before inheritance"
 }
 
+test_spawn_inheritance_copy_failure_refuses_publication() {
+  local w sm launchlog out status
+  w="$TMP_ROOT/spawn-inheritance-copy-failure"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf '%s\n' '{"workerPlacement":{"adapter":"host","workspaceMode":"direct","kits":[]},"secondmatePlacement":{"adapter":"host","workspaceMode":"direct","kits":[]},"commandExecution":{"adapter":"local","profile":null}}' \
+    > "$w/home/config/workspace-execution.json"
+  make_seeded_home "$sm" sm
+  mkdir -p "$sm/config/workspace-execution.json"
+
+  out=$(FM_SKIP_SECONDMATE_INHERIT=1 spawn_secondmate_capture \
+    "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 1 "$status" "secondmate config copy failure should refuse launch publication"
+  assert_contains "$out" "config inheritance failed" \
+    "secondmate config copy failure did not emit the publication refusal"
+  [ ! -e "$w/home/state/sm.meta" ] \
+    || fail "secondmate config copy failure wrote task metadata"
+  [ -d "$sm/config/workspace-execution.json" ] \
+    || fail "secondmate config copy failure modified the exact destination"
+  pass "B4c spawn: inherited workspace-execution copy failure refuses publication"
+}
+
 # An explicit per-spawn harness arg wins over config/secondmate-harness.
 test_spawn_explicit_harness_wins() {
   local w sm meta
@@ -2503,6 +2526,7 @@ test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_invalid_workspace_config_refused
+test_spawn_inheritance_copy_failure_refuses_publication
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_backend_precedence_over_inherited_config

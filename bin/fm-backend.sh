@@ -756,6 +756,17 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+fm_backend_kill_published() {  # <backend> <target> <expected-label>
+  local backend=$1
+  shift
+  [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    cmux) fm_backend_cmux_kill_published "$@" ;;
+    *) echo "error: no exact published kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift
