@@ -66,9 +66,20 @@ make_home() {  # <name> -> prints home
   printf '%s\n' "$home"
 }
 
+# A throwaway CODE ROOT for a case whose probe target the case itself writes.
+# Typed probe targets resolve only under the tracked code root, so a case that
+# needs to create the owner it probes needs a root it may write into; cases whose
+# probes name real repository files keep $ROOT.
+make_code_root() {  # <name> -> prints root
+  local root="$TMP_ROOT/$1/root"
+  mkdir -p "$root"
+  printf '%s\n' "$root"
+}
+
 # An entry whose probe is a declared owner command: absent by default, so the
-# commitment reads unmet until the owner is actually created.
-write_owner_entry() {  # <register-dir> <id> <command-path>
+# commitment reads unmet until the owner is actually created. The command is a
+# path RELATIVE to the code root, as every typed probe target must be.
+write_owner_entry() {  # <register-dir> <id> <relative-command>
   cat > "$1/$2.json" <<JSON
 {
   "commitment_schema_version": 1,
@@ -83,20 +94,26 @@ write_owner_entry() {  # <register-dir> <id> <command-path>
 JSON
 }
 
+# The code root every run_reg call resolves probe targets under. A case that
+# writes its own owner shadows it with `local REG_ROOT=$(make_code_root ...)`.
+REG_ROOT=$ROOT
+
 run_reg() {  # <register-dir> <home> [args...]
   local dir=$1 home=$2
   shift 2
-  FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$REG" "$@"
+  FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$REG_ROOT" "$REG" "$@"
 }
 
 # --- red-capable, in both directions ----------------------------------------
 
 red_capable_then_retires() {
   local dir home out rc before after owner
+  local REG_ROOT
   dir=$(make_register red)
   home=$(make_home red)
-  owner="$TMP_ROOT/red/owner.sh"
-  write_owner_entry "$dir" unmet-then-met "$owner"
+  REG_ROOT=$(make_code_root red)
+  owner="$REG_ROOT/owner.sh"
+  write_owner_entry "$dir" unmet-then-met owner.sh
   before=$(cksum < "$dir/unmet-then-met.json")
 
   out=$(run_reg "$dir" "$home" --open); rc=$?
@@ -137,28 +154,30 @@ SH
 
 three_values_are_distinct() {
   local dir home out met unmet unobserved owner
+  local REG_ROOT
   dir=$(make_register three)
   home=$(make_home three)
+  REG_ROOT=$(make_code_root three)
 
-  owner="$TMP_ROOT/three/answers.sh"
+  owner="$REG_ROOT/answers.sh"
   cat > "$owner" <<'SH'
 #!/usr/bin/env bash
 printf 'yes\n'
 SH
   chmod +x "$owner"
-  write_owner_entry "$dir" is-met "$owner"
+  write_owner_entry "$dir" is-met answers.sh
 
-  write_owner_entry "$dir" is-unmet "$TMP_ROOT/three/absent.sh"
+  write_owner_entry "$dir" is-unmet absent.sh
 
   # Exits 0 and prints nothing: the empty result set, which is the canonical
   # could-not-observe and must not read as either verdict.
-  local silent="$TMP_ROOT/three/silent.sh"
+  local silent="$REG_ROOT/silent.sh"
   cat > "$silent" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
   chmod +x "$silent"
-  write_owner_entry "$dir" cannot-observe "$silent"
+  write_owner_entry "$dir" cannot-observe silent.sh
 
   out=$(run_reg "$dir" "$home" --json)
   met=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="is-met") | .state')
@@ -201,7 +220,7 @@ status_word_cannot_satisfy() {
   "satisfied_when": "never, because the entry claims it instead of probing it",
   "assurance": "executable",
   "$word": "SATISFIED",
-  "probe": {"kind": "command_answers", "command": "$TMP_ROOT/word/absent.sh"}
+  "probe": {"kind": "command_answers", "command": "absent.sh"}
 }
 JSON
   done
@@ -427,10 +446,11 @@ JSON
 
 partial_probe_cannot_claim_the_whole_commitment() {
   local dir home out owner state
+  local REG_ROOT
   dir=$(make_register partial)
   home=$(make_home partial)
-  owner="$TMP_ROOT/partial/owner.sh"
-  mkdir -p "$TMP_ROOT/partial"
+  REG_ROOT=$(make_code_root partial)
+  owner="$REG_ROOT/owner.sh"
   cat > "$owner" <<'SH'
 #!/usr/bin/env bash
 printf 'enforced\n'
@@ -440,7 +460,7 @@ SH
   # The control: the SAME passing probe on an entry whose commitment the probe
   # covers entirely. Without it, the case below could pass because the probe
   # failed rather than because the uncovered half withheld the verdict.
-  write_owner_entry "$dir" whole-commitment "$owner"
+  write_owner_entry "$dir" whole-commitment owner.sh
 
   cat > "$dir/half-commitment.json" <<JSON
 {
@@ -451,7 +471,7 @@ SH
   "unmet_state": "RULED-NOT-ENFORCED",
   "satisfied_when": "the declared owner answers AND the second half becomes observable",
   "assurance": "executable",
-  "probe": {"kind": "command_answers", "command": "$owner"},
+  "probe": {"kind": "command_answers", "command": "owner.sh"},
   "unobserved_conditions": ["the second half, which has no landed artifact to probe"]
 }
 JSON
@@ -1121,18 +1141,19 @@ run: : > $marker"
 # would be the original hazard.
 session_start_runs_typed_probes_and_never_a_decision_run() {
   local dir home out rc typed_ran decision_ran wt
+  local REG_ROOT
   dir=$(make_register bothkinds)
   home=$(make_home bothkinds)
-  mkdir -p "$TMP_ROOT/bothkinds"
+  REG_ROOT=$(make_code_root bothkinds)
   typed_ran="$TMP_ROOT/bothkinds/typed-ran"
   decision_ran="$TMP_ROOT/bothkinds/decision-ran"
-  cat > "$TMP_ROOT/bothkinds/owner.sh" <<SH
+  cat > "$REG_ROOT/owner.sh" <<SH
 #!/usr/bin/env bash
 : > "$typed_ran"
 printf 'enforced\n'
 SH
-  chmod +x "$TMP_ROOT/bothkinds/owner.sh"
-  write_owner_entry "$dir" typed-entry "$TMP_ROOT/bothkinds/owner.sh"
+  chmod +x "$REG_ROOT/owner.sh"
+  write_owner_entry "$dir" typed-entry owner.sh
 
   wt=$(give_worktree "$home" bothtask)
   write_decision "$home" bothtask crit "tier: executable
@@ -1166,11 +1187,12 @@ run: : > $decision_ran"
 # the entry file must be byte-identical across the transition.
 typed_probe_pass_retires_the_entry_under_the_guard() {
   local dir home out rc owner before after
+  local REG_ROOT
   dir=$(make_register retireguard)
   home=$(make_home retireguard)
-  mkdir -p "$TMP_ROOT/retireguard"
-  owner="$TMP_ROOT/retireguard/owner.sh"
-  write_owner_entry "$dir" becomes-real "$owner"
+  REG_ROOT=$(make_code_root retireguard)
+  owner="$REG_ROOT/owner.sh"
+  write_owner_entry "$dir" becomes-real owner.sh
   before=$(cksum < "$dir/becomes-real.json")
 
   out=$(FM_COMMITMENT_NO_DECISION_RUN=1 run_reg "$dir" "$home" --open); rc=$?
@@ -1254,6 +1276,133 @@ run: true'
   pass "a timed-out probe is reported as a timeout, distinct from other could-not-observe"
 }
 
+# --- a typed probe may only run what this repository can audit ---------------
+#
+# The permission to run typed probes at session start rests on them being a
+# closed set this repository owns. That is true of the KINDS and false of the
+# TARGETS unless this holds: command, test and defined_in come out of the entry's
+# own JSON, and entries also arrive from the gitignored $FM_HOME/data/commitments/
+# overlay, so one unreviewed file could otherwise name any absolute executable
+# and have it run on every session's critical path.
+#
+# Each refusal is paired with the control that shows the SAME probe, the SAME
+# executable, named from inside the code root, does run and does pass - so the
+# case is about where the target is, not about a probe that never runs.
+typed_probe_target_outside_the_code_root_is_refused() {
+  local dir home out state outside
+  local REG_ROOT
+  dir=$(make_register outsideroot)
+  home=$(make_home outsideroot)
+  REG_ROOT=$(make_code_root outsideroot)
+  outside="$TMP_ROOT/outsideroot/outside-the-root"
+  mkdir -p "$outside"
+  cat > "$outside/owner.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'enforced\n'
+SH
+  chmod +x "$outside/owner.sh"
+
+  # The control: the same script, reached from inside the code root, passes.
+  cp "$outside/owner.sh" "$REG_ROOT/owner.sh"
+  write_owner_entry "$dir" in-root owner.sh
+  out=$(run_reg "$dir" "$home" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="in-root") | .state')
+  [ "$state" = SATISFIED ] \
+    || fail "control: an in-root target must run and pass, or the refusals below prove nothing (got $state)"
+  rm -f "$dir/in-root.json"
+
+  # Upward traversal out of the root.
+  write_owner_entry "$dir" traversal ../outside-the-root/owner.sh
+  # A symlink inside the root pointing at the same script outside it.
+  ln -sf "$outside/owner.sh" "$REG_ROOT/linked-owner.sh"
+  write_owner_entry "$dir" symlinked linked-owner.sh
+  # A directory symlink, so the escape is in the path rather than the leaf.
+  ln -sfn "$outside" "$REG_ROOT/linked-dir"
+  write_owner_entry "$dir" symlinked-dir linked-dir/owner.sh
+  # The other two path-bearing fields, so this is a property of TARGETS rather
+  # than of one probe kind.
+  cat > "$dir/outside-test.json" <<'JSON'
+{
+  "commitment_schema_version": 1,
+  "id": "outside-test",
+  "recorded": "a named test establishes this commitment",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "the named test passes",
+  "assurance": "executable",
+  "probe": {"kind": "test_passes", "test": "../outside-the-root/owner.sh"}
+}
+JSON
+  cat > "$dir/outside-defined-in.json" <<'JSON'
+{
+  "commitment_schema_version": 1,
+  "id": "outside-defined-in",
+  "recorded": "the guard runs in production",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "some runtime caller invokes it",
+  "assurance": "executable",
+  "probe": {"kind": "symbol_called", "symbol": "lonely_guard",
+            "defined_in": "../outside-the-root/owner.sh"}
+}
+JSON
+
+  out=$(run_reg "$dir" "$home" --json)
+  local id
+  for id in traversal symlinked symlinked-dir outside-test outside-defined-in; do
+    state=$(printf '%s' "$out" | jq -r --arg i "$id" '.entries[] | select(.id==$i) | .state')
+    [ "$state" = UNOBSERVED ] \
+      || fail "$id names a target outside the tracked code root and reached $state instead of being refused"
+  done
+  assert_contains "$out" "inadmissible probe target" \
+    "a refused target must be reported as an inadmissible entry, never silently skipped"
+  assert_contains "$out" "outside the tracked code root" \
+    "the refusal must say the target leaves the code root"
+  assert_contains "$out" "is a symlink" \
+    "the refusal must name a symlinked target as the reason it cannot be audited"
+  pass "a typed probe target outside the tracked code root is refused"
+}
+
+absolute_path_target_is_refused_verbatim() {
+  local dir home out state absolute
+  local REG_ROOT
+  dir=$(make_register absroot)
+  home=$(make_home absroot)
+  REG_ROOT=$(make_code_root absroot)
+  absolute="$REG_ROOT/owner.sh"
+  cat > "$absolute" <<'SH'
+#!/usr/bin/env bash
+printf 'enforced\n'
+SH
+  chmod +x "$absolute"
+
+  # The control comes first and is the whole point: this exact file, named
+  # relative to the code root, runs and passes. So the refusal below is about the
+  # path being absolute, not about the file.
+  write_owner_entry "$dir" relative owner.sh
+  out=$(run_reg "$dir" "$home" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="relative") | .state')
+  [ "$state" = SATISFIED ] \
+    || fail "control: the same file named relatively must run and pass (got $state)"
+  rm -f "$dir/relative.json"
+
+  # An absolute path that resolves INSIDE the code root is still refused: taking
+  # one verbatim is the behaviour being removed, and admitting the convenient
+  # cases back is how it returns.
+  write_owner_entry "$dir" absolute-inside "$absolute"
+  write_owner_entry "$dir" absolute-outside /bin/echo
+  out=$(run_reg "$dir" "$home" --json)
+  for state in absolute-inside absolute-outside; do
+    [ "$(printf '%s' "$out" | jq -r --arg i "$state" '.entries[] | select(.id==$i) | .state')" = UNOBSERVED ] \
+      || fail "$state was not refused; an absolute path must never be taken verbatim"
+  done
+  assert_contains "$out" "is an absolute path" \
+    "the refusal must say the target is absolute"
+  assert_contains "$out" "never taken verbatim" \
+    "the refusal must say why an absolute path is not simply resolved"
+  pass "an absolute path target is refused verbatim"
+}
+
 # --- the declared-uncovered half is the one field that can withhold ----------
 #
 # unobserved_conditions is the only field that can WITHHOLD satisfaction, so a
@@ -1262,10 +1411,11 @@ run: true'
 # objects, it produces nothing, and nothing reads as "no half was declared".
 malformed_unobserved_conditions_is_inadmissible() {
   local dir home out owner shape state err
+  local REG_ROOT
   dir=$(make_register malformedhalf)
   home=$(make_home malformedhalf)
-  mkdir -p "$TMP_ROOT/malformedhalf"
-  owner="$TMP_ROOT/malformedhalf/owner.sh"
+  REG_ROOT=$(make_code_root malformedhalf)
+  owner="$REG_ROOT/owner.sh"
   cat > "$owner" <<'SH'
 #!/usr/bin/env bash
 printf 'enforced\n'
@@ -1282,7 +1432,7 @@ SH
   "unmet_state": "RULED-NOT-ENFORCED",
   "satisfied_when": "both halves hold",
   "assurance": "executable",
-  "probe": {"kind": "command_answers", "command": "$owner"},
+  "probe": {"kind": "command_answers", "command": "owner.sh"},
   "unobserved_conditions": $shape
 }
 JSON
@@ -1309,7 +1459,7 @@ JSON
   "unmet_state": "RULED-NOT-ENFORCED",
   "satisfied_when": "both halves hold",
   "assurance": "executable",
-  "probe": {"kind": "command_answers", "command": "$owner"},
+  "probe": {"kind": "command_answers", "command": "owner.sh"},
   "unobserved_conditions": ["the second half, which has no landed artifact to probe"]
 }
 JSON
@@ -1429,6 +1579,8 @@ session_start_runs_typed_probes_and_never_a_decision_run
 typed_probe_pass_retires_the_entry_under_the_guard
 decision_probe_bound_matches_the_documented_value
 timed_out_probe_is_reported_as_a_timeout
+typed_probe_target_outside_the_code_root_is_refused
+absolute_path_target_is_refused_verbatim
 malformed_unobserved_conditions_is_inadmissible
 symbol_called_does_not_count_a_mention
 fold_keeps_refused_resolution_open

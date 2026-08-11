@@ -135,6 +135,15 @@
 # They must not share a switch, because a switch that answers the trust question
 # would silence the cost one too.
 #
+# That first paragraph is only true because of probe_target_fault below: the
+# KINDS are closed, but the TARGETS they run come out of the entry's own JSON,
+# and an entry can arrive from the gitignored home overlay. Every path a typed
+# probe names is therefore resolved only under the tracked code root - no
+# absolute path, no upward traversal, no symlink out - and an entry naming a
+# target outside it is inadmissible rather than executed. Without that, "this
+# repository owns every one of them" would be a hope rather than a property, and
+# the cost argument for running typed probes at session start would not hold.
+#
 # SESSION START RUNS TYPED PROBES AND NEVER A DECISION-FILE `run:`. The arbitrary-
 # execution chain is real and it is specific: bin/fm-session-start.sh runs
 # bin/fm-admission.sh, which runs bin/fm-fleet-snapshot.sh, which calls
@@ -164,6 +173,22 @@
 # decision-hold read, or a fleet snapshot run OUTSIDE session start sets no such
 # variable and evaluates decision probes normally; session start's own wake drain
 # and admission read are inside the guard and report those keys as still open.
+#
+# WHAT THIS SUPERSEDES, recorded rather than quietly rewritten, because the
+# reasoning is the part worth inheriting. The rule was first accepted in the
+# blanket form "SESSION START MUST EXECUTE NO PROBE - session start may report
+# RECORDED state; it may never execute a probe to find out." Built that way it
+# defeated the criterion it shares a page with: with no probe running, nothing at
+# session start is ever SATISFIED, so every registered entry prints a
+# could-not-observe line forever and never retires when its commitment becomes
+# real - the cry-wolf outcome the safety rule exists to prevent, since a session
+# start that always shouts is one that gets turned off. The rule is therefore
+# narrowed to its hazard: the guard covers decision-file `run:` EXECUTION only.
+# Typed probes remain permitted at session start precisely because their targets
+# are constrained to the tracked code root, which is what makes them a cost
+# question rather than a trust one; if that constraint is ever relaxed, this
+# permission has to be reconsidered with it. commitments/schema.json carries the
+# same supersession under probe_bounds.
 #
 # bin/fm-bootstrap.sh relays --open at every session start, so session
 # start cannot report a clean or quiet state while a registered commitment is open,
@@ -460,6 +485,68 @@ probe_launch_permission_enforced() {  # <probe-json>
   probe_answer PASS verified "every launchable harness composes a session with permission enforcement active"
 }
 
+# --- typed-probe targets live under the tracked code root --------------------
+#
+# The probe KINDS are a closed set; the TARGETS they run are not. command, test
+# and defined_in come out of the entry's own JSON, and entries arrive from the
+# gitignored $FM_HOME/data/commitments/ overlay as well as from the tracked
+# register - so without this, one unreviewed file could name any absolute
+# executable and have it run on the critical path of every session in the fleet.
+# That is a trust decision reached through the door labelled cost, which is
+# exactly the conflation TWO KINDS OF PROBE says must not happen. Constraining
+# targets to the tracked code root is what makes "this repository owns every one
+# of them" true rather than nearly true, and it is the reason typed probes are
+# allowed to run at session start at all.
+#
+# Prints one refusal reason, or nothing when the target is admissible. An ABSENT
+# target is not refused: an owner or test that does not exist is an OBSERVED
+# absence, and reporting it as unobservable would hide the very thing the entry
+# was written to catch.
+probe_target_fault() {  # <field> <value>
+  local field=$1 rel=$2 root dir base parent
+  case "$rel" in
+    '') return 0 ;;
+    *[![:print:]]*)
+      printf '%s carries a non-printable character, so what it names cannot be read' "$field"
+      return 0
+      ;;
+    /*)
+      printf '%s "%s" is an absolute path, and a typed probe target is resolved only under the tracked code root, never taken verbatim' \
+        "$field" "$rel"
+      return 0
+      ;;
+    ..|../*|*/../*|*/..)
+      printf '%s "%s" traverses upward, so it can leave the tracked code root' "$field" "$rel"
+      return 0
+      ;;
+  esac
+  root=$(CDPATH='' cd -- "$FM_ROOT" 2>/dev/null && pwd -P) || {
+    printf 'the tracked code root cannot be resolved, so %s "%s" cannot be shown to live under it' "$field" "$rel"
+    return 0
+  }
+  dir=$(dirname -- "$rel")
+  base=$(basename -- "$rel")
+  case "$base" in
+    ''|.|..) printf '%s "%s" names no file' "$field" "$rel"; return 0 ;;
+  esac
+  # An absent parent escapes nothing, and the probe's own answer for a target
+  # that is not there is the observed absence it exists to report.
+  parent=$(CDPATH='' cd -- "$FM_ROOT/$dir" 2>/dev/null && pwd -P) || return 0
+  case "$parent" in
+    "$root"|"$root"/*) ;;
+    *)
+      printf '%s "%s" resolves to %s, outside the tracked code root %s' \
+        "$field" "$rel" "$parent/$base" "$root"
+      return 0
+      ;;
+  esac
+  if [ -L "$parent/$base" ]; then
+    printf '%s "%s" is a symlink, so what it resolves to is not what this register audited' \
+      "$field" "$rel"
+    return 0
+  fi
+}
+
 # Reads .args into the caller's PROBE_ARGV array.
 PROBE_ARGV=()
 read_probe_argv() {  # <probe-json>
@@ -479,17 +566,19 @@ PROBE_COMMAND_OUT=
 # observed absence, not an unobservable one - that distinction is the whole point
 # of naming an owner in the entry.
 probe_command_answers() {  # <probe-json>
-  local probe=$1 rel cmd out rc
+  local probe=$1 rel cmd out rc fault
   PROBE_COMMAND_OUT=
   rel=$(printf '%s' "$probe" | jq -r '.command // ""')
   if [ -z "$rel" ]; then
     probe_answer NO_VERIFIER_RAN usage_error "probe declares no command"
     return 0
   fi
-  case "$rel" in
-    /*) cmd=$rel ;;
-    *) cmd="$FM_ROOT/$rel" ;;
-  esac
+  fault=$(probe_target_fault command "$rel")
+  if [ -n "$fault" ]; then
+    probe_answer NO_VERIFIER_RAN usage_error "refusing to run this probe: $fault"
+    return 0
+  fi
+  cmd="$FM_ROOT/$rel"
   if [ ! -x "$cmd" ]; then
     probe_answer FAIL verifier_reported_failure \
       "the declared owner $rel is not present and executable, so nothing performs this commitment"
@@ -561,16 +650,18 @@ probe_command_answer_matches() {  # <probe-json>
 # test that is absent is FAIL, not could-not-observe: a criterion whose test does
 # not exist was never established, and calling that unobservable would hide it.
 probe_test_passes() {  # <probe-json>
-  local probe=$1 rel test out rc
+  local probe=$1 rel test out rc fault
   rel=$(printf '%s' "$probe" | jq -r '.test // ""')
   if [ -z "$rel" ]; then
     probe_answer NO_VERIFIER_RAN usage_error "probe declares no test"
     return 0
   fi
-  case "$rel" in
-    /*) test=$rel ;;
-    *) test="$FM_ROOT/$rel" ;;
-  esac
+  fault=$(probe_target_fault test "$rel")
+  if [ -n "$fault" ]; then
+    probe_answer NO_VERIFIER_RAN usage_error "refusing to run this probe: $fault"
+    return 0
+  fi
+  test="$FM_ROOT/$rel"
   if [ ! -f "$test" ]; then
     probe_answer FAIL verifier_reported_failure \
       "the named test $rel does not exist, so the criterion it was to establish never was established"
@@ -611,11 +702,16 @@ probe_test_passes() {  # <probe-json>
 # left must look like a CALL: the symbol at a command position, not merely
 # somewhere on the line.
 probe_symbol_called() {  # <probe-json>
-  local probe=$1 symbol defined_in callers call_re
+  local probe=$1 symbol defined_in callers call_re fault
   symbol=$(printf '%s' "$probe" | jq -r '.symbol // ""')
   defined_in=$(printf '%s' "$probe" | jq -r '.defined_in // ""')
   if [ -z "$symbol" ] || [ -z "$defined_in" ]; then
     probe_answer NO_VERIFIER_RAN usage_error "probe declares no symbol or no defining file"
+    return 0
+  fi
+  fault=$(probe_target_fault defined_in "$defined_in")
+  if [ -n "$fault" ]; then
+    probe_answer NO_VERIFIER_RAN usage_error "refusing to read this probe's target: $fault"
     return 0
   fi
   # The symbol goes into a regular expression below, so a name carrying regex
@@ -1011,7 +1107,7 @@ read_schema() {
 
 # Prints one refusal reason, or nothing when the entry is admissible.
 entry_inadmissible_reason() {  # <entry-json> <expected-id>
-  local doc=$1 want=$2 key got tier
+  local doc=$1 want=$2 key got tier fault
   printf '%s' "$doc" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || { printf 'entry is not a JSON object'; return 0; }
   got=$(printf '%s' "$doc" | jq -r '.id // ""')
@@ -1061,6 +1157,21 @@ EOF
     printf '%s' "$doc" | jq -e '(.probe | type) == "object" and ((.probe.kind // "") != "")' >/dev/null 2>&1 \
       || { printf 'entry declares no probe; an entry without one cannot be admitted'; return 0; }
   fi
+  # Every path field a probe kind can carry, refused HERE rather than only inside
+  # each kind, so the entry is reported inadmissible before anything is run and a
+  # kind added later inherits the constraint by naming one of these fields. The
+  # field names are what is enumerated, not the kinds, because the target is the
+  # thing being constrained. See probe_target_fault above for why.
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    got=$(printf '%s' "$doc" | jq -r --arg k "$key" '.probe[$k] // ""' 2>/dev/null) || got=
+    fault=$(probe_target_fault "probe.$key" "$got")
+    [ -z "$fault" ] || { printf 'inadmissible probe target: %s' "$fault"; return 0; }
+  done <<EOF
+command
+test
+defined_in
+EOF
   # unobserved_conditions is the only field that can WITHHOLD satisfaction, so a
   # malformed one is the one malformation that would let a passing probe retire a
   # half-observed commitment. A bare string, an array of objects, or a null member

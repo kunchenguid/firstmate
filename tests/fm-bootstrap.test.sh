@@ -1527,7 +1527,7 @@ test_open_commitment_denies_a_quiet_session_start() {
   case_dir="$TMP_ROOT/commitment"
   home="$case_dir/home"
   register="$case_dir/commitments"
-  owner="$case_dir/owner.sh"
+  owner="$home/owner.sh"
   mkdir -p "$home/config" "$register"
   printf '%s\n' manual > "$home/config/backlog-backend"
   cp "$ROOT/commitments/schema.json" "$register/schema.json"
@@ -1540,7 +1540,7 @@ test_open_commitment_denies_a_quiet_session_start() {
   "unmet_state": "RULED-NOT-ENFORCED",
   "satisfied_when": "the declared owner exists and answers",
   "assurance": "executable",
-  "probe": {"kind": "command_answers", "command": "$owner"}
+  "probe": {"kind": "command_answers", "command": "owner.sh"}
 }
 JSON
   fakebin=$(make_fake_toolchain "$case_dir")

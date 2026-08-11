@@ -198,6 +198,11 @@ There are two kinds of probe here and they are not the same question, so they do
 The register's own typed probes are a closed set this repository owns, can audit, and bounds at 10 seconds, so running one is a cost decision.
 A decision file's `run:` is arbitrary text written by whoever authored a ruling and executed by `bash -c` inside a task worktree, so running one is a trust decision.
 
+The probe kinds are closed but their targets are not, so every path a typed probe names - `command`, `test`, `defined_in` - is resolved only under the tracked code root.
+An absolute path is refused verbatim, upward traversal is refused, and a target that leaves the root by symlink is refused; a refused target makes the entry inadmissible and is reported, never silently skipped and never a pass.
+An absent target is not refused, because an owner or test that does not exist is an observed absence rather than an unobservable one.
+That constraint is what makes running typed probes at session start a cost decision rather than a trust one, because the overlay at `data/commitments/` is gitignored and unreviewed.
+
 Session start runs typed probes and never a decision file's `run:`, and that is a safety requirement rather than a performance one.
 `bin/fm-session-start.sh` sets `FM_COMMITMENT_NO_DECISION_RUN=1` on exactly the two calls that reach the open-decision fold - its wake drain, and its admission read through `fm-fleet-snapshot.sh` - and on nothing else.
 It is deliberately not exported over the whole subtree, because that subtree relaunches secondmates through `bin/fm-spawn.sh`, which scrubs no environment, and a safety flag that escaped into a long-lived agent would wedge closure there for that agent's whole life.
