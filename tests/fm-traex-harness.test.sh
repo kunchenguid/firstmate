@@ -339,6 +339,7 @@ run_traex_resume() {  # <session-id>
 }
 
 run_traex_reconcile() {
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
@@ -352,6 +353,7 @@ run_traex_reconcile() {
 }
 
 run_traex_poll_reconcile() {
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
@@ -371,6 +373,7 @@ set_traex_readiness() {  # <expected> <new>
 }
 
 run_traex_observe() {  # <reported-status> <reported-agent>
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
@@ -384,6 +387,7 @@ run_traex_observe() {  # <reported-status> <reported-agent>
 }
 
 run_traex_exact_working_observe() {
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
@@ -397,6 +401,7 @@ run_traex_exact_working_observe() {
 }
 
 run_traex_stream_observe() {  # <reported-status> <reported-agent>
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
@@ -1335,7 +1340,7 @@ test_buffered_terminal_event_survives_native_deregistration() {
   status=$?
   expect_code 0 "$status" "TraeX spawn for buffered terminal recovery should succeed: $out"
   printf shell > "$CASE_DIR/phase"
-  run_traex_stream_observe done traex \
+  run_traex_stream_observe 'done' traex \
     || fail "buffered terminal event was discarded after native deregistration"
   verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
   [ "$verdict" = 'idle herdr-traex' ] \
@@ -1397,7 +1402,6 @@ test_pending_trust_block_is_suppressed_only_until_launch_fails() {
   fm_backend_herdr_traex_binding_publish "$state" "$id" sess w1:p2 "$gen" \
     || fail "could not publish the pending TraeX ownership fixture"
   blocked=$(fm_transition_record w1:p2 w1 '' blocked traex)
-  STATE=$state
   fm_backend_herdr_traex_lock_runtime
   lock="$state/.spawn-$id.lock"
   fm_lock_try_acquire "$lock" || fail "could not claim the active spawn-owner fixture"

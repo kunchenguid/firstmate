@@ -2987,7 +2987,7 @@ fm_backend_herdr_traex_identity_probe() {  # <session> <pane> [native-session] [
     if [ "$agent" = traex ] && [ -n "$native_session" ] \
        && ! fm_backend_herdr_traex_native_session_matches \
          "$session" "$pane" "$native_session" "$native_mode"; then
-      FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE=native-mismatch
+      FM_BACKEND_HERDR_TRAEX_IDENTITY_STATE='native-mismatch'
       FM_BACKEND_HERDR_TRAEX_IDENTITY_AGENT=$agent
       FM_BACKEND_HERDR_TRAEX_IDENTITY_STATUS=$status
       return 0
@@ -4076,8 +4076,8 @@ fm_backend_herdr_traex_reconcile_launch_failure() {  # <state-dir> <session> <pa
 # between bounded subscriptions still closes exactly once.
 fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> [mode]
   local state=$1 session=$2 record=$3 observation_mode=${4:-current}
-  local pane to= reported_to agent native_agent= current current_gen identity_state= absence=
-  local current_state current_rest current_source event event_override= id initial_id gen native_session rc=0 intent
+  local pane to='' reported_to agent native_agent='' current current_gen identity_state absence=''
+  local current_state current_rest current_source event event_override='' id initial_id gen native_session rc=0 intent
   local strict=0 recovery=0 recovered=0
   case "$observation_mode" in
     current|stream|stream-baseline) ;;
@@ -4259,7 +4259,7 @@ fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record> 
     case "$current_state $current_source" in
       'busy herdr-traex')
         native_agent=traex
-        to=done
+        to='done'
         if [ "$recovery" -eq 1 ]; then
           event_override="launch-failed-$absence"
         else
