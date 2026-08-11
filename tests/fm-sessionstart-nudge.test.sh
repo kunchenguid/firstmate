@@ -266,6 +266,103 @@ test_run_clear_rejects_previous_owner_completion() {
   pass "run wrapper: clear accepts completion only from the current harness"
 }
 
+# Codex Desktop carries no harness name in its process ancestry (an Electron
+# app), so fm-lock.sh identifies it from the paired CODEX_CI/CODEX_THREAD_ID
+# markers alone and, absent an ancestry match, its numeric lock pid is this
+# short-lived tool call's own pid rather than a stable session pid. This fake
+# ps makes every ancestor report a non-harness comm/args so the real ancestry
+# match this file's own "codex"-named wrapper would otherwise supply never
+# fires, forcing the same marker-only identification path a real Codex
+# Desktop tool call takes. Every other ps query (different -o fields, no -p)
+# passes straight through to the real ps, so unrelated liveness/pgid checks
+# elsewhere in a full session start are unaffected.
+CODEX_DESKTOP_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258
+
+make_codex_desktop_ps_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+REAL_PS=/usr/bin/ps
+[ -x "$REAL_PS" ] || REAL_PS=/bin/ps
+ORIG=("$@")
+field= pid= flags=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; flags=$((flags + 1)); shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$flags" -eq 1 ] && [ -n "$pid" ]; then
+  case "$field" in
+    comm=) printf 'bash\n'; exit 0 ;;
+    args=) printf 'bash fm-codex-desktop-test-fixture\n'; exit 0 ;;
+  esac
+fi
+exec "$REAL_PS" "${ORIG[@]}"
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+run_codex_desktop_hook() {  # <root> <fakebin> [args...]
+  local root=$1 fakebin=$2
+  shift 2
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID="$CODEX_DESKTOP_THREAD_ID" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" \
+    PATH="$fakebin:$RUN_PATH" "$RUN" "$@"
+}
+
+test_run_codex_desktop_reemits_keep_completion_pid_stable() {
+  local root fakebin out status=0
+  local lock_pid1 completion_pid1 lock_pid2 completion_pid2 lock_pid3 completion_pid3
+  root="$TMP_ROOT/run-codex-desktop"
+  make_run_primary "$root"
+  fakebin=$(make_codex_desktop_ps_fakebin "$root-ps")
+
+  out=$(run_codex_desktop_hook "$root" "$fakebin" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "Codex Desktop run wrapper startup"
+  assert_contains "$out" "$FULL_BANNER$root" "Codex Desktop startup did not run the full digest"
+  assert_present "$root/state/.session-start-complete" \
+    "Codex Desktop startup did not publish completion proof"
+  lock_pid1=$(cat "$root/state/.lock")
+  case "$lock_pid1" in
+    ''|*[!0-9]*) fail "Codex Desktop startup did not record a numeric lock pid" ;;
+  esac
+  completion_pid1=$(cat "$root/state/.session-start-complete")
+  [ "$completion_pid1" = "$lock_pid1" ] \
+    || fail "Codex Desktop startup's completion pid did not match the numeric lock pid"
+
+  status=0
+  out=$(run_codex_desktop_hook "$root" "$fakebin" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "Codex Desktop run wrapper clear re-emit"
+  assert_contains "$out" "$REEMIT_BANNER$root" \
+    "a Codex Desktop clear re-emit ran the full digest instead of re-emitting"
+  lock_pid2=$(cat "$root/state/.lock")
+  completion_pid2=$(cat "$root/state/.session-start-complete")
+  [ "$lock_pid2" = "$lock_pid1" ] \
+    || fail "a Codex Desktop clear re-emit's short-lived tool pid churned the durable numeric lock pid"
+  [ "$completion_pid2" = "$lock_pid1" ] \
+    || fail "a Codex Desktop clear re-emit desynced completion tracking from the durable lock pid"
+
+  status=0
+  out=$(run_codex_desktop_hook "$root" "$fakebin" --source compact </dev/null) || status=$?
+  expect_code 0 "$status" "Codex Desktop run wrapper compact re-emit"
+  assert_contains "$out" "$REEMIT_BANNER$root" \
+    "a second Codex Desktop re-emit fell back to a full startup instead of re-emitting"
+  lock_pid3=$(cat "$root/state/.lock")
+  completion_pid3=$(cat "$root/state/.session-start-complete")
+  [ "$lock_pid3" = "$lock_pid1" ] \
+    || fail "a second Codex Desktop re-emit's short-lived tool pid churned the durable numeric lock pid"
+  [ "$completion_pid3" = "$lock_pid1" ] \
+    || fail "a second Codex Desktop re-emit desynced completion tracking from the durable lock pid"
+
+  pass "run wrapper: repeated Codex Desktop clear/compact re-emits keep the numeric lock pid and completion tracking stable"
+}
+
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
   local fixture out status=0
   command -v node >/dev/null 2>&1 || {
@@ -403,6 +500,7 @@ test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
+test_run_codex_desktop_reemits_keep_completion_pid_stable
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
