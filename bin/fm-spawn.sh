@@ -662,6 +662,7 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_TREEHOUSE_LEASE_WT=
+SPAWN_TREEHOUSE_ACQUIRE_ERR=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -682,6 +683,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  [ -z "$SPAWN_TREEHOUSE_ACQUIRE_ERR" ] || rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR" 2>/dev/null || true
   if [ -n "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
     if ! (cd "$PROJ_ABS" && treehouse return --force "$SPAWN_TREEHOUSE_LEASE_WT") >/dev/null 2>&1; then
       echo "warning: could not return treehouse lease after aborted spawn of $ID; inspect '$SPAWN_TREEHOUSE_LEASE_WT'" >&2
@@ -2177,12 +2179,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  if ! SPAWN_TREEHOUSE_LEASE_WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" 2>/dev/null) \
+  SPAWN_TREEHOUSE_ACQUIRE_ERR="$STATE/.$ID.treehouse-get.${BASHPID:-$$}.err"
+  if ! SPAWN_TREEHOUSE_LEASE_WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" 2> "$SPAWN_TREEHOUSE_ACQUIRE_ERR") \
      || [ -z "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
     SPAWN_TREEHOUSE_LEASE_WT=
+    cat "$SPAWN_TREEHOUSE_ACQUIRE_ERR" >&2
+    rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR"
+    SPAWN_TREEHOUSE_ACQUIRE_ERR=
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
+  rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR"
+  SPAWN_TREEHOUSE_ACQUIRE_ERR=
   sq_treehouse_lease_wt=$(shell_quote "$SPAWN_TREEHOUSE_LEASE_WT")
   spawn_send_text_line "$WT_TARGET" "cd $sq_treehouse_lease_wt"
 

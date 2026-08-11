@@ -338,6 +338,10 @@ make_lease_lifecycle_fakebin() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${FM_FAKE_TREEHOUSE_ERROR:-0}" = 1 ]; then
+  echo "treehouse fixture acquisition failed" >&2
+  exit 1
+fi
 cd "$FM_REAL_TREEHOUSE_PROJECT"
 exec env HOME="$FM_REAL_TREEHOUSE_HOME" "$FM_REAL_TREEHOUSE" "$@"
 SH
@@ -374,7 +378,7 @@ SH
 }
 
 test_treehouse_lease_lifecycle() {
-  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id abort_id live_pid
+  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id abort_id live_pid real_sleep
   home="$TMP_ROOT/lease-home"
   proj=$(make_repo "$TMP_ROOT/lease-proj")
   fakebin=$(make_lease_lifecycle_fakebin "$TMP_ROOT/lease-fake")
@@ -383,6 +387,20 @@ test_treehouse_lease_lifecycle() {
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   printf '%s\n' "$proj" > "$pane"
+  real_sleep=$(command -v sleep) || fail "real sleep is unavailable"
+
+  mkdir -p "$home/data/lease-error-jj0"
+  printf 'brief\n' > "$home/data/lease-error-jj0/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX=fake \
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" FM_FAKE_PANE_STATE="$pane" FM_FAKE_TREEHOUSE_ERROR=1 \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" lease-error-jj0 "$proj" codex \
+    --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 1 "$status" "failed Treehouse acquisition should abort"
+  assert_contains "$out" "treehouse fixture acquisition failed" "spawn discarded Treehouse acquisition diagnostics"
+  assert_contains "$out" "treehouse get did not enter a worktree within 60s" "spawn dropped its public acquisition error"
 
   abort_id=lease-abort-ii9
   mkdir -p "$home/data/$abort_id"
@@ -416,8 +434,9 @@ test_treehouse_lease_lifecycle() {
     FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" get --lease --lease-holder live-worker) \
     || fail "real Treehouse could not acquire a concurrent lease"
   [ "$live_wt" != "$stopped_wt" ] || fail "real Treehouse recycled the stopped-but-preserved lease"
-  (cd "$live_wt" && sleep 60) &
+  (cd "$live_wt" && "$real_sleep" 60) &
   live_pid=$!
+  kill -0 "$live_pid" 2>/dev/null || fail "concurrent lease holder did not remain live"
   contender_wt=$(FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
     FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" get --lease --lease-holder contender) \
     || fail "real Treehouse could not acquire a contender lease"
