@@ -18,6 +18,7 @@ FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
+GHOST_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -25,6 +26,7 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  [ -z "$GHOST_WORKER_PID" ] || kill "$GHOST_WORKER_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -619,5 +621,40 @@ kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
+
+GHOST_HOME="$TMP_ROOT/ghost-account"
+GHOST_STATE="$TMP_ROOT/ghost-jobs"
+mkdir -p "$GHOST_HOME" "$GHOST_STATE/jobs" "$GHOST_STATE/logs" "$GHOST_STATE/worker.lock"
+chmod 700 "$GHOST_HOME" "$GHOST_STATE" "$GHOST_STATE/jobs" "$GHOST_STATE/logs" "$GHOST_STATE/worker.lock"
+sleep 0.01 &
+GHOST_OWNER_PID=$!
+wait "$GHOST_OWNER_PID" 2>/dev/null || true
+printf '%s\n' "$GHOST_OWNER_PID" > "$GHOST_STATE/worker.lock/pid"
+printf 'stale\n' > "$GHOST_STATE/worker.lock/start"
+printf 'stale\n' > "$GHOST_STATE/worker.lock/command"
+# An orphaned atomic-publish scratch file, exactly as a worker killed between
+# mktemp and rename would leave behind (issue #1972). Nothing else ever
+# removes this dotfile, so it must not be able to wedge reclaim forever.
+: > "$GHOST_STATE/worker.lock/.quarantine.orphan1"
+chmod 600 "$GHOST_STATE/worker.lock/pid" "$GHOST_STATE/worker.lock/start" \
+  "$GHOST_STATE/worker.lock/command" "$GHOST_STATE/worker.lock/.quarantine.orphan1"
+touch -t 200001010000 "$GHOST_STATE/worker.lock"
+HOME="$GHOST_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$GHOST_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/ghost-worker.out" 2> "$TMP_ROOT/ghost-worker.err" &
+GHOST_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$GHOST_STATE/worker.ready" ] && break
+  kill -0 "$GHOST_WORKER_PID" 2>/dev/null || break
+  sleep 0.05
+done
+assert_present "$GHOST_STATE/worker.ready" \
+  "an orphaned atomic-publish scratch file permanently wedged worker ownership"
+assert_absent "$GHOST_STATE/worker.lock/.quarantine.orphan1" \
+  "reclaim left the orphaned scratch file behind"
+kill -TERM "$GHOST_WORKER_PID" 2>/dev/null || true
+wait "$GHOST_WORKER_PID" 2>/dev/null || true
+GHOST_WORKER_PID=
+pass "an orphaned atomic-publish scratch file does not permanently wedge worker ownership"
 
 echo "ALL TESTS PASSED"

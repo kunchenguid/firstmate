@@ -143,6 +143,24 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# worker_publish_lock_owner and worker_publish_quarantine each stage their
+# atomic rename through a uniquely named scratch file directly inside the
+# lock directory. A child killed between mktemp and the rename - the second
+# TERM in worker_shutdown's disarmed window, or a SIGKILL - leaves that
+# scratch file behind with no owner left to finish or discard it, which
+# blocks every future rmdir reclaim of the lock forever. Clear every scratch
+# name pattern those two functions use before rmdir, refusing to follow a
+# symlink rather than removing it, exactly like the canonical pid/start/
+# command names next to it.
+worker_clear_publish_scratch() { # <lock-dir>
+  local lock=$1 file
+  for file in "$lock"/.pid.* "$lock"/.start.* "$lock"/.command.* "$lock"/.quarantine.*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ ! -L "$file" ] || return 1
+    rm -f -- "$file" || return 1
+  done
+}
+
 worker_acquire_lock() {
   local account_home=$1 attempt=0
   while [ "$attempt" -lt 150 ]; do
@@ -164,7 +182,14 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
-    rmdir "$WORKER_LOCK" || return 1
+    worker_clear_publish_scratch "$WORKER_LOCK" || {
+      worker_error "worker ownership lock $WORKER_LOCK contains an unexpected symlink in its scratch names; refusing to reclaim"
+      return 1
+    }
+    rmdir "$WORKER_LOCK" || {
+      worker_error "worker ownership lock $WORKER_LOCK is wedged: unexpected entries remain after clearing known scratch files"
+      return 1
+    }
   done
   return 1
 }
@@ -190,6 +215,7 @@ worker_cleanup() {
   if [ -z "$owner_pid" ]; then
     [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
       rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+    worker_clear_publish_scratch "$WORKER_LOCK" 2>/dev/null || true
     rmdir "$WORKER_LOCK" 2>/dev/null || true
     WORKER_LOCK_HELD=0
     return 0
@@ -202,6 +228,7 @@ worker_cleanup() {
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
   rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+  worker_clear_publish_scratch "$WORKER_LOCK" 2>/dev/null || true
   rmdir "$WORKER_LOCK" 2>/dev/null || true
   WORKER_LOCK_HELD=0
 }
@@ -720,6 +747,7 @@ worker_supervisor_cleanup_dead_child() { # <account-home> <pid>
   [ ! -L "$identity" ] && rm -f -- "$identity" || return 1
   [ ! -L "$lock/start" ] && [ ! -L "$lock/command" ] || return 1
   rm -f -- "$lock/pid" "$lock/start" "$lock/command" || return 1
+  worker_clear_publish_scratch "$lock" || return 1
   rmdir "$lock"
 }
 
