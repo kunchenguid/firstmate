@@ -170,7 +170,13 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_TREEHOUSE_REC"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -213,6 +219,30 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+}
+
+# --- GUARD 1b': fm-spawn returns a durable lease on early abort -------------
+
+# An abort between the durable lease acquisition (GUARD 1c) and state/<id>.meta
+# publication must return the lease, not leak the pool slot.
+test_spawn_abort_returns_durable_lease() {
+  local home proj fakebin rec out status
+  home="$TMP_ROOT/spawn-lease-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-lease-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-lease-fake")
+  mkdir -p "$TMP_ROOT/spawn-lease-notgit"
+  rec="$TMP_ROOT/spawn-lease-treehouse.log"
+  : > "$rec"
+
+  # Same abort as GUARD 1b (pane lands in a plain non-git dir), but with a
+  # recording treehouse stub so the abort's own release call is observable.
+  out=$(FM_TREEHOUSE_REC="$rec" run_spawn "$home" abort-lease-hh8 "$proj" "$TMP_ROOT/spawn-lease-notgit" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into a non-worktree dir should still abort"
+  assert_contains "$out" "did not yield an isolated worktree" "abort must keep its original isolation diagnostic"
+  assert_grep "treehouse return --force $TMP_ROOT/spawn-lease-notgit" "$rec" \
+    "an abort after the durable lease was acquired must return it instead of leaking the pool slot"
+  pass "fm-spawn: an abort after acquiring a durable treehouse lease returns it to the pool"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -307,4 +337,5 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_abort_returns_durable_lease
 test_spawn_tmux_window_construction

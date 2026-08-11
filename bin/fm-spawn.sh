@@ -635,6 +635,8 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ABORT_WT=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -746,6 +748,17 @@ spawn_abort_cleanup() {
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
+      fi
+    fi
+  fi
+  if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    if [ -n "${TREEHOUSE_ABORT_WT:-}" ]; then
+      if command -v treehouse >/dev/null 2>&1; then
+        ( cd "$PROJ_ABS" && treehouse return --force "$TREEHOUSE_ABORT_WT" >/dev/null ) || \
+          echo "warning: could not return durably leased worktree '$TREEHOUSE_ABORT_WT' after an aborted spawn of $ID; the pool slot may remain leased" >&2
+      else
+        echo "warning: could not return durably leased worktree '$TREEHOUSE_ABORT_WT' after an aborted spawn of $ID; treehouse command not found" >&2
       fi
     fi
   fi
@@ -2214,6 +2227,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 
+  TREEHOUSE_ABORT_CLEANUP=1
+  TREEHOUSE_ABORT_WT=$WT
+
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
@@ -2635,6 +2651,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+TREEHOUSE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
