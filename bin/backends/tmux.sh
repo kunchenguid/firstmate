@@ -166,12 +166,12 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # `codex` the substring `muse` is a common English fragment - a *muse* glob
     # would classify musescore or amuse as a live agent pane. The install path
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
-    # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
+    # COMPONENT, so the Claude-only path fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
-      if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
+      if fm_harness_claude_path_matches "$path" || fm_harness_claude_path_matches "$argv0"; then
         printf 'agent'
       else
         printf 'other'

@@ -81,6 +81,11 @@ chmod +x "$LAB/bin/agent-launcher"
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
+exec_bridge='/Users/u/.pi/agent/npm/node_modules/@howaboua/pi-codex-conversion/src/tools/exec/bin/darwin-arm64/exec_bridge'
+[ "$(fm_backend_tmux_classify_process_name "$exec_bridge" "$exec_bridge")" = other ] \
+  || fail "exec_bridge under an agent-named install path must not classify as an agent"
+pass "tmux liveness: helper executables under agent-named install paths stay unattributed"
+
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" \
   || fail "could not start the private tmux server"
 
@@ -186,14 +191,14 @@ if [ -n "$CC_BIN" ] &&
   "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
   new_window titled "$LAB/bin/claude/2.1.220"
   wait_for_state "$SESSION:titled" alive \
-    || fail "a version-named executable under a harness install path must classify alive"
+    || fail "a version-named executable under Claude's native install path must classify alive"
   assert_sources_disagree "$SESSION:titled" "version-string process name"
-  pass "tmux liveness: a version-named executable under a harness install path classifies alive"
+  pass "tmux liveness: a version-named executable under Claude's native install path classifies alive"
 
   new_window path-decoy "$LAB/bin/decoy/2.1.220"
   wait_for_state "$SESSION:path-decoy" ambiguous \
-    || fail "a version-named executable without a whole harness path component must stay ambiguous"
-  pass "tmux liveness: a version-named executable under a decoy path stays ambiguous"
+    || fail "a version-named executable outside Claude's native install path must stay ambiguous"
+  pass "tmux liveness: a version-named executable outside Claude's native install path stays ambiguous"
 else
   echo "skip: no C compiler, so the version-string process-name case cannot build its executable"
 fi

@@ -78,7 +78,27 @@ alive
 
 `#{pane_current_command}` and foreground `ps -o comm=` read different name fields, but which one preserves executable identity is platform-dependent.
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
-The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
+The classifier therefore accepts a harness basename first, then Claude Code's version-named native-install shape in the full executable path or argv[0], without depending on which field carries it on a given platform.
+
+The helper-path boundary and the exact primary-harness controls were reverified on 2026-08-11 with GNU bash 5.2.21 and tmux 3.4 on Linux x86_64.
+
+```sh
+bash --version | head -1
+tmux -V
+tests/fm-session-lock-ancestry.test.sh | rg 'supported exact|bare interpreters|exec_bridge'
+tests/fm-tmux-agent-liveness.test.sh | rg 'helper executables'
+```
+
+Observed output:
+
+```text
+GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)
+tmux 3.4
+ok - session-lock: every supported exact harness executable resolves
+ok - session-lock: bare interpreters use only the immediate harness script argument
+ok - session-lock: exec_bridge under an agent-named install path defers to its parent Pi harness
+ok - tmux liveness: helper executables under agent-named install paths stay unattributed
+```
 
 The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:

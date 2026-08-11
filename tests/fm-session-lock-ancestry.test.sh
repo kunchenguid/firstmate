@@ -87,6 +87,97 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+test_exact_supported_harness_names_resolve() {
+  local dir fakebin harness got
+  dir="$TMP_ROOT/exact-harnesses"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  720:comm=) printf '%s\n' "$FM_TEST_HARNESS" ;;
+  720:args=) printf '%s\n' "$FM_TEST_HARNESS --resume" ;;
+  720:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
+  *:ppid=) printf '%s\n' 720 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  for harness in claude codex opencode pi pi-signed grok kimi; do
+    got=$(FM_TEST_HARNESS="$harness" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$harness: the exact harness executable was not found in ancestry"
+    [ "$got" = 720 ] || fail "$harness: ancestry resolved '$got', expected harness pid 720"
+    FM_TEST_HARNESS="$harness" lib_eval "$fakebin" 'fm_harness_pid_alive 720' \
+      || fail "$harness: the exact harness executable failed the liveness predicate"
+  done
+  pass "session-lock: every supported exact harness executable resolves"
+}
+
+test_bare_interpreter_script_paths_resolve() {
+  local harness
+  for harness in claude codex opencode pi pi-signed grok kimi; do
+    lib_eval /usr/bin "fm_harness_process_matches node 'node /opt/$harness/bin/cli.js --resume'" \
+      || fail "$harness: an immediate bare-interpreter script path was not recognized"
+  done
+  if lib_eval /usr/bin "fm_harness_process_matches node 'node /opt/tools/runner.js --label codex'"; then
+    fail "a harness name in an unrelated later interpreter argument was recognized"
+  fi
+  pass "session-lock: bare interpreters use only the immediate harness script argument"
+}
+
+test_exec_bridge_defers_to_parent_pi() {
+  local dir fakebin got helper
+  dir="$TMP_ROOT/exec-bridge"
+  fakebin=$(fm_fakebin "$dir")
+  helper='/Users/u/.pi/agent/npm/node_modules/@howaboua/pi-codex-conversion/src/tools/exec/bin/darwin-arm64/exec_bridge'
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  820:comm=) printf '%s\\n' '$helper' ;;
+  820:args=) printf '%s\\n' '$helper --pipe' ;;
+  820:ppid=) printf '%s\\n' 830 ;;
+  830:comm=) printf '%s\\n' pi ;;
+  830:args=) printf '%s\\n' 'pi --mode rpc' ;;
+  830:ppid=) printf '%s\\n' 1 ;;
+  *:comm=) printf '%s\\n' bash ;;
+  *:args=) printf '%s\\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
+  *:ppid=) printf '%s\\n' 820 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '830\n' > "$dir/state/.lock"
+
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 820'; then
+    fail "exec_bridge under .pi/node_modules/pi-codex-conversion was classified as a harness"
+  fi
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the parent Pi harness was not found above exec_bridge"
+  [ "$got" = 830 ] || fail "ancestry resolved '$got', expected parent Pi pid 830"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the parent Pi harness did not recognize its session lock"
+  pass "session-lock: exec_bridge under an agent-named install path defers to its parent Pi harness"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -117,9 +208,9 @@ SH
   chmod +x "$fakebin/ps"
   printf '810\n' > "$dir/state/.lock"
 
-  # Identity may be read from an executable path, but only from whole path
-  # components: anything merely living under ~/.claude, and any component that
-  # merely starts with a harness name, must stay outside the harness identity.
+  # Only Claude's verified native-install shape may supply path identity.
+  # Anything merely living under ~/.claude, and any component that merely
+  # starts with a harness name, must stay outside the harness identity.
   for shape in hookdir piprefix; do
     if FM_TEST_PATH_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
       fail "$shape: an ordinary script path was treated as a harness process"
@@ -493,6 +584,9 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_exact_supported_harness_names_resolve
+test_bare_interpreter_script_paths_resolve
+test_exec_bridge_defers_to_parent_pi
 test_ordinary_paths_are_never_harness_processes
 test_exec_bridge_under_agent_named_directory_is_not_misclassified
 test_every_supported_harness_still_resolves_as_lock_owner
