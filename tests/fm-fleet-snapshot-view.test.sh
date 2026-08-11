@@ -29,15 +29,18 @@ for arg in "$@"; do
   if [ "$prev" = "-t" ]; then target=$arg; fi
   prev=$arg
 done
+case "$target" in
+  *11-secondmate*) exit 1 ;;
+esac
 case "${1:-}" in
   list-windows)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta | sed '/^fm-11-secondmate$/d'
     ;;
   display-message)
     case "$*" in
       *pane_current_command*)
         case "$target" in
-          *dead-secondmate*) printf 'zsh\n' ;;
+          *dead-secondmate*|*10-secondmate*) printf 'zsh\n' ;;
           *) printf 'codex\n' ;;
         esac
         ;;
@@ -367,6 +370,7 @@ test_snapshot_reuses_raw_no_mistakes_queries_per_identity() {
   printf 'blocked [key=network]: task a remains independently blocked\n' > "$home/state/01-ship-a-blocked.status"
   printf 'done: task a duplicate is independently complete\n' > "$home/state/02-ship-a-done.status"
   printf 'needs-decision [key=shape]: task b awaits its own decision\n' > "$home/state/03-ship-b-decision.status"
+  printf 'working: task b continued unrelated setup\n' >> "$home/state/03-ship-b-decision.status"
   printf 'failed: task b duplicate failed independently\n' > "$home/state/04-ship-b-failed.status"
   printf 'working: task c keeps its own current event\n' > "$home/state/05-ship-c-working.status"
   printf 'paused: detached task keeps its own external wait\n' > "$home/state/06-ship-detached.status"
@@ -391,7 +395,7 @@ case "${1:-}" in
     printf 'branch: %s\nhead: %s\nstatus: running\n' "$branch" "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
     ;;
   runs)
-    printf 'coarse\t%s\n' "$common" >> "${FM_FAKE_NM_CALLS:?}"
+    printf 'coarse\t%s\t%s\n' "$common" "${3:-}" >> "${FM_FAKE_NM_CALLS:?}"
     sleep "${FM_FAKE_NM_LATENCY:-0.04}"
     printf 'running scale-a %s 2026-08-11\n' "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
     printf 'running scale-b %s 2026-08-11\n' "${FM_FAKE_NM_UNPROVABLE_HEAD:?}"
@@ -444,7 +448,7 @@ SH
     || fail "snapshot-local query reuse changed task-local public current-state bytes"
 
   primary_calls=$(awk -F '\t' '$1 == "primary" {n++} END {print n+0}' "$calls")
-  coarse_calls=$(awk -F '\t' '$1 == "coarse" {n++} END {print n+0}' "$calls")
+  coarse_calls=$(awk -F '\t' '$1 == "coarse" && $3 == "200" {n++} END {print n+0}' "$calls")
   total_calls=$(wc -l < "$calls" | tr -d ' ')
   [ "$primary_calls" -eq 3 ] \
     || fail "expected one primary query per exact identity, got $primary_calls: $(cat "$calls")"
@@ -467,15 +471,50 @@ SH
       and ([.tasks[].kind] | map(select(. == "ship")) | length) == 7
       and ([.tasks[].kind] | map(select(. == "scout")) | length) == 1
       and ([.tasks[].kind] | map(select(. == "secondmate")) | length) == 3
-      and task("01-ship-a-blocked").current_state.state == "blocked"
-      and task("02-ship-a-done").current_state.state == "done"
-      and task("03-ship-b-decision").current_state.state == "parked"
-      and task("04-ship-b-failed").current_state.state == "failed"
-      and task("05-ship-c-working").current_state.state == "working"
-      and all(.tasks[:5][]; .current_state.source == "status-log")
+      and ([.tasks[] | {id, state:.current_state.state, source:.current_state.source}] == [
+        {id:"01-ship-a-blocked", state:"blocked", source:"status-log"},
+        {id:"02-ship-a-done", state:"done", source:"status-log"},
+        {id:"03-ship-b-decision", state:"working", source:"status-log"},
+        {id:"04-ship-b-failed", state:"failed", source:"status-log"},
+        {id:"05-ship-c-working", state:"working", source:"status-log"},
+        {id:"06-ship-detached", state:"paused", source:"status-log"},
+        {id:"07-ship-plain", state:"done", source:"status-log"},
+        {id:"08-scout", state:"done", source:"status-log"},
+        {id:"09-mate", state:"working", source:"status-log"},
+        {id:"10-secondmate", state:"blocked", source:"status-log"},
+        {id:"11-secondmate", state:"unknown", source:"none"}
+      ])
+      and ([.tasks[] | {id, exists:.endpoint.exists, agent_alive:.endpoint.agent_alive}] == [
+        {id:"01-ship-a-blocked", exists:true, agent_alive:"not_checked"},
+        {id:"02-ship-a-done", exists:true, agent_alive:"not_checked"},
+        {id:"03-ship-b-decision", exists:true, agent_alive:"not_checked"},
+        {id:"04-ship-b-failed", exists:true, agent_alive:"not_checked"},
+        {id:"05-ship-c-working", exists:true, agent_alive:"not_checked"},
+        {id:"06-ship-detached", exists:true, agent_alive:"not_checked"},
+        {id:"07-ship-plain", exists:true, agent_alive:"not_checked"},
+        {id:"08-scout", exists:true, agent_alive:"not_checked"},
+        {id:"09-mate", exists:true, agent_alive:"alive"},
+        {id:"10-secondmate", exists:true, agent_alive:"dead"},
+        {id:"11-secondmate", exists:false, agent_alive:"dead"}
+      ])
+      and task("01-ship-a-blocked").hints.open_decisions == [
+        {key:"network", verb:"blocked", summary:"task a remains independently blocked"}
+      ]
+      and task("03-ship-b-decision").paths.status_log.last_event == {
+        state:"working", note:"task b continued unrelated setup",
+        raw:"working: task b continued unrelated setup"
+      }
+      and task("03-ship-b-decision").hints.open_decisions == [
+        {key:"shape", verb:"needs-decision", summary:"task b awaits its own decision"}
+      ]
+      and task("10-secondmate").hints.open_decisions == [
+        {key:"mate-block", verb:"blocked", summary:"secondmate block stays task-local"}
+      ]
+      and all(.tasks[] | select(.id != "01-ship-a-blocked"
+        and .id != "03-ship-b-decision" and .id != "10-secondmate");
+        .hints.open_decisions == [])
       and task("01-ship-a-blocked").hints.blocked_event == true
       and task("03-ship-b-decision").hints.pending_decision == true
-      and all(.tasks[]; .endpoint.exists == true)
       and (.secondmate_current.records[] | select(.id == "09-mate")
         | .registered == true and .provenance.summary_valid == true)
   ' >/dev/null || fail "scale snapshot changed ordering, task truth, endpoint truth, decisions, or registered-home validity: $out"
@@ -494,8 +533,23 @@ SH
     || fail "separate public snapshots with identical inputs were not byte-for-byte equivalent"
   [ "$(awk -F '\t' '$1 == "primary" {n++} END {print n+0}' "$calls")" -eq 3 ] \
     || fail "a later snapshot reused primary query data from an earlier snapshot"
-  [ "$(awk -F '\t' '$1 == "coarse" {n++} END {print n+0}' "$calls")" -eq 1 ] \
+  [ "$(awk -F '\t' '$1 == "coarse" && $3 == "200" {n++} END {print n+0}' "$calls")" -eq 1 ] \
     || fail "a later snapshot reused coarse query data from an earlier snapshot"
+
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CREW_STATE_RUNS_LIMIT=50 \
+    FM_SNAPSHOT_NOW=2026-08-11T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1786449600 \
+    "$SNAPSHOT" --json 2> "$stderr_file") \
+    || fail "alternate-limit scale snapshot public read failed"
+  [ ! -s "$stderr_file" ] || fail "alternate-limit snapshot leaked private diagnostics: $(cat "$stderr_file")"
+  printf '%s' "$out" | cmp -s "$first_out" - \
+    || fail "alternate coarse query limit changed task-local public snapshot bytes"
+  [ "$(awk -F '\t' '$1 == "primary" {n++} END {print n+0}' "$calls")" -eq 3 ] \
+    || fail "alternate limit changed exact-identity primary reuse: $(cat "$calls")"
+  [ "$(awk -F '\t' '$1 == "coarse" && $3 == "50" {n++} END {print n+0}' "$calls")" -eq 5 ] \
+    || fail "non-200 coarse queries were reused or skipped: $(cat "$calls")"
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 8 ] \
+    || fail "alternate-limit query shape was not task-local: $(cat "$calls")"
 
   after_manifest=$(snapshot_home_manifest "$home" "$mate")
   [ "$before_manifest" = "$after_manifest" ] \

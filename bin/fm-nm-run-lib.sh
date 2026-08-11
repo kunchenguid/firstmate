@@ -52,7 +52,7 @@ fm_nm_snapshot_query() {  # <dir> <timeout_secs> <args...>
     common=$(cd "$common" 2>/dev/null && pwd -P) || return 1
     branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
     head=$(git -C "$dir" rev-parse --verify HEAD 2>/dev/null) || return 1
-  elif [ "$#" -eq 3 ] && [ "$1" = runs ] && [ "$2" = --limit ]; then
+  elif [ "$#" -eq 3 ] && [ "$1" = runs ] && [ "$2" = --limit ] && [ "$3" = 200 ]; then
     query=coarse
     common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
     common=$(cd "$common" 2>/dev/null && pwd -P) || return 1

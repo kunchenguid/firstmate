@@ -8,10 +8,11 @@
 # drift apart.
 #
 # Most functions are pure, side-effect-free reads of status files: each takes
-# what it needs as arguments and touches no globals beyond the optional
-# FM_CAPTAIN_RE override. Consumers layer their own dedup/marker state on top (the
-# daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
-# signatures).
+# what it needs as arguments and touches no public globals beyond the optional
+# FM_CAPTAIN_RE override. Private _FM_*_RESULT globals carry subprocess-avoidance
+# scratch outputs between this library's _set helpers and their callers. Consumers
+# layer their own dedup/marker state on top (the daemon keeps its escalation-digest
+# seen-markers; the watcher keeps its .seen-* signatures).
 #
 # There are two documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
