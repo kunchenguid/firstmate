@@ -35,14 +35,17 @@ const configDirectory = resolve(process.env.FM_CONFIG_OVERRIDE || resolve(fleetH
 const telemetryPath = resolve(dataDirectory, "routing-outcomes.jsonl");
 
 function usage(stream = process.stdout) {
-  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--show <row>] [--output <path>]
+  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--project <name>] [--show <row>] [--prune-candidates] [--output <path>]
 
 Render the fleet cockpit from live read-only state.
 Default output is an ANSI terminal view on stdout (pairs with watch/tmux).
---width <columns>  terminal width override (default: tty width, else 80)
---all              list every item; default caps each section to fit ~40 rows
---show <row>       print one row's full context by its rendered row number
---output <path>    write the self-contained HTML page to <path> instead
+--width <columns>   terminal width override (default: tty width, else 80)
+--all               list every item; default caps each section to fit ~40 rows
+--project <name>    show only one domain's work (exact project name)
+--show <row>        print one row's full context by its rendered row number
+--prune-candidates  print the read-only queued-cleanup review list; nothing
+                    is ever deleted or modified by this command
+--output <path>     write the self-contained HTML page to <path> instead
 The HTML output may never be written under data/, state/, or config/.
 `);
 }
@@ -52,6 +55,8 @@ function parseArguments(argumentsList) {
   let width = null;
   let showAll = false;
   let showRow = null;
+  let projectFilter = null;
+  let pruneCandidates = false;
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === "-h" || argument === "--help") {
@@ -60,6 +65,18 @@ function parseArguments(argumentsList) {
     }
     if (argument === "--all") {
       showAll = true;
+      continue;
+    }
+    if (argument === "--prune-candidates") {
+      pruneCandidates = true;
+      continue;
+    }
+    if (argument === "--project" && index + 1 < argumentsList.length) {
+      projectFilter = argumentsList[index + 1];
+      if (projectFilter === "") {
+        throw new Error("--project requires a non-empty project name");
+      }
+      index += 1;
       continue;
     }
     if (argument === "--show" && index + 1 < argumentsList.length) {
@@ -90,7 +107,10 @@ function parseArguments(argumentsList) {
   if (showRow !== null && outputPath !== null) {
     throw new Error("--show and --output cannot be combined");
   }
-  return { outputPath, width, showAll, showRow };
+  if (pruneCandidates && (showRow !== null || outputPath !== null)) {
+    throw new Error("--prune-candidates cannot be combined with --show or --output");
+  }
+  return { outputPath, width, showAll, showRow, projectFilter, pruneCandidates };
 }
 
 function pathIsWithin(candidate, parent) {
@@ -232,11 +252,12 @@ function telemetryForTask(task, telemetryRows, observedMilliseconds) {
   return { seconds, tuple };
 }
 
-function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
+function buildModel({ snapshot, telemetryRows, telemetryPresent }, projectFilter = null) {
   const observedMilliseconds = Date.parse(snapshot.generated || "");
   const backlogPresent = snapshot.backlog?.present === true;
   const records = Array.isArray(snapshot.backlog?.records) ? snapshot.backlog.records : [];
   const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+  const matchesFilter = (project) => projectFilter === null || project === projectFilter;
 
   const needsPedro = [];
   const underway = [];
@@ -267,7 +288,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
 
   for (const record of records) {
     if (!record.structured) {
-      if (record.state === "queued" || record.state === "in_flight") {
+      if (projectFilter === null && (record.state === "queued" || record.state === "in_flight")) {
         queued.push({
           tag: "NOTE",
           name: cleanProse(record.raw),
@@ -282,6 +303,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       continue;
     }
     if (record.state === "done") {
+      continue;
+    }
+    if (!matchesFilter(record.repo ?? null)) {
       continue;
     }
     const recordName = cleanProse(record.title) || record.id;
@@ -320,6 +344,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
 
   for (const orphanId of snapshot.main_inventory?.orphan_in_flight || []) {
     const record = records.find((candidate) => candidate.id === orphanId);
+    if (!matchesFilter(record?.repo ?? null)) {
+      continue;
+    }
     unhealthy.push({
       tag: "ORPHAN",
       name: record?.title ? cleanProse(record.title) : orphanId,
@@ -334,6 +361,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   }
 
   for (const task of tasks) {
+    if (!matchesFilter(task.project || null)) {
+      continue;
+    }
     const telemetry = telemetryForTask(task, telemetryRows, observedMilliseconds);
     const itemAge = taskAge(task, telemetry, observedMilliseconds);
     const state = task.current_state?.state || "unknown";
@@ -593,12 +623,57 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     }
   }
   model.totalRows = rowNumber;
+  model.projectFilter = projectFilter;
+
+  const domainCounts = new Map();
+  for (const bucket of model.buckets) {
+    for (const item of bucket.items) {
+      if (item.project) {
+        domainCounts.set(item.project, (domainCounts.get(item.project) || 0) + 1);
+      }
+    }
+  }
+  model.domains = [...domainCounts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([name, count]) => ({ name, count }));
+
+  // Read-only cleanup review list. The retention rule forbids blanket or
+  // age-based cleanup, so this list only SURFACES candidates for an explicit,
+  // dry-run-first hygiene pass; the cockpit never deletes or edits an item.
+  const structuredIds = new Set(records.filter((record) => record.structured && record.id).map((record) => record.id));
+  model.pruneCandidates = [];
+  for (const record of records) {
+    if (!record.structured || record.state !== "queued" || !matchesFilter(record.repo ?? null)) {
+      continue;
+    }
+    const reasons = [];
+    for (const blockerId of record.blocked_by_ids || []) {
+      if (!structuredIds.has(blockerId)) {
+        reasons.push(`waits on '${blockerId}' which is not in the backlog`);
+      }
+    }
+    const recordAge = sinceAge(record);
+    if (recordAge.seconds !== null && recordAge.seconds >= PRUNE_UNTOUCHED_SECONDS) {
+      reasons.push(`untouched in queue past ${PRUNE_UNTOUCHED_SECONDS / 86400}d`);
+    }
+    if (reasons.length > 0) {
+      model.pruneCandidates.push({
+        id: record.id,
+        name: cleanProse(record.title) || record.id,
+        project: record.repo ?? null,
+        age: recordAge,
+        reasons,
+      });
+    }
+  }
+  model.pruneCandidates.sort((left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1));
   return model;
 }
 
-const ANSI = { reset: "\u001b[0m", dim: "\u001b[2m", accent: "\u001b[33m" };
+const ANSI = { reset: "\u001b[0m", dim: "\u001b[2m", accent: "\u001b[33m", accentBold: "\u001b[1;33m" };
 const AGE_HOT_SECONDS = 7 * 86400;
 const AGE_WARM_SECONDS = 3 * 86400;
+const PRUNE_UNTOUCHED_SECONDS = 30 * 86400;
 
 function clip(text, width) {
   return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}\u2026`;
@@ -618,11 +693,13 @@ function ageSegment(item, paint) {
   return { plain: text, painted: paint("dim", text) };
 }
 
-function metricLine(model, width) {
+// The needs-you count is the one thing the eye must land on first: it alone
+// carries the accent on the metric line, everything after it stays dim.
+function metricLine(model, width, paint) {
   const countOf = (key) => model.buckets.find((bucket) => bucket.key === key).items.length;
   const backlogCount = (key) => (model.backlogPresent ? String(countOf(key)) : "?");
   const segments = [
-    `${backlogCount("needs-pedro")} need you`,
+    `${backlogCount("needs-pedro")} NEED YOU`,
     `${countOf("underway")} underway`,
     `${countOf("unhealthy")} unhealthy`,
     `${backlogCount("queued")} queued`,
@@ -631,9 +708,23 @@ function metricLine(model, width) {
     segments.push(`${countOf("unreadable")} unreadable`);
   }
   const plainLength = segments.reduce((sum, segment) => sum + segment.length, 0);
+  const paintSegment = (segment, index) => (index === 0 ? paint("accentBold", segment) : paint("dim", segment));
+  if (plainLength + 3 * (segments.length - 1) > width) {
+    return clip(segments.join(" \u00b7 "), width);
+  }
   const gap = Math.max(3, Math.floor((width - plainLength) / Math.max(1, segments.length - 1)));
-  const joined = segments.join(" ".repeat(gap));
-  return joined.length <= width ? joined : clip(segments.join(" \u00b7 "), width);
+  return segments.map(paintSegment).join(" ".repeat(gap));
+}
+
+function domainsLine(model, width, paint) {
+  if (model.projectFilter !== null) {
+    return paint("dim", clip(`domain: ${model.projectFilter} only \u00b7 run without --project for the full fleet`, width));
+  }
+  if (!model.domains || model.domains.length < 2) {
+    return null;
+  }
+  const listing = model.domains.map((domain) => `${domain.name} ${domain.count}`).join(" \u00b7 ");
+  return paint("dim", clip(`domains: ${listing} \u00b7 --project <name> filters`, width));
 }
 
 // One accent carries what needs Pedro; every other character stays quiet.
@@ -641,7 +732,7 @@ function renderTerminal(model, width, useColor, showAll) {
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
   lines.push(paint("dim", clip(`FIRSTMATE FLEET \u00b7 observed ${model.generated}`, width)));
-  lines.push(metricLine(model, width));
+  lines.push(metricLine(model, width, paint));
   lines.push(
     paint(
       "dim",
@@ -651,6 +742,10 @@ function renderTerminal(model, width, useColor, showAll) {
       ),
     ),
   );
+  const domains = domainsLine(model, width, paint);
+  if (domains !== null) {
+    lines.push(domains);
+  }
   let firstBucket = true;
   for (const bucket of model.buckets) {
     if (bucket.items.length === 0 && bucket.hideWhenEmpty) {
@@ -663,9 +758,10 @@ function renderTerminal(model, width, useColor, showAll) {
     firstBucket = false;
     const isAccentBucket = bucket.key === "needs-pedro";
     const bucketPaint = (text) => paint(isAccentBucket ? "accent" : "dim", text);
-    const header = `\u2500\u2500 ${bucket.name} (${bucket.items.length}) `;
-    const fill = "\u2500".repeat(Math.max(0, width - header.length));
-    lines.push(bucketPaint(clip(header + fill, width)));
+    const rule = isAccentBucket ? "\u2501" : "\u2500";
+    const header = `${rule}${rule} ${bucket.name} (${bucket.items.length}) `;
+    const fill = rule.repeat(Math.max(0, width - header.length));
+    lines.push(paint(isAccentBucket ? "accentBold" : "dim", clip(header + fill, width)));
     if (bucket.items.length === 0) {
       lines.push(paint("dim", clip(`   ${bucket.empty}`, width)));
       continue;
@@ -697,6 +793,46 @@ function renderTerminal(model, width, useColor, showAll) {
       const ruleText = bucket.rule ? ` \u00b7 ${bucket.rule}` : "";
       const foldWord = bucket.foldWord || "more";
       lines.push(paint("dim", clip(`  \u2026 ${hidden} ${foldWord}${ruleText} \u00b7 --all shows all`, width)));
+    }
+    if (bucket.key === "queued" && model.pruneCandidates.length > 0) {
+      lines.push(
+        paint(
+          "dim",
+          clip(
+            `  ${model.pruneCandidates.length} prune candidate${model.pruneCandidates.length === 1 ? "" : "s"} \u00b7 --prune-candidates lists them; nothing is deleted`,
+            width,
+          ),
+        ),
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+// Read-only cleanup review list: shows candidates and stops there, because
+// hygiene is explicit and dry-run-first, never blanket or age-triggered.
+function renderPrune(model, width) {
+  const lines = [];
+  lines.push(
+    clip(`PRUNE CANDIDATES (${model.pruneCandidates.length}) \u00b7 review list only - nothing is deleted or modified`, width),
+  );
+  lines.push(
+    clip(`rule: queued ${PRUNE_UNTOUCHED_SECONDS / 86400}d or longer, or waiting on a task missing from the backlog`, width),
+  );
+  if (model.projectFilter !== null) {
+    lines.push(clip(`domain: ${model.projectFilter} only`, width));
+  }
+  if (model.pruneCandidates.length === 0) {
+    lines.push("");
+    lines.push(model.backlogPresent ? "  no candidates" : "  backlog absent - candidates unknown");
+    return `${lines.join("\n")}\n`;
+  }
+  for (const candidate of model.pruneCandidates) {
+    lines.push("");
+    const head = [candidate.id, candidate.name, candidate.project].filter(Boolean).join(" \u00b7 ");
+    lines.push(clip(`  ${head} \u00b7 ${candidate.age.label}`, width));
+    for (const reason of candidate.reasons) {
+      lines.push(clip(`      ${reason}`, width));
     }
   }
   return `${lines.join("\n")}\n`;
@@ -889,12 +1025,16 @@ function writeAtomically(outputPath, html) {
 }
 
 try {
-  const { outputPath, width, showAll, showRow } = parseArguments(process.argv.slice(2));
+  const parsed = parseArguments(process.argv.slice(2));
+  const { outputPath, width, showAll, showRow, projectFilter, pruneCandidates } = parsed;
   if (outputPath !== null) {
     assertSafeOutput(outputPath);
   }
-  const model = buildModel(collectInputs());
-  if (showRow !== null) {
+  const model = buildModel(collectInputs(), projectFilter);
+  if (pruneCandidates) {
+    const pruneWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
+    process.stdout.write(renderPrune(model, pruneWidth));
+  } else if (showRow !== null) {
     process.stdout.write(renderShow(model, showRow));
   } else if (outputPath !== null) {
     writeAtomically(outputPath, renderHtml(model));

@@ -106,6 +106,8 @@ write_live_fixture() {  # <home>
 
 ## Queued
 - [ ] queued-task - Ship the follow-up blocked-by: decision-task (repo: firstmate) (kind: ship) (since 2026-07-30)
+- [ ] stale-queued - Refresh the legacy importer (repo: firstmate) (kind: ship) (since 2026-06-01)
+- [ ] ghost-queued - Ship the ghost follow-up blocked-by: ghost-task (repo: firstmate) (kind: ship) (since 2026-08-01)
 
 ## Done
 - [x] merged-task - Ship the merged thing (repo: firstmate) (kind: ship) (merged 2026-07-31)
@@ -244,7 +246,7 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   needs=$(line_number_of "$out" "NEEDS PEDRO (10)")
   underway=$(line_number_of "$out" "UNDERWAY (1)")
   unhealthy=$(line_number_of "$out" "UNHEALTHY (1)")
-  queued=$(line_number_of "$out" "QUEUED (2)")
+  queued=$(line_number_of "$out" "QUEUED (4)")
   [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section counting all ten items"
   [ -n "$underway" ] || fail "terminal output has no UNDERWAY section"
   [ -n "$unhealthy" ] || fail "terminal output has no UNHEALTHY section"
@@ -269,8 +271,12 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   assert_not_contains "$out" "Ship the merged thing" "a landed task still occupies a bucket"
   assert_not_contains "$out" "pull/5555" \
     "a PR URL parsed from secondmate status prose minted a review ask"
-  assert_contains "$out" "declared wait, worker gone: vendor" \
-    "a declared pause with a gone worker was not rendered as a wait"
+  assert_contains "$out" "NEED YOU" "the needs-Pedro count does not lead the metric line"
+  assert_contains "$out" "domains: " "the domains line is not rendered"
+  assert_contains "$out" "--project <name> filters" "the domain filter is not discoverable on screen"
+  assert_contains "$out" "2 prune candidates" "queued prune candidates are not counted on screen"
+  assert_contains "$out" "--prune-candidates lists them; nothing is deleted" \
+    "the prune list is not discoverable or not disclaimed read-only"
   assert_contains "$out" "UNREADABLE (1)" "unverifiable harness state did not get its own quiet section"
   assert_contains "$out" "nothing evidences them as bad" "the unreadable fold line does not disclaim sickness"
   assert_not_contains "$out" "Push the hotfix" "an unreadable worker rendered as a full row by default"
@@ -296,6 +302,8 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   assert_contains "$all_out" "Sign off on the icon refresh" "--all does not list capped-out items"
   assert_contains "$all_out" "Pedro must choose the deployment window." "--all does not list capped-out hold detail"
   assert_contains "$all_out" "Push the hotfix" "--all does not list unreadable workers"
+  assert_contains "$all_out" "declared wait, worker gone: vendor" \
+    "a declared pause with a gone worker was not rendered as a wait"
   assert_not_contains "$all_out" "more · --all shows all" "--all still hides items behind a count line"
 
   # shellcheck disable=SC2016  # the ${...} below is a node template literal, not shell
@@ -349,6 +357,30 @@ test_show_expands_a_row_with_full_context() {
   [ "$rc" -ne 0 ] || fail "--show accepted an out-of-range row"
   assert_contains "$error" "no such row" "out-of-range --show refusal is not actionable"
   pass "any numbered row expands to its full context and bad numbers refuse loudly"
+}
+
+test_domain_filter_and_prune_list() {
+  local home fakebin filtered prune
+  home=$(make_home domains)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  filtered=$(render_terminal "$home" "$fakebin" --width 100 --project artemis) || fail "--project render failed"
+  assert_contains "$filtered" "NEEDS PEDRO (6)" "domain filter did not narrow Needs Pedro"
+  assert_contains "$filtered" "domain: artemis only" "filtered view does not name its domain"
+  assert_contains "$filtered" "Approve the pricing page copy" "an artemis hold vanished under its own filter"
+  assert_not_contains "$filtered" "Renew the signing certificate" "a firstmate hold leaked into the artemis view"
+  assert_not_contains "$filtered" "Decide the public API" "a firstmate decision leaked into the artemis view"
+
+  prune=$(render_terminal "$home" "$fakebin" --prune-candidates --width 100) || fail "--prune-candidates failed"
+  assert_contains "$prune" "PRUNE CANDIDATES (2)" "prune list does not count its candidates"
+  assert_contains "$prune" "nothing is deleted or modified" "prune list does not disclaim read-only"
+  assert_contains "$prune" "Refresh the legacy importer" "a long-untouched queued item is not a candidate"
+  assert_contains "$prune" "untouched in queue past 30d" "the long-untouched reason is not stated"
+  assert_contains "$prune" "Ship the ghost follow-up" "a dangling-blocker item is not a candidate"
+  assert_contains "$prune" "waits on 'ghost-task' which is not in the backlog" "the dangling-blocker reason is not stated"
+  assert_not_contains "$prune" "queued-task ·" "a healthy queued item was surfaced as a prune candidate"
+  pass "domain filter narrows every bucket and the prune list is read-only review data"
 }
 
 test_html_page_renders_four_buckets() {
@@ -416,6 +448,7 @@ test_ignored_operational_directories_are_never_output_targets() {
 
 test_terminal_cockpit_opens_on_needs_pedro
 test_show_expands_a_row_with_full_context
+test_domain_filter_and_prune_list
 test_html_page_renders_four_buckets
 test_absent_sources_stay_absent
 test_ignored_operational_directories_are_never_output_targets
