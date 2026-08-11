@@ -37,11 +37,14 @@ test_list_all_exact_suite_coverage() {
 }
 
 test_family_selection() {
-  local listed line
+  local listed watcher_listed line
   listed=$("$RUNNER" --list --family pure-contract-unit)
   [ -n "$listed" ] || fail "--family pure-contract-unit selected nothing"
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-test-run.test.sh' \
     || fail "pure-contract-unit must include fm-test-run.test.sh"
+  watcher_listed=$("$RUNNER" --list --family watcher-wake-lock)
+  printf '%s\n' "$watcher_listed" | grep -Fq 'tests/fm-inactive-reconcile.test.sh' \
+    || fail "watcher-wake-lock must include fm-inactive-reconcile.test.sh"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
@@ -98,6 +101,7 @@ init_changed_fixture_repo() {
     fm-ask-user-authority.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
+    fm-inactive-reconcile.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
@@ -116,6 +120,7 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-inactive-reconcile.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -158,6 +163,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-inactive-reconcile.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-inactive-reconcile.test.sh" \
+    "inactive reconciliation source selects watcher coverage"
+  git -C "$repo" add bin/fm-inactive-reconcile.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm inactive-reconcile-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
