@@ -302,7 +302,7 @@ nm_argv_log() {
 # close. Args: case_dir
 seed_backlog_in_flight() {
   local case_dir=$1
-  cat > "$case_dir/data/backlog.md" <<'MD'
+  cat > "$case_dir/home/data/backlog.md" <<'MD'
 # Backlog
 
 ## In flight
@@ -315,13 +315,13 @@ MD
 # Task ids still under `## In flight` in the case home's backlog. Args: case_dir
 in_flight_ids() {
   local case_dir=$1
-  fm_backlog_inflight_ids "$case_dir/data/backlog.md"
+  fm_backlog_inflight_ids "$case_dir/home/data/backlog.md"
 }
 
 # Everything under `## Done` in the case home's backlog. Args: case_dir
 done_block() {
   local case_dir=$1
-  awk '/^## Done/ { d = 1; next } /^## / { d = 0 } d' "$case_dir/data/backlog.md"
+  awk '/^## Done/ { d = 1; next } /^## / { d = 0 } d' "$case_dir/home/data/backlog.md"
 }
 
 add_compatible_tasks_axi() {
@@ -783,9 +783,9 @@ test_teardown_moves_github_pr_row_to_done() {
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
 
   in_flight_ids "$case_dir" | grep -qx task-x1 \
-    && fail "teardown left task-x1 under ## In flight: $(cat "$case_dir/data/backlog.md")"
+    && fail "teardown left task-x1 under ## In flight: $(cat "$case_dir/home/data/backlog.md")"
   done_block "$case_dir" | grep -F 'https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not record the PR link in Done: $(cat "$case_dir/data/backlog.md")"
+    || fail "teardown did not record the PR link in Done: $(cat "$case_dir/home/data/backlog.md")"
   printf '%s\n' "$out" | grep -F 'moved task-x1 to Done' >/dev/null \
     || fail "teardown did not report the backlog write: $out"
   printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
@@ -810,9 +810,9 @@ test_teardown_records_codebase_mr_via_note() {
   out=$(run_teardown "$case_dir") || fail "teardown failed for a Codebase MR task"
 
   in_flight_ids "$case_dir" | grep -qx task-x1 \
-    && fail "teardown left the Codebase MR task under ## In flight: $(cat "$case_dir/data/backlog.md")"
+    && fail "teardown left the Codebase MR task under ## In flight: $(cat "$case_dir/home/data/backlog.md")"
   done_block "$case_dir" | grep -F "$mr" >/dev/null \
-    || fail "teardown did not record the MR link in Done: $(cat "$case_dir/data/backlog.md")"
+    || fail "teardown did not record the MR link in Done: $(cat "$case_dir/home/data/backlog.md")"
   printf '%s\n' "$out" | grep -F 'VALIDATION_ERROR' >/dev/null \
     && fail "teardown passed a Codebase MR URL to --pr: $out"
   pass "teardown records a Codebase MR link via --note, not the rejected --pr"
@@ -827,7 +827,7 @@ test_teardown_reports_backlog_write_failure_loudly() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   # A backlog that exists but never carried this task: tasks-axi done -> NOT_FOUND.
-  printf '%s\n' '# Backlog' '' '## In flight' '## Queued' '## Done' > "$case_dir/data/backlog.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '## Queued' '## Done' > "$case_dir/home/data/backlog.md"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
