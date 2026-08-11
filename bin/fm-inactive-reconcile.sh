@@ -309,20 +309,26 @@ summary_for_secondmate() { # <id> <meta>
 }
 
 request_secondmate_report() { # <record> <secondmate-id> <child-id> <state> <outcome-key>
-  local record=$1 mate=$2 child=$3 state=$4 outcome_key=$5 msg corr rc=0
+  local record=$1 mate=$2 child=$3 state=$4 outcome_key=$5 msg corr rc=0 marker
   [ "$(record_value "$record" request_attempted)" = 1 ] && return 1
-  record_field_set "$record" request_attempted 1 || return 2
   msg="INACTIVE OUTCOME RECONCILIATION: child $child is authoritatively $state but has no parent report. Append a terminal parent status report with [key=$outcome_key]."
-  corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$mate" "$msg" 2>/dev/null || true)
-  if [ -n "$corr" ]; then
-    msg="$msg Include corr=$corr in that report."
-    fm_pending_reply_embed_corr "$msg" "$corr" msg || true
-    FM_PENDING_REPLY_EXISTING_CORR="$corr" "$SEND_BIN" "$mate" "$msg" >/dev/null 2>&1 || rc=$?
-    record_field_set "$record" correlation "$corr" || true
-  else
-    "$SEND_BIN" "$mate" "$msg" >/dev/null 2>&1 || rc=$?
-  fi
+  corr=$(record_value "$record" correlation)
+  case "$corr" in
+    [A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9]) ;;
+    *)
+      corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$mate" "$msg" 2>/dev/null || true)
+      [ -n "$corr" ] || return 2
+      record_field_set "$record" correlation "$corr" || return 2
+      ;;
+  esac
+  msg="$msg Include corr=$corr in that report."
+  fm_pending_reply_embed_corr "$msg" "$corr" msg || true
+  FM_PENDING_REPLY_EXISTING_CORR="$corr" "$SEND_BIN" "$mate" "$msg" >/dev/null 2>&1 || rc=$?
   record_field_set "$record" request_result "$rc" || true
+  marker=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+  if [ "$rc" -eq 0 ] || { [ -f "$marker" ] && [ ! -L "$marker" ]; }; then
+    record_field_set "$record" request_attempted 1 || return 2
+  fi
   return "$rc"
 }
 

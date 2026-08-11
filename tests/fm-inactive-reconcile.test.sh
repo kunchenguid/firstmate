@@ -42,6 +42,9 @@ SH
 #!/usr/bin/env bash
 set -u
 printf '%s\t%s\n' "$1" "$2" >> "${FM_TEST_SEND_LOG:?}"
+if [ "${FM_TEST_SEND_FAIL_FIRST:-0}" = 1 ] && [ "$(wc -l < "${FM_TEST_SEND_LOG:?}" | tr -d ' ')" = 1 ]; then
+  exit 88
+fi
 corr=$(printf '%s' "$2" | grep -Eo 'corr=[A-Fa-f0-9]{16}' | head -1 | cut -d= -f2- || true)
 if [ -n "$corr" ]; then
   # The real fm-send confirms a successfully delivered existing expectation.
@@ -269,6 +272,23 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+test_failed_request_delivery_retries_existing_correlation() {
+  local record first_corr second_corr
+  make_world send-retry; bind_secondmate local; write_mate_meta; write_summary done
+  FM_TEST_SEND_FAIL_FIRST=1 run_reconcile "$MAIN" --startup
+  record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
+  [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=0 ] \
+    || fail "failed pre-delivery request was made non-retryable"
+  first_corr=$(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$WORLD/send.log" | head -1)
+  FM_TEST_SEND_FAIL_FIRST=1 run_reconcile "$MAIN" --startup
+  [ "$(wc -l < "$WORLD/send.log" | tr -d ' ')" = 2 ] || fail "failed request was not retried"
+  second_corr=$(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$WORLD/send.log" | tail -1)
+  [ "$first_corr" = "$second_corr" ] || fail "request retry replaced its durable correlation"
+  [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=1 ] \
+    || fail "successful retry was not made durable"
+  pass "pre-delivery request failures retry with the durable correlation"
+}
+
 test_local_secondmate_report_and_main_receipt
 test_main_cross_home_discovers_missing_report_once
 test_remote_parent_reply_is_idempotent
@@ -276,5 +296,6 @@ test_heartbeat_cap_does_not_delay_reconciliation
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_reconciliation_never_calls_forge
+test_failed_request_delivery_retries_existing_correlation
 
 echo "all inactive reconciliation tests passed"
