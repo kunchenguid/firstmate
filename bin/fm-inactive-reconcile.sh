@@ -8,8 +8,8 @@
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
 # `scan` evaluates at most once per FM_INACTIVE_RECONCILE_SECS (default 900,
-# valid 60..1800) per home, except that --startup performs the same cheap gate
-# during a locked session start.
+# valid 60..1800) per home, except that --startup performs the same cheap scan
+# immediately during a locked session start.
 #
 # It considers only a direct ordinary crewmate whose durable activity is older
 # than that interval and whose last status is not captain-held.
