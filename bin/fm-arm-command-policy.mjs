@@ -382,6 +382,7 @@ export class Lexer {
         continue;
       }
       if (char === "$") word.literal = false;
+      if (char === "~" && (word.value === "" || /[=:]$/.test(word.value))) word.unquotedExpansion = true;
       if ("*?[]{}".includes(char)) word.unquotedExpansion = true;
       word.value += char;
       this.index += 1;
@@ -868,7 +869,7 @@ function explicitHomePrefixAllowed(position) {
   if (position.prefixAssignments === 0) return true;
   if (position.prefixAssignments !== 1) return false;
   const assignment = position.words[0];
-  return assignment.literal && /^FM_HOME=.+/.test(assignment.value);
+  return assignment.literal && !assignment.unquotedExpansion && /^FM_HOME=.+/.test(assignment.value);
 }
 
 function setupKind(info, context) {

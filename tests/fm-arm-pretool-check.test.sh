@@ -142,6 +142,8 @@ matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
 matrix_case E18 deny 'OTHER_HOME=/tmp bin/fm-watch-arm.sh'
 matrix_case E19 deny 'FM_HOME= bin/fm-watch-arm.sh'
+matrix_case E20 deny 'FM_HOME=~/sibling bin/fm-watch-arm.sh'
+matrix_case E21 allow "FM_HOME='~/sibling' bin/fm-watch-arm.sh"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
