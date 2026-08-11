@@ -52,9 +52,11 @@ if [ "$jobs" -lt 1 ]; then
   exit 1
 fi
 
-mapfile -t tests < <(compgen -G 'tests/*.test.sh' | sort)
+mapfile -t tests < <(
+  { compgen -G 'tests/*.test.sh' || true; compgen -G 'tests/*.test.py' || true; } | sort
+)
 if [ "${#tests[@]}" -eq 0 ]; then
-  printf '%s\n' 'FAIL: no tests/*.test.sh files found' >&2
+  printf '%s\n' 'FAIL: no behavior test files found' >&2
   exit 1
 fi
 
@@ -143,7 +145,7 @@ is_serial_test() {
 
 mapfile -t all_tests < <(
   cd "$test_root" || exit 1
-  for test_path in tests/*.test.sh; do
+  for test_path in tests/*.test.sh tests/*.test.py; do
     [ -f "$test_path" ] || continue
     [ "$test_path" = tests/fm-gate-refuse.test.sh ] || printf '%s\n' "$test_path"
   done
@@ -152,7 +154,9 @@ tests=()
 serial_tests=()
 for test_path in "${all_tests[@]}"; do
   test_name=${test_path##*/}
-  if is_serial_test "${test_name%.test.sh}"; then
+  test_id=${test_name%.test.sh}
+  [ "$test_id" != "$test_name" ] || test_id=${test_name%.test.py}
+  if is_serial_test "$test_id"; then
     serial_tests+=("$test_path")
   else
     tests+=("$test_path")
@@ -186,7 +190,10 @@ run_one() {
     fi
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
-    bash "$test_path"
+    case "$test_path" in
+      *.test.py) python3 "$test_path" ;;
+      *) bash "$test_path" ;;
+    esac
   ) >"$log_path" 2>&1
 }
 
@@ -207,6 +214,7 @@ run_phase() {
       test_path=${phase_tests[$index]}
       test_name=${test_path##*/}
       test_id=${test_name%.test.sh}
+      [ "$test_id" != "$test_name" ] || test_id=${test_name%.test.py}
       job_root="$suite_tmp/$test_id"
       log_path="$job_root/output.log"
       mkdir -p "$job_root/tmp" "$job_root/gotmp"

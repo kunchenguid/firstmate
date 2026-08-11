@@ -253,6 +253,7 @@ SPAWN_PARENT_HOME_LOCK_HELD=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_RECORD_PATH=
 SPAWN_WORKTREE_LEASE_PROOF=
+SPAWN_WORKTREE_LEASE_GENERATION=
 SPAWN_ARTIFACTS_CLEAN=0
 SPAWN_CLAUDE_HOOK_CREATED=0
 SPAWN_OPENCODE_HOOK_CREATED=0
@@ -346,6 +347,7 @@ spawn_abort_recovery_meta() {
       [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
     fi
     echo "project=$PROJ_ABS"
+    [ -z "${SPAWN_WORKTREE_LEASE_GENERATION:-}" ] || echo "slot_lease_generation=$SPAWN_WORKTREE_LEASE_GENERATION"
     echo "harness=${HARNESS:-unknown}"
     echo "kind=${KIND:-ship}"
     echo "mode=${MODE:-no-mistakes}"
@@ -471,7 +473,7 @@ spawn_create_new_artifact() {
     rm -f -- "$tmp"
     return 1
   fi
-  if ! ln "$tmp" "$path" 2>/dev/null; then
+  if ! link "$tmp" "$path" 2>/dev/null; then
     rm -f -- "$tmp"
     echo "error: spawn artifact path was occupied during exclusive creation: $path" >&2
     return 1
@@ -519,7 +521,7 @@ spawn_create_or_reuse_artifact() {
     rm -f -- "$tmp"
     return 1
   fi
-  if ! ln "$tmp" "$path" 2>/dev/null; then
+  if ! link "$tmp" "$path" 2>/dev/null; then
     if [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$tmp" "$path"; then
       rm -f -- "$tmp"
       if [ -n "$created_var" ]; then
@@ -615,7 +617,7 @@ spawn_remove_artifact_bound() {
   quarantine="$dir/.fm-owned.$$.${RANDOM}.quarantine"
   [ ! -e "$identity" ] && [ ! -L "$identity" ] || return 1
   [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 1
-  ln "$path" "$identity" 2>/dev/null || return 1
+  link "$path" "$identity" 2>/dev/null || return 1
   if ! [ -f "$identity" ] || [ -L "$identity" ] || ! [ "$path" -ef "$identity" ]; then
     rm -f -- "$identity"
     return 1
@@ -648,7 +650,7 @@ spawn_remove_artifact_bound() {
   fi
   if [ ! -e "$path" ] && [ ! -L "$path" ] \
      && [ -f "$quarantine" ] && [ ! -L "$quarantine" ] \
-     && ln "$quarantine" "$path" 2>/dev/null; then
+     && link "$quarantine" "$path" 2>/dev/null; then
     rm -f -- "$quarantine" || true
   fi
   rm -f -- "$identity" || true
@@ -902,8 +904,8 @@ spawn_abort_cleanup() {
   fi
   if [ "$status" -ne 0 ] \
      && [ "$slot_returned" -ne 1 ] \
-     && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
-     && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ]; then
+     && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ]; then
+    SPAWN_RECOVERY_META_REPLACE_ALLOWED=1
     if spawn_abort_recovery_meta; then
       echo "warning: spawn abort left a recoverable task record for the lease held by $ID${WT:+ on worktree $WT}" >&2
     else
@@ -2008,6 +2010,7 @@ spawn_settle_path() {  # <target>
 
 if [ "$KIND" != secondmate ]; then
   SPAWN_WORKTREE_LEASE_PROOF="$STATE/.$ID.spawn-worktree"
+  SPAWN_WORKTREE_LEASE_GENERATION="$ID.$$.$RANDOM"
   rm -f "$SPAWN_WORKTREE_LEASE_PROOF"
   TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID" "$SPAWN_WORKTREE_LEASE_PROOF") || exit 1
   SPAWN_WORKTREE_LEASED=1
@@ -2080,12 +2083,15 @@ exclude_path() {
 }
 if [ "$KIND" != secondmate ]; then
   spawn_create_new_artifact "$TURNEND" SPAWN_TURNEND_INODE SPAWN_TURNEND_DIGEST SPAWN_TURNEND_CREATED </dev/null || exit 1
+  TURNEND_SHELL=$(shell_quote "$TURNEND") || exit 1
+  TURNEND_JS=$(printf '%s' "$TURNEND" | jq -Rs .) || exit 1
+  CLAUDE_TURNEND_COMMAND=$(printf 'touch %s' "$TURNEND_SHELL" | jq -Rs .) || exit 1
   case "$HARNESS" in
     claude*)
       spawn_preflight_real_directory_path "$WT/.claude" || exit 1
       spawn_ensure_real_directory_path "$WT/.claude" || exit 1
       spawn_create_new_artifact "$WT/.claude/settings.local.json" SPAWN_CLAUDE_HOOK_INODE SPAWN_CLAUDE_HOOK_DIGEST SPAWN_CLAUDE_HOOK_CREATED <<EOF || exit 1
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"Stop":[{"hooks":[{"type":"command":$CLAUDE_TURNEND_COMMAND}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -2095,7 +2101,7 @@ EOF
       spawn_create_new_artifact "$WT/.opencode/plugins/fm-turn-end.js" SPAWN_OPENCODE_HOOK_INODE SPAWN_OPENCODE_HOOK_DIGEST SPAWN_OPENCODE_HOOK_CREATED <<EOF || exit 1
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
-    if (event.type === "session.idle") await \$\`touch $TURNEND\`
+    if (event.type === "session.idle") await \$\`touch \${$TURNEND_JS}\`
   },
 })
 EOF
@@ -2112,7 +2118,7 @@ EOF
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
 import { execFile } from "node:child_process";
 export default function (pi: any) {
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => execFile("touch", [$TURNEND_JS]));
 }
 EOF
       ;;
@@ -2203,7 +2209,7 @@ EOF
       printf '%s\n' "$TURNEND" > "$auth_tmp" || { spawn_discard_grok_auth_provisional || true; exit 1; }
       SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_tmp") || { spawn_discard_grok_auth_provisional || true; exit 1; }
       SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_tmp") || { spawn_discard_grok_auth_provisional || true; exit 1; }
-      if ! ln "$auth_tmp" "$auth_file" 2>/dev/null; then
+      if ! link "$auth_tmp" "$auth_file" 2>/dev/null; then
         spawn_discard_grok_auth_provisional || true
         exit 1
       fi

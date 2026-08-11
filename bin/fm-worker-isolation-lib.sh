@@ -69,14 +69,15 @@ fm_worker_shell_quote() {  # <text>
 # lease remains held even if the worker process exits, so only Firstmate's
 # ownership-gated teardown can return and recycle the slot.
 fm_worker_treehouse_lease_command() {
-  local id=$1 proof=${2:-} quoted proof_quoted
+  local id=$1 proof=${2:-} quoted proof_quoted proof_tmp_quoted
   [ -n "$id" ] || return 1
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   quoted=$(fm_worker_shell_quote "$id") || return 1
   if [ -n "$proof" ]; then
     proof_quoted=$(fm_worker_shell_quote "$proof") || return 1
-    printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && printf "%%s\\n" "$fm_wt" > %s && unset fm_wt' \
-      "$quoted" "$proof_quoted"
+    proof_tmp_quoted=$(fm_worker_shell_quote "$proof.tmp.XXXXXX") || return 1
+    printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && fm_proof_tmp=$(mktemp %s) && printf "%%s\\n" "$fm_wt" > "$fm_proof_tmp" && link "$fm_proof_tmp" %s && rm -f -- "$fm_proof_tmp" && unset fm_wt fm_proof_tmp' \
+      "$quoted" "$proof_tmp_quoted" "$proof_quoted"
   else
     printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && unset fm_wt' \
       "$quoted"

@@ -253,7 +253,7 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
     rm -f "$tmp"
     return 1
   fi
-  if ! ln "$tmp" "$journal" 2>/dev/null; then
+  if ! link "$tmp" "$journal" 2>/dev/null; then
     rm -f "$tmp"
     echo "error: herdr presentation journal appeared concurrently for $id; refusing projected create" >&2
     return 1
@@ -647,9 +647,10 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 }
 
 fm_backend_herdr_projection_teardown_close() {
-  local session=$1 pane_id=$2 close_status
+  local session=$1 pane_id=$2 required_agent_state=${3:-} close_status
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ] && return 0
-  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" 2>/dev/null; then
+  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" \
+    "$required_agent_state" 2>/dev/null; then
     close_status=0
   else
     close_status=$?
@@ -1135,7 +1136,8 @@ fm_backend_herdr_create_task_abort_created() {
 }
 
 fm_backend_herdr_close_tab_focus_preserving() {
-  local session=$1 wsid=$2 tab_id=$3 replacement_tab=${4:-} before active_tab info close_status desired
+  local session=$1 wsid=$2 tab_id=$3 replacement_tab=${4:-} required_agent_state=${5:-}
+  local required_pane=${6:-} before active_tab info close_status desired state
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
   active_tab=${before#*$'\t'}
   info=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || return 1
@@ -1152,6 +1154,30 @@ fm_backend_herdr_close_tab_focus_preserving() {
     fm_backend_herdr_projection_focus_restore "$session" "$desired" "active husk replacement" || return 1
   else
     desired=$before
+  fi
+  if [ "$required_agent_state" = husk ]; then
+    [ -n "$required_pane" ] || return 1
+    info=$(fm_backend_herdr_cli "$session" pane get "$required_pane" 2>/dev/null) || return 1
+    printf '%s' "$info" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" --arg pane "$required_pane" '
+      .result.pane.workspace_id == $workspace
+      and .result.pane.tab_id == $tab
+      and .result.pane.pane_id == $pane
+    ' >/dev/null 2>&1 || return 1
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$required_pane") || return 1
+    case "$state" in
+      dead|no-agent) ;;
+      *) return 1 ;;
+    esac
+  elif [ -n "$required_agent_state" ]; then
+    [ -n "$required_pane" ] || return 1
+    info=$(fm_backend_herdr_cli "$session" pane get "$required_pane" 2>/dev/null) || return 1
+    printf '%s' "$info" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" --arg pane "$required_pane" '
+      .result.pane.workspace_id == $workspace
+      and .result.pane.tab_id == $tab
+      and .result.pane.pane_id == $pane
+    ' >/dev/null 2>&1 || return 1
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$required_pane") || return 1
+    [ "$state" = "$required_agent_state" ] || return 1
   fi
   if fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1; then
     close_status=0
@@ -1283,7 +1309,7 @@ EOF
   if [ -n "$dup_tab_ids" ]; then
     while IFS=$'\t' read -r dup dup_pane; do
       [ -n "$dup" ] || continue
-      if ! fm_backend_herdr_close_tab_focus_preserving "$session" "$wsid" "$dup" "$tab_id"; then
+      if ! fm_backend_herdr_close_tab_focus_preserving "$session" "$wsid" "$dup" "$tab_id" husk "$dup_pane"; then
         fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
         return 1
       fi

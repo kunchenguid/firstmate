@@ -427,10 +427,11 @@ teardown_slot_returning_recovery_line() {  # <meta> <worktree> <task-id>
 }
 
 teardown_unresolved_lease_recovery_line() {
-  local meta=$1 id=$2 holder candidate
+  local meta=$1 id=$2 holder candidate generation
   holder=$(meta_value "$meta" slot_lease_holder)
   candidate=$(meta_value "$meta" slot_worktree_candidate)
-  echo "teardown: RECLAIM: run 'treehouse list' to find the slot leased to ${holder:-$id}${candidate:+ (spawn saw candidate path $candidate)} and return it with 'treehouse return --force <slot>'; docs/worker-isolation.md owns the reclaim path." >&2
+  generation=$(meta_value "$meta" slot_lease_generation)
+  echo "teardown: RECLAIM: run 'treehouse list' to find the slot leased to ${holder:-$id}${candidate:+ (spawn saw candidate path $candidate)}${generation:+ (lease generation $generation)} and return it with 'treehouse return --force <slot>'; docs/worker-isolation.md owns the reclaim path." >&2
 }
 
 # Retire the task branch only once the slot is provably back in the pool.
@@ -547,8 +548,67 @@ teardown_release_herdr_presentation_lock() {
   fi
 }
 
+teardown_herdr_task_endpoint_identity_proven() {
+  local child_id=$1 child_meta=$2 target=$3 expected_state=${4:-}
+  local session pane workspace tab label expected_label expected_key label_key raw_state info
+  local meta_session meta_pane identity agent agent_status expected_harness
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  raw_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  [ -z "$expected_state" ] || [ "$raw_state" = "$expected_state" ] || return 1
+  case "$raw_state" in
+    live|no-agent) ;;
+    *) return 1 ;;
+  esac
+  meta_session=$(meta_value "$child_meta" herdr_session)
+  meta_pane=$(meta_value "$child_meta" herdr_pane_id)
+  workspace=$(meta_value "$child_meta" herdr_workspace_id)
+  tab=$(meta_value "$child_meta" herdr_tab_id)
+  label=$(meta_value "$child_meta" display_label)
+  expected_label=$label
+  expected_key=$(meta_value "$child_meta" task_key)
+  [ -n "$meta_session" ] && [ "$meta_session" = "$session" ] || return 1
+  [ -n "$meta_pane" ] && [ "$meta_pane" = "$pane" ] || return 1
+  [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$label" ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    .result.pane.workspace_id == $workspace
+    and .result.pane.tab_id == $tab
+    and .result.pane.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg label "$expected_label" '
+    .result.tab.workspace_id == $workspace
+    and .result.tab.tab_id == $tab
+    and .result.tab.label == $label
+  ' >/dev/null 2>&1 || return 1
+  if label_key=$(fm_task_label_validate_display_label "$label" 2>/dev/null); then
+    [ -n "$expected_key" ] || expected_key=$(fm_task_label_base_key "$child_id") || return 1
+    [ "$label_key" = "$expected_key" ] || return 1
+  else
+    [ "$label" = "fm-$child_id" ] || return 1
+  fi
+  if [ "$raw_state" = live ]; then
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 1
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    [ -n "$agent_status" ] || return 1
+    expected_harness=$(meta_value "$child_meta" harness)
+    case "$expected_harness:$agent" in
+      claude*:claude|codex*:codex|grok*:grok|opencode*:opencode|pi*:pi) ;;
+      *:) ;;
+      *) [ "$agent" = "$expected_harness" ] || return 1 ;;
+    esac
+  fi
+}
+
 teardown_herdr_endpoint_focus_safe() {
-  local target=$1 session pane state close_status=1 acquired_here=0
+  local target=$1 child_id=${2:-} child_meta=${3:-} child_kind=${4:-}
+  local parent_home=${5:-} child_wt=${6:-}
+  local session pane state close_status=1 acquired_here=0
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
@@ -559,7 +619,14 @@ teardown_herdr_endpoint_focus_safe() {
     teardown_acquire_herdr_presentation_lock "$target" || return 1
     acquired_here=1
   fi
-  if fm_backend_herdr_projection_teardown_close "$session" "$pane"; then
+  if [ -n "$child_id" ] && ! teardown_herdr_task_endpoint_identity_proven \
+    "$child_id" "$child_meta" "$target" "$state"; then
+    if [ "$acquired_here" = 1 ]; then
+      teardown_release_herdr_presentation_lock || true
+    fi
+    return 1
+  fi
+  if fm_backend_herdr_projection_teardown_close "$session" "$pane" "$state"; then
     close_status=0
   else
     close_status=$?
@@ -610,7 +677,7 @@ EOF
 }
 
 teardown_unresolved_endpoint_identity_proven() {
-  local id=$1 backend=$2 target=$3 state index stable stable_again
+  local id=$1 backend=$2 target=$3 state index stable stable_again meta=${4:-$META}
   local task_name task_name_again command command_again raw_state session pane
   TEARDOWN_UNRESOLVED_ENDPOINT_STABLE_TARGET=
   if [ "$backend" = herdr ]; then
@@ -622,7 +689,7 @@ teardown_unresolved_endpoint_identity_proven() {
     if [ "$raw_state" = no-agent ]; then
       index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
       teardown_task_pid_index_empty "$id" "$index" || return 1
-      teardown_herdr_endpoint_focus_safe "$target" || return 1
+      teardown_herdr_endpoint_focus_safe "$target" "$id" "$meta" "${KIND:-ship}" "${FM_HOME:-}" "${WT:-}" || return 1
       return 0
     fi
   fi
@@ -720,7 +787,8 @@ teardown_child_endpoint_identity_proven() {
     raw_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
     if [ "$raw_state" = no-agent ]; then
       teardown_endpoint_process_census_empty "$occupancy_path" || return 1
-      teardown_herdr_endpoint_focus_safe "$target" || return 1
+      teardown_herdr_endpoint_focus_safe "$target" "$child_id" "$child_meta" \
+        "$child_kind" "$parent_home" "$child_wt" || return 1
       TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=1
       return 0
     fi
@@ -770,28 +838,8 @@ teardown_child_endpoint_identity_proven() {
       return 0
       ;;
     herdr)
-      fm_backend_source herdr || return 1
-      fm_backend_herdr_parse_target "$target" || return 1
-      session=$FM_BACKEND_HERDR_SESSION
-      pane=$FM_BACKEND_HERDR_PANE
-      workspace=$(meta_value "$child_meta" herdr_workspace_id)
-      tab=$(meta_value "$child_meta" herdr_tab_id)
-      label=$(meta_value "$child_meta" display_label)
-      [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$label" ] || return 1
-      pane=$(meta_value "$child_meta" herdr_pane_id)
-      [ "$target" = "$session:$pane" ] || return 1
-      info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
-      printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
-        .result.pane.workspace_id == $workspace
-        and .result.pane.tab_id == $tab
-        and .result.pane.pane_id == $pane
-      ' >/dev/null 2>&1 || return 1
-      info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
-      printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg label "$label" '
-        .result.tab.workspace_id == $workspace
-        and .result.tab.tab_id == $tab
-        and .result.tab.label == $label
-      ' >/dev/null 2>&1
+      teardown_herdr_task_endpoint_identity_proven \
+        "$child_id" "$child_meta" "$target" live || return 1
       ;;
     *) return 1 ;;
   esac
@@ -812,7 +860,8 @@ teardown_child_endpoint() {
       teardown_release_herdr_presentation_lock || return 1
       return 0
     fi
-    if teardown_herdr_endpoint_focus_safe "$target"; then
+    if teardown_herdr_endpoint_focus_safe "$target" "$child_id" "$child_meta" \
+      "$child_kind" "$parent_home" "$child_wt"; then
       status=0
     else
       status=$?
@@ -862,7 +911,7 @@ teardown_remove_owned_file() {
   quarantine="$dir/.fm-owned.$$.${RANDOM}.quarantine"
   [ ! -e "$identity" ] && [ ! -L "$identity" ] || return 1
   [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 1
-  ln "$path" "$identity" 2>/dev/null || return 1
+  link "$path" "$identity" 2>/dev/null || return 1
   if ! [ -f "$identity" ] || [ -L "$identity" ] || ! [ "$path" -ef "$identity" ]; then
     rm -f -- "$identity"
     return 1
@@ -893,7 +942,7 @@ teardown_remove_owned_file() {
   fi
   if [ ! -e "$path" ] && [ ! -L "$path" ] \
      && [ -f "$quarantine" ] && [ ! -L "$quarantine" ] \
-     && ln "$quarantine" "$path" 2>/dev/null; then
+     && link "$quarantine" "$path" 2>/dev/null; then
     rm -f -- "$quarantine" || true
   fi
   rm -f -- "$identity" || true
@@ -1891,14 +1940,18 @@ cleanup_firstmate_home_children() {
 }
 
 remove_secondmate_registry_entry() {
-  local id=$1 tmp
-  [ -f "$SECONDMATE_REG" ] || return 0
-  tmp="$SECONDMATE_REG.tmp.$$"
+  local id=$1 tmp dir
+  [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ] || return 0
+  [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ] || return 1
+  dir=$(dirname -- "$SECONDMATE_REG") || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  tmp=$(mktemp "$dir/.secondmates.md.tmp.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   awk -v wanted="$id" '!($1 == "-" && $2 == wanted)' "$SECONDMATE_REG" > "$tmp" || {
-    rm -f "$tmp"
+    rm -f -- "$tmp"
     return 1
   }
-  mv "$tmp" "$SECONDMATE_REG"
+  mv -- "$tmp" "$SECONDMATE_REG"
 }
 
 if [ "$KIND" = secondmate ]; then
@@ -2038,7 +2091,14 @@ fi
 # undeclared workers; an incomplete proof retains the lease.
 teardown_slot_endpoint_state() {
   local backend=$1 target=$2 state
-  state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  if [ "$backend" = herdr ]; then
+    fm_backend_source herdr || { TEARDOWN_RAW_ENDPOINT_STATE=unknown; printf 'unknown'; return 0; }
+    fm_backend_herdr_parse_target "$target" || { TEARDOWN_RAW_ENDPOINT_STATE=unknown; printf 'unknown'; return 0; }
+    state=$(fm_backend_herdr_pane_agent_state \
+      "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  else
+    state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  fi
   TEARDOWN_RAW_ENDPOINT_STATE=$state
   case "$state" in
     dead|missing|no-agent) printf 'closed' ;;
@@ -2134,6 +2194,13 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       }
       TOP_ENDPOINT_CLOSED=1
+    elif [ "$BACKEND" = herdr ] && { [ "$TEARDOWN_RAW_ENDPOINT_STATE" = no-agent ] || [ "$TEARDOWN_RAW_ENDPOINT_STATE" = dead ]; }; then
+      teardown_child_endpoint_identity_proven "$ID" "$META" "$KIND" "$FM_HOME" "$WT" \
+        "$BACKEND" "$T" || {
+        echo "REFUSED: could not prove the Herdr task endpoint for $ID; preserving task state and worktree" >&2
+        exit 1
+      }
+      [ "$TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD" = 1 ] && TOP_ENDPOINT_CLOSED=1
     elif [ "$TEARDOWN_RAW_ENDPOINT_STATE" = missing ]; then
       TOP_ENDPOINT_CLOSED=1
     fi
@@ -2155,12 +2222,31 @@ if [ "$KIND" != secondmate ]; then
   fi
 fi
 
+if [ "$KIND" = secondmate ] && [ "$TOP_SLOT_RETURNED" != 1 ] \
+   && [ "$BACKEND" = herdr ]; then
+  TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+  case "$TEARDOWN_RAW_ENDPOINT_STATE" in
+    live|no-agent|dead)
+      teardown_child_endpoint_identity_proven "$ID" "$META" "$KIND" "$FM_HOME" "$WT" \
+        "$BACKEND" "$T" || {
+        echo "REFUSED: could not prove the Herdr secondmate endpoint for $ID; preserving task state and home" >&2
+        exit 1
+      }
+      [ "$TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD" = 1 ] && TOP_ENDPOINT_CLOSED=1
+      ;;
+    *)
+      echo "REFUSED: Herdr secondmate endpoint for $ID is not safely identifiable; preserving task state and home" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 if [ "$BACKEND" = herdr ]; then
   # Same resume gate as the other endpoint branches: a prior run that already
   # returned the slot also already closed this pane, so re-closing it would
   # refuse on a pane that is legitimately gone and leave the task unfinishable.
   if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$TOP_ENDPOINT_CLOSED" != 1 ] \
-    && ! teardown_herdr_endpoint_focus_safe "$T"; then
+    && ! teardown_herdr_endpoint_focus_safe "$T" "$ID" "$META" "$KIND" "$FM_HOME" "$WT"; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
   fi
@@ -2187,7 +2273,7 @@ if [ "$KIND" != secondmate ] \
   fi
 fi
 
-if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" != 1 ] && [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   if [ -e "$STATE/$ID.grok-turnend-token" ] || [ -L "$STATE/$ID.grok-turnend-token" ]; then
     TOP_GROK_ARTIFACTS_RETAINED=1
   fi
@@ -2266,7 +2352,13 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID"
 fi
-if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
+  if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" \
+    "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then
+    echo "error: could not remove non-ownership task records for $ID; preserving its reclaim record" >&2
+    exit 1
+  fi
+elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   teardown_release_top_slot_lock || {
     echo "error: could not release the retained-slot ownership lock for $ID" >&2
     exit 1
@@ -2292,7 +2384,7 @@ cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
 }
-if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" != 1 ] && [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   teardown_meta_identity_matches || {
     echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
     exit 1
@@ -2307,7 +2399,9 @@ teardown_meta_identity_matches || {
   echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
   exit 1
 }
-if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
+  :
+elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
     "$STATE/$ID.pi-ext.ts" "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then
     teardown_meta_backup_restore "$META" || true

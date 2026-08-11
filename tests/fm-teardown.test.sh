@@ -56,8 +56,10 @@ make_case() {
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
   token="teardown-$name"
+  : > "$case_dir/data/backlog.md"
   printf 'root=%s\ntoken=%s\n' "$ROOT" "$token" > "$case_dir/state/.primary-attestation"
   chmod 600 "$case_dir/state/.primary-attestation"
+  printf '%s\n' '1|codex:teardown-fixture|fallback' > "$case_dir/state/.lock"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -81,7 +83,7 @@ if [ "${1:-}" = display-message ]; then
   case " $* " in
     *"#{pane_pid}"*) printf '%s\n' "$$" ;;
     *"#{pane_current_command}"*) printf '%s\n' bash ;;
-    *"#{pane_current_path}"*) pwd ;;
+    *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_TMUX_PATH:-$PWD}" ;;
     *"#{window_name}"*) printf '%s\n' fm-task-x1 ;;
   esac
   exit 0
@@ -293,9 +295,11 @@ run_teardown() {
   FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$ROOT}" \
   FM_HOME="${FM_HOME:-$case_dir}" \
   FM_PRIMARY_ATTESTATION="${FM_PRIMARY_ATTESTATION:-$token}" \
+  CODEX_THREAD_ID=teardown-fixture \
   FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-$case_dir/state}" \
   FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-$case_dir/config}" \
   FM_FAKE_TMUX_REPLACE_META="${FM_FAKE_TMUX_REPLACE_META:-}" \
+  FM_FAKE_TMUX_PATH="$case_dir/wt" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1493,7 +1497,7 @@ SH
 
 make_herdr_teardown_fake() {
   local case_dir=$1
-  printf '%s\n' '{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w9","label":"PROJECTION_LABEL","focused":false,"active_tab_id":"w9:t2"}],"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","focused":true},{"tab_id":"w9:t2","workspace_id":"w9","focused":false}],"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}]}' > "$case_dir/herdr-state.json"
+  printf '%s\n' '{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w9","label":"PROJECTION_LABEL","focused":false,"active_tab_id":"w9:t2"}],"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","focused":true,"label":"firstmate"},{"tab_id":"w9:t2","workspace_id":"w9","focused":false,"label":"fm-task-x1"}],"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}]}' > "$case_dir/herdr-state.json"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1511,6 +1515,14 @@ done
 case "$cmd $sub" in
   "workspace list") jq '{result:{workspaces:.workspaces}}' "$state" ;;
   "tab list") jq --arg workspace "$workspace" '{result:{tabs:[.tabs[] | select(.workspace_id == $workspace)]}}' "$state" ;;
+  "tab get")
+    tab=${3:-}
+    if jq -e --arg tab "$tab" '.tabs[] | select(.tab_id == $tab)' "$state" >/dev/null; then
+      jq --arg tab "$tab" '{result:{tab:(.tabs[] | select(.tab_id == $tab))}}' "$state"
+    else
+      printf '%s\n' '{"error":{"code":"tab_not_found"}}'
+    fi
+    ;;
   "pane get")
     pane=${3:-}
     if jq -e --arg pane "$pane" '.panes[] | select(.pane_id == $pane)' "$state" >/dev/null; then
@@ -1542,6 +1554,8 @@ test_projection_journal_retires_before_worktree_return() {
     'backend=herdr' \
     'herdr_session=fmtest' \
     'herdr_workspace_id=w9' \
+    'herdr_tab_id=w9:t2' \
+    'display_label=fm-task-x1' \
     'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
   journal="$case_dir/state/task-x1.herdr-presentation"
   token=$(FM_HOME="$case_dir" bash -c '

@@ -18,6 +18,7 @@ export SIGNATURE_DATE_STATE SIGNATURE_GH_LOG
 
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
+[ "${GH_TOKEN:-}" = synthetic-gh-token ] || exit 91
 printf '%s\n' "$*" > "$SIGNATURE_GH_LOG"
 SH
 cat > "$FAKEBIN/date" <<'SH'
@@ -56,30 +57,85 @@ else:
 PY
 }
 
+workflow_signature_env() {
+  local workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" python3 - <<'PY'
+import json
+import os
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+for step in workflow["jobs"]["check"]["steps"]:
+    if step.get("name") == "Verify no-mistakes signature in PR body":
+        for key, value in step.get("env", {}).items():
+            print(f"{key}\t{value}")
+        break
+else:
+    raise SystemExit("signature step missing")
+PY
+}
+
+apply_signature_env() {
+  local body=$1 key expression value
+  while IFS=$'\t' read -r key expression; do
+    case "$expression" in
+      '${{ github.event.pull_request.body }}') value=$body ;;
+      '${{ github.event.pull_request.user.login }}') value=synthetic-fork-contributor ;;
+      '${{ github.event.pull_request.number }}') value=418 ;;
+      '${{ github.token }}') value=synthetic-gh-token ;;
+      *) fail "unsupported signature-step environment expression for $key: $expression" ;;
+    esac
+    export "$key=$value"
+  done < <(workflow_signature_env)
+}
+
 signature_result() {
   local body=$1 script
   script=$(extract_signature_script)
   : > "$SIGNATURE_DATE_STATE"
   : > "$SIGNATURE_GH_LOG"
-  GITHUB_REPOSITORY=JTInventory/firstmate \
-    PR_NUMBER=418 \
-    PR_AUTHOR=synthetic-fork-contributor \
-    PR_BODY="$body" \
-    PATH="$FAKEBIN:$PATH" \
-    bash -c "$script" > "$SIGNATURE_OUTPUT" 2>&1
+  export GITHUB_REPOSITORY=JTInventory/firstmate
+  apply_signature_env "$body" || return 1
+  export PATH="$FAKEBIN:$PATH"
+  bash -c "$script" > "$SIGNATURE_OUTPUT" 2>&1
+}
+
+render_workflow_field() {
+  local field=$1 action=$2 run_number=$3 run_id=$4 workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" FIELD="$field" ACTION="$action" \
+    RUN_NUMBER="$run_number" RUN_ID="$run_id" python3 - <<'PY'
+import json
+import os
+import re
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+field = os.environ["FIELD"]
+value = workflow["concurrency"]["group"] if field == "concurrency.group" else workflow["run-name"]
+context = {
+    "github.event.pull_request.number": 418,
+    "github.event.action": os.environ["ACTION"],
+    "github.run_number": int(os.environ["RUN_NUMBER"]),
+    "github.run_id": os.environ["RUN_ID"],
+}
+
+def evaluate(expression):
+    expression = expression.strip()
+    for token, replacement in sorted(context.items(), key=lambda item: -len(item[0])):
+        expression = expression.replace(token, repr(replacement))
+    expression = expression.replace("||", " or ").replace("&&", " and ")
+    return eval(expression, {"__builtins__": {}}, {})
+
+print(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match.group(1))), value))
+PY
 }
 
 render_group() {
-  local action=$1 run_id=$2
-  case "$action" in
-    opened|edited) printf 'no-mistakes-required-418-%s\n' "$run_id" ;;
-    synchronize|reopened) printf 'no-mistakes-required-418-head-change\n' ;;
-  esac
+  render_workflow_field concurrency.group "$1" 1 "$2"
 }
 
 render_run_name() {
-  local action=$1 run_number=$2 run_id=$3
-  printf 'PR #418 body compliance - %s - event %s (run %s)\n' "$action" "$run_number" "$run_id"
+  render_workflow_field run-name "$1" "$2" "$3"
 }
 
 test_signature_sequence_at_fixed_head() {
