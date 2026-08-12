@@ -400,7 +400,9 @@ nm_run_matches_worktree() {
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh (equal, or local is
+# ancestor of run tip) - the head-only rule, not the broader binding
+# nm_run_matches_worktree also accepts above.
 nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
