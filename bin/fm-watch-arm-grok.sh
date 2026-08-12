@@ -93,31 +93,53 @@ EOF
   done
 }
 
-retire_child_tree() {
-  local root=$1 seed=${2:-} signal pid i=0 pids pgid
-  pgid=$(ps -o pgid= -p "$root" 2>/dev/null | tr -d '[:space:]' || true)
-  pids=$(printf '%s\n' "$(cat "$seed" 2>/dev/null || true)" "$(child_tree_pids "$root")" | awk 'NF && !seen[$0]++')
-  for signal in TERM KILL; do
-    if [ "$pgid" = "$root" ]; then
-      kill -"$signal" -- "-$pgid" 2>/dev/null || true
-    fi
-    printf '%s\n' "$pids" | awk 'NF' | sort -rn | while read -r pid; do
-      kill -"$signal" "$pid" 2>/dev/null || true
-    done
-    if [ "$signal" = TERM ]; then
-      while fm_pid_alive "$root" && [ "$i" -lt 20 ]; do
-        sleep "$(awk -v grace="$CHILD_TERM_GRACE" 'BEGIN { print grace / 20 }')"
-        i=$((i + 1))
-      done
-      pids=$(printf '%s\n' "$pids" "$(child_tree_pids "$root")" | awk 'NF && !seen[$0]++')
-    fi
+child_tree_identities() {
+  local root=$1 pid identity
+  child_tree_pids "$root" | while read -r pid; do
+    identity=$(fm_pid_identity "$pid" 2>/dev/null) || continue
+    printf '%s\t%s\n' "$pid" "$identity"
   done
+}
+
+signal_identity_records() {
+  local records=$1 signal=$2 pid expected current mismatch=0
+  while IFS=$'\t' read -r pid expected; do
+    [ -n "$pid" ] && [ -n "$expected" ] || continue
+    current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ "$current" != "$expected" ]; then
+      mismatch=1
+      continue
+    fi
+    kill -"$signal" "$pid" 2>/dev/null || true
+  done < "$records"
+  return "$mismatch"
+}
+
+retire_child_tree() {
+  local root=$1 seed=${2:-} i=0 records current incomplete=0
+  records=$(mktemp "$STATE/.grok-retire.XXXXXX") || return 1
+  printf '%s\n' "$(cat "$seed" 2>/dev/null || true)" \
+    "$(cat "${FM_GROK_WATCH_RETIRE_TEST_SEED:-/dev/null}" 2>/dev/null || true)" \
+    "$(child_tree_identities "$root")" \
+    | awk -F '\t' 'NF >= 2 && !seen[$1 FS $2]++' > "$records"
+  signal_identity_records "$records" TERM || incomplete=1
+  while fm_pid_alive "$root" && [ "$i" -lt 20 ]; do
+    sleep "$(awk -v grace="$CHILD_TERM_GRACE" 'BEGIN { print grace / 20 }')"
+    i=$((i + 1))
+  done
+  current="$records.current"
+  printf '%s\n' "$(cat "$records")" "$(child_tree_identities "$root")" \
+    | awk -F '\t' 'NF >= 2 && !seen[$1 FS $2]++' > "$current"
+  mv "$current" "$records"
+  signal_identity_records "$records" KILL || incomplete=1
   wait "$root" 2>/dev/null || true
+  rm -f "$records"
+  [ "$incomplete" -eq 0 ]
 }
 
 cleanup_cycle() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
-    retire_child_tree "$child"
+    retire_child_tree "$child" || true
   fi
   if [ -n "$reader" ] && fm_pid_alive "$reader"; then
     kill -TERM "$reader" 2>/dev/null || true
@@ -237,7 +259,7 @@ while :; do
       remaining=$((OUTPUT_MAX_BYTES - captured))
       if [ "$bytes" -gt "$remaining" ]; then
         head -c "$remaining" "$stream_dir/chunk" >> "$stream_dir/capture"
-        child_tree_pids "$child" > "$stream_dir/overflow-pids"
+        child_tree_identities "$child" > "$stream_dir/overflow-pids"
         printf 'watcher: FAILED - Grok continuity arm output exceeded %s bytes\n' "$OUTPUT_MAX_BYTES" > "$stream_dir/overflow"
         break
       fi
@@ -256,7 +278,9 @@ while :; do
     sleep 0.02
   done
   if [ -s "$stream_dir/overflow" ]; then
-    retire_child_tree "$child" "$stream_dir/overflow-pids"
+    if ! retire_child_tree "$child" "$stream_dir/overflow-pids"; then
+      printf 'watcher: FAILED - Grok continuity arm output exceeded %s bytes; exact child retirement was incomplete\n' "$OUTPUT_MAX_BYTES" > "$stream_dir/overflow"
+    fi
   fi
   wait "$child"
   rc=$?

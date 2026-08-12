@@ -224,6 +224,36 @@ SH
   pass "TERM-resistant overflow forcibly retires its exact process tree"
 }
 
+test_retirement_identity_mismatch_preserves_unrelated_process() {
+  local home arm out status unrelated identity fake_seed failure
+  home=$(make_home retirement-identity-mismatch)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  sleep 300 &
+  unrelated=$!
+  identity=$(FM_HOME="$home" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$unrelated") \
+    || fail "could not identify unrelated retirement counterfactual"
+  fake_seed="$home/state/fake-overflow-identities"
+  printf '%s\t%s-mismatch\n' "$unrelated" "$identity" > "$fake_seed"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do printf '0123456789abcdef0123456789abcdef'; done
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 \
+    FM_GROK_WATCH_CHILD_TERM_GRACE=0.2 FM_GROK_WATCH_RETIRE_TEST_SEED="$fake_seed" "$OWNER" > "$out" 2>&1
+  status=$?
+  expect_code 1 "$status" "identity-mismatch retirement must fail through the typed boundary"
+  kill -0 "$unrelated" 2>/dev/null || fail "identity mismatch killed an unrelated process"
+  failure='exact child retirement was incomplete'
+  assert_contains "$(cat "$out")" "$failure" "identity mismatch did not surface incomplete retirement"
+  kill -TERM "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "retirement skips changed identities and preserves unrelated processes"
+}
+
 test_transferred_no_newline_overflow_queues_once() {
   local home arm out pid child failure size
   home=$(make_home transferred-no-newline-overflow)
@@ -724,6 +754,7 @@ test_output_overflow_retires_child_and_fails_once
 test_transferred_output_overflow_queues_once
 test_no_newline_output_overflow_is_bounded
 test_term_resistant_overflow_is_forced_bounded
+test_retirement_identity_mismatch_preserves_unrelated_process
 test_transferred_no_newline_overflow_queues_once
 test_open_decision_completes_without_queue_row
 test_pending_recovery_completes_without_queue_row
