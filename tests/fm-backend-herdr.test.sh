@@ -2962,17 +2962,20 @@ SH
 }
 
 # herdr_agent_state_case: run fm_backend_herdr_agent_state over a canned herdr
-# reporting <agent-status> on the pane and <foreground> as its sole foreground
-# process, and echo the verdict.
-herdr_agent_state_case() {  # <name> <agent-status> <foreground> <polls>
+# reporting <agent-status> and <agent-state> on the pane and <foreground> as its
+# sole foreground process, and echo the verdict.
+herdr_agent_state_case() {  # <name> <agent-status> <foreground> <polls> [<agent-state>]
   local name=$1 status=$2 foreground=$3 polls=$4 dir log resp fb ps_bin state
+  state=${5:-}
   dir="$TMP_ROOT/$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
-  case "$status" in
-    working) state=working ;;
-    blocked) state=blocked ;;
-    *) state=idle ;;
-  esac
+  if [ -z "$state" ]; then
+    case "$status" in
+      working) state=working ;;
+      blocked) state=blocked ;;
+      *) state=idle ;;
+    esac
+  fi
   printf '{"result":{"agent":{"agent_status":"%s","state":"%s"}}}\n' "$status" "$state" > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"%s","state":"%s"}}}\n' "$status" "$state" > "$resp/3.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":["%s"],"name":"%s","pid":67}]}}}\n' \
@@ -3001,6 +3004,10 @@ test_agent_state_requires_both_signals_before_calling_an_agent_ended() {
   [ "$out" = alive ] \
     || fail "a done agent still holding its pane's foreground process is running and must stay alive, got '$out'"
 
+  out=$(herdr_agent_state_case agent-state-done-nonidle 'done' /bin/zsh 1 working)
+  [ "$out" = alive ] \
+    || fail "a done agent with a non-idle Herdr state must stay alive, got '$out'"
+
   # A busy agent stays alive on the status signal alone, whatever the pane's
   # process table happens to look like.
   out=$(herdr_agent_state_case agent-state-working working /bin/zsh 1)
@@ -3010,7 +3017,7 @@ test_agent_state_requires_both_signals_before_calling_an_agent_ended() {
   out=$(herdr_agent_state_case agent-state-idle idle /bin/zsh 1)
   [ "$out" = alive ] \
     || fail "an idle registered agent is waiting for input, not ended, and must stay alive, got '$out'"
-  pass "fm_backend_herdr_agent_state: only a done status AND a provably bare shell classify an agent as ended"
+  pass "fm_backend_herdr_agent_state: only done+idle and a provably bare shell classify an agent as ended"
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
