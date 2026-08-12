@@ -25,7 +25,8 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start performs the same bounded local scan immediately.
-In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
+That scan records bounded home-local progress observations for every ordinary direct report from canonical current state, branch HEAD, durable status, and turn activity; healthy checks are silent, genuine progress resets suspicion, and repeated correction themes or live activity without meaningful change queue one targeted read-only inspection before any recovery action.
+In each home progress observation covers every ordinary direct report while captain-held work remains exempt from suspicion; terminal-outcome reporting separately considers only long-inactive ordinary crewmates and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.

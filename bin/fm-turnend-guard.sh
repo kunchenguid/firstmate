@@ -86,6 +86,8 @@ done
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -123,6 +125,42 @@ fi
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# An ordinary Captain reply does not settle accepted unfinished work. Only the
+# session that owns this home's fleet lock may be forced to reconcile it; a
+# lock-refused session stays read-only and exits without competing. The shared
+# checker delegates eligibility to tasks-axi, never launches work, and reports
+# only dispatchable queue entries or In flight records without verified current
+# worker progress.
+CONTINUATION_REQUIRED=''
+if fm_session_lock_owned_by_self "$STATE"; then
+  CONTINUATION_REQUIRED=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-continuation-check.sh" 2>/dev/null)
+  continuation_status=$?
+  case "$continuation_status" in
+    0) CONTINUATION_REQUIRED='' ;;
+    2) ;;
+    *) CONTINUATION_REQUIRED='' ;;
+  esac
+fi
+if [ -n "$CONTINUATION_REQUIRED" ]; then
+  # All primary adapters are deliberately bounded to one forced continuation.
+  # Default-mode direct hooks already returned above on their active-loop
+  # payload; Claude ignores that field for watcher recovery but honors it for
+  # this independent continuation prompt.
+  if [ "$CLAUDE_MODE" -eq 1 ] && [ "$STOP_HOOK_ACTIVE" = true ]; then
+    exit 0
+  fi
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  ACCEPTED WORK STILL NEEDS RECONCILIATION\n'
+    printf '●  %s\n' "$CONTINUATION_REQUIRED"
+    printf '●  A reply is not completion. Dispatch eligible accepted work, or record the exact dependency, resource delay, interactive login, approval, or Captain decision before ending the turn.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+fi
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

@@ -859,19 +859,6 @@ while :; do
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
 
-  # The existing poll loop also owns the bounded inactive-outcome cadence.
-  # This is mechanical and silent unless a durable terminal-outcome obligation
-  # was created, so quiet cycles never wake firstmate or consume model tokens.
-  inactive_out=
-  if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
-    if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
-    fi
-  else
-    triage_log "inactive-outcome reconciliation unavailable"
-  fi
-
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -995,6 +982,26 @@ $pending
 EOF
       triage_log "absorbed benign $reason"
     fi
+  fi
+
+  # This existing poll loop owns bounded read-only direct-report
+  # reconciliation after immediate signal triage and before slower pane-stale
+  # classification. It records quiet progress observations and emits only a
+  # terminal obligation or targeted suspicion requiring deeper inspection.
+  # Reuse the watcher's configured canonical state reader so one scan cannot
+  # disagree with the cycle that preceded it.
+  inactive_out=
+  if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_INACTIVE_CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}}" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
+    if [ -n "$inactive_out" ]; then
+      case "$inactive_out" in
+        *'targeted read-only progress inspection required'*) wake "check: progress-suspicion" ;;
+        *) wake "check: inactive-outcome" ;;
+      esac
+    fi
+  else
+    triage_log "direct-report reconciliation unavailable"
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-inactive-reconcile.sh - bounded reconciliation of suspicious inactive terminal outcomes.
+# fm-inactive-reconcile.sh - bounded read-only reconciliation of direct reports.
 #
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
@@ -13,13 +13,19 @@
 # FM_INACTIVE_RECONCILE_BUDGET_SECS bound (default 10, valid 1..30) and resumes
 # after its last visited child on the next scan.
 #
-# It considers only a direct ordinary crewmate whose newest meta, status, or
-# turn-ended mtime is older than that interval and whose last status is not
-# captain-held. It then uses fm-crew-state.sh as the sole current-state source.
-# Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
-# captain-held work retain their existing supervision semantics.
+# Every scan checks each ordinary direct report through fm-crew-state.sh and
+# records a bounded progress observation under state/progress-observations/.
+# Meaningful progress is a current-state/phase transition, branch HEAD advance,
+# or durable status change. A live process alone is never progress. Suspicion is
+# bounded by a longer allowance for test/build/CI phases, repeated turn activity
+# with no meaningful change, or repeated same-theme blocked/decision rounds.
+# Healthy observations are silent. Suspicion queues one targeted read-only
+# inspection wake per unchanged episode; this script never messages, interrupts,
+# steers, restarts, or launches a worker. Genuine progress resets the episode.
+#
+# Terminal outcome handling additionally requires the newest meta, status, or
+# turn-ended mtime to be older than the interval. Only done or failed creates a
+# durable terminal outcome receipt. Persistent secondmates remain excluded.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
@@ -46,6 +52,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 OUTCOME_DIR="$STATE/terminal-outcomes"
+PROGRESS_DIR="$STATE/progress-observations"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
@@ -79,6 +86,18 @@ case "$FM_INACTIVE_RECONCILE_BUDGET_SECS" in
 esac
 if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
   printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_BUDGET_SECS must be a whole number from 1 to 30\n' >&2
+  exit 2
+fi
+FM_PROGRESS_STALL_SECS=${FM_PROGRESS_STALL_SECS:-7200}
+FM_PROGRESS_LONG_PHASE_SECS=${FM_PROGRESS_LONG_PHASE_SECS:-21600}
+FM_PROGRESS_ACTIVITY_SCANS=${FM_PROGRESS_ACTIVITY_SCANS:-3}
+FM_PROGRESS_REPEAT_ROUNDS=${FM_PROGRESS_REPEAT_ROUNDS:-3}
+case "$FM_PROGRESS_STALL_SECS:$FM_PROGRESS_LONG_PHASE_SECS:$FM_PROGRESS_ACTIVITY_SCANS:$FM_PROGRESS_REPEAT_ROUNDS" in
+  *[!0-9:]*) echo "fm-inactive-reconcile: progress thresholds must be whole numbers" >&2; exit 2 ;;
+esac
+if [ "$FM_PROGRESS_STALL_SECS" -lt 60 ] || [ "$FM_PROGRESS_LONG_PHASE_SECS" -lt "$FM_PROGRESS_STALL_SECS" ] \
+  || [ "$FM_PROGRESS_ACTIVITY_SCANS" -lt 2 ] || [ "$FM_PROGRESS_REPEAT_ROUNDS" -lt 2 ]; then
+  echo "fm-inactive-reconcile: progress thresholds are outside safe bounds" >&2
   exit 2
 fi
 
@@ -274,6 +293,141 @@ meta_incarnation() { # <meta>
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
 }
 
+progress_record_path() { # <id>
+  printf '%s/%s.record\n' "$PROGRESS_DIR" "$1"
+}
+
+progress_record_value() { # <record> <key>
+  local record=$1 key=$2
+  [ -f "$record" ] && [ ! -L "$record" ] || return 0
+  grep "^${key}=" "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+worktree_head() { # <meta>
+  local worktree head
+  worktree=$(meta_field "$1" worktree)
+  [ -d "$worktree" ] || { printf '%s\n' none; return; }
+  head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null || true)
+  [ -n "$head" ] || head=none
+  clean_field "$head"
+}
+
+turn_mtime() { # <path>
+  local value
+  [ -e "$1" ] || { printf '%s\n' 0; return; }
+  value=$(file_mtime "$1" 2>/dev/null || true)
+  case "$value" in ''|*[!0-9]*) value=0 ;; esac
+  printf '%s\n' "$value"
+}
+
+repeated_correction_rounds() { # <status-log>
+  [ -f "$1" ] || { printf '%s\n' 0; return; }
+  tail -40 "$1" 2>/dev/null | awk '
+    BEGIN { max=0 }
+    /^(blocked|needs-decision)([[:space:]]|\[|:)/ {
+      line=tolower($0)
+      gsub(/\[key=[^]]*\]/, "", line)
+      gsub(/https?:\/\/[^[:space:]]+/, "url", line)
+      gsub(/[0-9]+/, "n", line)
+      gsub(/[[:space:]]+/, " ", line)
+      count[line]++
+      if (count[line] > max) max=count[line]
+    }
+    END { print max }
+  '
+}
+
+write_progress_record() { # <record> <incarnation> <meaning> <head> <state> <status> <turn> <progress-epoch> <activity-count> <suspicious> <emitted>
+  local record=$1 incarnation=$2 meaning=$3 head=$4 state_sig=$5 status_sig=$6 turn_sig=$7 progress_epoch=$8 activity_count=$9
+  local suspicious=${10} emitted=${11} tmp
+  mkdir -p "$PROGRESS_DIR" || return 1
+  [ ! -L "$PROGRESS_DIR" ] || return 1
+  [ ! -L "$record" ] || return 1
+  tmp=$(mktemp "$PROGRESS_DIR/.observation.XXXXXX") || return 1
+  {
+    printf 'schema=fm-progress-observation.v1\n'
+    printf 'incarnation=%s\n' "$incarnation"
+    printf 'meaning_sig=%s\n' "$meaning"
+    printf 'head=%s\n' "$head"
+    printf 'state_sig=%s\n' "$state_sig"
+    printf 'status_sig=%s\n' "$status_sig"
+    printf 'turn_mtime=%s\n' "$turn_sig"
+    printf 'progress_epoch=%s\n' "$progress_epoch"
+    printf 'activity_count=%s\n' "$activity_count"
+    printf 'suspicious=%s\n' "$suspicious"
+    printf 'notice_emitted=%s\n' "$emitted"
+    printf 'checked_epoch=%s\n' "$(reconcile_now)"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
+}
+
+observe_progress() { # <id> <meta> <status> <turn> <last-status> <state-line> [held]
+  local id=$1 meta=$2 status=$3 turn=$4 last=$5 state_line=$6 held=${7:-0} record incarnation now head state_sig status_sig meaning
+  local old_inc old_mean old_turn progress_epoch activity_count suspicious=0 emitted=0 age threshold rounds reason='' payload key
+  record=$(progress_record_path "$id")
+  incarnation=$(meta_incarnation "$meta")
+  now=$(reconcile_now)
+  head=$(worktree_head "$meta")
+  state_sig=$(sha256_text "$(clean_field "$state_line")")
+  status_sig=$(sha256_text "$(clean_field "$last")")
+  meaning=$(sha256_text "$head|$state_sig|$status_sig")
+  old_inc=$(progress_record_value "$record" incarnation)
+  old_mean=$(progress_record_value "$record" meaning_sig)
+  old_turn=$(progress_record_value "$record" turn_mtime)
+  progress_epoch=$(progress_record_value "$record" progress_epoch)
+  activity_count=$(progress_record_value "$record" activity_count)
+  emitted=$(progress_record_value "$record" notice_emitted)
+  case "$progress_epoch" in ''|*[!0-9]*) progress_epoch=$now ;; esac
+  case "$activity_count" in ''|*[!0-9]*) activity_count=0 ;; esac
+  case "$emitted" in 1) ;; *) emitted=0 ;; esac
+
+  if [ "$old_inc" != "$incarnation" ] || [ -z "$old_mean" ] || [ "$old_mean" != "$meaning" ]; then
+    progress_epoch=$now
+    activity_count=0
+    emitted=0
+  elif [ "$old_turn" != "$(turn_mtime "$turn")" ]; then
+    activity_count=$((activity_count + 1))
+  fi
+  age=$((now - progress_epoch))
+  [ "$age" -ge 0 ] || age=0
+  threshold=$FM_PROGRESS_STALL_SECS
+  case "$(printf '%s' "$state_line" | tr '[:upper:]' '[:lower:]')" in
+    *ci*|*test*|*build*|*render*|*deploy*) threshold=$FM_PROGRESS_LONG_PHASE_SECS ;;
+  esac
+  rounds=$(repeated_correction_rounds "$status")
+  case "$held:$state_line" in
+    1:*) ;;
+    0:'state: paused '*|0:'state: parked '*|0:'state: blocked '*|0:'state: done '*|0:'state: failed '*) ;;
+    *)
+      if [ "$rounds" -ge "$FM_PROGRESS_REPEAT_ROUNDS" ]; then
+        suspicious=1
+        reason="repeated-same-theme-rounds:$rounds"
+      elif [ "$activity_count" -ge "$FM_PROGRESS_ACTIVITY_SCANS" ] \
+        && [ "$age" -ge $((FM_INACTIVE_RECONCILE_SECS * 2)) ]; then
+        suspicious=1
+        reason="live-activity-without-progress:$activity_count"
+      elif [ "$age" -ge "$threshold" ]; then
+        suspicious=1
+        reason="phase-without-progress:${age}s"
+      fi
+      ;;
+  esac
+
+  if [ "$suspicious" -eq 1 ] && [ "$emitted" -eq 0 ]; then
+    key="progress-suspicion:$id:$incarnation"
+    payload="targeted read-only progress inspection required: child=$id reason=$reason state=$(clean_field "$state_line") head=$head"
+    if queue_key_exists "$key"; then
+      emitted=1
+    elif fm_wake_append check "$key" "$payload"; then
+      emitted=1
+      printf 'actionable: %s\n' "$payload"
+    fi
+  fi
+  write_progress_record "$record" "$incarnation" "$meaning" "$head" "$state_sig" "$status_sig" \
+    "$(turn_mtime "$turn")" "$progress_epoch" "$activity_count" "$suspicious" "$emitted"
+}
+
 pr_for_task() { # <meta> <status>
   local pr=$1 status=$2 value
   value=$(meta_field "$pr" pr)
@@ -332,16 +486,25 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
-  status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
   age=$(last_activity_age "$meta" "$status" "$turn")
-  [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  if status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1; then
+    observe_progress "$id" "$meta" "$status" "$turn" "$last" "$state_line" 1 || return 1
+    return 0
+  fi
+  if [ "$age" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+    observe_progress "$id" "$meta" "$status" "$turn" "$last" "$state_line" || return 1
+    return 0
+  fi
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
-    *) return 0 ;;
+    *)
+      observe_progress "$id" "$meta" "$status" "$turn" "$last" "$state_line" || return 1
+      return 0
+      ;;
   esac
   pr=$(pr_for_task "$meta" "$status")
   incarnation=$(meta_incarnation "$meta")
