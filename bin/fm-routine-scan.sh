@@ -253,10 +253,12 @@ routine_ack_publication_exists() {
         [ -n "$parentpid" ] && [ "$parentpid" != "$current" ] || break
         current=$parentpid
       done
-      [ -n "$ownerdir" ] && [ "$owner_ancestor" -eq 1 ] \
-        && fm_lock_points_to_owner "$FM_WAKE_QUEUE_LOCK" "$ownerdir" \
-        && fm_pid_alive "$ownerpid" \
-        || { routine_error 'routine acknowledgement lacks verified wake queue lock ownership'; return 1; }
+      if [ -z "$ownerdir" ] || [ "$owner_ancestor" -ne 1 ] \
+        || ! fm_lock_points_to_owner "$FM_WAKE_QUEUE_LOCK" "$ownerdir" \
+        || ! fm_pid_alive "$ownerpid"; then
+        routine_error 'routine acknowledgement lacks verified wake queue lock ownership'
+        return 1
+      fi
       ;;
     *) routine_error 'invalid wake queue lock ownership'; return 1 ;;
   esac
