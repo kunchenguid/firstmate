@@ -472,7 +472,7 @@ esac
 case "$code" in
   2[0-9][0-9])
     if [ "$FOLLOWUP" = 0 ]; then
-      fmx_context_registry_set "$STATE" "$REQ" "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX" 1 2>/dev/null \
+      fmx_context_registry_set "$STATE" "$REQ" "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX" 1 "$REPLY_AUDIENCE" 2>/dev/null \
         || echo "fm-x-reply: warning: could not retain reply context for $REQ" >&2
     fi
     write_reply_receipt "$N" 0

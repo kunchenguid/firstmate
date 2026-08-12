@@ -2040,6 +2040,55 @@ test_context_registry_retention_starts_on_successful_live_answer() {
   pass "context retention starts only when a live initial answer succeeds"
 }
 
+test_private_answer_retention_recovers_failed_poll_registry() {
+  local home fakebin inbox reg meta log out rc err now
+  home="$TMP_ROOT/private-answer-retention"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-private-retention\n' > "$home/.env"
+  private_artifact_dir "$home/state/x-inbox"
+  inbox="$home/state/x-inbox/req-private-retention.json"
+  now=$(date +%s)
+  jq -cn --argjson now "$now" \
+    '{request_id:"req-private-retention",platform:"discord",reply_max_chars:1900,reply_audience:"private-trusted",text:"q",received_at:$now}' > "$inbox"
+  private_artifact_file "$inbox"
+  assert_absent "$home/state/x-context/req-private-retention.json" \
+    "the fixture must begin after poll-time registry persistence failed"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FMX_RELAY_URL="http://127.0.0.1:8787" FMX_REPLY_AUDIENCE=private-trusted \
+    FAKE_ANSWER_CODE=200 "$ROOT/bin/fm-x-reply.sh" req-private-retention \
+    "Private initial answer." 2>"$home/answer.err"); rc=$?
+  expect_code 0 "$rc" "private retention initial answer exit"
+  [ "$out" = req-private-retention ] || fail "the private initial answer must post"
+  reg="$home/state/x-context/req-private-retention.json"
+  assert_present "$reg" "the successful answer must reconstruct durable context"
+  [ "$(jq -r .reply_audience "$reg")" = private-trusted ] \
+    || fail "answer retention must preserve the stamped private audience"
+
+  rm -f "$inbox"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$home/state/task-private-retention.meta"
+  FM_HOME="$home" FMX_RELAY_URL="https://relay.test" FMX_REPLY_AUDIENCE=public \
+    "$ROOT/bin/fm-x-link.sh" task-private-retention req-private-retention >/dev/null
+  meta="$home/state/task-private-retention.meta"
+  assert_grep "x_reply_audience=private-trusted" "$meta" \
+    "linking after inbox removal must recover the retained private ceiling"
+
+  log="$home/followup-curl.log"
+  err="$home/followup.err"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_AUDIENCE=public FMX_NOW_OVERRIDE="$now" FAKE_CURL_LOG="$log" \
+    "$ROOT/bin/fm-x-followup.sh" task-private-retention - \
+    <<<"Private follow-up." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "retained private follow-up drift exit"
+  [ -z "$out" ] || fail "a retained private follow-up refusal must echo nothing"
+  assert_absent "$log" "retained private follow-up drift must refuse before network access"
+  assert_grep "x_request=req-private-retention" "$meta" \
+    "retained private follow-up refusal must preserve the binding"
+  assert_grep "x_followups=0" "$meta" \
+    "retained private follow-up refusal must preserve the counter"
+  pass "successful answer retention preserves private audience after poll registry failure"
+}
+
 # Regression case 1: a Discord follow-up >280 but < the Discord budget stays ONE
 # message even after the inbox is deleted AND posted late by request_id.
 test_regression_discord_followup_survives_inbox_cleanup() {
@@ -3155,6 +3204,7 @@ test_private_artifact_publisher_runs_under_system_bash
 test_context_registry_prunes_expired_records
 test_context_registry_preserves_first_seen_timestamp
 test_context_registry_retention_starts_on_successful_live_answer
+test_private_answer_retention_recovers_failed_poll_registry
 test_regression_discord_followup_survives_inbox_cleanup
 test_regression_x_followup_still_splits_after_cleanup
 test_regression_unresolved_followup_fails_safe
