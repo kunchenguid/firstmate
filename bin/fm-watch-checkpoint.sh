@@ -4,6 +4,11 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+if [ -f "$SCRIPT_DIR/fm-locale-lib.sh" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$SCRIPT_DIR/fm-locale-lib.sh"
+fi
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {

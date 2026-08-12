@@ -45,6 +45,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+if [ -f "$SCRIPT_DIR/fm-locale-lib.sh" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-locale-lib.sh"
+fi
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"

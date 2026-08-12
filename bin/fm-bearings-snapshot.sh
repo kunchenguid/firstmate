@@ -59,6 +59,11 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+if [ -f "$SCRIPT_DIR/fm-locale-lib.sh" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$SCRIPT_DIR/fm-locale-lib.sh"
+fi
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091

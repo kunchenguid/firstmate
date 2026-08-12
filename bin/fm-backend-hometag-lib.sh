@@ -26,6 +26,13 @@
 # an accepted limitation, no worse than the existing fact that a task's
 # recorded absolute worktree path does not survive a move either.
 
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+FM_LOCALE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-locale-lib.sh"
+if [ -f "$FM_LOCALE_LIB" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$FM_LOCALE_LIB"
+fi
+
 FM_BACKEND_HOMETAG_SECONDMATE_MARKER=".fm-secondmate-home"
 
 fm_backend_hometag() {

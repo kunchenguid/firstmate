@@ -33,6 +33,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+if [ -f "$SCRIPT_DIR/fm-locale-lib.sh" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$SCRIPT_DIR/fm-locale-lib.sh"
+fi
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.

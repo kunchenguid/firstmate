@@ -1116,6 +1116,37 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+test_no_timeout_perl_bound_survives_broken_darwin_locale() {
+  reset_fakes
+  local d toolbin real_perl out
+  d=$(new_case no-timeout-broken-locale)
+  make_repo_on_branch "$d/wt" fm/feat-locale
+  make_fakebin "$d" >/dev/null
+  toolbin=$(make_no_timeout_toolbin "$d")
+  real_perl=$(command -v perl)
+  rm -f "$toolbin/perl"
+  cat > "$toolbin/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${LC_ALL:-}" != C ] && { [ "${LC_CTYPE:-}" = C.UTF-8 ] || [ "${LANG:-}" = C.UTF-8 ]; }; then
+  echo "panic: unsupported inherited C.UTF-8" >&2
+  exit 9
+fi
+exec "$FM_FAKE_REAL_PERL" "$@"
+SH
+  chmod +x "$toolbin/perl"
+  fm_write_meta "$d/state/feat-locale.meta" "window=fm:fm-feat-locale" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-locale)"
+  # shellcheck disable=SC2016  # Positional expansion is intentionally deferred to the child bash.
+  out=$(env -u LC_ALL LC_CTYPE=C.UTF-8 LANG=C.UTF-8 \
+    PATH="$d/fakebin:$toolbin" FM_FAKE_REAL_PERL="$real_perl" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_NM_TIMEOUT=5 bash -c 'OSTYPE=darwin24; . "$1" "$2"' \
+    _ "$CREW_STATE" feat-locale)
+  assert_contains "$out" "state: working" "active run must survive the broken inherited Darwin locale"
+  assert_contains "$out" "source: run-step" "locale repair must preserve the perl-bound run-step lookup"
+  pass "the perl-bound no-mistakes lookup survives a broken inherited Darwin C.UTF-8 locale"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1348,6 +1379,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_no_timeout_perl_bound_survives_broken_darwin_locale
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

@@ -51,6 +51,13 @@
 # reconciled by the ordinary remote sync/update path before the transfer
 # succeeds; there is no separate allowlist version negotiation.
 #
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+FM_LOCALE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-locale-lib.sh"
+if [ -f "$FM_LOCALE_LIB" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$FM_LOCALE_LIB"
+fi
+
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
 

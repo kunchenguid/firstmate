@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+FM_LOCALE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-locale-lib.sh"
+if [ -f "$FM_LOCALE_LIB" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$FM_LOCALE_LIB"
+fi
+
 FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
 

@@ -17,6 +17,13 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+# Best-effort for hand-built partial bin/ fixtures without this sibling.
+FM_LOCALE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-locale-lib.sh"
+if [ -f "$FM_LOCALE_LIB" ]; then
+  # shellcheck source=bin/fm-locale-lib.sh
+  . "$FM_LOCALE_LIB"
+fi
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
