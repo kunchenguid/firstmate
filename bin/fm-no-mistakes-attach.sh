@@ -11,11 +11,13 @@
 # the installed no-mistakes skill. Outside Herdr it prints `not-applicable` and
 # exits 0 without mutation.
 #
-# Under Herdr, `prepare` verifies the caller's injected pane against the named
-# session, splits that exact pane to the right at ratio 0.5 without changing
-# focus, verifies that the response-derived sibling shares the caller's current
-# tab and workspace, and starts the internal `wait` operation there. It prints
-# `prepared: pane <id>` only after `pane run` accepts the waiter command.
+# Under Herdr, `prepare` verifies the caller's live pane, tab, workspace, named
+# session, and socket through the canonical Herdr launcher-identity primitive.
+# It holds the shared named-session presentation lock while splitting that exact
+# pane to the right at ratio 0.5 without changing focus, verifying that the
+# response-derived sibling shares the caller's current tab and workspace, and
+# starting the internal `wait` operation there. It prints `prepared: pane <id>`
+# only after `pane run` accepts the waiter command.
 #
 # `wait` is internal but documented for auditability. It polls only
 # `no-mistakes axi status` from <repo-root>. It ignores terminal or wrong-branch
@@ -25,8 +27,11 @@
 #
 # The default wait is 900 one-second polls. Tests may override it with the
 # positive integer FM_NM_ATTACH_MAX_POLLS and non-negative integer
-# FM_NM_ATTACH_POLL_SECONDS environment variables. Timeout exits visibly and
-# never starts AXI. This helper creates no journal, performs no recovery or
+# FM_NM_ATTACH_POLL_SECONDS environment variables. Lock tests may override the
+# default 50 attempts and 0.1-second interval with positive integer
+# FM_NM_ATTACH_LOCK_ATTEMPTS and non-negative number
+# FM_NM_ATTACH_LOCK_SLEEP_SECONDS. Timeout exits visibly and never starts AXI.
+# This helper creates no journal, performs no recovery or
 # retirement, sends no dashboard input, and never calls axi run/respond, sync,
 # abort, rerun, push, PR, CI, or merge operations. A failed post-split launch
 # leaves the exact new pane visible for manual inspection instead of guessing
@@ -38,6 +43,8 @@ SCRIPT_PATH="$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"
 
 # shellcheck source=bin/backends/herdr.sh
 . "$SCRIPT_DIR/backends/herdr.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   awk '
@@ -78,50 +85,17 @@ fm_nm_attach_shell_quote() {
   printf "'"
 }
 
-fm_nm_attach_prepare() {
-  local session pane socket repo branch nm_bin parent_output parent_tab parent_workspace
+fm_nm_attach_prepare_locked() { # <session> <repo> <branch> <no-mistakes-executable>
+  local session=$1 repo=$2 branch=$3 nm_bin=$4 pane parent_tab parent_workspace
   local split_output child child_output child_tab child_workspace command
 
-  if [ "${HERDR_ENV:-}" != 1 ]; then
-    printf 'not-applicable: runtime is not Herdr\n'
-    return 0
+  if ! fm_backend_herdr_launcher_identity "$session"; then
+    fm_nm_attach_error 'cannot verify current Herdr identity'
+    return 2
   fi
-
-  session=${HERDR_SESSION:-}
-  pane=${HERDR_PANE_ID:-}
-  socket=${HERDR_SOCKET_PATH:-}
-  [ -n "$session" ] && [ -n "$pane" ] && [ -n "$socket" ] || {
-    fm_nm_attach_error 'Herdr identity is incomplete (need HERDR_SESSION, HERDR_PANE_ID, and HERDR_SOCKET_PATH)'
-    return 2
-  }
-  command -v jq >/dev/null 2>&1 || { fm_nm_attach_error 'jq is required'; return 2; }
-  command -v herdr >/dev/null 2>&1 || { fm_nm_attach_error 'herdr is required'; return 2; }
-  nm_bin=$(command -v no-mistakes 2>/dev/null) || nm_bin=
-  case "$nm_bin" in /*) ;; *) fm_nm_attach_error 'no-mistakes executable is unavailable'; return 2 ;; esac
-  [ -x "$nm_bin" ] || { fm_nm_attach_error "no-mistakes executable is not executable: $nm_bin"; return 2; }
-
-  repo=$(git rev-parse --show-toplevel 2>/dev/null) || {
-    fm_nm_attach_error 'prepare must run inside the implementation repository'
-    return 2
-  }
-  repo=$(cd "$repo" 2>/dev/null && pwd -P) || return 2
-  branch=$(git -C "$repo" branch --show-current 2>/dev/null) || branch=
-  [ -n "$branch" ] || { fm_nm_attach_error 'implementation repository is detached'; return 2; }
-
-  parent_output=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
-    fm_nm_attach_error "cannot verify current Herdr pane $pane in session $session"
-    return 2
-  }
-  [ "$(printf '%s' "$parent_output" | jq -r '.result.pane.pane_id // empty')" = "$pane" ] || {
-    fm_nm_attach_error 'Herdr pane lookup did not return the injected pane identity'
-    return 2
-  }
-  parent_tab=$(printf '%s' "$parent_output" | jq -r '.result.pane.tab_id // empty')
-  parent_workspace=$(printf '%s' "$parent_output" | jq -r '.result.pane.workspace_id // empty')
-  [ -n "$parent_tab" ] && [ -n "$parent_workspace" ] || {
-    fm_nm_attach_error 'current Herdr pane has no tab/workspace binding'
-    return 2
-  }
+  pane=$FM_BACKEND_HERDR_LAUNCHER_PANE_ID
+  parent_tab=$FM_BACKEND_HERDR_LAUNCHER_TAB_ID
+  parent_workspace=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
 
   split_output=$(fm_backend_herdr_cli "$session" pane split "$pane" \
     --direction right --ratio 0.5 --cwd "$repo" --no-focus 2>/dev/null) || {
@@ -152,6 +126,62 @@ fm_nm_attach_prepare() {
     return 2
   }
   printf 'prepared: pane %s waiting for no-mistakes on branch %s\n' "$child" "$branch"
+}
+
+fm_nm_attach_prepare() {
+  local session pane socket repo branch nm_bin lock_path attempts sleep_seconds attempt=0 rc
+
+  if [ "${HERDR_ENV:-}" != 1 ]; then
+    printf 'not-applicable: runtime is not Herdr\n'
+    return 0
+  fi
+
+  session=${HERDR_SESSION:-}
+  pane=${HERDR_PANE_ID:-}
+  socket=${HERDR_SOCKET_PATH:-}
+  [ -n "$session" ] && [ -n "$pane" ] && [ -n "$socket" ] || {
+    fm_nm_attach_error 'Herdr identity is incomplete (need HERDR_SESSION, HERDR_PANE_ID, and HERDR_SOCKET_PATH)'
+    return 2
+  }
+  command -v jq >/dev/null 2>&1 || { fm_nm_attach_error 'jq is required'; return 2; }
+  command -v herdr >/dev/null 2>&1 || { fm_nm_attach_error 'herdr is required'; return 2; }
+  nm_bin=$(command -v no-mistakes 2>/dev/null) || nm_bin=
+  case "$nm_bin" in /*) ;; *) fm_nm_attach_error 'no-mistakes executable is unavailable'; return 2 ;; esac
+  [ -x "$nm_bin" ] || { fm_nm_attach_error "no-mistakes executable is not executable: $nm_bin"; return 2; }
+
+  repo=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    fm_nm_attach_error 'prepare must run inside the implementation repository'
+    return 2
+  }
+  repo=$(cd "$repo" 2>/dev/null && pwd -P) || return 2
+  branch=$(git -C "$repo" branch --show-current 2>/dev/null) || branch=
+  [ -n "$branch" ] || { fm_nm_attach_error 'implementation repository is detached'; return 2; }
+
+  attempts=${FM_NM_ATTACH_LOCK_ATTEMPTS:-50}
+  sleep_seconds=${FM_NM_ATTACH_LOCK_SLEEP_SECONDS:-0.1}
+  case "$attempts" in ''|*[!0-9]*|0) fm_nm_attach_error 'FM_NM_ATTACH_LOCK_ATTEMPTS must be a positive integer'; return 2 ;; esac
+  case "$sleep_seconds" in
+    ''|*[!0-9.]*|.*.*|*.*.*|.)
+      fm_nm_attach_error 'FM_NM_ATTACH_LOCK_SLEEP_SECONDS must be a non-negative number'
+      return 2
+      ;;
+  esac
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || {
+    fm_nm_attach_error 'cannot resolve the Herdr session presentation lock'
+    return 2
+  }
+  while [ "$attempt" -lt "$attempts" ]; do
+    if fm_lock_try_acquire "$lock_path"; then
+      fm_nm_attach_prepare_locked "$session" "$repo" "$branch" "$nm_bin"
+      rc=$?
+      fm_lock_release "$lock_path"
+      return "$rc"
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$attempts" ] && sleep "$sleep_seconds"
+  done
+  fm_nm_attach_error 'cannot acquire the Herdr session presentation lock'
+  return 2
 }
 
 fm_nm_attach_wait() { # <repo-root> <branch> <no-mistakes-executable>

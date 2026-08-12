@@ -18,7 +18,8 @@ Read `bin/fm-no-mistakes-attach.sh --help`; its header owns the exact invocation
 wait boundary, and Herdr mutations. Have the implementation crewmate run the
 helper's prepare operation from its repository before invoking no-mistakes.
 The operation must run inside that crewmate's pane: injected Herdr identity is
-the placement authority for the sibling split.
+the placement authority for the sibling split, and the helper serializes that
+layout mutation with the canonical named-session presentation lock.
 
 - `prepared` means the sibling exists and is waiting; immediately invoke the
   installed no-mistakes skill on that same crewmate.

@@ -278,8 +278,9 @@ There is still one watcher process; the event reader is a bounded child of that 
 The agent-only `no-mistakes-herdr-dashboard` skill requires the implementation
 crewmate to prepare an unfocused sibling split immediately before it invokes the
 installed no-mistakes skill. `bin/fm-no-mistakes-attach.sh --help` owns the exact
-command and mutation mechanics. The sibling waits for the same repository and
-branch to expose a nonterminal AXI run, then executes native
+command and mutation mechanics. Sibling creation reuses the adapter's canonical
+live launcher identity and named-session presentation lock. The sibling waits
+for the same repository and branch to expose a nonterminal AXI run, then executes native
 `no-mistakes attach --run <id>`.
 
 The native TUI exposes phases, logs, findings, tests, gates, PR, and CI state;

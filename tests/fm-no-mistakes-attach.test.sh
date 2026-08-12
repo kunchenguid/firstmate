@@ -6,6 +6,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fail_with_output() {
+  printf '%s\n' "$2" >&2
+  fail "$1"
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-no-mistakes-attach)
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
@@ -50,12 +55,22 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -u
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_CALLS:?}"
 case "${1:-} ${2:-}" in
+  "session list")
+    printf '%s\n' "{\"sessions\":[{\"name\":\"test\",\"running\":true,\"socket_path\":\"${FM_FAKE_HERDR_SOCKET:?}\"}]}"
+    ;;
   "pane get")
     case "${3:-}" in
       w1:p7) printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p7","tab_id":"w1:t7","workspace_id":"w1"}}}' ;;
       w1:p8) printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p8","tab_id":"w1:t7","workspace_id":"w1"}}}' ;;
       *) exit 3 ;;
     esac
+    ;;
+  "tab get")
+    [ "${3:-}" = w1:t7 ] || exit 3
+    printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t7","workspace_id":"w1"}}}'
+    ;;
+  "workspace list")
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1"}]}}'
     ;;
   "pane split")
     printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p8"}}}'
@@ -72,6 +87,7 @@ export PATH="$FAKEBIN:$PATH"
 export FM_FAKE_NM_CALLS="$FIXTURE/no-mistakes.calls"
 export FM_FAKE_NM_ATTACHED="$FIXTURE/attached"
 export FM_FAKE_HERDR_CALLS="$FIXTURE/herdr.calls"
+export FM_FAKE_HERDR_SOCKET="$FIXTURE/herdr.sock"
 : > "$FM_FAKE_NM_CALLS"
 : > "$FM_FAKE_HERDR_CALLS"
 
@@ -98,6 +114,41 @@ grep -F 'pane run w1:p8 ' "$FM_FAKE_HERDR_CALLS" | grep -F ' wait ' | grep -F "'
   || fail 'prepare did not start the waiter in the sibling pane'
 assert_no_grep ' focus ' "$FM_FAKE_HERDR_CALLS" 'prepare attempted to change focus'
 pass 'fm-no-mistakes-attach: Herdr prepare creates and binds one exact sibling without focus theft'
+
+: > "$FM_FAKE_HERDR_CALLS"
+set +e
+output=$(cd "$REPO" && \
+  HERDR_ENV=1 HERDR_SESSION=test HERDR_PANE_ID=w1:p7 \
+  HERDR_SOCKET_PATH="$FIXTURE/other.sock" "$HELPER" prepare 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'cross-socket prepare did not refuse' "$output"
+assert_contains "$output" 'cannot verify current Herdr identity' \
+  'cross-socket refusal did not identify the binding failure'
+assert_no_grep 'pane split' "$FM_FAKE_HERDR_CALLS" 'cross-socket identity created a sibling'
+pass 'fm-no-mistakes-attach: prepare reuses canonical live Herdr identity verification'
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
+# shellcheck source=bin/backends/herdr.sh
+. "$ROOT/bin/backends/herdr.sh"
+lock_path=$(PATH="$FAKEBIN:$PATH" HERDR_SESSION=test HERDR_SOCKET_PATH="$FM_FAKE_HERDR_SOCKET" \
+  fm_backend_herdr_presentation_session_lock_path test) || fail 'could not derive fixture presentation lock'
+fm_lock_try_acquire "$lock_path" || fail 'could not hold fixture presentation lock'
+: > "$FM_FAKE_HERDR_CALLS"
+set +e
+output=$(cd "$REPO" && \
+  HERDR_ENV=1 HERDR_SESSION=test HERDR_PANE_ID=w1:p7 \
+  HERDR_SOCKET_PATH="$FM_FAKE_HERDR_SOCKET" FM_NM_ATTACH_LOCK_ATTEMPTS=1 \
+  FM_NM_ATTACH_LOCK_SLEEP_SECONDS=0 "$HELPER" prepare 2>&1)
+rc=$?
+set -e
+fm_lock_release "$lock_path"
+[ "$rc" -eq 2 ] || fail_with_output 'contended presentation lock did not refuse' "$output"
+assert_contains "$output" 'cannot acquire the Herdr session presentation lock' \
+  'lock contention refusal was not explicit'
+assert_no_grep 'pane split' "$FM_FAKE_HERDR_CALLS" 'lock contention allowed an unlocked sibling split'
+pass 'fm-no-mistakes-attach: sibling creation serializes with canonical Herdr presentation mutations'
 
 : > "$FM_FAKE_NM_CALLS"
 : > "$FIXTURE/terminal-first"
