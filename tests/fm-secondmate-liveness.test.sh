@@ -306,6 +306,29 @@ test_tmux_canonical_omp_accepts_proven_clean_shell_exit() {
   pass "tmux liveness: canonical OMP clean stop requires terminal evidence and a lone shell"
 }
 
+test_tmux_canonical_omp_rejects_symlinked_stop_evidence() {
+  local dir fb out state target id file target_file
+  dir="$TMP_ROOT/tmux-canonical-omp-symlink-evidence"
+  state="$dir/state"; id=canonical-omp-symlink; target="sess:fm-$id"
+  mkdir -p "$state"
+  printf '%s\n' g123 > "$state/$id.busy-gen"
+  printf '%s\n' g123.test > "$state/$id.omp-session-run"
+  printf '%s\n' g123.test > "$state/$id.omp-session-stop"
+  fb=$(make_probe_tmux "$dir" zsh "fm-$id")
+  for file in busy-gen omp-session-run omp-session-stop; do
+    target_file="$dir/$file-target"
+    mv "$state/$id.$file" "$target_file"
+    ln -s "$target_file" "$state/$id.$file"
+    out=$(PATH="$fb:$BASE_PATH" FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1" omp' "$ROOT" "$target")
+    [ "$out" = ambiguous ] || fail "a symlinked OMP $file marker must remain ambiguous, got '$out'"
+    [ -L "$state/$id.$file" ] || fail "tmux replaced the symlinked OMP $file marker"
+    rm -f "$state/$id.$file"
+    mv "$target_file" "$state/$id.$file"
+  done
+  pass "tmux OMP stop evidence rejects symlinked generation, run, and stop markers"
+}
+
 test_tmux_raw_omp_is_not_verified() {
   local fb out
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-omp" omp)
@@ -802,6 +825,7 @@ test_tmux_canonical_omp_accepts_current_endpoint
 test_tmux_canonical_non_omp_rejects_omp_input_and_busy
 test_tmux_key_rechecks_after_target_resolution
 test_tmux_canonical_omp_accepts_proven_clean_shell_exit
+test_tmux_canonical_omp_rejects_symlinked_stop_evidence
 test_tmux_raw_omp_is_not_verified
 test_tmux_omp_endpoint_requires_target_inventory
 test_tmux_control_rejects_stale_canonical_omp

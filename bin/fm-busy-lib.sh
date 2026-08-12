@@ -173,7 +173,7 @@ fm_busy_token_valid() {  # <value>
 fm_busy_current_gen() {  # <state-dir> <id>
   local gen_file gen
   gen_file=$(fm_busy_gen_path "$1" "$2")
-  [ -f "$gen_file" ] || return 1
+  [ -f "$gen_file" ] && [ ! -L "$gen_file" ] || return 1
   IFS= read -r gen < "$gen_file" 2>/dev/null || gen=
   fm_busy_token_valid "$gen" || return 1
   printf '%s' "$gen"

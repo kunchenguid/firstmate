@@ -184,7 +184,7 @@ drive_omp_ext() {
     BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { readFileSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
@@ -203,6 +203,41 @@ const removeMarker = (path) => {
 };
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
+  case "incarnation-temp-recovery": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    await fire("agent_start");
+    const staleTemp = runPath + "." + process.pid + ".4.tmp";
+    writeFileSync(staleTemp, "foreign temporary marker\n", { encoding: "utf8", flag: "wx" });
+    await fire("agent_start");
+    if (!existsSync(staleTemp)) throw new Error("an unowned marker temp was removed");
+    if (!readFileSync(runPath, "utf8").trim()) throw new Error("the next run did not publish its marker");
+    break;
+  }
+  case "state-marker-symlinks": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const paths = [
+      base + ".busy-gen",
+      base + ".omp-session-run",
+      base + ".omp-session-stop",
+      base + ".busy-state",
+    ];
+    await fire("agent_start");
+    const turnEndPath = base + ".turn-ended";
+    for (const path of paths) {
+      const target = path + ".collision-target";
+      renameSync(path, target);
+      const before = readFileSync(target, "utf8");
+      symlinkSync(target, path);
+      try { unlinkSync(turnEndPath); } catch {}
+      await fire("agent_end");
+      if (!lstatSync(path).isSymbolicLink()) throw new Error("a state symlink was replaced");
+      if (readFileSync(target, "utf8") !== before) throw new Error("a state symlink target was modified");
+      if (existsSync(turnEndPath)) throw new Error("a state symlink collision published turn-end evidence");
+      unlinkSync(path);
+      renameSync(target, path);
+    }
+    break;
+  }
   case "generation-mutation-guard": {
     const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
     const stopPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-stop";
@@ -951,6 +986,60 @@ test_omp_extension_rejects_evidence_path_collisions() {
   pass "omp evidence recovery rejects regular-file and symlink path collisions"
 }
 
+test_omp_extension_reconciles_idle_finalizing_before_new_run() {
+  local rec id=busy-omp-finalizing-recovery out state ext
+  rec=$(make_spawn_case omp-finalizing-recovery omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp finalizing-recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "finalizing agent_start drive failed: $out"
+  out=$(drive_omp_ext "$ext" session-stop) || fail "finalizing session_stop drive failed: $out"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "reload before fresh run drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "an already-idle finalizing run did not restore turn-end evidence before a fresh run"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a fresh run after finalizing recovery did not remain busy, got '$out'"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "fresh run after finalizing recovery did not settle: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "fresh run after finalizing recovery remained wedged, got '$out'"
+  pass "omp reconciles already-idle finalizing evidence before accepting a fresh run"
+}
+
+test_omp_extension_rejects_state_marker_symlinks() {
+  local rec id=busy-omp-state-symlinks out state ext
+  rec=$(make_spawn_case omp-state-symlinks omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp state-symlink spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" state-marker-symlinks "$state" "$id") \
+    || fail "state-marker symlink drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "state-marker symlink collisions changed busy state, got '$out'"
+  pass "omp rejects symlinked generation, run, stop, and busy-state markers"
+}
+
+test_omp_extension_uses_incarnation_unique_marker_temps() {
+  local rec id=busy-omp-marker-temp out state ext
+  rec=$(make_spawn_case omp-marker-temp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp marker-temp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" incarnation-temp-recovery "$state" "$id") \
+    || fail "incarnation-unique marker temp drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "an unowned marker temp poisoned the next run, got '$out'"
+  pass "omp marker writes use incarnation-unique temps and preserve unowned temps"
+}
+
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps() {
   local rec id=busy-omp-timestamps out state ext run_token started_at
   rec=$(make_spawn_case omp-timestamps omp "$id")
@@ -1228,6 +1317,9 @@ test_omp_extension_adopts_pending_run_before_new_start
 test_omp_extension_recovers_partial_persistence
 test_omp_extension_preserves_unverified_evidence_temps
 test_omp_extension_rejects_evidence_path_collisions
+test_omp_extension_reconciles_idle_finalizing_before_new_run
+test_omp_extension_rejects_state_marker_symlinks
+test_omp_extension_uses_incarnation_unique_marker_temps
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected

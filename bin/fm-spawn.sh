@@ -1252,7 +1252,6 @@ esac
 
 raw_launch_uses_omp_fallback() {
   local word first= canonical
-  [ "$HARNESS" = raw-omp ] || return 1
   for word in $LAUNCH; do
     case "$word" in
       [A-Za-z_]*=*) continue ;;
@@ -1264,6 +1263,32 @@ raw_launch_uses_omp_fallback() {
   [ "$first" = omp ] || [ "$first" = "$canonical" ]
 }
 
+raw_launch_needs_policy_runtime() {
+  local launch=$1 word first= canonical
+  canonical=$(command -v omp 2>/dev/null) || return 1
+  for word in $launch; do
+    case "$word" in
+      [A-Za-z_]*=*) continue ;;
+      *) first=$word; break ;;
+    esac
+  done
+  case "$first" in
+    env|*/env|nice|*/nice|time|*/time|setsid|*/setsid|bash|*/bash|sh|*/sh|zsh|*/zsh|cd|*/cd|source|.)
+      case "$launch" in
+        *"$canonical"*|*start-omp.sh*|*" omp "*|*" ./omp "*) return 0 ;;
+      esac
+      ;;
+  esac
+  case "$launch" in
+    *" && "*)
+      case "$launch" in
+        *"$canonical"*|*start-omp.sh*|*" omp "*|*" ./omp "*) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
 raw_launch_uses_omp() {
   local launch=$1 result
   if command -v node >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/fm-raw-launch-policy.mjs" ]; then
@@ -1271,7 +1296,9 @@ raw_launch_uses_omp() {
     [ "$result" = omp ]
     return
   fi
-  raw_launch_uses_omp_fallback
+  raw_launch_uses_omp_fallback && return 0
+  raw_launch_needs_policy_runtime "$launch" && return 2
+  return 1
 }
 
 # Raw OMP-shaped commands need an independent process-tree ownership token so
@@ -1279,7 +1306,13 @@ raw_launch_uses_omp() {
 # Generic escape-hatch commands retain their literal launch form and metadata;
 # the token is only meaningful for the OMP safety gate.
 if [ "$RAW_LAUNCH" -eq 1 ]; then
-  if raw_launch_uses_omp "$LAUNCH"; then
+  raw_omp_policy_status=0
+  raw_launch_uses_omp "$LAUNCH" || raw_omp_policy_status=$?
+  if [ "$raw_omp_policy_status" -eq 2 ]; then
+    echo "error: raw OMP ownership classification requires Node.js for dispatcher or wrapper validation; install Node.js or use a direct canonical OMP executable" >&2
+    exit 1
+  fi
+  if [ "$raw_omp_policy_status" -eq 0 ]; then
     RAW_OWNER_REQUIRED=1
     RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
   fi
@@ -2574,8 +2607,9 @@ EOF
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
@@ -2586,6 +2620,9 @@ let runToken = "";
 let idlePublishedToken = "";
 let runSequence = 0;
 let tempSequence = 0;
+const INCARNATION_ID = "$BUSY_GEN." + process.pid + "." + randomUUID();
+const ownedTemps = new Set<string>();
+let recoveryBlocked = false;
 const runRecords: Array<{
   token: string;
   startedAt: number;
@@ -2605,6 +2642,8 @@ const trimRunHistory = () => {
 };
 const generationIsCurrent = () => {
   try {
+    const stat = lstatSync(BUSY_GEN_PATH);
+    if (!stat.isFile()) return false;
     return readFileSync(BUSY_GEN_PATH, "utf8").trim() === "$BUSY_GEN";
   } catch {
     return false;
@@ -2613,13 +2652,35 @@ const generationIsCurrent = () => {
 const requireCurrentGeneration = () => {
   if (!generationIsCurrent()) throw new Error("stale OMP extension generation");
 };
+const cleanupOwnedTemp = (path: string) => {
+  if (!ownedTemps.delete(path)) return;
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if ((error as any)?.code !== "ENOENT") throw error;
+  }
+};
 const atomicWrite = (path: string, value: string) => {
   requireCurrentGeneration();
-  const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
-  requireCurrentGeneration();
-  writeFileSync(temp, value, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  requireCurrentGeneration();
-  renameSync(temp, path);
+  const temp = path + "." + INCARNATION_ID + "." + String(++tempSequence) + ".tmp";
+  let fd = -1;
+  try {
+    requireCurrentGeneration();
+    fd = openSync(temp, "wx", 0o600);
+    ownedTemps.add(temp);
+    writeFileSync(fd, value, { encoding: "utf8" });
+    closeSync(fd);
+    fd = -1;
+    requireCurrentGeneration();
+    renameSync(temp, path);
+    ownedTemps.delete(temp);
+  } catch (error) {
+    if (fd >= 0) {
+      try { closeSync(fd); } catch {}
+    }
+    try { cleanupOwnedTemp(temp); } catch {}
+    throw error;
+  }
 };
 const ensureEvidenceDirectory = () => {
   requireCurrentGeneration();
@@ -2636,9 +2697,14 @@ const ensureEvidenceDirectory = () => {
   requireCurrentGeneration();
 };
 const evidencePath = (token: string) => SESSION_EVIDENCE_DIR + "/" + token;
+const readRegularFile = (path: string) => {
+  const stat = lstatSync(path);
+  if (!stat.isFile()) throw new Error("OMP state path is not a regular file");
+  return readFileSync(path, "utf8");
+};
 const readOptional = (path: string) => {
   try {
-    return readFileSync(path, "utf8");
+    return readRegularFile(path);
   } catch (error) {
     if ((error as any)?.code === "ENOENT") return "";
     throw error;
@@ -2657,10 +2723,17 @@ const parseRunToken = (token: string) => {
   return { processId, startedAt, sequence };
 };
 const isAtomicTempName = (name: string) => {
-  const match = /^(.*)\.([0-9]+)\.([0-9]+)\.tmp$/.exec(name);
-  if (!match || !parseRunToken(match[1])) return false;
-  const processId = Number(match[2]);
-  const sequence = Number(match[3]);
+  const legacy = /^(.*)\.([0-9]+)\.([0-9]+)\.tmp$/.exec(name);
+  if (legacy && parseRunToken(legacy[1])) {
+    const processId = Number(legacy[2]);
+    const sequence = Number(legacy[3]);
+    return Number.isSafeInteger(processId) && processId > 0 &&
+      Number.isSafeInteger(sequence) && sequence > 0;
+  }
+  const current = /^(.*)\.([A-Za-z0-9._-]+)\.([0-9]+)\.([0-9a-f-]{36})\.([0-9]+)\.tmp$/.exec(name);
+  if (!current || current[2] !== "$BUSY_GEN" || !parseRunToken(current[1])) return false;
+  const processId = Number(current[3]);
+  const sequence = Number(current[5]);
   return Number.isSafeInteger(processId) && processId > 0 &&
     Number.isSafeInteger(sequence) && sequence > 0;
 };
@@ -2740,7 +2813,7 @@ const persistedRuns = () => {
     if (!generationIsCurrent()) return null;
     const runLines = readOptional(SESSION_RUN).split(/\r?\n/).filter(Boolean);
     const stop = readOptional(SESSION_STOP).trim();
-    const busyFields = new Set(readFileSync("$STATE_REAL/$ID.busy-state", "utf8").trim().split(/\s+/));
+    const busyFields = new Set(readRegularFile("$STATE_REAL/$ID.busy-state").trim().split(/\s+/));
     const busy = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=busy");
     const idle = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=idle");
     if (!busy && !idle) return null;
@@ -2766,7 +2839,7 @@ const persistedRuns = () => {
         continue;
       }
       if (!entry.isFile() || !parseRunToken(entry.name)) return null;
-      const record = parseRunEvidence(readFileSync(evidencePath(entry.name), "utf8"));
+      const record = parseRunEvidence(readRegularFile(evidencePath(entry.name)));
       if (!record || record.token !== entry.name) return null;
       evidence.set(record.token, record);
     }
@@ -2824,6 +2897,21 @@ const adoptCurrentRun = () => {
     runToken = "";
     return "";
   }
+  try {
+    readRegularFile("$STATE_REAL/$ID.busy-state");
+    readOptional(SESSION_RUN);
+    readOptional(SESSION_STOP);
+    try {
+      const evidenceStat = lstatSync(SESSION_EVIDENCE_DIR);
+      if (!evidenceStat.isDirectory()) throw new Error("OMP evidence path is not a directory");
+    } catch (error) {
+      if ((error as any)?.code !== "ENOENT") throw error;
+    }
+  } catch {
+    recoveryBlocked = true;
+    runToken = "";
+    return "";
+  }
   if (runToken) return runToken;
   const persisted = persistedRuns();
   if (!persisted) return "";
@@ -2839,15 +2927,31 @@ const adoptCurrentRun = () => {
       ], { stdio: "ignore" });
     }
   } catch {
+    recoveryBlocked = true;
     return "";
   }
-  runToken = persisted.token;
-  idlePublishedToken = "";
+  const recoveredActive = persisted.pending.length > 0 || persisted.finalizing.some((record) => record.idlePending);
+  if (recoveredActive) {
+    runToken = persisted.token;
+    idlePublishedToken = "";
+  } else {
+    try {
+      execFileSync("touch", [TURNEND], { stdio: "ignore" });
+    } catch {
+      recoveryBlocked = true;
+      runToken = "";
+      return "";
+    }
+    runToken = "";
+    idlePublishedToken = persisted.token;
+  }
   for (const record of persisted.pending) {
     runRecords.push({ ...record, active: true, recovered: true, finalizing: false, idlePending: true });
   }
   for (const record of persisted.finalizing) {
-    runRecords.push({ ...record, active: true, recovered: true, finalizing: true });
+    if (record.idlePending) {
+      runRecords.push({ ...record, active: true, recovered: true, finalizing: true });
+    }
   }
   trimRunHistory();
   return runToken;
@@ -2974,6 +3078,7 @@ const settleRun = async (token: string, event: string, timestamp?: number) => {
 export default function (omp: any) {
   omp.on("agent_start", () => {
     adoptCurrentRun();
+    if (recoveryBlocked) return;
     const token = rotateRun();
     return busyEvent(token, "busy", "agent-start");
   });
