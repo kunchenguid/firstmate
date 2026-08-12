@@ -66,9 +66,10 @@ run_check() {
 
 run_guard() {
   local dir=$1 fakebin=$2 payload=${3:-'{"stop_hook_active":false,"session_id":"fixture"}'} status
+  [ "$#" -le 3 ] && shift "$#" || shift 3
   set +e
   printf '%s' "$payload" | PATH="$fakebin:$PATH" FM_HOME="$dir" \
-    "$dir/bin/fm-turnend-guard.sh" 2>&1
+    "$dir/bin/fm-turnend-guard.sh" "$@" 2>&1
   status=$?
   set -e
   return "$status"
@@ -266,6 +267,84 @@ EOF
   pass "continuation check: a lock-refused session remains inert"
 }
 
+# Watcher recovery strictly outranks accepted-work continuation. A continuation
+# prompt must never preempt the blind-turn block nor let its bounded
+# stop_hook_active allowance settle a turn that supervision would refuse
+# (docs/turnend-guard.md, 2026-07-21 blind window).
+queued_backlog() {
+  cat > "$1/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+
+- [ ] accepted-work - Accepted unfinished work (repo: firstmate) (kind: ship)
+
+## Done
+EOF
+}
+
+assert_blind_turn_block() {
+  local out=$1 status=$2 label=$3
+  [ "$status" -eq 2 ] || fail "$label settled with status $status: $out"
+  assert_contains "$out" 'TURN WOULD END BLIND - SUPERVISION IS OFF' \
+    "$label did not emit the supervision block"
+  case "$out" in
+    *'ACCEPTED WORK STILL NEEDS RECONCILIATION'*)
+      fail "$label emitted the continuation banner instead of the supervision block"
+      ;;
+  esac
+}
+
+test_supervision_outranks_continuation_when_suppressed() {
+  local dir="$TMP_ROOT/blind-suppressed" fakebin out status
+  make_primary "$dir"
+  fakebin=$(install_lock_owner_ps "$dir")
+  printf '700\n' > "$dir/state/.lock"
+  : > "$dir/state/task1.meta"
+  queued_backlog "$dir"
+  set +e
+  out=$(run_guard "$dir" "$fakebin" '{"stop_hook_active":true,"session_id":"fixture"}' --claude)
+  status=$?
+  set -e
+  assert_blind_turn_block "$out" "$status" \
+    "a Claude stop with stop_hook_active=true, work in flight and no live watcher"
+  pass "turn-end guard: continuation cannot suppress the blind-turn block via stop_hook_active"
+}
+
+test_supervision_outranks_continuation_when_not_suppressed() {
+  local dir="$TMP_ROOT/blind-open" fakebin out status
+  make_primary "$dir"
+  fakebin=$(install_lock_owner_ps "$dir")
+  printf '700\n' > "$dir/state/.lock"
+  : > "$dir/state/task1.meta"
+  queued_backlog "$dir"
+  set +e
+  out=$(run_guard "$dir" "$fakebin" '{"stop_hook_active":false,"session_id":"fixture"}' --claude)
+  status=$?
+  set -e
+  assert_blind_turn_block "$out" "$status" \
+    "a Claude stop with a dead watcher and dispatchable accepted work"
+  pass "turn-end guard: continuation cannot preempt the watcher-repair instruction"
+}
+
+test_continuation_still_fires_once_supervision_resolves() {
+  local dir="$TMP_ROOT/supervised" fakebin out status
+  make_primary "$dir"
+  fakebin=$(install_lock_owner_ps "$dir")
+  printf '700\n' > "$dir/state/.lock"
+  queued_backlog "$dir"
+  set +e
+  out=$(run_guard "$dir" "$fakebin" '{"stop_hook_active":false,"session_id":"fixture"}' --claude)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "accepted work settled once supervision resolved: $out"
+  assert_contains "$out" 'ACCEPTED WORK STILL NEEDS RECONCILIATION' \
+    "continuation did not fire on a path where supervision is satisfied"
+  pass "turn-end guard: accepted-work continuation still blocks once supervision resolves"
+}
+
 test_accepted_ready_work_forces_continuation
 test_structured_waits_do_not_launch
 test_completed_work_settles
@@ -273,3 +352,6 @@ test_new_message_is_additive
 test_orphan_active_claim_forces_reconciliation
 test_current_progress_must_be_verified
 test_lock_refusal_stays_inert
+test_supervision_outranks_continuation_when_suppressed
+test_supervision_outranks_continuation_when_not_suppressed
+test_continuation_still_fires_once_supervision_resolves

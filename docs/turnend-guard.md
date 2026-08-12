@@ -66,6 +66,7 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 That exception applies only to watcher recovery; accepted-work continuation honors `stop_hook_active` so it remains bounded to one forced follow-up like every other primary integration.
+Watcher recovery strictly outranks accepted-work continuation: the supervision predicate resolves first, and the continuation prompt is emitted only on a path that has already proven supervision healthy or not needed, so a continuation can never preempt or suppress a blind-turn block.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
 The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.

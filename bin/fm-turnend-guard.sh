@@ -132,24 +132,32 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # checker delegates eligibility to tasks-axi, never launches work, and reports
 # only dispatchable queue entries or In flight records without verified current
 # worker progress.
+#
+# This is evaluated here but never acted on until the supervision predicate
+# below has resolved: watcher recovery strictly outranks accepted-work
+# continuation, so a continuation prompt can neither preempt nor suppress a
+# blind-turn block (docs/turnend-guard.md, 2026-07-21 incident).
 CONTINUATION_REQUIRED=''
 if fm_session_lock_owned_by_self "$STATE"; then
   CONTINUATION_REQUIRED=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-continuation-check.sh" 2>/dev/null)
   continuation_status=$?
   case "$continuation_status" in
-    0) CONTINUATION_REQUIRED='' ;;
     2) ;;
     *) CONTINUATION_REQUIRED='' ;;
   esac
 fi
-if [ -n "$CONTINUATION_REQUIRED" ]; then
-  # All primary adapters are deliberately bounded to one forced continuation.
-  # Default-mode direct hooks already returned above on their active-loop
-  # payload; Claude ignores that field for watcher recovery but honors it for
-  # this independent continuation prompt.
+
+# Emit the accepted-work continuation block. Callable only once supervision has
+# been proven healthy or not needed. All primary adapters are deliberately
+# bounded to one forced continuation: default-mode direct hooks already returned
+# above on their active-loop payload, and Claude ignores that field for watcher
+# recovery but honors it for this independent continuation prompt.
+continuation_gate() {
+  local rule
+  [ -n "$CONTINUATION_REQUIRED" ] || return 0
   if [ "$CLAUDE_MODE" -eq 1 ] && [ "$STOP_HOOK_ACTIVE" = true ]; then
-    exit 0
+    return 0
   fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
@@ -160,7 +168,7 @@ if [ -n "$CONTINUATION_REQUIRED" ]; then
     printf '●%s\n' "$rule"
   } >&2
   exit 2
-fi
+}
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
@@ -182,12 +190,15 @@ budget_reset() {
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
+  continuation_gate
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
-  fm_failure_episode_reset "$STATE" && exit 0
-  exit 2
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    fm_failure_episode_reset "$STATE" || exit 2
+  fi
+  continuation_gate
+  exit 0
 fi
 
 block_stop() {
@@ -382,6 +393,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
+    continuation_gate
     exit 0
   fi
   sleep 0.1
@@ -391,6 +403,7 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
+  continuation_gate
   exit 0
 fi
 
@@ -410,5 +423,8 @@ if [ "$terminal_status" -eq 0 ]; then
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0
 fi
-[ "$terminal_status" -eq 2 ] && exit 0
+if [ "$terminal_status" -eq 2 ]; then
+  continuation_gate
+  exit 0
+fi
 block_stop

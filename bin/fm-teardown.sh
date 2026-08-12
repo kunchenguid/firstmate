@@ -394,6 +394,7 @@ remote_secondmate_teardown() {
   mv -f -- "$tmp" "$SECONDMATE_REG"
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
     "$STATE/.$ID.open-decisions-cursor"
+  remove_progress_observation "$STATE" "$ID" || return 1
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -735,6 +736,22 @@ validate_pr_poll_cleanup() {
       return 1
     fi
   done
+}
+
+# Drop this task's bounded progress-observation baseline written by
+# bin/fm-inactive-reconcile.sh, so per-task suspicion state retires with the
+# task instead of accumulating for the lifetime of the home.
+remove_progress_observation() {
+  local state_dir=$1 id=$2 dir record
+  fm_task_id_path_safe "$id" || return 0
+  dir="$state_dir/progress-observations"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  record="$dir/$id.record"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    rm -f -- "$record" || return 1
+  fi
+  rmdir "$dir" 2>/dev/null || true
+  return 0
 }
 
 remove_pr_poll_artifacts() {
@@ -2532,6 +2549,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+remove_progress_observation "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
