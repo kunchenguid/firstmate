@@ -551,6 +551,48 @@ test_long_validation_phase_uses_longer_bound() {
   pass "test, build, CI, render, and deploy phases use a longer no-progress bound"
 }
 
+# Worker-authored status prose that merely contains the letters of a phase word
+# ("decision", "specification", "precision") must not buy the long validation
+# allowance, or a genuinely stalled worker goes unreconciled three times longer
+# than intended.
+test_ordinary_prose_does_not_claim_long_phase_bound() {
+  local now detail
+  for detail in 'awaiting a decision on the API shape' 'implementing the specification' 'needs more precision here'; do
+    make_world "prose-$(printf '%s' "$detail" | tr -cd '[:alnum:]' | cut -c1-12)"
+    write_child "$MAIN" child 'working: drafting'
+    now=$(date +%s)
+    FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+      || fail "ordinary prose '$detail' wrongly claimed the long validation-phase bound"
+  done
+  pass "ordinary status prose containing phase-word letters keeps the ordinary stall bound"
+}
+
+# The true-positive side of the same boundary: a real validation phase named as
+# its own word still gets the longer allowance.
+test_named_validation_phase_keeps_long_bound() {
+  local now detail
+  for detail in 'running the build' 'deploy in progress' 'waiting on CI'; do
+    make_world "phase-$(printf '%s' "$detail" | tr -cd '[:alnum:]' | cut -c1-12)"
+    write_child "$MAIN" child 'working: validating'
+    now=$(date +%s)
+    FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 0 ] \
+      || fail "named validation phase '$detail' was penalized by the ordinary timeout"
+    FM_INACTIVE_RECONCILE_NOW=$((now + 121)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+      || fail "named validation phase '$detail' never became suspicious at its own bound"
+  done
+  pass "named build, deploy, and CI phases still use the longer no-progress bound"
+}
+
 test_repeated_same_theme_rounds_are_suspicious() {
   local out now
   make_world repeated-rounds; write_child "$MAIN" child 'working: validation active'
@@ -588,6 +630,8 @@ test_live_nonprogress_becomes_suspicious_and_restart_safe
 test_live_turn_activity_without_progress_becomes_suspicious
 test_genuine_progress_resets_suspicion
 test_long_validation_phase_uses_longer_bound
+test_ordinary_prose_does_not_claim_long_phase_bound
+test_named_validation_phase_keeps_long_bound
 test_repeated_same_theme_rounds_are_suspicious
 
 echo "all inactive reconciliation tests passed"

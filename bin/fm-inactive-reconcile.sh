@@ -362,6 +362,17 @@ write_progress_record() { # <record> <incarnation> <meaning> <head> <state> <sta
   mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
 }
 
+# A long validation phase is a controlled category, not any prose that happens
+# to contain those letters. The detail field carries worker-authored status text
+# (bin/fm-crew-state.sh feeds its status-log note straight through), so bare
+# substrings let ordinary English like "decision", "specification", or
+# "precision" claim the much longer allowance and hide a real stall. Match whole
+# words only, allowing the usual separators around them.
+long_validation_phase() { # <state-line>
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+    | grep -Eq '(^|[^a-z0-9])(ci|tests?|testing|builds?|building|render|rendering|deploys?|deploying|deployment)([^a-z0-9]|$)'
+}
+
 observe_progress() { # <id> <meta> <status> <turn> <last-status> <state-line> [held]
   local id=$1 meta=$2 status=$3 turn=$4 last=$5 state_line=$6 held=${7:-0} record incarnation now head state_sig status_sig meaning
   local old_inc old_mean old_turn progress_epoch activity_count suspicious=0 emitted=0 age threshold rounds reason='' payload key
@@ -392,9 +403,9 @@ observe_progress() { # <id> <meta> <status> <turn> <last-status> <state-line> [h
   age=$((now - progress_epoch))
   [ "$age" -ge 0 ] || age=0
   threshold=$FM_PROGRESS_STALL_SECS
-  case "$(printf '%s' "$state_line" | tr '[:upper:]' '[:lower:]')" in
-    *ci*|*test*|*build*|*render*|*deploy*) threshold=$FM_PROGRESS_LONG_PHASE_SECS ;;
-  esac
+  if long_validation_phase "$state_line"; then
+    threshold=$FM_PROGRESS_LONG_PHASE_SECS
+  fi
   rounds=$(repeated_correction_rounds "$status")
   case "$held:$state_line" in
     1:*) ;;

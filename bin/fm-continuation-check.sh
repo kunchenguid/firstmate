@@ -45,14 +45,24 @@ esac
 [ -f "$BACKLOG" ] || exit 0
 command -v tasks-axi >/dev/null 2>&1 || exit 0
 
+# Ordinary dispatchable rows are the indented lines under the tool's own
+# `ready[N]{...}` header. `tasks-axi ready` prints delivery-ready
+# public-followup obligations in a separate `ready_public_followups` group and
+# documents them as never dispatchable, and its `count:` line excludes them, so
+# anchoring here keeps the id list and the count drawn from the same set. This
+# mirrors print_ready_queued_bounded in bin/fm-session-start.sh, the repo's
+# existing owner of this output.
 table_ids() {
   awk '
-    /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
+    /^ready\[/ { rows = 1; next }
+    rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
       row=$0
       sub(/^  /, "", row)
       sub(/,.*/, "", row)
       print row
+      next
     }
+    /^[^[:space:]]/ { rows = 0 }
   '
 }
 

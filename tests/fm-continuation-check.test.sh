@@ -345,6 +345,73 @@ test_continuation_still_fires_once_supervision_resolves() {
   pass "turn-end guard: accepted-work continuation still blocks once supervision resolves"
 }
 
+# `tasks-axi ready` reports delivery-ready public-followup obligations in a
+# separate ready_public_followups group and documents them as never
+# dispatchable; its `count:` line excludes them. The continuation line must
+# therefore draw its ids from the ordinary ready group only, or it names an item
+# the tool refuses to dispatch under a banner telling Firstmate to dispatch it.
+# The obligation here is built through the real tasks-axi CLI, so this asserts
+# against the tool's genuine output rather than a hand-written imitation.
+build_delivery_ready_obligation() { # <dir>
+  local dir=$1
+  cat > "$dir/ctx.json" <<'EOF'
+{"request_id":"req-1","platform":"x","context_binding":{"version":"ctx1","value":"ctx1_demo"},"public_safe_summary":"demo obligation","received_at":"2026-08-13T00:00:00Z","followup_expires_at":"2099-01-01T00:00:00Z","reservation_expires_at":"2099-01-01T00:00:00Z"}
+EOF
+  cat > "$dir/final.json" <<'EOF'
+{"type":"pr-merged","project":"demo","required_deliverables":["pr_url"],"completion_policy":"all-required"}
+EOF
+  cat > "$dir/rel.json" <<'EOF'
+{"relation_id":"rel-1","work_ref":{"home_id":"main","task_id":"q1"},"role":"fulfills","required":true,"generation":1}
+EOF
+  cat > "$dir/ev.json" <<'EOF'
+{"schema_version":1,"event_id":"ev-1","obligation_id":"pf-1","relation_id":"rel-1","source_home_id":"main","work_id":"q1","generation":1,"outcome_type":"pr-merged","public_safe_outcome":"merged","deliverables":{"pr_url":"https://github.com/o/r/pull/1"},"successor":null,"occurred_at":"2026-08-13T00:00:00Z"}
+EOF
+  tasks-axi public-followup add pf-1 --file "$dir/data/backlog.md" \
+    --request-context-file "$dir/ctx.json" --purpose promised-final \
+    --expected-final-file "$dir/final.json" --expires-at 2099-01-01T00:00:00Z >/dev/null 2>&1 || return 1
+  tasks-axi public-followup bind-work pf-1 --file "$dir/data/backlog.md" \
+    --relation-file "$dir/rel.json" >/dev/null 2>&1 || return 1
+  tasks-axi public-followup work-event pf-1 --file "$dir/data/backlog.md" \
+    --event-file "$dir/ev.json" >/dev/null 2>&1 || return 1
+  tasks-axi ready --file "$dir/data/backlog.md" 2>/dev/null | grep -q '^ready_public_followups\[' || return 1
+}
+
+test_public_followups_are_not_listed_as_dispatchable() {
+  local dir="$TMP_ROOT/public-followup" fakebin out status
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "continuation check: public-followup fixture skipped (tasks-axi unavailable)"
+    return 0
+  fi
+  make_primary "$dir"
+  fakebin=$(install_lock_owner_ps "$dir")
+  printf '700\n' > "$dir/state/.lock"
+  cat > "$dir/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+
+- [ ] q1 - Ordinary queued work (repo: demo) (kind: ship)
+
+## Done
+EOF
+  if ! build_delivery_ready_obligation "$dir"; then
+    fail "could not build a delivery-ready public-followup obligation via tasks-axi"
+  fi
+
+  set +e
+  out=$(run_guard "$dir" "$fakebin"); status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "ordinary queued work settled with status $status: $out"
+  assert_contains "$out" 'ready=1 ids=q1 orphan=0' \
+    "continuation line did not report exactly the ordinary dispatchable item"
+  case "$out" in
+    *pf-1*) fail "continuation line named a never-dispatchable public-followup obligation: $out" ;;
+  esac
+  pass "continuation check: delivery-ready public-followup obligations stay out of the dispatch list"
+}
+
 test_accepted_ready_work_forces_continuation
 test_structured_waits_do_not_launch
 test_completed_work_settles
@@ -355,3 +422,4 @@ test_lock_refusal_stays_inert
 test_supervision_outranks_continuation_when_suppressed
 test_supervision_outranks_continuation_when_not_suppressed
 test_continuation_still_fires_once_supervision_resolves
+test_public_followups_are_not_listed_as_dispatchable
