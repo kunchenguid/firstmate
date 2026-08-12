@@ -614,10 +614,21 @@ if [ "$HAVE_RUN" = 1 ]; then
   # PARKED at a gate can be reported as paused, so a finished, failed, or running
   # crew can never be hidden behind a stale pause line.
   if [ "$RUN_STATE" = parked ]; then
-    if [ -n "$BACKEND_TARGET" ] && pane_readable "$BACKEND_TARGET" && crew_pane_is_busy "$BACKEND_TARGET"; then
-      RUN_DETAIL="$RUN_DETAIL${SEP}pane busy"
+    if [ -n "$BACKEND_TARGET" ] && pane_readable "$BACKEND_TARGET"; then
+      BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+      case "${BUSY_VERDICT%% *}" in
+        busy) RUN_DETAIL="$RUN_DETAIL${SEP}pane busy" ;;
+        idle)
+          if status_is_paused "$LOG_LINE"; then
+            emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}run parked at a gate (declared pause holds)"
+          else
+            RUN_DETAIL="$RUN_DETAIL${SEP}pane idle"
+          fi
+          ;;
+        *) RUN_DETAIL="$RUN_DETAIL${SEP}pane state unavailable ($BUSY_VERDICT)" ;;
+      esac
     elif status_is_paused "$LOG_LINE"; then
-      emit paused status-log "$(log_note_of "$LOG_LINE")${SEP}run parked at a gate (declared pause holds)"
+      emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}run parked at a gate (declared pause holds)"
     else
       RUN_DETAIL="$RUN_DETAIL${SEP}pane idle"
     fi
