@@ -11,7 +11,7 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the pas
 TMP_ROOT=$(fm_test_tmproot fm-backend-paseo-tests)
 
 make_paseo_fakebin() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
+  local fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/paseo" <<'SH'
 #!/usr/bin/env bash
@@ -145,6 +145,59 @@ run_paseo_parent_fallback_test() {
   fi
 }
 run_paseo_parent_fallback_test
+
+run_paseo_parent_model_tests() {
+  local model_out err_out
+  reset_responses
+  export PASEO_AGENT_ID="agent-model-test"
+
+  # Case A: inspect returns object model {"model":{"provider":"openai","name":"gpt-4"}}
+  printf '{"model":{"provider":"openai","name":"gpt-4"}}\n' > "$FM_PASEO_RESPONSES/1.out"
+  model_out=$(fm_backend_paseo_parent_model)
+  if [ "$model_out" = "openai/gpt-4" ]; then
+    pass "fm_backend_paseo_parent_model normalized object model to openai/gpt-4"
+  else
+    fail "unexpected normalized object model: '$model_out'"
+  fi
+
+  # Case B: inspect returns string model + separate provider {"model":"gpt-4","provider":"openai"}
+  reset_responses
+  printf '{"model":"gpt-4","provider":"openai"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  model_out=$(fm_backend_paseo_parent_model)
+  if [ "$model_out" = "openai/gpt-4" ]; then
+    pass "fm_backend_paseo_parent_model normalized scalar model with provider to openai/gpt-4"
+  else
+    fail "unexpected normalized scalar model: '$model_out'"
+  fi
+
+  # Case C: inspect returns unqualified string model without provider {"model":"gpt-4"}
+  reset_responses
+  printf '{"model":"gpt-4"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  if ! model_out=$(fm_backend_paseo_parent_model 2>/dev/null); then
+    pass "fm_backend_paseo_parent_model rejected unqualified model without provider"
+  else
+    fail "expected fm_backend_paseo_parent_model to reject unqualified model, got '$model_out'"
+  fi
+
+  # Case D: fm_backend_paseo_resolve_model with unqualified PASEO_MODEL_FALLBACK
+  reset_responses
+  echo "1" > "$FM_PASEO_RESPONSES/1.exit"
+  (
+    PASEO_MODEL_FALLBACK="gpt-4"
+    if err_out=$(fm_backend_paseo_resolve_model 2>&1); then
+      fail "expected fm_backend_paseo_resolve_model to reject unqualified PASEO_MODEL_FALLBACK, got '$err_out'"
+    else
+      if echo "$err_out" | grep -q "not provider-qualified"; then
+        pass "fm_backend_paseo_resolve_model rejected unqualified PASEO_MODEL_FALLBACK"
+      else
+        fail "unexpected error message for unqualified fallback: '$err_out'"
+      fi
+    fi
+  )
+
+  unset PASEO_AGENT_ID
+}
+run_paseo_parent_model_tests
 
 reset_responses
 
@@ -414,10 +467,16 @@ run_paseo_spawn_test() {
       fail "meta file missing after paseo spawn"
     fi
 
-    if grep -q "PASEO_CALL.*run.*--env.*GOTMPDIR=/tmp/fm-paseo-task-1/gotmp" "$FM_PASEO_LOG"; then
+    if grep -q "PASEO_CALL.*run.*GOTMPDIR=/tmp/fm-paseo-task-1/gotmp" "$FM_PASEO_LOG"; then
       pass "fm-spawn.sh passed bound GOTMPDIR env to paseo run"
     else
       fail "GOTMPDIR env missing from paseo run invocation log"
+    fi
+
+    if grep -q "PASEO_CALL.*run.*__MODELFLAG__" "$FM_PASEO_LOG" || grep -q "PASEO_CALL.*run.*__BRIEF__" "$FM_PASEO_LOG"; then
+      fail "fm-spawn.sh passed unresolved template tokens to paseo run"
+    else
+      pass "fm-spawn.sh resolved launch contract before calling paseo run"
     fi
 
     if grep -q "PASEO_CALL.*send" "$FM_PASEO_LOG"; then

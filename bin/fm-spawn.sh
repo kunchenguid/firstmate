@@ -2072,17 +2072,7 @@ EOF
     if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
       freshen_spawn_worktree_base "$WT" || exit 1
     fi
-    PASEO_LAUNCH_CONTRACT="$LAUNCH"
-    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$WT" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND" "${MODEL:-}" "${EFFORT:-}" "$PASEO_LAUNCH_CONTRACT") || exit 1
-    read -r PASEO_AGENT_ID WT_OUT <<EOF
-$PASEO_SPAWN_OUT
-EOF
-    if [ -z "$PASEO_AGENT_ID" ] || [ -z "$WT_OUT" ]; then
-      echo "error: paseo did not return an agent id / worktree for $W" >&2
-      exit 1
-    fi
-    WT="$WT_OUT"
-    T="$PASEO_AGENT_ID"
+    T="pending-paseo"
     WT_TARGET="$T"
     ;;
 esac
@@ -2589,6 +2579,70 @@ else
   fi
 fi
 
+sq_brief=$(shell_quote "$BRIEF")
+sq_turnend=$(shell_quote "$TURNEND")
+sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
+sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
+LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
+LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+case "$HARNESS" in
+  pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+esac
+# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
+# inherit firstmate's current environment, so a bare `claude` in the pane falls
+# back to the default ~/.claude store even when firstmate itself runs under a
+# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
+# Forward firstmate's own resolved store onto the claude launch so the crewmate
+# uses the same credential/config firstmate is authenticated with. Only when set;
+# an unset value is the single-store default and needs no prefix.
+if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$KIND" = secondmate ]; then
+  sq_home=$(shell_quote "$PROJ_ABS")
+  sq_primary_home=$(shell_quote "$FM_HOME")
+  case "$HARNESS" in
+    claude) supervision_model=autoarm ;;
+    *) supervision_model=persistent ;;
+  esac
+  # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
+  # literal (never the raw FM_TRACE_CONTEXT string) so a FM_TRACE_CONTEXT override
+  # on the primary reaches the secondmate's OWN workers, not just the copied
+  # config/trace-context file: otherwise off would not disable them and on would
+  # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
+  # Reuse the single frozen decision from the carrier resolution above so the
+  # injected carrier and this on/off snapshot are guaranteed to agree.
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+fi
+if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
+  LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+
+if [ "$BACKEND" = paseo ]; then
+  PASEO_LAUNCH_CONTRACT="$LAUNCH"
+  PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$WT" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND" "${MODEL:-}" "${EFFORT:-}" "$PASEO_LAUNCH_CONTRACT") || exit 1
+  read -r PASEO_AGENT_ID WT_OUT <<EOF
+$PASEO_SPAWN_OUT
+EOF
+  if [ -z "$PASEO_AGENT_ID" ] || [ -z "$WT_OUT" ]; then
+    echo "error: paseo did not return an agent id / worktree for $W" >&2
+    exit 1
+  fi
+  WT="$WT_OUT"
+  T="$PASEO_AGENT_ID"
+  WT_TARGET="$T"
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
@@ -2678,55 +2732,6 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-
-sq_brief=$(shell_quote "$BRIEF")
-sq_turnend=$(shell_quote "$TURNEND")
-sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
-sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-case "$HARNESS" in
-  pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
-fi
-if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  sq_primary_home=$(shell_quote "$FM_HOME")
-  case "$HARNESS" in
-    claude) supervision_model=autoarm ;;
-    *) supervision_model=persistent ;;
-  esac
-  # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
-  # literal (never the raw FM_TRACE_CONTEXT string) so a FM_TRACE_CONTEXT override
-  # on the primary reaches the secondmate's OWN workers, not just the copied
-  # config/trace-context file: otherwise off would not disable them and on would
-  # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
-  # Reuse the single frozen decision from the carrier resolution above so the
-  # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
-fi
-if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
-  LAUNCH="unset TRACEPARENT; $LAUNCH"
-fi
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" tmp status=0

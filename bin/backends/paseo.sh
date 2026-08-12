@@ -85,20 +85,28 @@ fm_backend_paseo_parent_id() {
 # fallback is intentionally opt-in: an unavailable identity must never turn
 # into an accidental Paseo default model.
 fm_backend_paseo_parent_model() {
-  local parent info model provider name
+  local parent info model
   parent=$(fm_backend_paseo_parent_id) || return 1
   info=$(paseo inspect "$parent" --json 2>/dev/null) || return 1
-  model=$(printf '%s' "$info" | jq -r '.model // .model.id // .model.name // empty' 2>/dev/null)
-  if [ -n "$model" ] && [ "$model" != null ]; then
-    printf '%s' "$model"
-    return 0
-  fi
-  provider=$(printf '%s' "$info" | jq -r '.provider // .model.provider // empty' 2>/dev/null)
-  name=$(printf '%s' "$info" | jq -r '.modelName // .model.name // empty' 2>/dev/null)
-  if [ -n "$provider" ] && [ -n "$name" ] && [ "$provider" != null ] && [ "$name" != null ]; then
-    printf '%s/%s' "$provider" "$name"
-    return 0
-  fi
+  model=$(printf '%s' "$info" | jq -r '
+    if (.model | type) == "string" then
+      if (.model | contains("/")) then
+        .model
+      else
+        ((.provider // .modelProvider // .model.provider // "") + "/" + .model)
+      end
+    elif (.model | type) == "object" then
+      ((.model.provider // .provider // .modelProvider // "") + "/" + (.model.name // .model.id // .modelName // ""))
+    else
+      ((.provider // .modelProvider // "") + "/" + (.modelName // .name // ""))
+    end
+  ' 2>/dev/null)
+  case "$model" in
+    ?*/?*)
+      printf '%s' "$model"
+      return 0
+      ;;
+  esac
   return 1
 }
 
@@ -112,6 +120,13 @@ fm_backend_paseo_resolve_model() {
     echo "error: could not resolve the Paseo parent model; inspect the parent or set documented PASEO_MODEL_FALLBACK" >&2
     return 1
   }
+  case "$model" in
+    ?*/?*) ;;
+    *)
+      echo "error: resolved Paseo model '$model' is not provider-qualified (expected 'provider/model')" >&2
+      return 1
+      ;;
+  esac
   printf '%s' "$model"
 }
 
