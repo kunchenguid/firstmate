@@ -22,6 +22,10 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
+#       A rolled-back lease also gives up the identity this run wrote onto it,
+#       through the same transaction retirement uses (bin/fm-home-return-lib.sh),
+#       so the pool never hands the next task a slot still carrying a seeded
+#       home's markers.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -49,6 +53,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-home-return-lib.sh
+. "$SCRIPT_DIR/fm-home-return-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -575,17 +581,40 @@ seed_rollback_target() {
   printf '%s\n' "$abs_target"
 }
 
+seed_pool_return() {  # <home> <label>
+  ( cd "$FM_ROOT" && treehouse return --force "$1" >/dev/null )
+}
+
+# Rollback returns the lease this run acquired, and it must not hand the slot
+# back still wearing the identity this run wrote onto it: the markers are
+# gitignored, so the pool's clean-and-reset keeps them and the next ship or
+# scout dispatched into that slot is refused by the spawn-time isolation guard.
+# The clearing transaction is bin/fm-home-return-lib.sh's, the same one
+# retirement uses, so neither path can return a marked checkout. A home whose
+# marker names another secondmate is not this run's to clear, so its lease is
+# still released - leaking a pool slot would be the worse failure - but its
+# identity is left exactly as the pool handed it over.
 seed_return_treehouse_home() {
-  local home=$1 abs_home
+  local home=$1 id=${2:-} abs_home rc=0
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
-    echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
-    return 0
-  }
+  fm_home_return_with_clean_identity "$abs_home" "treehouse-acquired home" "$id" seed_pool_return || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    "$FM_HOME_RETURN_REFUSED")
+      echo "warning: could not clear the seeded identity of $abs_home during seed rollback; returning its lease unchanged" >&2
+      seed_pool_return "$abs_home" "treehouse-acquired home" || {
+        echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
+      }
+      ;;
+    *)
+      echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
+      ;;
+  esac
+  return 0
 }
 
 seed_remove_created_home() {
@@ -637,7 +666,7 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME"
+      seed_return_treehouse_home "$SEED_HOME" "${SEED_ID:-}"
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -836,6 +865,7 @@ seed_home() {
 
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
+  SEED_ID=$id
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
   SEED_HOME_CREATED=0

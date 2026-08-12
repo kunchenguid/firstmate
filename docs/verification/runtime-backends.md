@@ -230,7 +230,9 @@ The pooled-home retirement boundary was validated on 2026-08-12 with treehouse v
 A leased worktree carrying `.fm-secondmate-home` plus `data/`, `state/`, `config/` and `projects/` was returned with `treehouse return --force`, and every one of those paths survived the return and was handed straight back on the next `treehouse get --lease`.
 `git status --porcelain` reported nothing at any point, because a firstmate checkout gitignores all of them, which is why no cleanliness gate anywhere in the fleet catches this residue.
 So a returned pool slot kept a retired secondmate's identity, and the next ship or scout dispatched into it was refused by the spawn-time isolation guard until someone deleted the file by hand.
-The residue is created by the home lifecycle, so it is cleared by the home lifecycle: `remove_firstmate_home` in `bin/fm-teardown.sh` stages those artifacts aside after every ownership and safety check has passed and while the lease is still held, returns the checkout, and deletes the staging only once the return succeeded.
+The residue is created by the home lifecycle, so it is cleared by the home lifecycle: `bin/fm-home-return-lib.sh` stages those artifacts aside after every ownership and safety check has passed and while the lease is still held, returns the checkout, and deletes the staging only once the return succeeded.
+Both lifecycle paths that hand a leased home back call it - retirement in `bin/fm-teardown.sh` and failed-seed rollback in `bin/fm-home-seed.sh` - so neither can return a marked slot.
+What counts as a safe home layout is not redefined for pooled homes: an operational directory symlinked to a target inside the home is supported exactly as the non-pooled path already allows, and the link is staged together with the target it owns.
 
 ```sh
 tests/fm-teardown-home-identity.test.sh
@@ -242,15 +244,21 @@ Bounded output from the lifecycle regression:
 ok - a seeded home in service keeps its identity and operational state
 ok - a successful retirement returns a reusable checkout with no home residue
 ok - a failed return restores the complete home and keeps its registration
-ok - a symlinked identity artifact refuses retirement instead of guessing
+ok - an operational path resolving outside the home refuses retirement
+ok - an operational directory symlinked inside the home retires with its target
 ok - an unrelated reusable checkout in the same pool is untouched
 ok - no identity is cleared before the ownership check passes
-ok - the next lease after a retirement is accepted and carries no home residue
+ok - the next lease after a retirement reuses the retired slot and carries no home residue
+ok - a rolled-back seed returns its lease with no seeded identity on the slot
+ok - a seed rollback whose return fails restores the identity it staged
 ```
 
-Each case leases from a throwaway repository whose `treehouse.toml` points `root` inside that case's own temporary tree, so no live fleet pool, home, or task id is touched, and the file reports itself as not run when the real treehouse binary is absent rather than passing vacuously.
+Each case leases from a throwaway repository whose `treehouse.toml` points `root` inside that case's own temporary tree and outside the repository, so no live fleet pool, home, or task id is touched, and the file reports itself as not run when the real treehouse binary is absent rather than passing vacuously.
 The clean-checkout case and the next-lease case were both run against the unretired teardown first, where the marker survived retirement and was handed to the next lease, which is the reported failure end to end.
-The failed-return case drives a treehouse whose `return` fails and asserts that the home gets its identity, its contents, and its registration back, matching the existing contract that a home whose lease cannot be released is preserved rather than half cleared.
+The next-lease case caps that pool at one tree and compares both the leased path and the lease id, so it proves the retired slot was released and reacquired rather than a fresh tree being handed out.
+The two seed cases drive the real seeder against the real pool and fail it at a command it reaches only after both markers are on disk, which is the sibling path that returns a leased home without retiring it; the successful one was run against the unfixed rollback first, where the marker survived and went back to the pool.
+The failed-return cases on both paths drive a treehouse whose `return` fails and assert that the home gets its identity, its contents, and its registration back, matching the existing contract that a home whose lease cannot be released is preserved rather than half cleared.
+The supported-layout case retires a pooled home whose `data/`, `config/` and `projects/` are symlinks to targets inside it and asserts both the links and those targets come off, so the pooled and non-pooled paths cannot disagree about which homes are retirable; the escaping-link case asserts the same contract's refusal.
 
 ## Composer classification matrix
 

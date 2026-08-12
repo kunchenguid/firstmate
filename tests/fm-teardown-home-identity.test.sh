@@ -21,11 +21,20 @@
 # is still registered.
 #
 # Isolation: every case builds a throwaway repository whose treehouse.toml sets
-# root = "./", so the pool and its lease state live under that repository's own
-# .treehouse/ and nothing resolves into the live fleet pool. Leases are taken
-# non-interactively with `treehouse get --lease`. The whole tree is removed on
-# exit. Without the real treehouse binary the pooled lifecycle cannot be driven
-# at all, so this file reports itself as not run rather than passing vacuously.
+# root to a directory inside that case's own temporary tree and outside the
+# repository, so the pool and its lease state live at <case>/pool/.treehouse/ and
+# nothing resolves into the live fleet pool. Leases are taken non-interactively
+# with `treehouse get --lease`. The whole tree is removed on exit. Without the
+# real treehouse binary the pooled lifecycle cannot be driven at all, so this
+# file reports itself as not run rather than passing vacuously.
+#
+# Both lifecycle paths that return a leased home are driven here, in both
+# directions: retirement through bin/fm-teardown.sh and failed-seed rollback
+# through bin/fm-home-seed.sh, each with a successful return and with a return
+# that fails. The supported layout is driven too - an operational directory
+# symlinked to a target inside the home retires normally, exactly as the
+# non-pooled path already allows - alongside the unsafe link that resolves out
+# of the home, which is refused.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -98,10 +107,12 @@ SH
   chmod +x "$fakebin/treehouse"
 }
 
-# make_pool_case <name>: a throwaway firstmate-shaped repository with its own
-# treehouse pool, plus the fleet home that runs the retirement.
+# make_pool_case <name> [<max-trees>]: a throwaway firstmate-shaped repository
+# with its own treehouse pool, plus the fleet home that runs the retirement.
+# <max-trees> caps the pool: a case that must prove a slot was REUSED sets it to
+# 1, so the pool has no fresh tree to hand out instead.
 make_pool_case() {
-  local name=$1
+  local name=$1 max_trees=${2:-4}
   CASE_DIR="$TMP_ROOT/$name"
   CASE_REPO="$CASE_DIR/repo"
   CASE_FLEET="$CASE_DIR/fleet"
@@ -121,7 +132,7 @@ make_pool_case() {
   # which is where a real fleet keeps it: a home under FM_ROOT is refused as a
   # removal target long before any of this. The config stays untracked so the
   # leased worktrees are clean checkouts of the repository alone.
-  printf 'max_trees = 4\nroot = "%s"\n' "$CASE_DIR/pool" > "$CASE_REPO/treehouse.toml"
+  printf 'max_trees = %s\nroot = "%s"\n' "$max_trees" "$CASE_DIR/pool" > "$CASE_REPO/treehouse.toml"
   git -C "$CASE_REPO" add -A
   git -C "$CASE_REPO" commit -qm "throwaway firstmate repo"
 
@@ -130,6 +141,75 @@ make_pool_case() {
 
 lease_pool_worktree() {  # <holder>
   ( cd "$CASE_REPO" && treehouse get --lease --lease-holder "$1" )
+}
+
+# The lease allocation as treehouse's own --json record, which is where the pool
+# publishes the identity of a lease (its path, id, and holder) for exactly this
+# kind of non-interactive use.
+lease_pool_worktree_json() {  # <holder>
+  ( cd "$CASE_REPO" && treehouse get --lease --lease-holder "$1" --json )
+}
+
+lease_json_field() {  # <json> <field>
+  command -v python3 >/dev/null 2>&1 || return 0
+  printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$2" 2>/dev/null || true
+}
+
+# The one worktree a max_trees=1 pool holds, whatever treehouse named it.
+sole_pool_worktree() {
+  local wt
+  for wt in "$CASE_DIR/pool/.treehouse"/*/*/repo; do
+    [ -d "$wt" ] || continue
+    printf '%s\n' "$wt"
+    return 0
+  done
+  return 1
+}
+
+# A date that fails once the leased home carries its identity marker, i.e. only
+# after bin/fm-home-seed.sh has written both markers and reached its registry
+# write. That is the reported sequence - a seed that fails after seeding the
+# identity - injected at a command the seeder shells out to rather than by
+# reaching into it.
+install_failing_date() {
+  local fakebin=$1 real
+  real=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+set -u
+for marker in "\${FM_FAKE_SEED_POOL:?}"/.treehouse/*/*/repo/$MARKER; do
+  if [ -f "\$marker" ]; then
+    echo "date: injected seed failure after the identity was written" >&2
+    exit 1
+  fi
+done
+exec $(printf '%q' "$real") "\$@"
+SH
+  chmod +x "$fakebin/date"
+}
+
+# A project-less seed of a pooled home. The charter brief is provided already
+# filled so the seeder takes its ordinary path instead of scaffolding one, which
+# is what puts the identity on the leased slot before the registry step fails.
+run_home_seed() {  # <id>
+  local id=$1
+  mkdir -p "$CASE_FLEET/data/$id"
+  cat > "$CASE_FLEET/data/$id/brief.md" <<EOF
+# Charter
+throwaway charter for $id
+
+# Routing scope
+throwaway scope
+
+# Project clones
+None. This is a project-less domain.
+EOF
+  FM_ROOT_OVERRIDE="$CASE_REPO" FM_HOME="$CASE_FLEET" \
+    FM_SECONDMATE_CHARTER="throwaway charter for $id" \
+    FM_SECONDMATE_SCOPE="throwaway scope" \
+    FM_FAKE_SEED_POOL="$CASE_DIR/pool" \
+    PATH="$CASE_FAKEBIN:$PATH" \
+    "$ROOT/bin/fm-home-seed.sh" "$id" - --no-projects 2>&1
 }
 
 # seed_pool_home <home> <id>: the identity and operational state bin/fm-home-seed.sh
@@ -274,32 +354,67 @@ test_failed_return_restores_the_home() {
   pass "a failed return restores the complete home and keeps its registration"
 }
 
-# 4. Malformed identity is a refusal, not a guess: an operational path that is a
-# symlink cannot be cleared without reaching outside the home, so retirement
-# stops and changes nothing.
-test_symlinked_identity_artifact_refuses() {
+# 4. Malformed identity is a refusal, not a guess: an operational path that
+# resolves OUT of the home cannot be cleared without reaching outside it, so
+# retirement stops and changes nothing. Pooling does not change that answer - it
+# is the same removable-home contract the plain-directory path applies.
+test_escaping_operational_symlink_refuses() {
   local id home out status
   id=identity-symlink-t4
   make_pool_case teardown-identity-symlink
   home=$(lease_pool_worktree "$id")
   seed_pool_home "$home" "$id"
   register_secondmate "$id" "$home"
-  mkdir -p "$home/real-state"
-  rm -rf "${home:?}/state"
-  ln -s "$home/real-state" "$home/state"
+  mkdir -p "$CASE_DIR/escaped-data"
+  printf 'not the home\n' > "$CASE_DIR/escaped-data/keep.md"
+  rm -rf "${home:?}/data"
+  ln -s "$CASE_DIR/escaped-data" "$home/data"
 
   out=$(run_teardown "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "teardown retired a home whose state directory is a symlink"$'\n'"--- output ---"$'\n'"$out"
-  assert_contains "$out" "symlinked identity artifact" \
-    "teardown did not explain the refusal of a symlinked identity artifact"
-  [ -L "$home/state" ] || fail "teardown removed the symlinked state directory it refused to clear"
-  [ -d "$home/real-state" ] || fail "teardown removed what the symlinked state directory pointed at"
+  [ "$status" -ne 0 ] || fail "teardown retired a home whose data directory resolves outside it"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "resolves outside the secondmate home" \
+    "teardown did not explain the refusal of an escaping operational path"
+  [ -L "$home/data" ] || fail "teardown removed the escaping data symlink it refused to clear"
+  assert_grep "not the home" "$CASE_DIR/escaped-data/keep.md" \
+    "teardown followed an escaping symlink out of the home"
   assert_grep "$id" "$home/$MARKER" "teardown cleared the marker of a home it refused to retire"
   assert_no_identity_staging "a refused retirement staged identity anyway"
   assert_present "$CASE_FLEET/state/$id.meta" \
     "teardown cleared the task metadata of a home it refused to retire"
-  pass "a symlinked identity artifact refuses retirement instead of guessing"
+  pass "an operational path resolving outside the home refuses retirement"
+}
+
+# 4b. The supported shape of the same layout: an operational directory symlinked
+# to a target INSIDE the home is what the non-pooled retirement path already
+# allows, so a pooled home wearing it retires normally. Both the link and the
+# target it owns come off, or the returned checkout would still carry the home's
+# operational state under another name.
+test_internal_operational_symlink_retires() {
+  local id home out status opdir
+  id=identity-inside-symlink-t4b
+  make_pool_case teardown-identity-inside-symlink
+  home=$(lease_pool_worktree "$id")
+  seed_pool_home "$home" "$id"
+  register_secondmate "$id" "$home"
+  for opdir in data config projects; do
+    rm -rf "${home:?}/$opdir"
+    mkdir -p "$home/internal-$opdir"
+    printf 'owned %s\n' "$opdir" > "$home/internal-$opdir/keep.md"
+    ln -s "$home/internal-$opdir" "$home/$opdir"
+  done
+
+  out=$(run_teardown "$id")
+  status=$?
+  expect_code 0 "$status" "retiring a home with supported internal operational symlinks should succeed"$'\n'"--- output ---"$'\n'"$out"
+  assert_home_identity_cleared "$home" "the returned checkout still wears the retired home's identity"
+  for opdir in data config projects; do
+    if [ -e "$home/internal-$opdir" ] || [ -L "$home/internal-$opdir" ]; then
+      fail "retirement left the target of the $opdir symlink on the returned checkout"
+    fi
+  done
+  assert_no_identity_staging "retirement left its staged identity behind"
+  pass "an operational directory symlinked inside the home retires with its target"
 }
 
 # 5. Resemblance is not ownership: another leased checkout in the same pool, with
@@ -353,31 +468,101 @@ test_ownership_check_precedes_cleanup() {
   pass "no identity is cleared before the ownership check passes"
 }
 
-# 7. The point of clearing identity at retirement: the slot goes back to the pool
-# reusable, and the next lease gets a checkout a task can actually run in.
+# 7. The point of clearing identity at retirement: the RETIRED slot goes back to
+# the pool reusable. The pool is capped at one tree here, so treehouse has no
+# fresh worktree to hand out instead, and the case compares both the leased path
+# and the lease identity: the same path under a NEW lease id is the slot being
+# released and reacquired, not a lease that was never returned.
 test_next_lease_is_reusable() {
-  local id home out status next
+  local id home out status next next_id first_id
   id=identity-release-t7
-  make_pool_case teardown-identity-release
-  home=$(lease_pool_worktree "$id")
+  make_pool_case teardown-identity-release 1
+  home=$(lease_pool_worktree_json "$id")
+  first_id=$(lease_json_field "$home" lease_id)
+  home=$(lease_json_field "$home" path)
+  [ -n "$home" ] || fail "the throwaway pool did not report a leased worktree path"
   seed_pool_home "$home" "$id"
   register_secondmate "$id" "$home"
 
   out=$(run_teardown "$id")
   status=$?
   expect_code 0 "$status" "retiring a leased secondmate home should succeed"$'\n'"--- output ---"$'\n'"$out"
-  next=$(lease_pool_worktree "next-holder")
+  next=$(lease_pool_worktree_json "next-holder")
+  next_id=$(lease_json_field "$next" lease_id)
+  next=$(lease_json_field "$next" path)
   [ -n "$next" ] || fail "the pool refused a lease after the retirement"
+  [ "$next" = "$home" ] || fail "the pool handed out $next instead of reusing the retired slot $home"
+  if [ -n "$first_id" ] && [ -n "$next_id" ]; then
+    [ "$next_id" != "$first_id" ] || fail "the pool reported the same lease id, so the retired lease was never released"
+  else
+    echo "# lease-id comparison not run: no JSON reader available, path reuse asserted alone"
+  fi
   assert_home_identity_cleared "$next" "the next lease was handed a checkout still wearing a retired identity"
-  pass "the next lease after a retirement is accepted and carries no home residue"
+  pass "the next lease after a retirement reuses the retired slot and carries no home residue"
+}
+
+# 8. Retirement is not the only path that hands a leased home back. A seed whose
+# registry step fails rolls back and returns the lease it just acquired, after
+# having already written that home's identity onto the slot, so it has to clear
+# the same artifacts through the same transaction. Driven end to end through the
+# real seeder against the real pool, with the failure injected at a command the
+# seeder runs only after both markers are on disk.
+test_seed_rollback_returns_a_clean_checkout() {
+  local id out status leased
+  id=identity-seedroll-t8
+  make_pool_case teardown-identity-seedroll 1
+  install_failing_date "$CASE_FAKEBIN"
+
+  out=$(run_home_seed "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the seed reported success although its registry step was made to fail"$'\n'"--- output ---"$'\n'"$out"
+  # Without this the case could pass on a seed that aborted before it ever wrote
+  # an identity, which would prove nothing about clearing one.
+  assert_contains "$out" "injected seed failure after the identity was written" \
+    "the seed failed before it wrote the identity, so the rollback had nothing to clear"$'\n'"--- output ---"$'\n'"$out"
+  leased=$(sole_pool_worktree)
+  [ -n "$leased" ] || fail "the throwaway pool holds no worktree after the rolled-back seed"
+  assert_home_identity_cleared "$leased" "the rolled-back seed returned a slot still wearing the identity it wrote"
+  assert_no_identity_staging "the rolled-back seed left its staged identity behind"
+  pass "a rolled-back seed returns its lease with no seeded identity on the slot"
+}
+
+# 9. The same transaction's failure direction on the seed path: when the return
+# itself fails, the identity this run wrote is put back rather than lost, and the
+# operator is told the lease may still be held.
+test_seed_rollback_failed_return_keeps_identity() {
+  local id out status leased
+  id=identity-seedroll-fail-t9
+  make_pool_case teardown-identity-seedroll-fail 1
+  install_failing_date "$CASE_FAKEBIN"
+  install_failing_return_treehouse "$CASE_FAKEBIN"
+
+  out=$(run_home_seed "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the seed reported success although its registry step was made to fail"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "injected seed failure after the identity was written" \
+    "the seed failed before it wrote the identity, so the rollback had nothing to restore"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "lease may still be held" \
+    "the rolled-back seed did not report that the lease may still be held"
+  leased=$(sole_pool_worktree)
+  [ -n "$leased" ] || fail "the throwaway pool holds no worktree after the rolled-back seed"
+  assert_grep "$id" "$leased/$MARKER" \
+    "a rolled-back seed whose return failed did not put its identity marker back"
+  assert_present "$leased/$PARENT_MARKER" \
+    "a rolled-back seed whose return failed did not put its parent binding back"
+  assert_no_identity_staging "a failed seed-rollback return left the staged identity outside the home"
+  pass "a seed rollback whose return fails restores the identity it staged"
 }
 
 test_seeded_identity_survives_ordinary_use
 test_retirement_returns_a_clean_checkout
 test_failed_return_restores_the_home
-test_symlinked_identity_artifact_refuses
+test_escaping_operational_symlink_refuses
+test_internal_operational_symlink_retires
 test_unrelated_checkout_is_untouched
 test_ownership_check_precedes_cleanup
 test_next_lease_is_reusable
+test_seed_rollback_returns_a_clean_checkout
+test_seed_rollback_failed_return_keeps_identity
 
 echo "# all fm-teardown-home-identity tests passed"
