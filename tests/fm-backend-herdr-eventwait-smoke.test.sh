@@ -85,7 +85,7 @@ SOCK=$(fm_backend_herdr_socket_path "$SESSION")
 # --- register the pane's agent idle, then drive idle->blocked ----------------
 # report-agent is herdr's documented primitive for a non-built-in process to
 # report its own agent state (docs/herdr-backend.md); routed through the lab
-# helper's guarded `run` so it carries the trailing --session.
+# helper's guarded `run` so it carries an explicit --session.
 fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-evwait-test --agent claude --state idle >/dev/null 2>&1 \
   || fail "could not register the pane's agent as idle"
 
