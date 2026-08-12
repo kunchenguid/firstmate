@@ -2419,7 +2419,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
-  rm -f "$STATE_REAL/$ID.omp-session-run" "$STATE_REAL/$ID.omp-session-stop"
+  rm -f "$STATE_REAL/$ID.omp-session-run" "$STATE_REAL/$ID.omp-session-stop" \
+    "$STATE_REAL/$ID.omp-session-evidence"
 fi
 if [ "$KIND" != secondmate ] || { [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; }; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -2586,11 +2587,18 @@ import { execFile } from "node:child_process";
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
+const SESSION_EVIDENCE = "$STATE_REAL/$ID.omp-session-evidence";
 let runToken = "";
 let idlePublishedToken = "";
 let runSequence = 0;
 let tempSequence = 0;
-const runRecords: Array<{ token: string; startedAt: number; active: boolean }> = [];
+const runRecords: Array<{
+  token: string;
+  startedAt: number;
+  lastEventAt: number;
+  stoppedAt: number;
+  active: boolean;
+}> = [];
 const atomicWrite = (path: string, value: string) => {
   const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
   try {
@@ -2600,6 +2608,30 @@ const atomicWrite = (path: string, value: string) => {
     try { unlinkSync(temp); } catch {}
     throw error;
   }
+};
+const writeRunEvidence = (record: {
+  token: string;
+  startedAt: number;
+  lastEventAt: number;
+  stoppedAt: number;
+}) => atomicWrite(
+  SESSION_EVIDENCE,
+  record.token + " " + String(record.startedAt) + " " +
+    String(record.lastEventAt) + " " + String(record.stoppedAt) + "\\n",
+);
+const parseRunEvidence = (line: string) => {
+  const fields = line.trim().split(/\s+/);
+  if (fields.length !== 4) return null;
+  const [token, startedAtText, lastEventAtText, stoppedAtText] = fields;
+  const startedAt = Number(startedAtText);
+  const lastEventAt = Number(lastEventAtText);
+  const stoppedAt = Number(stoppedAtText);
+  if (!token || !/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
+  if (!Number.isSafeInteger(startedAt) || startedAt <= 0) return null;
+  if (!Number.isSafeInteger(lastEventAt) || lastEventAt < startedAt) return null;
+  if (!Number.isSafeInteger(stoppedAt) || stoppedAt < 0) return null;
+  if (stoppedAt > 0 && stoppedAt < lastEventAt) return null;
+  return { token, startedAt, lastEventAt, stoppedAt };
 };
 const busyEvent = (token: string, state: string, event: string) =>
   new Promise<void>((resolve) => {
@@ -2626,10 +2658,12 @@ const rotateRun = () => {
   const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
   runToken = token;
   idlePublishedToken = "";
-  runRecords.push({ token, startedAt, active: true });
+  const record = { token, startedAt, lastEventAt: startedAt, stoppedAt: 0, active: true };
+  runRecords.push(record);
   if (runRecords.length > 64) runRecords.shift();
   atomicWrite(SESSION_RUN, token + "\\n");
   atomicWrite(SESSION_STOP, "pending\\n");
+  writeRunEvidence(record);
   return token;
 };
 const persistedRun = () => {
@@ -2641,9 +2675,9 @@ const persistedRun = () => {
     if (!busyFields.has("gen=$BUSY_GEN") || !busyFields.has("state=busy")) return null;
     const token = runLines[0];
     if (!/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
-    const match = token.match(/\.([0-9]+)\.[0-9]+$/);
-    const startedAt = match ? Number(match[1]) : 0;
-    return { token, startedAt: Number.isSafeInteger(startedAt) ? startedAt : 0 };
+    const evidence = parseRunEvidence(readFileSync(SESSION_EVIDENCE, "utf8"));
+    if (!evidence || evidence.token !== token || evidence.stoppedAt > 0) return null;
+    return evidence;
   } catch {
     return null;
   }
@@ -2654,7 +2688,7 @@ const adoptCurrentRun = (timestamp?: number) => {
   if (!persisted || (timestamp !== undefined && (persisted.startedAt <= 0 || timestamp < persisted.startedAt))) return "";
   runToken = persisted.token;
   idlePublishedToken = "";
-  runRecords.push({ token: persisted.token, startedAt: persisted.startedAt, active: true });
+  runRecords.push({ ...persisted, active: true });
   if (runRecords.length > 64) runRecords.shift();
   return runToken;
 };
@@ -2678,14 +2712,46 @@ const explicitRunToken = (event: any) => {
   }
   return "";
 };
-const timestampMatchesRun = (record: { startedAt: number }, timestamp: number | undefined) =>
-  timestamp === undefined || (record.startedAt > 0 && timestamp >= record.startedAt);
-const uniqueActiveCurrentRun = (timestamp?: number) => {
-  const current = adoptCurrentRun(timestamp);
-  if (!current) return null;
+const timestampMatchesRun = (record: {
+  startedAt: number;
+  lastEventAt: number;
+  stoppedAt: number;
+}, timestamp: number | undefined) => {
+  if (timestamp === undefined) return true;
+  const upperBound = record.stoppedAt > 0 ? record.stoppedAt : Date.now();
+  return record.startedAt > 0 && timestamp >= record.startedAt &&
+    timestamp >= record.lastEventAt && timestamp <= upperBound;
+};
+const rememberRunTimestamp = (record: {
+  token: string;
+  startedAt: number;
+  lastEventAt: number;
+  stoppedAt: number;
+}, timestamp: number | undefined) => {
+  if (timestamp === undefined) return true;
+  if (!timestampMatchesRun(record, timestamp)) return false;
+  record.lastEventAt = timestamp;
+  writeRunEvidence(record);
+  return true;
+};
+const advanceCurrentRun = () => {
   const active = runRecords.filter((record) => record.active);
-  if (active.length !== 1 || active[0].token !== current) return null;
-  return active[0];
+  if (!active.length) return null;
+  const current = active[active.length - 1];
+  if (runToken !== current.token) {
+    runToken = current.token;
+    idlePublishedToken = "";
+    atomicWrite(SESSION_RUN, current.token + "\\n");
+    writeRunEvidence(current);
+  }
+  return current;
+};
+const uniqueActiveCurrentRun = (timestamp?: number) => {
+  if (!adoptCurrentRun(timestamp)) return null;
+  const active = runRecords.filter((record) => record.active);
+  if (active.length !== 1) return null;
+  const current = advanceCurrentRun();
+  return current && timestampMatchesRun(current, timestamp) ? current : null;
 };
 const eventRunToken = (event: any) => {
   const timestamp = eventTimestamp(event);
@@ -2711,12 +2777,18 @@ const resolveRunToken = (event: any) => {
   if (token || eventTimestamp(event) !== undefined || explicitRunToken(event)) return token;
   return resolveUniqueActiveRunToken();
 };
-const settleRun = async (token: string, event: string) => {
+const settleRun = async (token: string, event: string, timestamp?: number) => {
   if (!token) return;
   const record = runRecords.find((candidate) => candidate.token === token);
   if (!record?.active) return;
+  if (!rememberRunTimestamp(record, timestamp)) return;
+  record.stoppedAt = timestamp === undefined ? Math.max(Date.now(), record.lastEventAt) : timestamp;
+  writeRunEvidence(record);
   record.active = false;
-  if (runRecords.some((candidate) => candidate.active)) return;
+  if (runRecords.some((candidate) => candidate.active)) {
+    advanceCurrentRun();
+    return;
+  }
   if (!runToken || idlePublishedToken === runToken) return;
   idlePublishedToken = runToken;
   await busyEvent(runToken, "idle", event);
@@ -2729,19 +2801,29 @@ export default function (omp: any) {
   });
   omp.on("session_stop", async (event: any) => {
     const token = resolveRunToken(event);
+    const timestamp = eventTimestamp(event);
     const record = runRecords.find((candidate) => candidate.token === token);
     if (!record?.active) return;
+    if (!timestampMatchesRun(record, timestamp)) return;
     if (token === runToken && !runRecords.some((candidate) => candidate.active && candidate.token !== token)) {
       atomicWrite(SESSION_STOP, token + "\\n");
     }
-    await settleRun(token, "session-stop");
+    await settleRun(token, "session-stop", timestamp);
   });
   omp.on("agent_end", (event: any) => {
-    if (event?.willContinue === true) return;
-    return settleRun(resolveRunToken(event), "agent-end");
+    const token = resolveRunToken(event);
+    const timestamp = eventTimestamp(event);
+    const record = runRecords.find((candidate) => candidate.token === token);
+    if (event?.willContinue === true) {
+      if (record?.active) rememberRunTimestamp(record, timestamp);
+      return;
+    }
+    return settleRun(token, "agent-end", timestamp);
   });
-  omp.on("session_shutdown", (event: any) =>
-    settleRun(resolveSessionShutdownToken(event), "session-shutdown"));
+  omp.on("session_shutdown", (event: any) => {
+    const timestamp = eventTimestamp(event);
+    return settleRun(resolveSessionShutdownToken(event), "session-shutdown", timestamp);
+  });
 }
 EOF
       ;;

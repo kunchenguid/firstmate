@@ -209,6 +209,12 @@ switch (process.env.MODE) {
       throw new Error("willContinue agent_end settled the active run");
     }
     break;
+  case "timestamped-agent-end-continuation":
+    await fire("agent_end", {
+      willContinue: true,
+      last_assistant_message: { timestamp: Number(process.env.EVENT_TIMESTAMP) },
+    });
+    break;
   case "session-stop": await fire("session_stop"); break;
   case "session-shutdown": await fire("session_shutdown"); break;
   case "timestamped-agent-end":
@@ -300,6 +306,24 @@ switch (process.env.MODE) {
     await fire("agent_end", { last_assistant_message: { timestamp: Date.now() } });
     if (busyState().includes("state=busy") || !markerPresent(turnEndPath)) {
       throw new Error("the remaining unique run did not settle after an explicit sibling token");
+    }
+    break;
+  }
+  case "explicit-current-then-tokenless-older": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    const turnEndPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".turn-ended";
+    await fire("agent_start");
+    const firstToken = readFileSync(runPath, "utf8").trim();
+    await fire("agent_start");
+    const secondToken = readFileSync(runPath, "utf8").trim();
+    removeMarker(turnEndPath);
+    await fire("session_stop", { run_token: secondToken });
+    if (!busyState().includes("state=busy") || readFileSync(runPath, "utf8").trim() !== firstToken) {
+      throw new Error("settling the current run did not advance to the surviving run");
+    }
+    await fire("agent_end");
+    if (busyState().includes("state=busy") || !markerPresent(turnEndPath)) {
+      throw new Error("a tokenless event did not settle the surviving run after pointer advance");
     }
     break;
   }
@@ -443,6 +467,24 @@ test_omp_extension_rejects_overlapping_timestamped_runs() {
   pass "omp terminal correlation rejects overlap before settling the remaining run"
 }
 
+test_omp_extension_recovers_stale_current_pointer() {
+  local rec id=busy-omp-pointer out state ext
+  rec=$(make_spawn_case omp-pointer omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" explicit-current-then-tokenless-older "$state" "$id") \
+    || fail "stale current-pointer drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] \
+    || fail "the surviving run must settle after the current run is explicitly settled, got '$out'"
+  [ -e "$state/$id.turn-ended" ] \
+    || fail "the surviving run must publish turn-end evidence after pointer advance"
+  pass "omp terminal correlation advances the current run after an explicit sibling settles"
+}
+
 test_omp_extension_reloads_and_reconciles_persisted_run() {
   local rec id out state ext run_token started_at record_before record_after
   local fresh_token fresh_started_at stale_token
@@ -502,6 +544,57 @@ test_omp_extension_reloads_and_reconciles_persisted_run() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "a fresh persisted run must settle after reload, got '$out'"
   pass "omp extension reconciles persisted runs across reloads with timestamp and ambiguity guards"
+}
+
+test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps() {
+  local rec id=busy-omp-timestamps out state ext run_token started_at
+  rec=$(make_spawn_case omp-timestamps omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "timestamp evidence agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  started_at=$(printf '%s\n' "$run_token" | awk -F. '{ print $(NF - 1) }')
+  rm -f "$state/$id.turn-ended"
+  out=$(EVENT_TIMESTAMP=$((started_at + 5)) \
+    drive_omp_ext "$ext" timestamped-agent-end-continuation "$state" "$id") \
+    || fail "timestamp evidence continuation drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a continuing timestamp must keep the persisted run busy, got '$out'"
+
+  out=$(EVENT_TIMESTAMP=$((started_at + 1)) \
+    drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
+    || fail "out-of-order timestamp drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] \
+    || fail "an out-of-order timestamp must not settle the persisted run, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "an out-of-order timestamp must not publish turn-end evidence"
+
+  out=$(EVENT_TIMESTAMP=$((started_at + 86400000)) \
+    drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
+    || fail "foreign future timestamp drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] \
+    || fail "a foreign future timestamp must not settle the persisted run, got '$out'"
+
+  out=$(EVENT_TIMESTAMP=$((started_at - 1)) \
+    drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
+    || fail "prior-run timestamp drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] \
+    || fail "a prior-run timestamp must not settle the persisted run, got '$out'"
+
+  out=$(EVENT_TIMESTAMP=$((started_at + 6)) \
+    drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
+    || fail "valid timestamp drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a valid persisted timestamp must settle the unique run, got '$out'"
+  [ -e "$state/$id.turn-ended" ] || fail "a valid persisted timestamp must publish turn-end evidence"
+  pass "omp reload correlation rejects foreign and out-of-order timestamps"
 }
 
 test_omp_agent_end_continuation_stays_busy() {
@@ -720,7 +813,9 @@ test_omp_extension_rejects_late_prior_run_stop
 test_omp_session_shutdown_requires_one_active_run
 test_omp_extension_persistent_run_correlation
 test_omp_extension_rejects_overlapping_timestamped_runs
+test_omp_extension_recovers_stale_current_pointer
 test_omp_extension_reloads_and_reconciles_persisted_run
+test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
