@@ -50,6 +50,7 @@ for value in ("PrivateNetwork=yes","RestrictAddressFamilies=AF_UNIX","IPAddressD
 run_at=guest.index("systemd-run --quiet")
 token_at=guest.index("metadata/identity/oauth2/token")
 assert token_at > run_at
+assert '/usr/bin/python3 "$EXECUTOR"' in guest
 assert "https://files.pythonhosted.org/packages/*.whl" in guest
 assert 'fetch_exact "$url"' in guest and '--location' not in guest[guest.index('while IFS=$\'\\t\' read -r url'):guest.index('done <"$BASE/wheels.tsv"')]
 assert "protectedParameters" not in host
@@ -102,7 +103,9 @@ r={"invocation":"azr-aaaaaaaaaaaa","attempt":1,"fence":"sha256:"+"1"*64,"reposit
 canon=lambda v:json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(); r["command_digest"]="sha256:"+hashlib.sha256(canon(command)).hexdigest(); r["request_digest"]="sha256:"+hashlib.sha256(canon(r)).hexdigest(); open(sys.argv[1],"wb").write(canon(r)+b"\n")
 PY
   printf '44444444-4444-4444-8444-444444444444\n' >"$tmp/boot"
-  env AZURE_CLIENT_SECRET=must-not-pass FM_AZURE_RUNNER_TEST_NO_DROP=1 FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" "$EXECUTOR" "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || fail "credential adversary escaped sanitized executor"
+  env AZURE_CLIENT_SECRET=must-not-pass FM_AZURE_RUNNER_TEST_NO_DROP=1 FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" \
+    /usr/bin/python3 "$EXECUTOR" "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || \
+    fail "credential adversary escaped sanitized executor"
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["exit_code"])' "$output/result.json")" = 0 ] || fail "credential/fd adversary observed inherited authority"
   pass "repository command receives no Azure/token/SAS/secret environment or inherited credential descriptor"
 }
@@ -138,7 +141,8 @@ PY
     --property=NoNewPrivileges=yes --property=PrivateNetwork=yes --property=RestrictAddressFamilies=AF_UNIX \
     --property=IPAddressDeny=any --property='CapabilityBoundingSet=CAP_SETUID CAP_SETGID' \
     --property=AmbientCapabilities= --property=RestrictSUIDSGID=yes \
-    env FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" "$EXECUTOR" "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || \
+    env FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" /usr/bin/python3 "$EXECUTOR" \
+    "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || \
     fail "actual Linux/systemd broker could not drop to an empty-cap networkless child"
   [ "$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["exit_code"])' "$output/result.json")" = 0 ] || fail "Linux child security proof failed"
   pass "actual Linux/systemd broker drops uid/gid/groups and repository child has empty capabilities/no-new-privileges/networkless"
