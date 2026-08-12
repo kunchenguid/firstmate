@@ -34,6 +34,7 @@ fm-bounded-io.test.sh	hermetic
 fm-brief.test.sh	hermetic
 fm-captain-item-check.test.sh	hermetic
 fm-cd-pretool-check.test.sh	hermetic
+fm-checkout-identity-cost.test.sh	hermetic
 fm-checkout-refresh.test.sh	hermetic
 fm-checkout-return-boundary.test.sh	hermetic
 fm-composer-ghost.test.sh	hermetic
