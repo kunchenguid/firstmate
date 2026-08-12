@@ -1385,6 +1385,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1410,6 +1411,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
   reap "$pid"
+  unset FM_FAKE_CREW_STATE
   pass "matching non-terminal stale suppressors repair missing or corrupt stale-since timers"
 }
 
@@ -1636,7 +1638,7 @@ test_procevent_surface_serializes_with_drain() {
   touch "$release"
   wait "$pid" || fail "the paused watcher did not finish surfacing"
   wait "$drain_pid" || fail "the concurrent drain failed after surfacing committed"
-  grep -F "procevent:drain-race:1" "$drain_out" >/dev/null \
+  grep -F "— check: procevent fixture drain-race 1" "$drain_out" >/dev/null \
     || fail "the serialized drain lost the process-event record"
   pass "queue revalidation, proactive output, and marker commit serialize with drain"
 }
