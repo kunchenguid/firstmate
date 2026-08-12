@@ -220,6 +220,129 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# Claude Code hosts an asyncRewake Stop hook inside the worker chain of its
+# shared per-user daemon (hook -> claude bg-spare -> claude bg-pty-host ->
+# claude daemon run), a branch that never contains the session pid state/.lock
+# records. Those three processes carry the same "claude" branding in argv[0] as
+# a session does, so counting them as this session's harness ancestry produces a
+# confident answer that provably excludes the session that fired the hook: the
+# recorded owner then reads as a competing live session and the home is refused
+# forever. Infrastructure is not a session, and the shared daemon in particular
+# outlives every session and is common to every home.
+test_daemon_worker_chain_is_never_session_ancestry() {
+  local dir fakebin pids
+  dir="$TMP_ROOT/daemon-worker-chain"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  300:comm=) printf '%s\n' '2.1.227' ;;
+  300:args=) printf '%s\n' 'claude bg-spare --bg-spare /tmp/cc/spare/x.claim.sock' ;;
+  300:ppid=) printf '%s\n' 310 ;;
+  310:comm=) printf '%s\n' '2.1.227' ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host --bg-pty-host /tmp/cc/pty/x.sock 200 50' ;;
+  310:ppid=) printf '%s\n' 320 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' '/home/u/.local/bin/claude daemon run --json-path /home/u/.claude/daemon.json' ;;
+  320:ppid=) printf '%s\n' 330 ;;
+  330:comm=) printf '%s\n' bash ;;
+  330:args=) printf '%s\n' 'bash -l' ;;
+  330:ppid=) printf '%s\n' 1 ;;
+  400:comm=) printf '%s\n' claude ;;
+  400:args=) printf '%s\n' 'claude --dangerously-skip-permissions' ;;
+  400:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 300 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '400\n' > "$dir/state/.lock"
+
+  pids=$(lib_eval "$fakebin" 'fm_harness_ancestry_pids' || true)
+  printf '%s' "$pids" | grep -qx 320 \
+    && fail "the shared claude daemon was reported as this session's harness ancestry: '$pids'"
+  printf '%s' "$pids" | grep -qxE '300|310' \
+    && fail "a claude background worker was reported as this session's harness ancestry: '$pids'"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 320' \
+    && fail "the shared claude daemon was accepted as a live firstmate session owner"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 300' \
+    && fail "a claude bg-spare worker was accepted as a live firstmate session owner"
+  # Divergence: a real session must still be identified from the same table, so
+  # the narrowing cannot pass by rejecting everything.
+  lib_eval "$fakebin" 'fm_harness_pid_alive 400' \
+    || fail "a genuine live session stopped being recognized as a live lock owner"
+  pass "session-lock: claude's shared daemon and its background workers are never a session"
+}
+
+# Excluding the infrastructure subcommands from harness identity makes them
+# TRANSPARENT to the ancestry climb, not a boundary: the walk climbs freely
+# until its FIRST match, so a hook firing in the shared-daemon chain would walk
+# straight past bg-spare, bg-pty-host and `claude daemon run` and latch onto
+# whatever harness happens to sit ABOVE the daemon, reporting an unrelated
+# session as its own ancestry. That is the same gap crossing
+# test_harness_beyond_a_gap_never_owns_the_lock forbids, reached from the other
+# direction, and it would let the hook arm a home it cannot prove it owns. The
+# fixture above places `bash -l` above the daemon, which cannot show this; here a
+# real session sits there, and it is also the session that holds the lock.
+test_harness_above_the_daemon_is_never_this_sessions_ancestry() {
+  local dir fakebin pids
+  dir="$TMP_ROOT/harness-above-daemon"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  300:comm=) printf '%s\n' '2.1.227' ;;
+  300:args=) printf '%s\n' 'claude bg-spare --bg-spare /tmp/cc/spare/x.claim.sock' ;;
+  300:ppid=) printf '%s\n' 310 ;;
+  310:comm=) printf '%s\n' '2.1.227' ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host --bg-pty-host /tmp/cc/pty/x.sock 200 50' ;;
+  310:ppid=) printf '%s\n' 320 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' '/home/u/.local/bin/claude daemon run --json-path /home/u/.claude/daemon.json' ;;
+  320:ppid=) printf '%s\n' 400 ;;
+  400:comm=) printf '%s\n' claude ;;
+  400:args=) printf '%s\n' 'claude --dangerously-skip-permissions' ;;
+  400:ppid=) printf '%s\n' 410 ;;
+  410:comm=) printf '%s\n' bash ;;
+  410:args=) printf '%s\n' 'bash -l' ;;
+  410:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 300 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '400\n' > "$dir/state/.lock"
+
+  pids=$(lib_eval "$fakebin" 'fm_harness_ancestry_pids' || true)
+  [ -z "$pids" ] \
+    || fail "the walk resolved an ancestry from inside the shared daemon chain: '$pids'"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    && fail "a firing inside the shared daemon chain claimed to own the session lock"
+  pass "session-lock: a harness above the shared daemon is never read as this session's ancestry"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -264,7 +387,7 @@ if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   done
 fi
 printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
-printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+printf '%s\n' "${FM_FIXTURE_LOCK_PID:-$$}" > "$FM_HOME/state/.lock"
 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" </dev/null > "$FM_HOME/state/hook.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
@@ -286,6 +409,9 @@ SH
 # launcher exits immediately, so the tree is reparented to init and the ancestry
 # walk terminates inside the fixture. Returns once the hook has recorded its exit
 # code.
+# FM_FIXTURE_LOCK_PID (optional, exported by the caller) makes the fixture record
+# a DIFFERENT process as the session-lock owner, which is what a home looks like
+# when the hook cannot see the session that owns it.
 run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
   local dir=$1 session_bin=$2 daemon_bin=${3:-} i
   if [ -n "$daemon_bin" ]; then
@@ -354,10 +480,112 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+UNRESOLVED_MARKER=state/.claude-autoarm-unresolved-ancestry
+
+# The end-to-end consequence of the same fault, from the auto-arm's side. A
+# firing that cannot resolve its own session ancestry knows nothing about who
+# owns the home; a firing that resolves its ancestry and finds a different live
+# harness knows a competitor owns it. Both stay inert, which is correct, but only
+# the first is a fault, and left silent it repeats on every Stop with no trace:
+# the epoch ledger never advances and the synchronous guard can only report that
+# nobody claimed. The unresolvable case must leave a durable record.
+test_e2e_unresolvable_ancestry_is_recorded_not_silent() {
+  local dir other
+  dir="$TMP_ROOT/e2e-unresolvable-ancestry"
+  make_primary_home "$dir"
+  "$NAMED_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  FM_FIXTURE_LOCK_PID="$other" run_fixture_tree "$dir" /bin/bash
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$(hook_rc "$dir")" "a firing that cannot resolve its own session must stay inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "an unresolvable firing armed the home anyway"
+  [ -s "$dir/$UNRESOLVED_MARKER" ] \
+    || fail "an unresolvable firing left no durable record, so it repeats silently forever"
+  grep -q "owner_pid=$other" "$dir/$UNRESOLVED_MARKER" \
+    || fail "the record did not name the recorded owner it deferred to: $(cat "$dir/$UNRESOLVED_MARKER")"
+  pass "session-lock e2e: a firing that cannot resolve its own session records the fault instead of failing silently"
+}
+
+test_e2e_competing_live_session_stays_silently_inert() {
+  local dir other
+  dir="$TMP_ROOT/e2e-competing-live-session"
+  make_primary_home "$dir"
+  # A fault record left by an EARLIER firing that genuinely could not resolve its
+  # own session. This firing can, so the condition the record describes no longer
+  # holds and the record must not survive to make the guard name an
+  # unresolvable-session cause for a correctly diagnosed competing-session
+  # refusal.
+  printf 'owner_pid=1 updated_at=1\n' > "$dir/$UNRESOLVED_MARKER"
+  "$NAMED_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  FM_FIXTURE_LOCK_PID="$other" run_fixture_tree "$dir" "$NAMED_CLAUDE"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$(hook_rc "$dir")" "a resolvable firing must stay inert while another live session owns the home"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a competing session's home was armed"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$other" ] \
+    || fail "a competing live session's lock was taken over"
+  [ ! -e "$dir/$UNRESOLVED_MARKER" ] \
+    || fail "a genuine competing-session refusal kept an unresolved-ancestry fault record: $(cat "$dir/$UNRESOLVED_MARKER")"
+  pass "session-lock e2e: a genuine competing live session is refused and clears any stale fault record"
+}
+
+# A home locked before harness identity was narrowed can hold the shared daemon's
+# pid, because the daemon was itself a valid contiguous match then. After the
+# narrowing that pid is no longer a live harness, and a lock whose owner is not
+# live is CLAIMABLE - so a different live session's Stop hook could take a home
+# another live session is working in. A fleet self-update lands on every home at
+# once, so this would open that window everywhere simultaneously. It must be
+# stale but NOT claimable: recognized as no valid session owner, and no grounds
+# to arm, left for the ordinary session-start acquisition to replace.
+test_e2e_pre_upgrade_daemon_pid_lock_is_stale_but_not_claimable() {
+  local dir infra recorded
+  dir="$TMP_ROOT/e2e-daemon-pid-lock"
+  make_primary_home "$dir"
+  bash -c 'exec -a "claude daemon run --json-path /tmp/fixture-daemon.json" sleep 60' &
+  infra=$!
+  FM_FIXTURE_LOCK_PID="$infra" run_fixture_tree "$dir" "$NAMED_CLAUDE"
+  kill "$infra" 2>/dev/null || true
+  wait "$infra" 2>/dev/null || true
+  expect_code 0 "$(hook_rc "$dir")" "a lock recording shared infrastructure must leave the hook inert"
+  [ ! -e "$dir/state/arm-ran" ] \
+    || fail "a Stop hook armed a home whose lock records Claude's shared infrastructure"
+  recorded=$(tr -d '[:space:]' < "$dir/state/.lock" 2>/dev/null || true)
+  [ "$recorded" = "$infra" ] \
+    || fail "a pre-upgrade infrastructure lock was claimed by a Stop hook: .lock now holds '$recorded'"
+  pass "session-lock e2e: a pre-upgrade lock recording shared infrastructure is stale but never claimable"
+}
+
+# The fault record exists so a permanently unclaimable home cannot look like
+# routine silence. The live-recorded-owner branch is not the only decline a
+# daemon-hosted firing reaches: a home whose lock is missing or malformed
+# declines just as permanently, with the same unknowable ownership and the same
+# frozen epoch ledger, so it must be diagnosed the same way.
+test_e2e_unresolvable_ancestry_is_recorded_on_a_malformed_lock() {
+  local dir
+  dir="$TMP_ROOT/e2e-unresolvable-malformed-lock"
+  make_primary_home "$dir"
+  FM_FIXTURE_LOCK_PID=not-a-pid run_fixture_tree "$dir" /bin/bash
+  expect_code 0 "$(hook_rc "$dir")" "a malformed lock must leave the hook inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a malformed lock was armed on anyway"
+  [ -s "$dir/$UNRESOLVED_MARKER" ] \
+    || fail "an unresolvable firing declining on a malformed lock left no durable record"
+  grep -q 'owner_pid=none' "$dir/$UNRESOLVED_MARKER" \
+    || fail "the record invented an owner it never deferred to: $(cat "$dir/$UNRESOLVED_MARKER")"
+  pass "session-lock e2e: an unresolvable firing records the fault on a malformed lock too"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_daemon_worker_chain_is_never_session_ancestry
+test_harness_above_the_daemon_is_never_this_sessions_ancestry
 test_e2e_version_named_session_claims_the_home
+test_e2e_unresolvable_ancestry_is_recorded_not_silent
+test_e2e_unresolvable_ancestry_is_recorded_on_a_malformed_lock
+test_e2e_competing_live_session_stays_silently_inert
+test_e2e_pre_upgrade_daemon_pid_lock_is_stale_but_not_claimable
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

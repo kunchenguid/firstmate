@@ -144,6 +144,85 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# Print the key of the decision a task is currently PARKED on, or return 1.
+# This is the THIRD declared-idle class, alongside the external-wait pause and
+# the verified captain-held transfer.
+#
+# A crew that appended needs-decision: or blocked: is parked awaiting FIRSTMATE's
+# own answer, which is the one wait firstmate is itself the blocker for. Its
+# endpoint is expected to sit still for as long as the answer takes, so the
+# stale path must not keep classifying that idle pane as a possible wedge.
+# Suppressing the WEDGE never suppresses the DECISION: the fleet-wide
+# scan_open_decisions fold surfaces the same open set on every wake drain, so an
+# open decision cannot rot quietly just because its pane went quiet.
+#
+# Two independent conditions, and they answer two different questions.
+#   1. The task's LAST status line must itself be the line that opened a
+#      decision. This BOUNDS the class to a crew that is actually parked: once
+#      the pane's status advances past that line the crew has demonstrably moved
+#      again, so the wedge timer and the terminal-stale backstop must both apply
+#      to it once more. Without that bound the suppression would last the whole
+#      lifetime of an unclosed key, with no upper bound and no dependence on the
+#      crew still being parked - a crew answered directly in its pane rather
+#      than through fm-send --resolve-key would be exempt from wedge detection
+#      forever, and a later done: would be absorbed by the backstop that exists
+#      precisely to catch an absorbed signal.
+#   2. The durable fold must still hold that exact key open. This is what makes
+#      the class a statement about the DECISION rather than about one line: a
+#      line whose key is already closed, or one rejected as a reserved-namespace
+#      transition, opens nothing and must not park anything.
+# Neither condition weakens the fold's own contract, which is unchanged and
+# still the only authority on what is open: an unrelated later working: or done:
+# line never CLOSES a decision, it only proves the crew is no longer parked on
+# it, and the fleet-wide fold keeps surfacing it until its key is resolved.
+#
+# The fold is reached through status_open_decisions_incremental, the bounded-cost
+# sibling shared with bin/fm-wake-drain.sh, because this predicate sits on the
+# watcher's per-poll path where the whole-file fold's cost would grow with total
+# log size. Both consumers fold through the same _fm_decision_fold_line rule and
+# an open decision is still dropped ONLY by an explicit resolved/captain-held
+# line for its exact key, never by cursor advancement, so neither consumer can
+# make the other miss a still-open decision. Condition 1 is a pure last-line read
+# and is checked FIRST, so the common quiet-crew poll never reaches the fold at
+# all.
+status_parked_decision_key() {  # <status-file>
+  local f=$1 last verb key open line
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 1
+  verb=$(status_line_verb "$last")
+  case "$verb" in
+    needs-decision|blocked) ;;
+    *) return 1 ;;
+  esac
+  key=$(_fm_decision_key "$last") || return 1
+  open=$(status_open_decisions_incremental "$f")
+  [ -n "$open" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "$key"$'\t'*) printf '%s' "$key"; return 0 ;;
+    esac
+  done <<EOF
+$open
+EOF
+  return 1
+}
+
+# 0 when <status-file>'s task is parked on a still-open keyed captain decision.
+status_has_open_captain_decision() {  # <status-file>
+  status_parked_decision_key "$1" >/dev/null
+}
+
+# 0 when a task's CURRENT declarations put its idle endpoint on the bounded
+# pause cadence instead of the wedge timer: a declared external-wait pause, a
+# verified captain-held transfer, or a still-open keyed captain decision.
+# This is the ONE predicate the stale path asks; the three classes differ only
+# in what declared them, never in how a quiet endpoint is then paced.
+status_idle_is_declared() {  # <status-file>
+  local f=$1
+  status_is_paused_or_captain_held "$(last_status_line "$f")" && return 0
+  status_has_open_captain_decision "$f"
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

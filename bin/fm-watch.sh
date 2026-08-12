@@ -19,9 +19,20 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          external-wait pause, a verified captain-held transfer,
+#                          or a still-open keyed captain decision is absorbed
+#                          instead with its own long re-surface cadence, never as
+#                          a wedge: an open decision parks the crew on firstmate's
+#                          own answer, so it outranks even an actively running
+#                          step, and the wake drain's fleet-wide open-decision
+#                          fold keeps that decision visible the whole time it is
+#                          being absorbed. That last class lasts only while the
+#                          crew is still PARKED on the decision: the moment its
+#                          status advances past the line that opened the key the
+#                          crew is wedge-detectable and backstop-visible again,
+#                          so an unclosed key can never exempt a live crew
+#                          indefinitely. Only when no absorb class at all
+#                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -162,6 +173,12 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent still surfaces once.
+# A crew holding an OPEN captain decision inverts only that liveness asymmetry:
+# a live parked agent is exactly what an unanswered decision looks like, so it
+# goes straight to the bounded cadence, and a crew that died holding the decision
+# is the anomaly that still gets its one surface first. That death check runs on
+# every cadence pass, not only the first, so dying LATER while parked surfaces
+# just as promptly as dying before the pane was ever absorbed.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -321,8 +338,9 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
-# Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
+# Absorb a stale pane under a declared external-wait pause (paused:), a
+# dead-agent captain-held transfer, or a still-open captain decision, and
+# re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
@@ -331,8 +349,17 @@ busy_turn_over_age() {  # <task>
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
+#
+# The recheck says what firstmate must actually DO, so it is worded per class.
+# A declared pause and a captain-held transfer are both waits on something
+# outside firstmate, and the recheck asks whether that wait still holds. An open
+# captain decision is the opposite: firstmate itself owes the answer, so the
+# recheck names the decision key rather than telling firstmate to confirm an
+# external wait it is not waiting on. Once that decision holder's own death has
+# been surfaced, answering the decision would restart nothing, so the recheck
+# names the exited agent instead of asking for an answer.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason dkey what
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -343,13 +370,23 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+  dkey=$(status_parked_decision_key "$statusf") || dkey=''
+  if [ -n "$dkey" ] && [ -e "$STATE/.decision-dead-$key" ]; then
+    what="open decision key=$dkey, holder's agent exited"
+    reason="stale: $win (open decision key=$dkey ${age}s, and this crew's agent has EXITED - answering the decision restarts nothing; inspect the window and respawn or retire the crew, then close the key with fm-send --resolve-key $dkey)"
+  elif [ -n "$dkey" ]; then
+    what="open decision key=$dkey"
+    reason="stale: $win (parked ${age}s on open decision key=$dkey - FIRSTMATE owes this crew the answer, rechecked on a long cadence not a wedge; answer it and close the key with fm-send --resolve-key $dkey)"
+  else
+    what="paused, awaiting external"
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+  fi
+  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  triage_log "absorbed stale ($what, age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -357,7 +394,8 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+    "$STATE/.decision-dead-$key"
 }
 
 clear_pause_tracking() {  # <window>
@@ -369,19 +407,58 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
-# Reconcile a declared pause or captain-held status with authoritative crew state.
+# Reconcile a declared pause, captain-held status, or still-open captain decision
+# with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
+# Prints one of: paused (bounded cadence), working (provably working, absorb),
+# dead (a decision-holder just found dead - surface it now, once), or none.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive statusf
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  last=$(last_status_line "$STATE/$task.status")
+  statusf="$STATE/$task.status"
+  last=$(last_status_line "$statusf")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
-    rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    if ! status_has_open_captain_decision "$statusf"; then
+      rm -f "$recheck_file"
+      crew_absorb_class "$task"
+      return
+    fi
+    # An open captain decision parks the crew on FIRSTMATE's own answer, so an
+    # idle endpoint is the expected state for as long as the answer takes -
+    # including while a validation run sits at its gate, which still reports a
+    # running step. Letting that run-step verdict win here is what turned a
+    # correctly parked crew into a repeating possible-wedge escalation.
+    # Liveness is rechecked on EVERY cadence pass, not only at first sight: a
+    # crew can open a decision while alive and die later, and gating the recheck
+    # on the pause marker would miss exactly that transition, because the marker
+    # is written the moment the pane goes on the bounded cadence. A crew that
+    # writes needs-decision: and then dies must never become invisible, so the
+    # death gets its own surface - once, tracked by .decision-dead-<key>, after
+    # which the pane returns to the bounded cadence rather than spamming.
+    # Only a CONFIDENT live verdict retires that marker. fm_backend_agent_alive
+    # answers unknown for every ambiguous, unreadable or unverified read as well
+    # as for a genuinely indeterminate one, so retiring on anything but alive
+    # would let a flapping backend re-surface the same death every cycle - the
+    # very every-cycle-ends symptom this class exists to remove.
+    if [ "$(window_kind "$win")" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" = dead ]; then
+        if [ ! -e "$STATE/.decision-dead-$key" ]; then
+          : > "$STATE/.decision-dead-$key"
+          rm -f "$recheck_file"
+          printf 'dead'
+          return
+        fi
+      elif [ "$agent_alive" = alive ]; then
+        rm -f "$STATE/.decision-dead-$key"
+      fi
+    fi
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
@@ -419,14 +496,13 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
-  if status_is_paused_or_captain_held "$last"; then
+  if status_idle_is_declared "$STATE/$task.status"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
@@ -1008,7 +1084,9 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    # Existence of the marker first: this clears pause tracking, so there is
+    # nothing to ask about a window that was never put on the pause cadence.
+    if [ -e "$STATE/.paused-$key" ] && ! status_idle_is_declared "$STATE/$task.status"; then
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
@@ -1048,7 +1126,7 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
-        elif stale_is_terminal "$w" "$STATE"; then
+        elif stale_is_terminal "$w" "$STATE" && ! status_idle_is_declared "$STATE/$task.status"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
           # new entry once firstmate hands it to a no-mistakes validation
@@ -1118,9 +1196,10 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+            if [ -e "$pf" ] || status_idle_is_declared "$STATE/$task.status"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                dead)    surface_nonterminal_stale "$w" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
@@ -1141,7 +1220,7 @@ EOF
         else
           rm -f "$ssf" "$ewf"
         fi
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_idle_is_declared "$STATE/$(window_to_task "$w" "$STATE").status"; }; then
           clear_pause_tracking "$w"
         fi
       fi
@@ -1154,9 +1233,10 @@ EOF
         rm -f "$ssf" "$ewf"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      if ! afk_present && [ "$busy_now" -ne 0 ] && status_idle_is_declared "$STATE/$task.status"; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
+          dead)   surface_nonterminal_stale "$w" "$h" ;;
           *)      clear_pause_tracking "$w" ;;
         esac
       else

@@ -71,6 +71,7 @@ CLAUDE_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+UNRESOLVED_RECORD="$STATE/.claude-autoarm-unresolved-ancestry"
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
@@ -152,8 +153,61 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 2
 fi
 
+# Succeed when a CURRENT unresolved-ancestry fault is recorded, printing the lock
+# condition the auto-arm actually observed followed by the owner pid it deferred
+# to. Only the live-owner condition carries a pid, because it is the only one
+# whose pid names a genuine competing session; the auto-arm deliberately withholds
+# the pid for a shared-infrastructure lock and for an unclaimable one, so this
+# banner can never present a shared-daemon pid or an already-dead pid as a live
+# competing session. A record from an older hook carries no condition field, so a
+# bare pid is read as the live-owner case it could only have described.
+# The record is durable and self-healing, so it can outlive the
+# condition it describes: it is only rewritten when the auto-arm fires again and
+# hits the same fault, and only removed when a later firing claims or refuses
+# with a resolvable ancestry. A record left by a transient or already-corrected
+# fault must not be used to explain a LATER, different failure, or to name an
+# owner pid that has since died. So the banner reads it under the same
+# same-Stop-event freshness bound the epoch ledger is read under above: the
+# auto-arm fires on the same Stop event as this guard, and the guard waits a
+# bounded window for it, so a fault genuinely current for this turn is recorded
+# well within EPOCH_FRESH. Its own recorded updated_at is used rather than the
+# file mtime, because that is the value the writer commits atomically.
+fresh_unresolved_ancestry_fault() {
+  local record owner condition at age
+  [ -s "$UNRESOLVED_RECORD" ] || return 1
+  record=$(cat "$UNRESOLVED_RECORD" 2>/dev/null) || return 1
+  record=${record%%$'\n'*}
+  case "$record" in owner_pid=*) ;; *) return 1 ;; esac
+  owner=${record#owner_pid=}
+  owner=${owner%% *}
+  case "$owner" in
+    none) owner='' ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  condition=''
+  case "$record" in
+    *condition=*)
+      condition=${record#*condition=}
+      condition=${condition%% *}
+      ;;
+  esac
+  case "$condition" in
+    live-owner|infra-lock|unclaimable) ;;
+    '') [ -n "$owner" ] && condition=live-owner || condition=unclaimable ;;
+    *) return 1 ;;
+  esac
+  [ "$condition" = live-owner ] || owner=''
+  case "$record" in *updated_at=*) ;; *) return 1 ;; esac
+  at=${record#*updated_at=}
+  at=${at%% *}
+  case "$at" in ''|*[!0-9]*) return 1 ;; esac
+  age=$(( $(date +%s) - at ))
+  [ "$age" -ge 0 ] && [ "$age" -lt "$EPOCH_FRESH" ] || return 1
+  printf '%s %s' "$condition" "$owner"
+}
+
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule unresolved_fault unresolved_condition unresolved_owner
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -173,6 +227,22 @@ block_stop() {
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      if unresolved_fault=$(fresh_unresolved_ancestry_fault); then
+        unresolved_condition=${unresolved_fault%% *}
+        unresolved_owner=${unresolved_fault#* }
+        case "$unresolved_condition" in
+          live-owner)
+            printf '●  Cause: the automatic arm cannot resolve its own session, so it reads this home as owned by another live session (recorded owner pid %s) and refuses on every turn. It will not recover on its own.\n' \
+              "$unresolved_owner"
+            ;;
+          infra-lock)
+            printf '●  Cause: the automatic arm cannot resolve its own session, and this home lock still records Claude Code shared infrastructure rather than any session, so it refuses on every turn. A session start must rewrite the lock; it will not recover on its own.\n'
+            ;;
+          *)
+            printf '●  Cause: the automatic arm cannot resolve its own session, so it cannot prove it owns this home and refuses on every turn. It will not recover on its own.\n'
+            ;;
+        esac
+      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -188,7 +258,22 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-budget_account_current_epoch() {
+# Re-accounting the SAME epoch must not consume the bounded budget twice, and
+# there are exactly two reasons it legitimately would not:
+#   - the auto-arm demonstrably owns recovery for that epoch, which is what every
+#     autoarm_owns_recovery call site has just established, so the one Stop event
+#     keeps yielding one recovery turn across as many guard runs as it takes;
+#   - this same guard run already accounted it, which is what the failed and
+#     failed-suppressed paths do before falling through here.
+# Neither holds for an epoch that has simply STOPPED ADVANCING because the
+# auto-arm is not claiming at all. Suppressing on that pins the count below its
+# threshold forever, so the guard never reaches its designed attended fail-open
+# and instead re-blocks until Claude Code's own consecutive-block override ends
+# the episode - the backstop going quiet exactly while the failure persists.
+# <epoch-owned> defaults to 1; only the unowned fall-through call passes 0.
+EPOCH_ACCOUNTED=0
+budget_account_current_epoch() {  # [<epoch-owned>]
+  local epoch_owned=${1:-1}
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
@@ -204,7 +289,8 @@ budget_account_current_epoch() {
     esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
-      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
+      if { [ "$epoch_owned" -eq 1 ] || [ "$EPOCH_ACCOUNTED" -eq 1 ]; } \
+        && [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
         :
       else
         COUNT=$((COUNT + 1))
@@ -233,6 +319,7 @@ budget_account_current_epoch() {
   fi
   rm -f "$tmp" 2>/dev/null || true
   BUDGET_INITIALIZED_FAILURE=$initialized
+  EPOCH_ACCOUNTED=1
   fm_lock_release "$BUDGET_LOCK"
   return 0
 }
@@ -357,8 +444,9 @@ if autoarm_owns_recovery; then
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
-# budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+# budget before considering the verified one-time attended fail-open. The epoch
+# is explicitly NOT owned here, so a frozen ledger cannot pin the progression.
+budget_account_current_epoch 0 || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then

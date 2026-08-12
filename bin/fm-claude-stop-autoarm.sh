@@ -15,6 +15,17 @@
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
 #     ownership. A live owner, missing lock, malformed lock, or unresolved
 #     ancestry remains inert, so a competing session never arms or rewakes.
+#     A recorded owner that is one of Claude Code's shared infrastructure
+#     processes is stale but NOT claimable: it names no session, and claiming on
+#     it during the identity-narrowing migration window would let one session
+#     take a home another live session is using.
+#     ANY decline reached with NO resolvable ancestry of this hook's own is a
+#     fault rather than a decision, because ownership is then unknowable rather
+#     than disproved; it is recorded in
+#     state/.claude-autoarm-unresolved-ancestry and cleared on the next claim or
+#     on any reasoned decline, so a permanently unclaimable home cannot look like
+#     routine silence. The record is written only once the AFK and need gates
+#     have passed, so an idle or away home stays byte-for-byte inert.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -51,7 +62,7 @@
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
-# the model.
+# the model, recording the unresolvable-ancestry case so that guard can name it.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,19 +97,87 @@ cat >/dev/null 2>&1 || true
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# Durable record of the one inert case that is NOT a decision this hook made
+# about a competing session: a firing whose own session ancestry cannot be
+# resolved at all, so ownership is unknowable rather than disproved. Written
+# only in that case and cleared on the next successful claim or on any decline
+# this firing could actually reason about, so it is self-healing and idempotent.
+# bin/fm-turnend-guard.sh reads it to name the real condition instead of
+# reporting a generic "the auto-arm did not claim".
+# The record carries WHICH lock condition this firing declined on, so the guard
+# can say something true rather than assuming the worst case:
+#   live-owner    a recorded owner that this firing verified is a live harness,
+#                 and the ONLY condition that supplies a pid, because it is the
+#                 only one where that pid names a genuine competing session.
+#   infra-lock    a recorded owner that resolves to Claude Code's shared
+#                 infrastructure, which names no session at all.
+#   unclaimable   no usable recorded owner, or a recovery that did not establish
+#                 ownership; any pid involved is one this firing already proved
+#                 is not a live harness.
+# Reporting a shared-daemon pid or an already-dead pid as a live competing
+# session would be a confident misdiagnosis, and the freshness bound cannot catch
+# it because that bounds only the record's own age, never the pid's liveness.
+UNRESOLVED="$STATE/.claude-autoarm-unresolved-ancestry"
+record_unresolved_ancestry() {  # <condition> [<live-owner-pid>]
+  local tmp="$UNRESOLVED.tmp.$$"
+  printf 'owner_pid=%s condition=%s updated_at=%s\n' "${2:-none}" "$1" "$(date +%s)" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$UNRESOLVED" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+# The ONE exit taken by every identity decline, so the diagnosis cannot drift
+# between them. What distinguishes a decision from a fault is not WHICH decline
+# was reached but whether this firing could see its own session at all: with a
+# resolvable ancestry every decline is a reasoned refusal and any older record is
+# stale, while with no resolvable ancestry the firing knows nothing about who
+# owns this home, cannot ever claim it, and would otherwise repeat that silence
+# on every Stop forever. That is true of a missing or malformed lock and of a
+# failed or unverifiable recovery exactly as it is of a live recorded owner, so
+# all of them record it.
+# The AFK and need gates are applied FIRST so an idle or away home stays
+# byte-for-byte inert: nothing here is worth diagnosing while no supervision is
+# owed, and the guard only ever reads this record on a turn it is blocking.
+decline() {  # <condition> [<live-owner-pid>]
+  [ -e "$STATE/.afk" ] && exit 0
+  fm_supervision_needed "$STATE" "$GRACE" || exit 0
+  if fm_harness_ancestry_pids >/dev/null 2>&1; then
+    rm -f "$UNRESOLVED" 2>/dev/null || true
+  else
+    record_unresolved_ancestry "$@"
+  fi
+  exit 0
+}
+
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
 # Use the shared liveness predicate to recognize only that stale-owner case.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
+#
+# A LIVE recorded owner outside this ancestry has two very different causes that
+# must not be collapsed into the same silent exit. Either another firstmate
+# session genuinely owns this home, which is a correct and permanent refusal, or
+# this firing simply cannot see its own session: Claude Code hosts an asyncRewake
+# hook inside the shared worker chain of its per-user daemon, whose ancestry
+# never contains the session pid that state/.lock records. That second case is
+# unknowable ownership, not a competing session, and left silent it pins the home
+# forever - every later firing repeats the same refusal, the epoch ledger never
+# advances, and the synchronous guard can only report that nobody claimed.
+#
+# A recorded owner that resolves to Claude Code's shared infrastructure is a
+# third case and the only one that is neither: such a pid can only have been
+# written by a pre-narrowing firstmate, it names no session, and it must not be
+# treated as a dead owner either, because a dead owner is claimable and claiming
+# on it would let one session take a home another live session is using.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
+    ''|*[!0-9]*) decline unclaimable ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_harness_pid_is_infra "$LOCK_PID" && decline infra-lock
+  fm_harness_pid_alive "$LOCK_PID" && decline live-owner "$LOCK_PID"
   RECOVER_SESSION_LOCK=1
 fi
 
@@ -116,8 +195,8 @@ need_supervision || exit 0
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || decline unclaimable
+  fm_session_lock_owned_by_self "$STATE" || decline unclaimable
 fi
 
 # --- single-flight owner claim ------------------------------------------------
@@ -145,6 +224,7 @@ write_epoch() {  # <outcome>
   rm -f "$tmp" 2>/dev/null || true
 }
 
+rm -f "$UNRESOLVED" 2>/dev/null || true
 write_epoch arming
 
 # X mode cadence: source the generated config so an X instance polls at its

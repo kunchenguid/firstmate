@@ -37,6 +37,65 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Claude Code subcommands that are shared INFRASTRUCTURE, never a firstmate
+# session: the per-user daemon and the background worker processes it hosts.
+# They carry the same "claude" branding in argv[0] and in their install path, so
+# the harness-identity evidence below matches them exactly like a session - but
+# the daemon is one long-lived process shared by every session and every home,
+# and a bg-pty-host/bg-spare worker is a transient host for background work.
+# Treating either as a session owner is what lets one of them pin a home's
+# session lock forever, and lets an async hook hosted inside that worker chain
+# report a "harness ancestry" that provably excludes the session that fired it.
+FM_HARNESS_INFRA_SUBCOMMANDS='daemon bg-pty-host bg-spare'
+
+# The subset of those that is also a hard BOUNDARY for the ancestry walk below,
+# rather than merely transparent to it. A session-hosted hook chain legitimately
+# passes THROUGH a bg-pty-host or bg-spare worker on its way up to its own
+# session, so those must stay transparent or a real session would stop being
+# found. The per-user daemon is different: it is one process shared by every
+# session and every home, and nothing above it is below any session. Reaching it
+# without having already matched a session therefore proves the caller is in the
+# shared infrastructure chain, so the walk must stop there UNRESOLVED instead of
+# climbing on and latching onto whatever harness happens to sit above the daemon
+# and reporting it as this session's own ancestry - the exact gap-crossing the
+# walk otherwise forbids, and the one that would let a hook arm a home it cannot
+# prove it owns.
+FM_HARNESS_INFRA_BOUNDARY_SUBCOMMANDS='daemon'
+
+# Print the FIRST argument after argv[0] in full argument string $1, or return 1
+# when there is none. Anchoring on that one token is what keeps the infrastructure
+# tests below safe: a real session can never be misread as infrastructure because
+# its prompt text happens to contain one of these words - a crewmate launch brief
+# is passed as argv.
+fm_harness_subcommand() {  # <args>
+  local args=$1 rest
+  rest=${args#* }
+  [ "$rest" != "$args" ] || return 1
+  printf '%s' "${rest%% *}"
+}
+
+# True when full argument string $1 is one of those shared infrastructure
+# processes.
+fm_harness_is_infra() {  # <args>
+  local sub name
+  sub=$(fm_harness_subcommand "$1") || return 1
+  for name in $FM_HARNESS_INFRA_SUBCOMMANDS; do
+    [ "$sub" = "$name" ] && return 0
+  done
+  return 1
+}
+
+# True when full argument string $1 is an infrastructure process the pre-match
+# ancestry climb must terminate on rather than pass through.
+fm_harness_is_infra_boundary() {  # <args>
+  local sub name
+  sub=$(fm_harness_subcommand "$1") || return 1
+  for name in $FM_HARNESS_INFRA_BOUNDARY_SUBCOMMANDS; do
+    [ "$sub" = "$name" ] && return 0
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -52,6 +111,7 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  fm_harness_is_infra "$args" && return 1
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -83,6 +143,15 @@ fm_harness_process_matches() {  # <comm> <args>
 # into an unrelated harness further up the real process tree - for example the
 # live session that launched a test as its own subprocess.
 #
+# The pre-match climb has one hard stop of its own: the shared per-user daemon.
+# Excluding infrastructure from fm_harness_process_matches makes it transparent
+# to that climb rather than a boundary, so without this the walk would pass
+# straight through a bg-spare/bg-pty-host/daemon chain and report whatever sits
+# ABOVE the daemon as this session's ancestry - the same gap crossing, reached
+# from a different direction. Reaching the daemon before any session has matched
+# proves the caller is in the shared infrastructure chain, where this session is
+# simply not visible, so the walk terminates UNRESOLVED.
+#
 # For every harness except Claude the innermost match is the session, which is
 # where e.g. Pi's shared signed-wrapper ancestry actually holds the lock: a
 # "pi-signed" launcher can be the direct parent of the inner "pi" engine pid that
@@ -103,6 +172,8 @@ fm_harness_ancestry_pids() {
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
     elif [ "$extending" -eq 1 ]; then
+      break
+    elif fm_harness_is_infra_boundary "$args"; then
       break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -127,6 +198,37 @@ $pids
 EOF
   [ -n "$outermost" ] || return 1
   printf '%s\n' "$outermost"
+}
+
+# True when $1 is a live process that is one of Claude Code's shared
+# infrastructure processes rather than a session.
+#
+# This exists for the MIGRATION window, and a session lock is the one place that
+# window must not be waved through. Before infrastructure was excluded from
+# harness identity, the daemon was itself a valid contiguous match, so
+# fm_harness_ancestry_pid could return the shared daemon's pid and a home's
+# state/.lock could legitimately hold it. After the exclusion that recorded pid
+# fails fm_harness_pid_alive, which alone would make the lock read as a dead
+# owner - and a dead owner is claimable. A fleet self-update lands on every home
+# at once, so that would open the same window everywhere simultaneously, and the
+# failure it permits is the exact one this lock exists to prevent: two live
+# sessions both believing they own one home. So an infrastructure pid is
+# recognized as STALE BUT NOT CLAIMABLE - not a valid session owner, and not
+# evidence any hook may arm on. The record is left for the ordinary session-start
+# lock acquisition to replace with a real session pid.
+fm_harness_pid_is_infra() {  # <pid>
+  local pid=$1 comm args base argv0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_harness_is_infra "$args" || return 1
+  base=$(basename -- "$comm")
+  printf '%s' "$base" | grep -qE "$FM_HARNESS_RE" && return 0
+  argv0=${args%% *}
+  fm_harness_path_name "$comm" >/dev/null && return 0
+  fm_harness_path_name "$argv0" >/dev/null && return 0
+  return 1
 }
 
 # True if $1 is a live process that looks like a verified harness.

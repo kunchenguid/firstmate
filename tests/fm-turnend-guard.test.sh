@@ -1581,6 +1581,109 @@ test_hook_claude_mode_waits_for_late_claim() {
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
 }
 
+# When the auto-arm never claims, its epoch ledger stops advancing. The block
+# budget is keyed on epoch change, so a frozen ledger used to pin the count below
+# its threshold: the guard re-blocked on every turn, never reached its designed
+# attended fail-open, and the episode ended only when Claude Code's own
+# consecutive-block override stepped in - the backstop going quiet exactly while
+# the failure persisted. Consecutive unclaimed blocks must advance the budget.
+test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget() {
+  local dir out status i count seen_terminal=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch")
+  : > "$dir/state/task1.meta"
+  # A completed rewake epoch that then stopped advancing, exactly as an auto-arm
+  # that can no longer claim the home leaves it.
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=2246 owner_pid=999 outcome=failed updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null)
+    case "$out" in *"SUPERVISION IS GENUINELY DOWN"*) seen_terminal=1 ;; esac
+    [ "$status" = 0 ] || [ "$status" = 2 ]       || fail "unexpected guard status $status on unclaimed block $i"
+    [ "$i" -lt 2 ] || [ -n "$count" ] || fail "the block budget vanished on unclaimed block $i"
+    if [ "$i" -ge 2 ] && [ "$count" = 1 ] && [ "$seen_terminal" -eq 0 ] && [ "$i" -ge 5 ]; then
+      fail "the block budget stayed frozen at 1 across $i unclaimed blocks on a frozen epoch"
+    fi
+    [ "$seen_terminal" -eq 1 ] && break
+    i=$((i + 1))
+  done
+  [ "$seen_terminal" -eq 1 ]     || fail "a frozen epoch never reached the attended fail-open: budget stuck at count=$count after 5 unclaimed blocks"
+  pass "fm-turnend-guard --claude: a frozen auto-arm epoch still advances the bounded budget to its attended fail-open"
+}
+
+# The unresolved-ancestry record is durable and self-healing, so it can outlive
+# the condition it describes. A record left by a fault that has since been
+# corrected must not be used to explain a LATER, different failure, nor to name
+# an owner pid that has long since died - that turns a correct diagnosis into a
+# confident misdiagnosis. It is read only while its own recorded updated_at is
+# within the same freshness bound the epoch ledger is read under.
+test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record() {
+  local dir out status record
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unresolved-freshness")
+  : > "$dir/state/task1.meta"
+  record="$dir/state/.claude-autoarm-unresolved-ancestry"
+
+  printf 'owner_pid=424242 condition=live-owner updated_at=1\n' > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a stale fault record must not change whether the guard blocks"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "the generic unclaimed line must still be reported"
+  case "$out" in
+    *"cannot resolve its own session"*)
+      fail "a long-stale fault record was used to diagnose an unrelated failure: $out" ;;
+  esac
+  case "$out" in
+    *424242*) fail "the banner named an owner pid from a long-stale fault record: $out" ;;
+  esac
+
+  # Divergence: the same record written for THIS Stop event is exactly what the
+  # banner exists to name, so the freshness bound must not silence it.
+  printf 'owner_pid=424242 condition=live-owner updated_at=%s\n' "$(date +%s)" > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a current fault record must not change whether the guard blocks"
+  assert_contains "$out" "cannot resolve its own session" "a current fault must be named as the cause"
+  assert_contains "$out" "424242" "a current fault must name the recorded owner pid"
+  pass "fm-turnend-guard --claude: the unresolvable-session cause is named only while its record is current"
+}
+
+# The record carries which lock condition the auto-arm actually declined on, and
+# only a verified live competing owner may be rendered as one. A shared-daemon
+# pid or an already-dead pid presented as "owned by another live session" is a
+# confident misdiagnosis, and the freshness bound cannot catch it because that
+# bounds the record's own age, never the pid's liveness.
+test_hook_claude_mode_banner_never_calls_a_non_live_pid_a_live_session() {
+  local dir out status record condition
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unresolved-condition")
+  : > "$dir/state/task1.meta"
+  record="$dir/state/.claude-autoarm-unresolved-ancestry"
+
+  for condition in infra-lock unclaimable; do
+    printf 'owner_pid=none condition=%s updated_at=%s\n' "$condition" "$(date +%s)" > "$record"
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "a recorded $condition fault must not change whether the guard blocks"
+    assert_contains "$out" "cannot resolve its own session" "a current $condition fault must still be named as the cause"
+    case "$out" in
+      *"owned by another live session"*)
+        fail "a $condition fault was reported as a competing live session: $out" ;;
+    esac
+  done
+
+  # An infrastructure lock names the one repair that actually clears it.
+  printf 'owner_pid=none condition=infra-lock updated_at=%s\n' "$(date +%s)" > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+  assert_contains "$out" "shared infrastructure" "an infrastructure lock must be named as the lock condition"
+
+  # A record written before the condition field existed could only ever have
+  # described the live-owner case, so a bare pid still reads that way.
+  printf 'owner_pid=424242 updated_at=%s\n' "$(date +%s)" > "$record"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+  assert_contains "$out" "owned by another live session" "a legacy bare-pid record lost its live-owner meaning"
+  assert_contains "$out" "424242" "a legacy bare-pid record lost the owner pid"
+  pass "fm-turnend-guard --claude: only a verified live competing owner is reported as one"
+}
+
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
   local dir pid out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
@@ -1661,4 +1764,7 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget
+test_hook_claude_mode_unresolved_ancestry_banner_needs_a_current_record
+test_hook_claude_mode_banner_never_calls_a_non_live_pid_a_live_session
 test_hook_claude_mode_secondmate_reblocks_like_primary
