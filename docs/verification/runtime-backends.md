@@ -144,6 +144,21 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh` and `tests/fm-tmux-submit-busy.test.sh`.
 
+### Pi Calm presentation
+
+The Pi Calm presentation adapters were reverified on 2026-08-12 against Pi 0.84.0 in an isolated pseudo-terminal with a deterministic provider.
+The portable regression and strict typecheck commands remain:
+
+```sh
+FORCE_COLOR= NO_COLOR= PATH="/nix/store/6r6gl2w15a87nfdxcf9wfnyfj6pn6axs-pi-coding-agent-rlm-fork-0.84.0-71ca6cf/lib/pi-rlm-fork/node_modules/.bin:$PATH" FM_PI_PACKAGE_DIR="/Users/dmitrijarkov/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent" bash tests/fm-calm-pi-extension.test.sh
+PATH="/nix/store/6r6gl2w15a87nfdxcf9wfnyfj6pn6axs-pi-coding-agent-rlm-fork-0.84.0-71ca6cf/lib/pi-rlm-fork/node_modules/.bin:$PATH" FM_PI_PACKAGE_DIR="/Users/dmitrijarkov/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent" bash tests/fm-pi-primary-types.test.sh
+```
+
+The portable checks passed and self-skipped only the tmux-dependent cases when tmux was absent from the ordinary path.
+The complete native tmux fixture then passed against a temporary Pi 0.84.0 package copy carrying an evidence-only RLM endpoint repair that changed no transcript-rendering code.
+The real Pi primary hid default-visible thinking plus controlled tool and operational rows, restored original reasoning through Pi's stock thinking toggle, preserved captain prompts and assistant outcomes, exported unchanged session data, and survived a process restart.
+The live credentialed guard after a harness upgrade remains `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.

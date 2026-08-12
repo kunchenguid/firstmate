@@ -1,6 +1,6 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
+// Verified against Pi 0.81.1, 0.82.0, and 0.84.0, which expose built-in ToolDefinitions, per-slot
 // renderers, renderShell: "self", session_start replacement reasons, agent_start and
 // agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
 // with a disposable component factory, and setHiddenThinkingLabel().
@@ -47,7 +47,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
-import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
+import {
+  installCalmAssistantLayout,
+  resetCalmAssistantLayout,
+} from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
@@ -389,6 +392,7 @@ export default function (pi: ExtensionAPI) {
     reportBuiltInLosses();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
+    resetCalmAssistantLayout();
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;
@@ -422,6 +426,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setToolsExpanded(!expanded);
         ctx.ui.setToolsExpanded(expanded);
       }, 0);
+      return undefined;
     });
   });
 
@@ -447,6 +452,7 @@ export default function (pi: ExtensionAPI) {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);
       setCalmPresentation(active);
+      resetCalmAssistantLayout();
       if (active) activateBuiltInsIfNeeded(ctx.ui);
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);

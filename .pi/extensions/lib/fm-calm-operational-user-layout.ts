@@ -1,5 +1,7 @@
-// Verified against Pi 0.81.1 and 0.82.0, which add the ordinary-user spacer and row
-// together via InteractiveMode.addMessageToChat. This adapter probes that exact method
+// Verified against Pi 0.81.1, 0.82.0, and 0.84.0, which add the ordinary-user spacer and row
+// together via InteractiveMode.addMessageToChat. Pi 0.84.0 also passes Markdown transformers
+// to UserMessageComponent, which this adapter forwards without changing older runtime calls.
+// This adapter probes that exact method
 // and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
 // diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
 // message delivery.
@@ -25,6 +27,7 @@ type InteractiveModePresentation = {
     addToHistory?(text: string): void;
   };
   getMarkdownThemeWithSettings(): UserMessageConstructorArgs[1];
+  getMarkdownTransformers?(): unknown;
   getUserMessageText(message: UserMessageLike): string;
   outputPad: number;
 };
@@ -104,8 +107,12 @@ export function installCalmOperationalUserLayout(): void {
       markdownTheme: UserMessageConstructorArgs[1],
       outputPad: number,
       hasLeadingSpacer: boolean,
+      markdownTransformers: unknown,
     ) {
-      super(text, markdownTheme, outputPad);
+      // Pi 0.84 added markdown transformers as a fourth constructor argument.
+      // Older Pi versions ignore the extra runtime argument, so one call supports
+      // both declaration shapes without changing the stock off-path rendering.
+      super(text, markdownTheme, outputPad, markdownTransformers as never);
       this.hasLeadingSpacer = hasLeadingSpacer;
     }
 
@@ -136,6 +143,7 @@ export function installCalmOperationalUserLayout(): void {
       this.getMarkdownThemeWithSettings(),
       this.outputPad,
       this.chatContainer.children.length > 0,
+      this.getMarkdownTransformers?.() ?? [],
     );
     this.chatContainer.addChild(component);
     if (options?.populateHistory) this.editor.addToHistory?.(text);

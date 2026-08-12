@@ -17,7 +17,7 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
-# Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
+# Verified against Pi 0.81.1, 0.82.0, and 0.84.0 (docs/calm-mode-feasibility.md). This is
 # known-good evidence, not a support ceiling: the fixtures below run against whatever
 # Pi is actually installed, and record_pi_version_evidence never rejects a newer
 # version. The tracked presentation adapters probe the exact API they patch (see
@@ -827,6 +827,7 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -1045,11 +1046,18 @@ const assistantThinkingTool = new AssistantMessageComponent({
   ],
   stopReason: "toolUse",
 }, true);
+const assistantDefaultThinking = new AssistantMessageComponent({
+  ...assistantBase,
+  content: [
+    { type: "thinking", thinking: "HIDDEN_DEFAULT_THINKING" },
+    { type: "text", text: "VISIBLE_DEFAULT_TEXT" },
+  ],
+}, false);
 if (!assistantThinkingText.render(100).join("\n").includes("Thinking...")) {
   throw new Error("stock collapsed-thinking fixture did not render before Calm was active");
 }
 
-const assistantComponents = [assistantTextOnly, assistantThinkingText, assistantThinkingTool];
+const assistantComponents = [assistantTextOnly, assistantThinkingText, assistantThinkingTool, assistantDefaultThinking];
 let expanded = true;
 let editorText = "";
 let terminalInputHandler;
@@ -1095,6 +1103,9 @@ await handlers.get("session_start")[0]({ reason: "startup" }, commandContext);
 if (workingVisible !== true || hiddenThinkingLabel !== undefined) {
   throw new Error("session start did not restore Pi's stock working and thinking presentation");
 }
+if (!assistantDefaultThinking.render(100).join("\n").includes("HIDDEN_DEFAULT_THINKING")) {
+  throw new Error("Calm-off default thinking fixture did not preserve Pi's visible reasoning");
+}
 const presentationRenderer = entryRenderers.get("firstmate-synthetic-input-presentation");
 if (!presentationRenderer) throw new Error("legacy synthetic presentation renderer was not registered");
 const presentationEntry = {
@@ -1116,6 +1127,51 @@ if (expanded !== true || workingVisible !== true || hiddenThinkingLabel !== "" |
 }
 if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
   throw new Error("Calm did not persist the active choice in the effective Firstmate home");
+}
+if (assistantDefaultThinking.render(100).join("\n").includes("HIDDEN_DEFAULT_THINKING")) {
+  throw new Error("Calm did not hide routine reasoning when Pi's default thinking setting is visible");
+}
+const thinkingSettings = [];
+const thinkingStatuses = [];
+const thinkingMode = {
+  hideThinkingBlock: false,
+  settingsManager: {
+    setHideThinkingBlock(hidden) {
+      thinkingSettings.push(hidden);
+    },
+  },
+  chatContainer: {
+    clear() {},
+  },
+  rebuildChatFromMessages() {
+    assistantDefaultThinking.invalidate();
+  },
+  streamingComponent: undefined,
+  streamingMessage: undefined,
+  showStatus(status) {
+    thinkingStatuses.push(status);
+  },
+};
+InteractiveMode.prototype.toggleThinkingBlockVisibility.call(thinkingMode);
+if (!assistantDefaultThinking.render(100).join("\n").includes("HIDDEN_DEFAULT_THINKING")) {
+  throw new Error("Pi thinking toggle did not restore the original reasoning");
+}
+if (thinkingMode.hideThinkingBlock !== false || thinkingSettings.at(-1) !== false) {
+  throw new Error("Calm thinking expansion diverged from Pi's stock visible state");
+}
+InteractiveMode.prototype.toggleThinkingBlockVisibility.call(thinkingMode);
+const collapsedDefaultThinking = assistantDefaultThinking.render(100).join("\n");
+if (collapsedDefaultThinking.includes("HIDDEN_DEFAULT_THINKING") || !collapsedDefaultThinking.includes("VISIBLE_DEFAULT_TEXT")) {
+  throw new Error("Pi thinking toggle did not restore Calm's hidden-reasoning presentation");
+}
+if (thinkingMode.hideThinkingBlock !== true || thinkingSettings.at(-1) !== true) {
+  throw new Error("Calm thinking collapse diverged from Pi's stock hidden state");
+}
+if (
+  JSON.stringify(thinkingStatuses) !==
+  JSON.stringify(["Thinking blocks: visible", "Thinking blocks: hidden"])
+) {
+  throw new Error(`unexpected Pi thinking toggle statuses: ${thinkingStatuses.join(", ")}`);
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -2815,7 +2871,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2834,7 +2890,6 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
-  export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
@@ -3031,7 +3086,7 @@ export default function (pi: ExtensionAPI): void {
   });
 }
 TS
-  printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
+  printf '%s\n' '{}' >"$config/keybindings.json"
   printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
@@ -3076,7 +3131,7 @@ JSON
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
     # Include scrollback: the built-in tool rows this documented bound keeps visible
@@ -3132,7 +3187,7 @@ JSON
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_before_snapshot"
@@ -3156,7 +3211,7 @@ JSON
     kind=${fixture%%|*}
     needle=${fixture#*|}
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
     active_wait=0
     while ! grep -F '"role":"user"' "$session_file" 2>/dev/null |
       grep -Fq "$needle" && [ "$active_wait" -lt 120 ]; do
@@ -3210,9 +3265,10 @@ for (const [needle, kind] of expected) {
 }
 JS
   active_screen_wait=0
-  while [ "$active_screen_wait" -lt 120 ]; do
+  while [ "$active_screen_wait" -lt 240 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
-    if grep -Fq " Error:" "$active_hidden_snapshot" &&
+    error_count=$(grep -Fc "Error: CALM_OPERATIONAL_E2E_ERROR" "$active_hidden_snapshot" || true)
+    if [ "$error_count" -ge 5 ] &&
       ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot"; then
       break
     fi
@@ -3237,9 +3293,13 @@ JS
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  active_screen_wait=0
+  while [ ! -s "$export_file" ] && [ "$active_screen_wait" -lt 120 ]; do
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -s "$export_file" ] || fail "/export did not complete while calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
@@ -3291,7 +3351,7 @@ if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.st
 JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "second /calm did not restore tool result output"
   wait_for_text "$restored_snapshot" "/tmp/active-probe.status" \
@@ -3317,7 +3377,7 @@ JS
   [ "$hash_before" = "$hash_after" ] || fail "/calm changed the persisted session or context data"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   # CALM_E2E_OUTPUT is not a useful redraw signal here: it is the pre-activation
   # bash row covered by the documented bound above, so it never leaves the screen
@@ -3335,7 +3395,7 @@ JS
 
   # Calm on plus a genuinely active run replaces Pi's stock working row with the boat.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
@@ -3529,7 +3589,7 @@ JS
   # sail rather than recreating the boat at the left edge. Capture the first resumed
   # frames quickly so the slow boat cadence cannot advance before the assertion.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   boat_resume_column=""
   boat_resume_sail=""
   active_screen_wait=0
@@ -3571,7 +3631,7 @@ JS
 
   # Calm off restores Pi's stock working row and never shows the ship.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     if [ "$(cat "$home/config/calm")" = off ]; then
@@ -3582,7 +3642,7 @@ JS
   done
   [ "$(cat "$home/config/calm")" = off ] || fail "the Calm-off working-row probe did not turn Calm off"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-working-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
@@ -3603,7 +3663,7 @@ JS
 
   # Restore Calm for the persistence restart below.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     if [ "$(cat "$home/config/calm")" = on ]; then
@@ -3616,7 +3676,7 @@ JS
   tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 180 -y 44
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_text "$working_response_snapshot" "PI_EXIT=0" \
     || fail "Pi did not exit cleanly before the Calm persistence restart"
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
@@ -3643,12 +3703,12 @@ JS
   [ "$(cat "$home/config/calm")" = on ] || fail "restart/resume changed the persisted active choice"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_text "$resumed_restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "/calm after restart did not restore ordinary transcript rows"
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
