@@ -681,7 +681,7 @@ test_downtime_marker_does_not_follow_symlink() {
 }
 
 test_arm_parks_while_away_mode_owns_supervision() {
-  local dir state fakebin out armout lock_pid arm_pid i
+  local dir state fakebin out armout lock_pid arm_pid i status
   dir=$(make_case afk-park)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -707,18 +707,34 @@ test_arm_parks_while_away_mode_owns_supervision() {
   rm -f "$state/.afk"
   i=0
   while [ "$i" -lt 120 ]; do
-    grep -q '^watcher: started' "$armout" 2>/dev/null && break
+    grep -qE '^watcher: started|check: rearm-resurface' "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  grep -q '^watcher: started' "$armout" \
-    || fail "parked arm did not resume a normal cycle after away mode ended: $(cat "$armout")"
-  if [ "$ARM_PID" != "$arm_pid" ] || ! is_live_non_zombie "$arm_pid"; then
-    fail "parked arm did not resume from the same tracked process"
+  grep -qE '^watcher: started|check: rearm-resurface' "$armout" \
+    || fail "parked arm did not resume after away mode ended: $(cat "$armout")"
+
+  if grep -qF 'check: rearm-resurface' "$armout"; then
+    # --restart's TERM to the daemon's watcher always leaves #2065 recovery state
+    # behind, and the same tracked process's fresh cycle can resurface that
+    # recovery wake before this poll ever observes an intermediate
+    # "watcher: started" line - a legitimate race between this test's grep and the
+    # arm's own confirmation loop, not a missed resume. Either way the SAME
+    # tracked pid must be the one that closed the cycle, and it must close
+    # cleanly rather than crash.
+    [ "$ARM_PID" = "$arm_pid" ] || fail "parked arm resumed as a different tracked process"
+    wait "$arm_pid"
+    status=$?
+    [ "$status" -eq 0 ] \
+      || fail "parked arm's resurfaced recovery cycle exited $status instead of delivering cleanly"
+  else
+    if [ "$ARM_PID" != "$arm_pid" ] || ! is_live_non_zombie "$arm_pid"; then
+      fail "parked arm did not resume from the same tracked process"
+    fi
+    kill "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
   fi
 
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
   kill "$SEED_PID" 2>/dev/null || true
   wait "$SEED_PID" 2>/dev/null || true
   pass "watch-arm: away mode parks the tracked arm and it resumes after return"
