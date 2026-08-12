@@ -97,7 +97,7 @@ printf 'off\n' > "$SM_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
-printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
+printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\nSurface contract: non-web\n' > "$SM_HOME/data/cm2/brief.md"
 
 make_scratch_project() {  # <dir>
   local dir=$1

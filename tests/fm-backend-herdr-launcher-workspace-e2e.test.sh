@@ -185,9 +185,9 @@ mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 
 for id in uniqA uniqB dupC dupD staleF smE presU presD; do
   mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
-  printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRIMARY_HOME/data/$id/brief.md"
-  printf 'trivial launcher-placement brief: nothing to do.\n' > "$SM_HOME/data/$id/brief.md"
-  printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRES_HOME/data/$id/brief.md"
+  printf 'trivial launcher-placement brief: nothing to do.\nSurface contract: non-web\n' > "$PRIMARY_HOME/data/$id/brief.md"
+  printf 'trivial launcher-placement brief: nothing to do.\nSurface contract: non-web\n' > "$SM_HOME/data/$id/brief.md"
+  printf 'trivial launcher-placement brief: nothing to do.\nSurface contract: non-web\n' > "$PRES_HOME/data/$id/brief.md"
 done
 mkdir -p "$PRIMARY_HOME/data/$SM2_ID"
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$PRIMARY_HOME/data/$SM2_ID/brief.md"
