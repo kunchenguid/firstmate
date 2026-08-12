@@ -11,10 +11,19 @@ HOME_DIR="$TMP_ROOT/home"
 SESSION_DIR="$TMP_ROOT/session"
 SESSION_FILE="$SESSION_DIR/current.jsonl"
 LOCK_SCRIPT="$TMP_ROOT/lock-status.sh"
+LIFECYCLE_SCRIPT="$TMP_ROOT/lifecycle-noop.mjs"
 SID=12345678-1234-1234-1234-123456789abc
 APP_FINGERPRINT=sha256:134510bfcd5236dbf6f222594a857cb6bb19bc6bf707c74b3eef174a47409445
-mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$SESSION_DIR"
+mkdir -p "$HOME_DIR/config" "$HOME_DIR/data" "$HOME_DIR/state" "$SESSION_DIR"
 printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$SESSION_DIR" > "$SESSION_FILE"
+cat > "$HOME_DIR/config/feishu.env" <<'EOF'
+FM_FEISHU_ENABLED=true
+FM_FEISHU_APP_ID=cli_0123456789abcdef
+FM_FEISHU_APP_SECRET=fixture-secret-never-logged
+FM_FEISHU_CAPTAIN_OPEN_ID=ou_captain1234
+FM_FEISHU_P2P_CHAT_ID=oc_chat1234
+EOF
+chmod 600 "$HOME_DIR/config/feishu.env"
 printf 'owned\n' > "$HOME_DIR/lock-mode"
 cat > "$LOCK_SCRIPT" <<'SH'
 #!/usr/bin/env bash
@@ -23,10 +32,12 @@ printf '%s\n' "$mode"
 [ "$mode" = owned ]
 SH
 chmod +x "$LOCK_SCRIPT"
+printf '%s\n' 'process.stdin.resume();' > "$LIFECYCLE_SCRIPT"
 
 FM_HOME="$HOME_DIR" \
 FM_ROOT_OVERRIDE="$ROOT" \
 FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
+FM_FEISHU_LIFECYCLE_SCRIPT="$LIFECYCLE_SCRIPT" \
 FM_FEISHU_DISABLE_AUTOSTART=1 \
 SESSION_FILE="$SESSION_FILE" \
 SESSION_DIR="$SESSION_DIR" \
@@ -40,6 +51,7 @@ import {
   bindSession,
   claimNextOutbound,
   claimTransportOwner,
+  convergeConfiguredSession,
   createPairing,
   deterministicChunks,
   findInboundByDeliveryRef,
@@ -190,7 +202,7 @@ assert(!pi.handlers.has("message_end") && !pi.handlers.has("turn_start"), "remov
 assert(!pi.handlers.has("tool_call"), "Feishu extension retained a special tool-effect policy");
 await emit(pi, "session_start", { reason: "startup" }, session.ctx);
 await new Promise((resolve) => setTimeout(resolve, 320));
-assert.equal(pi.sends.length, 1, "accepted Feishu input was not submitted to Pi's native queue");
+assert.equal(pi.sends.length, 1, `accepted Feishu input was not submitted to Pi's native queue: ${JSON.stringify([...session.statuses])} ${JSON.stringify(session.notifications)}`);
 assert.equal(pi.sends[0].options?.deliverAs, "steer", "Feishu input did not use Pi's native steering queue");
 const marker = parseFeishuMarker(pi.sends[0].content);
 assert.equal(marker?.deliveryRef, first.deliveryRef);
@@ -289,6 +301,20 @@ const rebindBinding = bindSession(rebindHome, { sessionId, sessionFile: rebindFi
 const rebindInbound = publishFeishuInbound(rebindHome, remote({ event_id: "evt_rebind", message_id: "om_rebindSource1234" }));
 offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation });
 assert.throws(() => bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession }, { rebind: true }), /belongs to the current Pi native queue/);
+const replacementId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const replacementFile = join(rebindSession, "replacement.jsonl");
+writeFileSync(replacementFile, `${JSON.stringify({ type: "session", version: 3, id: replacementId, cwd: rebindSession })}\n`);
+assert.throws(() => convergeConfiguredSession(rebindHome, {
+  appIdFingerprint: process.env.APP_FINGERPRINT,
+  allowedUser: "ou_captain1234",
+  allowedChat: "oc_chat1234",
+}, {
+  sessionId: replacementId,
+  sessionFile: replacementFile,
+  sessionCwd: rebindSession,
+  headerId: replacementId,
+  headerCwd: rebindSession,
+}), /belongs to the prior Pi native queue/);
 
 const secretHome = join(home, "secret-home");
 mkdirSync(join(secretHome, "data"), { recursive: true });
@@ -318,7 +344,9 @@ printf '%s\n' "$DISABLED_BOOTSTRAP" | grep -q '^FEISHU:' \
   || fail "unconfigured Feishu channel created private state"
 
 BRIDGE_FIXTURE="$TMP_ROOT/bridge-fixture"
-mkdir -p "$BRIDGE_FIXTURE/.pi/extensions/lib" "$BRIDGE_FIXTURE/bin" "$BRIDGE_FIXTURE/node_modules/@earendil-works" "$BRIDGE_FIXTURE/home/state"
+mkdir -p "$BRIDGE_FIXTURE/.pi/extensions/lib" "$BRIDGE_FIXTURE/bin" "$BRIDGE_FIXTURE/node_modules/@earendil-works" "$BRIDGE_FIXTURE/home/config" "$BRIDGE_FIXTURE/home/state"
+printf 'FM_FEISHU_ENABLED=true\n' > "$BRIDGE_FIXTURE/home/config/feishu.env"
+chmod 600 "$BRIDGE_FIXTURE/home/config/feishu.env"
 printf 'owned\n' > "$BRIDGE_FIXTURE/home/lock-mode"
 cp "$ROOT/.pi/extensions/fm-primary-feishu-bridge.ts" "$BRIDGE_FIXTURE/.pi/extensions/"
 cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$BRIDGE_FIXTURE/.pi/extensions/lib/"
@@ -366,10 +394,7 @@ const pi = {
 const bridge = await import(pathToFileURL(process.env.BRIDGE).href);
 bridge.default(pi);
 assert.deepEqual([...commands.keys()].sort(), [
-  "fm-feishu-bind",
   "fm-feishu-disable",
-  "fm-feishu-pair",
-  "fm-feishu-rebind",
   "fm-feishu-status",
 ]);
 assert(!handlers.has("input") && !handlers.has("tool_call") && !handlers.has("turn_start"));
@@ -388,14 +413,11 @@ const ctx = {
   ui: { notify(message) { notices.push(String(message)); }, setStatus() {} },
   async reload() {},
 };
-await commands.get("fm-feishu-pair").handler(`ou_captain1234 oc_chat1234 ${process.env.APP_FINGERPRINT}`, ctx);
-await commands.get("fm-feishu-bind").handler("", ctx);
-await commands.get("fm-feishu-rebind").handler("", ctx);
 await commands.get("fm-feishu-disable").handler("", ctx);
 assert(existsSync(process.env.BRIDGE_TRANSPORT_LOG), notices.join("\n"));
-assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["stop generation=1", "stop generation=2"]);
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["disable-config generation=none"]);
 assert(notices.every((message) => !message.includes("refused")), notices.join("\n"));
-console.log("ok - local Pi bridge keeps native TUI/tool paths and stops transport before identity changes");
+console.log("ok - local Pi bridge keeps only status and durable disable controls");
 JS
 
 # The transport test replaces the official SDK boundary with one local module.
@@ -478,6 +500,7 @@ async function send(kind, payload) {
 
 export class Client {
   constructor(options) {
+    if (process.env.FM_FAKE_SDK_AUTH_REJECT === "1") throw new Error(`credential rejected: ${options.appSecret}`);
     log({ type: "client", appId: options.appId, hasSecret: Boolean(options.appSecret), source: options.source });
     this.im = { v1: {
       chat: { get: async ({ path }) => {
@@ -520,6 +543,208 @@ export class WSClient {
 }
 JS
 
+write_feishu_config() {
+  home=$1
+  enabled=$2
+  app_id=${3:-$APP_ID}
+  app_secret=${4:-$APP_SECRET}
+  open_id=${5:-ou_captain1234}
+  chat_id=${6:-oc_chat1234}
+  mkdir -p "$home/config"
+  cat > "$home/config/feishu.env" <<EOF
+FM_FEISHU_ENABLED=$enabled
+FM_FEISHU_APP_ID=$app_id
+FM_FEISHU_APP_SECRET=$app_secret
+FM_FEISHU_CAPTAIN_OPEN_ID=$open_id
+FM_FEISHU_P2P_CHAT_ID=$chat_id
+EOF
+  chmod 600 "$home/config/feishu.env"
+}
+
+run_config_check() {
+  home=$1
+  shift
+  env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$@" bash bin/fm-feishu-transport.sh config-check
+}
+
+run_configured_lifecycle() {
+  home=$1
+  session_id=$2
+  session_file=$3
+  session_dir=$4
+  boundary=${5:-null}
+  shift 5 || true
+  printf '{"sessionId":"%s","sessionFile":"%s","sessionCwd":"%s","headerId":"%s","headerCwd":"%s","outboundAfterEntryId":%s}\n' \
+    "$session_id" "$session_file" "$session_dir" "$session_id" "$session_dir" "$boundary" |
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
+      FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+      "$@" node bin/fm-feishu-lifecycle.mjs reconcile
+}
+
+owner_pid() {
+  node -e 'const fs=require("fs");process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1])).pid))' \
+    "$1/state/feishu/transport/owner.json"
+}
+
+wait_for_transport_phase() {
+  home=$1
+  expected=$2
+  for _ in $(seq 1 150); do
+    phase=$(FM_HOME="$home" node bin/fm-feishu-state.mjs status --public 2>/dev/null |
+      node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).transport_phase||"")}catch{}})' || true)
+    [ "$phase" = "$expected" ] && return 0
+    sleep 0.03
+  done
+  return 1
+}
+
+INERT_CONFIG_HOME="$TMP_ROOT/config-inert-home"
+INERT_CONFIG_SESSION="$TMP_ROOT/config-inert-session"
+INERT_CONFIG_FILE="$INERT_CONFIG_SESSION/current.jsonl"
+mkdir -p "$INERT_CONFIG_HOME/config" "$INERT_CONFIG_HOME/data" "$INERT_CONFIG_HOME/state" "$INERT_CONFIG_SESSION"
+printf 'owned\n' > "$INERT_CONFIG_HOME/lock-mode"
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$INERT_CONFIG_SESSION" > "$INERT_CONFIG_FILE"
+[ "$(run_config_check "$INERT_CONFIG_HOME")" = '{"status":"absent"}' ] || fail "absent Feishu config did not report inert"
+run_configured_lifecycle "$INERT_CONFIG_HOME" "$SID" "$INERT_CONFIG_FILE" "$INERT_CONFIG_SESSION" null \
+  >"$TMP_ROOT/config-inert.out" 2>"$TMP_ROOT/config-inert.err"
+[ ! -s "$TMP_ROOT/config-inert.out" ] && [ ! -s "$TMP_ROOT/config-inert.err" ] \
+  || fail "absent Feishu config emitted startup chatter"
+[ ! -e "$INERT_CONFIG_HOME/data/feishu" ] && [ ! -e "$INERT_CONFIG_HOME/state/feishu" ] \
+  || fail "absent Feishu config created private channel state"
+
+CONFIG_REFUSAL_HOME="$TMP_ROOT/config-refusal-home"
+mkdir -p "$CONFIG_REFUSAL_HOME/config" "$CONFIG_REFUSAL_HOME/data" "$CONFIG_REFUSAL_HOME/state"
+for body in \
+  'FM_FEISHU_ENABLED=true' \
+  'FM_FEISHU_ENABLED=true|FM_FEISHU_ENABLED=true' \
+  'FM_FEISHU_ENABLED=true|FM_FEISHU_UNSUPPORTED=value'; do
+  printf '%s\n' "$body" | tr '|' '\n' > "$CONFIG_REFUSAL_HOME/config/feishu.env"
+  chmod 600 "$CONFIG_REFUSAL_HOME/config/feishu.env"
+  if run_config_check "$CONFIG_REFUSAL_HOME" >"$TMP_ROOT/config-refusal.out" 2>"$TMP_ROOT/config-refusal.err"; then
+    fail "malformed, duplicate, or unsupported Feishu config was accepted"
+  fi
+  grep -Fq "$APP_SECRET" "$TMP_ROOT/config-refusal.err" && fail "config refusal exposed a credential"
+done
+write_feishu_config "$CONFIG_REFUSAL_HOME" true
+chmod 644 "$CONFIG_REFUSAL_HOME/config/feishu.env"
+if run_config_check "$CONFIG_REFUSAL_HOME" >"$TMP_ROOT/config-mode.out" 2>"$TMP_ROOT/config-mode.err"; then
+  fail "group-readable Feishu config was accepted"
+fi
+chmod 600 "$CONFIG_REFUSAL_HOME/config/feishu.env"
+mv "$CONFIG_REFUSAL_HOME/config/feishu.env" "$CONFIG_REFUSAL_HOME/config/real.env"
+ln -s real.env "$CONFIG_REFUSAL_HOME/config/feishu.env"
+if run_config_check "$CONFIG_REFUSAL_HOME" >"$TMP_ROOT/config-symlink.out" 2>"$TMP_ROOT/config-symlink.err"; then
+  fail "symlinked Feishu config was accepted"
+fi
+rm "$CONFIG_REFUSAL_HOME/config/feishu.env"
+mv "$CONFIG_REFUSAL_HOME/config/real.env" "$CONFIG_REFUSAL_HOME/config/feishu.env"
+if command -v setpriv >/dev/null 2>&1; then
+  chmod 755 "$TMP_ROOT" "$CONFIG_REFUSAL_HOME" "$CONFIG_REFUSAL_HOME/config"
+  if setpriv --reuid=65534 --regid=65534 --clear-groups \
+    env FM_HOME="$CONFIG_REFUSAL_HOME" FM_ROOT_OVERRIDE="$ROOT" bash bin/fm-feishu-transport.sh config-check \
+    >"$TMP_ROOT/config-owner.out" 2>"$TMP_ROOT/config-owner.err"; then
+    fail "Feishu config owned by another user was accepted"
+  fi
+fi
+
+AUTO_HOME="$TMP_ROOT/auto-home"
+AUTO_SESSION_ONE="$TMP_ROOT/auto-session-one"
+AUTO_SESSION_TWO="$TMP_ROOT/auto-session-two"
+AUTO_FILE_ONE="$AUTO_SESSION_ONE/current.jsonl"
+AUTO_FILE_TWO="$AUTO_SESSION_TWO/current.jsonl"
+AUTO_SDK_LOG="$TMP_ROOT/auto-sdk.log"
+mkdir -p "$AUTO_HOME/data" "$AUTO_HOME/state" "$AUTO_SESSION_ONE" "$AUTO_SESSION_TWO"
+printf 'owned\n' > "$AUTO_HOME/lock-mode"
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$AUTO_SESSION_ONE" > "$AUTO_FILE_ONE"
+SECOND_SID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SECOND_SID" "$AUTO_SESSION_TWO" > "$AUTO_FILE_TWO"
+write_feishu_config "$AUTO_HOME" true
+: > "$AUTO_SDK_LOG"
+run_configured_lifecycle "$AUTO_HOME" "$SID" "$AUTO_FILE_ONE" "$AUTO_SESSION_ONE" '"0000000a"' \
+  FM_FAKE_SDK_LOG="$AUTO_SDK_LOG" >"$TMP_ROOT/auto-first.out" 2>"$TMP_ROOT/auto-first.err"
+[ ! -s "$TMP_ROOT/auto-first.out" ] && [ ! -s "$TMP_ROOT/auto-first.err" ] \
+  || fail "healthy automatic Feishu activation emitted success chatter"
+wait_for_transport_phase "$AUTO_HOME" healthy || fail "automatic Feishu transport did not become healthy"
+FIRST_OWNER=$(owner_pid "$AUTO_HOME")
+AUTO_HOME="$AUTO_HOME" APP_SECRET="$APP_SECRET" node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { readActiveBinding, readPairing } from "./bin/fm-feishu-state.mjs";
+const pairing = readPairing(process.env.AUTO_HOME);
+const binding = readActiveBinding(process.env.AUTO_HOME);
+assert.equal(pairing.allowed_users[0], "ou_captain1234");
+assert.equal(pairing.allowed_chats[0], "oc_chat1234");
+assert.equal(pairing.managed_by, "local-config");
+assert.equal(binding.generation, 1);
+assert.equal(binding.bound_by, "local-config");
+assert.equal(binding.outbound_after_entry_id, "0000000a");
+assert(!JSON.stringify(pairing).includes(process.env.APP_SECRET));
+assert(!JSON.stringify(binding).includes(process.env.APP_SECRET));
+const owner = JSON.parse(readFileSync(`${process.env.AUTO_HOME}/state/feishu/transport/owner.json`, "utf8"));
+assert(!JSON.stringify(owner).includes(process.env.APP_SECRET));
+JS
+tr '\0' '\n' < "/proc/$FIRST_OWNER/cmdline" | grep -Fq "$APP_SECRET" \
+  && fail "Feishu App Secret appeared in the transport process title or arguments"
+run_configured_lifecycle "$AUTO_HOME" "$SID" "$AUTO_FILE_ONE" "$AUTO_SESSION_ONE" '"0000000a"' \
+  FM_FAKE_SDK_LOG="$AUTO_SDK_LOG" >"$TMP_ROOT/auto-repeat.out" 2>"$TMP_ROOT/auto-repeat.err"
+SECOND_OWNER=$(owner_pid "$AUTO_HOME")
+[ "$SECOND_OWNER" = "$FIRST_OWNER" ] || fail "idempotent activation replaced a healthy matching transport"
+[ "$(FM_HOME="$AUTO_HOME" node -e 'import("./bin/fm-feishu-state.mjs").then(m=>process.stdout.write(String(m.readActiveBinding(process.env.FM_HOME).generation)))')" -eq 1 ] \
+  || fail "idempotent activation incremented the binding generation"
+
+run_configured_lifecycle "$AUTO_HOME" "$SECOND_SID" "$AUTO_FILE_TWO" "$AUTO_SESSION_TWO" '"0000000b"' \
+  FM_FAKE_SDK_LOG="$AUTO_SDK_LOG" >"$TMP_ROOT/auto-rebind.out" 2>"$TMP_ROOT/auto-rebind.err"
+wait_for_transport_phase "$AUTO_HOME" healthy || fail "configured session replacement did not recover transport health"
+REBOUND_OWNER=$(owner_pid "$AUTO_HOME")
+[ "$REBOUND_OWNER" != "$FIRST_OWNER" ] || fail "configured session replacement retained the prior transport generation"
+kill -0 "$FIRST_OWNER" 2>/dev/null && fail "configured session replacement left the prior transport alive"
+AUTO_HOME="$AUTO_HOME" SECOND_SID="$SECOND_SID" node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { readActiveBinding } from "./bin/fm-feishu-state.mjs";
+const binding = readActiveBinding(process.env.AUTO_HOME);
+assert.equal(binding.generation, 2);
+assert.equal(binding.session_id, process.env.SECOND_SID);
+assert.equal(binding.outbound_after_entry_id, "0000000b");
+JS
+
+FM_HOME="$AUTO_HOME" FM_FEISHU_SILENT=1 bash bin/fm-feishu-transport.sh stop
+run_configured_lifecycle "$AUTO_HOME" "$SECOND_SID" "$AUTO_FILE_TWO" "$AUTO_SESSION_TWO" '"0000000b"' \
+  FM_FAKE_SDK_LOG="$AUTO_SDK_LOG" >"$TMP_ROOT/auto-recover.out" 2>"$TMP_ROOT/auto-recover.err"
+wait_for_transport_phase "$AUTO_HOME" healthy || fail "configured lifecycle did not recover a stopped transport"
+RECOVERED_OWNER=$(owner_pid "$AUTO_HOME")
+[ "$RECOVERED_OWNER" != "$REBOUND_OWNER" ] || fail "transport recovery did not create a new verified owner"
+[ "$(FM_HOME="$AUTO_HOME" node -e 'import("./bin/fm-feishu-state.mjs").then(m=>process.stdout.write(String(m.readActiveBinding(process.env.FM_HOME).generation)))')" -eq 2 ] \
+  || fail "transport-only recovery changed the binding generation"
+
+FM_HOME="$AUTO_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
+  FM_FEISHU_SILENT=1 bash bin/fm-feishu-transport.sh disable-config
+[ "$(run_config_check "$AUTO_HOME")" = '{"status":"disabled"}' ] || fail "explicit local disable did not persist in config/feishu.env"
+[ ! -e "$AUTO_HOME/state/feishu/transport/owner.json" ] || fail "explicit local disable left a transport owner"
+[ "$(FM_HOME="$AUTO_HOME" node -e 'import("./bin/fm-feishu-state.mjs").then(m=>process.stdout.write(m.readActiveBinding(process.env.FM_HOME).status))')" = disabled ] \
+  || fail "explicit local disable did not retire the active binding"
+run_configured_lifecycle "$AUTO_HOME" "$SECOND_SID" "$AUTO_FILE_TWO" "$AUTO_SESSION_TWO" '"0000000b"' \
+  FM_FAKE_SDK_LOG="$AUTO_SDK_LOG" >"$TMP_ROOT/auto-disabled.out" 2>"$TMP_ROOT/auto-disabled.err"
+[ ! -e "$AUTO_HOME/state/feishu/transport/owner.json" ] || fail "disabled config restarted the transport"
+
+REJECT_HOME="$TMP_ROOT/reject-home"
+REJECT_SESSION="$TMP_ROOT/reject-session"
+REJECT_FILE="$REJECT_SESSION/current.jsonl"
+mkdir -p "$REJECT_HOME/data" "$REJECT_HOME/state" "$REJECT_SESSION"
+printf 'owned\n' > "$REJECT_HOME/lock-mode"
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$REJECT_SESSION" > "$REJECT_FILE"
+write_feishu_config "$REJECT_HOME" true
+if run_configured_lifecycle "$REJECT_HOME" "$SID" "$REJECT_FILE" "$REJECT_SESSION" null \
+  FM_FAKE_SDK_AUTH_REJECT=1 >"$TMP_ROOT/reject.out" 2>"$TMP_ROOT/reject.err"; then
+  fail "credential-rejected Feishu config activated"
+fi
+grep -Fq "$APP_SECRET" "$TMP_ROOT/reject.out" "$TMP_ROOT/reject.err" \
+  && fail "credential rejection exposed the App Secret"
+[ ! -e "$REJECT_HOME/data/feishu" ] && [ ! -e "$REJECT_HOME/state/feishu" ] \
+  || fail "credential rejection changed Feishu binding state before validation"
+
+pass "secure config parsing and automatic Feishu lifecycle converge silently and fail closed"
+
+write_feishu_config "$TRANSPORT_HOME" true
 FM_HOME="$TRANSPORT_HOME" SESSION_FILE="$TRANSPORT_FILE" SESSION_DIR="$TRANSPORT_SESSION" SID="$SID" APP_FINGERPRINT="$APP_FINGERPRINT" TOUCH_SENTINEL="$TOUCH_SENTINEL" node --input-type=module <<'JS'
 import { bindSession, createPairing, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const home = process.env.FM_HOME;
@@ -537,9 +762,9 @@ if (result.status !== "registered") throw new Error(JSON.stringify(result));
 JS
 
 BOOTSTRAP_OUT=$(FM_HOME="$TRANSPORT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 \
-  FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_APP_ID="$APP_ID" FM_FEISHU_APP_SECRET="$APP_SECRET" bash bin/fm-bootstrap.sh)
-printf '%s\n' "$BOOTSTRAP_OUT" | grep -Eq '^FEISHU: paired=yes binding=active generation=1 transport=' \
-  || fail "paired session-start health did not report body-free Feishu status"
+  FM_FEISHU_SDK_MODULE="$MOCK_SDK" bash bin/fm-bootstrap.sh)
+printf '%s\n' "$BOOTSTRAP_OUT" | grep -q '^FEISHU:' \
+  && fail "healthy configured Feishu startup emitted success chatter"
 printf '%s\n' "$BOOTSTRAP_OUT" | grep -Fq 'ou_captain1234' \
   && fail "session-start Feishu health leaked the allowlisted open_id"
 printf '%s\n' "$BOOTSTRAP_OUT" | grep -Fq 'oc_chat1234' \
@@ -550,16 +775,15 @@ printf '%s\n' "$BOOTSTRAP_OUT" | grep -Fq "$APP_SECRET" \
 INERT_HOME="$TMP_ROOT/sdk-inert-home"
 INERT_SDK_LOG="$TMP_ROOT/inert-sdk.log"
 mkdir -p "$INERT_HOME/data" "$INERT_HOME/state"
-if FM_HOME="$INERT_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
-  FM_FEISHU_APP_ID="$APP_ID" FM_FEISHU_APP_SECRET="$APP_SECRET" FM_FAKE_SDK_LOG="$INERT_SDK_LOG" \
-  node bin/fm-feishu-transport.mjs run --once >"$TMP_ROOT/inert.out" 2>"$TMP_ROOT/inert.err"; then
-  fail "unconfigured direct SDK transport started"
-fi
+FM_HOME="$INERT_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_LOG="$INERT_SDK_LOG" node bin/fm-feishu-transport.mjs run --once \
+  >"$TMP_ROOT/inert.out" 2>"$TMP_ROOT/inert.err"
 [ ! -e "$INERT_SDK_LOG" ] || fail "unconfigured transport imported or initialized the SDK"
 
 : > "$SDK_LOG"
+write_feishu_config "$TRANSPORT_HOME" true cli_ffffffffffffffff
 if PATH="$FAKE_BIN:$PATH" FM_HOME="$TRANSPORT_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
-  FM_FEISHU_APP_ID=cli_ffffffffffffffff FM_FEISHU_APP_SECRET="$APP_SECRET" FM_FAKE_SDK_LOG="$SDK_LOG" \
+  FM_FAKE_SDK_LOG="$SDK_LOG" \
   node bin/fm-feishu-transport.mjs run --once >"$TMP_ROOT/app-mismatch.out" 2>"$TMP_ROOT/app-mismatch.err"; then
   fail "transport accepted an SDK app fingerprint mismatch"
 fi
@@ -567,8 +791,9 @@ fi
 [ ! -e "$LARK_SENTINEL" ] || fail "direct SDK transport executed lark-cli"
 
 : > "$SDK_LOG"
+write_feishu_config "$TRANSPORT_HOME" true
 if PATH="$FAKE_BIN:$PATH" FM_HOME="$TRANSPORT_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
-  FM_FEISHU_APP_ID="$APP_ID" FM_FEISHU_APP_SECRET="$APP_SECRET" FM_FAKE_SDK_LOG="$SDK_LOG" FM_FAKE_SDK_CHAT_MODE=group \
+  FM_FAKE_SDK_LOG="$SDK_LOG" FM_FAKE_SDK_CHAT_MODE=group \
   node bin/fm-feishu-transport.mjs run --once >"$TMP_ROOT/group-chat.out" 2>"$TMP_ROOT/group-chat.err"; then
   fail "transport accepted a configured group chat"
 fi
@@ -592,8 +817,6 @@ COMMON_SDK_ENV=(
   "FM_HOME=$TRANSPORT_HOME"
   "FM_FEISHU_SDK_MODULE=$MOCK_SDK"
   "FM_FEISHU_SDK_TEST_MODE=1"
-  "FM_FEISHU_APP_ID=$APP_ID"
-  "FM_FEISHU_APP_SECRET=$APP_SECRET"
   "FM_FAKE_SDK_LOG=$SDK_LOG"
   "FM_FAKE_SDK_EVENTS=$SDK_EVENTS"
   "FM_FAKE_SDK_SEND_MARK=$SDK_SEND_MARK"

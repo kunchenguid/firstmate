@@ -527,6 +527,7 @@ function validateRecordAtPath(path, record) {
     requireString(record.module_file, "transport module path", undefined, 4096);
     requireString(record.home_realpath, "transport home path", undefined, 4096);
     requireString(record.process_start_token, "transport process start token", /^[0-9]+$/, 64);
+    requireNullableString(record.config_file_identity ?? null, "transport config file identity", /^[0-9]+:[0-9]+:[0-9.]+:[0-9]+$/, 256);
     requireIso(record.started_at, "transport owner start time");
   } else if (path.endsWith("/transport/health.json")) {
     if (record.schema !== TRANSPORT_HEALTH_SCHEMA || !new Set(["starting", "connecting", "healthy", "reconnecting", "degraded", "stopped"]).has(record.phase) || typeof record.healthy !== "boolean") throw new Error("invalid Feishu transport health");
@@ -568,6 +569,9 @@ function validatePairingRecord(pairing) {
   if (pairing.chat_policy !== "p2p-only" || JSON.stringify(pairing.inbound_types) !== JSON.stringify(["text"])) {
     throw new Error("invalid Feishu pairing policy");
   }
+  if (pairing.managed_by !== undefined && !new Set(["local-tui", "local-config"]).has(pairing.managed_by)) {
+    throw new Error("invalid Feishu pairing owner");
+  }
   requireIso(pairing.created_at, "pairing creation time");
   requireIso(pairing.updated_at, "pairing update time");
   if (pairing.disabled_at !== null) requireIso(pairing.disabled_at, "pairing disabled time");
@@ -587,7 +591,7 @@ function validateBindingRecord(binding) {
   requireString(binding.session_header_cwd_realpath, "binding session header cwd", undefined, 4096);
   if (!Number.isSafeInteger(binding.generation) || binding.generation <= 0) throw new Error("invalid Feishu binding generation");
   if (!new Set(["active", "disabled"]).has(binding.status)) throw new Error("invalid Feishu binding status");
-  if (binding.thread_policy !== "bound-chat-mirror" || binding.bound_by !== "local-tui") throw new Error("invalid Feishu binding policy");
+  if (binding.thread_policy !== "bound-chat-mirror" || !new Set(["local-tui", "local-config"]).has(binding.bound_by)) throw new Error("invalid Feishu binding policy");
   requireNullableString(binding.outbound_after_entry_id, "binding outbound history boundary", SESSION_ENTRY_ID);
   requireIso(binding.bound_at, "binding time");
   requireNullableString(binding.previous_binding_id, "previous binding id", /^bind_[a-f0-9]{24}$/);
@@ -629,6 +633,7 @@ export function createPairing(home, input) {
       allowed_chats: [requireString(input.allowedChat, "allowed P2P chat_id", /^oc_[A-Za-z0-9_-]{4,128}$/)],
       chat_policy: "p2p-only",
       inbound_types: ["text"],
+      managed_by: "local-tui",
       created_at: prior?.created_at ?? nowIso(),
       updated_at: nowIso(),
       disabled_at: null,
@@ -726,6 +731,136 @@ export function bindSession(home, session, { rebind = false } = {}) {
     }
     return binding;
   });
+}
+
+export function configuredSessionMatches(home, input, session) {
+  const desired = {
+    appIdFingerprint: requireString(input.appIdFingerprint, "app id fingerprint", /^sha256:[a-f0-9]{64}$/),
+    allowedUser: requireString(input.allowedUser, "allowed user open_id", /^ou_[A-Za-z0-9_-]{4,128}$/),
+    allowedChat: requireString(input.allowedChat, "allowed P2P chat_id", /^oc_[A-Za-z0-9_-]{4,128}$/),
+  };
+  const identity = validateSessionIdentity(session);
+  const paths = pathsForHome(home);
+  const pairingRaw = readJson(paths.pairing, { optional: true });
+  const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
+  const bindingRaw = readJson(paths.activeBinding, { optional: true });
+  const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
+  try {
+    assertConfigurationIdentity(paths, pairing, binding);
+  } catch (error) {
+    if (pairing?.managed_by === "local-config" || binding?.bound_by === "local-config") return false;
+    throw error;
+  }
+  return pairing?.disabled_at === null &&
+    pairing.app_id_fingerprint === desired.appIdFingerprint &&
+    pairing.allowed_users[0] === desired.allowedUser &&
+    pairing.allowed_chats[0] === desired.allowedChat &&
+    binding?.status === "active" &&
+    binding.chat_id === desired.allowedChat &&
+    binding.session_id === identity.id &&
+    binding.session_file_realpath === identity.file &&
+    binding.session_cwd_realpath === identity.cwd &&
+    binding.session_header_id === identity.headerId &&
+    binding.session_header_cwd_realpath === identity.headerCwd;
+}
+
+export function convergeConfiguredSession(home, input, session) {
+  const desired = {
+    appIdFingerprint: requireString(input.appIdFingerprint, "app id fingerprint", /^sha256:[a-f0-9]{64}$/),
+    allowedUser: requireString(input.allowedUser, "allowed user open_id", /^ou_[A-Za-z0-9_-]{4,128}$/),
+    allowedChat: requireString(input.allowedChat, "allowed P2P chat_id", /^oc_[A-Za-z0-9_-]{4,128}$/),
+  };
+  const identity = validateSessionIdentity(session);
+  const paths = ensurePrivateLayout(home);
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
+    repairInboundPublicationsLocked(paths);
+    const priorPairingRaw = readJson(paths.pairing, { optional: true });
+    const priorPairing = priorPairingRaw ? validatePairingRecord(priorPairingRaw) : undefined;
+    const priorBindingRaw = readJson(paths.activeBinding, { optional: true });
+    const priorBinding = priorBindingRaw ? validateBindingRecord(priorBindingRaw) : undefined;
+    let priorIdentityConsistent = true;
+    try {
+      assertConfigurationIdentity(paths, priorPairing, priorBinding);
+    } catch (error) {
+      if (priorPairing?.managed_by !== "local-config" && priorBinding?.bound_by !== "local-config") throw error;
+      priorIdentityConsistent = false;
+    }
+    const pairingMatches = priorPairing?.app_id_fingerprint === desired.appIdFingerprint &&
+      priorPairing.allowed_users[0] === desired.allowedUser &&
+      priorPairing.allowed_chats[0] === desired.allowedChat;
+    const bindingMatches = pairingMatches &&
+      priorPairing?.disabled_at === null &&
+      priorBinding?.status === "active" &&
+      priorBinding.chat_id === desired.allowedChat &&
+      priorBinding.session_id === identity.id &&
+      priorBinding.session_file_realpath === identity.file &&
+      priorBinding.session_cwd_realpath === identity.cwd &&
+      priorBinding.session_header_id === identity.headerId &&
+      priorBinding.session_header_cwd_realpath === identity.headerCwd;
+    if (bindingMatches) return { changed: false, pairing: priorPairing, binding: priorBinding };
+    for (const name of safeJsonNames(paths.inboundPending)) {
+      const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
+      if (ledger.state === "offered") throw new Error("cannot replace a configured Feishu binding while a message belongs to the prior Pi native queue");
+    }
+    const generation = Number(priorBinding?.generation ?? 0) + 1;
+    if (!Number.isSafeInteger(generation) || generation <= 0) throw new Error("invalid Feishu binding generation");
+    const homeId = priorPairing?.home_id ?? `home_${randomBytes(16).toString("hex")}`;
+    const pairing = {
+      schema: PAIRING_SCHEMA,
+      home_id: homeId,
+      fm_home_realpath: paths.home,
+      app_id_fingerprint: desired.appIdFingerprint,
+      allowed_users: [desired.allowedUser],
+      allowed_chats: [desired.allowedChat],
+      chat_policy: "p2p-only",
+      inbound_types: ["text"],
+      managed_by: "local-config",
+      created_at: priorPairing?.created_at ?? nowIso(),
+      updated_at: nowIso(),
+      disabled_at: null,
+    };
+    const bindingId = stableId("bind_", `${homeId}\0${generation}\0${identity.id}\0${identity.file}`, 24);
+    const binding = {
+      schema: BINDING_SCHEMA,
+      binding_id: bindingId,
+      home_id: homeId,
+      fm_home_realpath: paths.home,
+      chat_id: desired.allowedChat,
+      thread_policy: "bound-chat-mirror",
+      session_id: identity.id,
+      session_file_realpath: identity.file,
+      session_cwd_realpath: identity.cwd,
+      session_header_id: identity.headerId,
+      session_header_cwd_realpath: identity.headerCwd,
+      outbound_after_entry_id: identity.outboundAfterEntryId,
+      generation,
+      status: "active",
+      bound_by: "local-config",
+      bound_at: nowIso(),
+      previous_binding_id: priorBinding?.binding_id ?? null,
+    };
+    if (pairingMatches && priorIdentityConsistent) {
+      retargetPendingIngressLocked(paths, binding);
+    } else {
+      for (const name of safeJsonNames(paths.inboundPending)) {
+        const path = join(paths.inboundLedger, name);
+        const ledger = requireSchema(readJson(path), INBOUND_LEDGER_SCHEMA, "inbound ledger");
+        if (ledger.state !== "pending") continue;
+        atomicJson(path, {
+          ...ledger,
+          state: "superseded",
+          superseded_at: nowIso(),
+          last_error: "configured Feishu identity changed before native Pi submission",
+        });
+        removeInboundPendingIndex(paths, name);
+      }
+      syncInboundPendingCount(paths);
+    }
+    atomicJson(paths.pairing, pairing);
+    atomicJson(join(paths.bindings, `generation-${String(generation).padStart(8, "0")}.json`), binding);
+    atomicJson(paths.activeBinding, binding);
+    return { changed: true, pairing, binding };
+  }));
 }
 
 function retargetPendingIngressLocked(paths, binding) {
@@ -1871,6 +2006,9 @@ export function claimTransportOwner(home, owner) {
       module_file: requireString(owner.moduleFile, "transport module path", undefined, 4096),
       home_realpath: paths.home,
       process_start_token: requireString(owner.processStartToken, "transport process start token", /^[0-9]+$/, 64),
+      config_file_identity: owner.configFileIdentity === undefined
+        ? null
+        : requireString(owner.configFileIdentity, "transport config file identity", /^[0-9]+:[0-9]+:[0-9.]+:[0-9]+$/, 256),
       started_at: nowIso(),
     };
     validateRecordAtPath(paths.owner, record);

@@ -21,6 +21,7 @@ export interface PairingRecord {
   allowed_chats: string[];
   chat_policy: "p2p-only";
   inbound_types: string[];
+  managed_by?: "local-tui" | "local-config";
   created_at: string;
   updated_at: string;
   disabled_at: string | null;
@@ -41,7 +42,7 @@ export interface BindingRecord {
   outbound_after_entry_id: string | null;
   generation: number;
   status: "active" | "disabled";
-  bound_by: "local-tui";
+  bound_by: "local-tui" | "local-config";
   bound_at: string;
   previous_binding_id: string | null;
 }
@@ -127,6 +128,30 @@ export function bindSession(home: string, session: {
   headerCwd: string;
   outboundAfterEntryId?: string | null;
 }, options?: { rebind?: boolean }): BindingRecord;
+export function configuredSessionMatches(home: string, input: {
+  appIdFingerprint: string;
+  allowedUser: string;
+  allowedChat: string;
+}, session: {
+  sessionId: string;
+  sessionFile: string;
+  sessionCwd: string;
+  headerId: string;
+  headerCwd: string;
+  outboundAfterEntryId?: string | null;
+}): boolean;
+export function convergeConfiguredSession(home: string, input: {
+  appIdFingerprint: string;
+  allowedUser: string;
+  allowedChat: string;
+}, session: {
+  sessionId: string;
+  sessionFile: string;
+  sessionCwd: string;
+  headerId: string;
+  headerCwd: string;
+  outboundAfterEntryId?: string | null;
+}): { changed: boolean; pairing: PairingRecord; binding: BindingRecord };
 export function publishFeishuInbound(home: string, raw: Record<string, unknown>, options?: {
   maxInboundBytes?: number;
   maxPendingInbound?: number;
@@ -256,6 +281,7 @@ export function claimTransportOwner(home: string, owner: {
   nonce: string;
   moduleFile: string;
   processStartToken: string;
+  configFileIdentity?: string;
 }): { ok: boolean; owner: Record<string, unknown> };
 export function readTransportOwner(home: string): Record<string, unknown> | undefined;
 export function retireStaleTransportOwner(home: string, expected: Record<string, unknown>): boolean;

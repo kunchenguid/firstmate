@@ -272,9 +272,14 @@ The [Relay configuration reference](configuration.md#promised-public-replies-sta
 ## Feishu current-Pi channel
 
 The optional Feishu channel has three owners and no second Agent authority.
-The dedicated `bin/fm-feishu-transport.mjs` process owns one official Feishu Node SDK long connection, SDK P2P identity verification, SDK bound-chat `message.create`, reconnect health, and no Pi or Agent access.
+The dedicated `bin/fm-feishu-transport.mjs` process owns strict local-config credential access, one official Feishu Node SDK long connection, SDK P2P identity verification, SDK bound-chat `message.create`, reconnect health, and no Pi or Agent access.
 `bin/fm-feishu-state.mjs` owns private pairing, exact binding generations and Assistant-history boundaries, accepted Feishu events, native-queue submission evidence, finalized-Assistant registration intents and outbox records, attempts, receipts, quarantine, and local alerts.
 `.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-feishu-native-channel.ts` are the only components allowed to offer authorized Feishu text to the current Pi native queue.
+
+The Pi extension sends only the verified current persisted-session identity to a credential-blind lifecycle launcher.
+The dedicated transport process parses `config/feishu.env`, probes app authentication and P2P chat identity before binding mutation, gracefully stops the exact prior owner, converges the pairing and binding generation, and starts exactly one credential-bearing daemon process.
+Credentials never enter Pi or a process argument.
+An unchanged session, configuration identity, generation, and healthy owner make startup a silent no-op.
 
 The extension binds canonical `FM_HOME`, stable home identity, full persisted Pi session UUID and file, session and header cwd, verified Firstmate lock ancestry, exact P2P chat, and binding generation.
 It calls only the current extension API's `sendUserMessage` with native steer delivery, so a busy Pi receives Feishu input after the current turn's tool calls and before its next model call, while no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.

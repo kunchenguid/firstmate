@@ -5,7 +5,7 @@
 // exact binding, generation, transport, and live-session checks.
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -70,10 +70,21 @@ const root = resolve(extensionDir, "../../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const lockStatusScript = process.env.FM_FEISHU_LOCK_STATUS_SCRIPT || `${fmRoot}/bin/fm-session-lock-status.sh`;
-const transportScript = process.env.FM_FEISHU_TRANSPORT_SCRIPT || `${fmRoot}/bin/fm-feishu-transport.sh`;
+const lifecycleScript = process.env.FM_FEISHU_LIFECYCLE_SCRIPT || `${fmRoot}/bin/fm-feishu-lifecycle.mjs`;
+const configFile = `${fmHome}/config/feishu.env`;
 const markerPattern = /^\u2063FIRSTMATE_FEISHU: v1 ref=(in_[a-f0-9]{24}) g=([1-9][0-9]*)$/u;
 const registeredApis = new WeakSet<object>();
 let activeRuntime: ActiveRuntime | null = null;
+let lifecycleTask: Promise<void> = Promise.resolve();
+
+function configPathPresent(): boolean {
+  try {
+    lstatSync(configFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function messageText(message: unknown): string {
   const content = (message as { content?: unknown })?.content;
@@ -193,14 +204,31 @@ function updateStatus(runtime: ActiveRuntime): void {
   runtime.ctx.ui.setStatus("fm-feishu", value);
 }
 
-function startTransport(): void {
-  if (process.env.FM_FEISHU_DISABLE_AUTOSTART === "1" || !existsSync(transportScript)) return;
-  const child = spawn(transportScript, ["start"], {
-    cwd: fmRoot,
-    env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
-    stdio: "ignore",
+function reconcileConfiguredLifecycle(identity: SessionIdentity): Promise<void> {
+  const reconcile = () => new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [lifecycleScript, "reconcile"], {
+      cwd: fmRoot,
+      env: Object.fromEntries(Object.entries({
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_ROOT_OVERRIDE: fmRoot,
+        FM_FEISHU_APP_ID: undefined,
+        FM_FEISHU_APP_SECRET: undefined,
+        FM_FEISHU_P2P_CHAT_ID: undefined,
+        FM_FEISHU_CONFIG_IDENTITY: undefined,
+      }).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    child.once("error", rejectPromise);
+    child.once("close", (code) => {
+      if (code === 0) resolvePromise();
+      else rejectPromise(new Error("configured lifecycle refused"));
+    });
+    child.stdin.end(JSON.stringify(identity));
   });
-  child.unref();
+  const result = lifecycleTask.then(reconcile, reconcile);
+  lifecycleTask = result.catch(() => {});
+  return result;
 }
 
 function stopRuntime(runtime: ActiveRuntime): void {
@@ -334,6 +362,7 @@ function schedulePump(runtime: ActiveRuntime): void {
 
 function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): ActiveRuntime | undefined {
   if (activeRuntime) stopRuntime(activeRuntime);
+  if (!configPathPresent()) return undefined;
   const pairing = readPairing(fmHome);
   const binding = readActiveBinding(fmHome);
   if (!pairing || pairing.disabled_at !== null || !binding || binding.status !== "active") return undefined;
@@ -382,7 +411,6 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
   }
   runtime.timer = setInterval(() => schedulePump(runtime), 250);
   runtime.timer.unref();
-  startTransport();
   schedulePump(runtime);
   updateStatus(runtime);
   return runtime;
@@ -423,14 +451,25 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): void {
   if (registeredApis.has(pi as object)) return;
   registeredApis.add(pi as object);
   const token = `registration_${randomBytes(10).toString("hex")}`;
-  pi.on("session_start", (_event, ctx) => {
-    try { activate(pi, ctx, token); }
+  let lifecycleEpoch = 0;
+  pi.on("session_start", async (_event, ctx) => {
+    const epoch = ++lifecycleEpoch;
+    try {
+      if (configPathPresent() && ctx.mode === "tui" && ctx.isProjectTrusted() && firstmateSessionLockOwnership() === "owned") {
+        const identity = currentFirstmateSessionIdentity(ctx);
+        if (identity) await reconcileConfiguredLifecycle(identity);
+      }
+      if (epoch !== lifecycleEpoch) return;
+      activate(pi, ctx, token);
+    }
     catch (error) {
-      ctx.ui.setStatus("fm-feishu", "Feishu: suspended - private state is invalid");
-      ctx.ui.notify(`Feishu channel suspended safely: ${String(error)}`, "error");
+      if (epoch !== lifecycleEpoch) return;
+      ctx.ui.setStatus("fm-feishu", undefined);
+      ctx.ui.notify("Feishu activation stopped safely. Run bin/fm-feishu-transport.sh config-check and inspect docs/feishu-channel.md.", "error");
     }
   });
   pi.on("session_shutdown", () => {
+    lifecycleEpoch += 1;
     const runtime = activeRuntime;
     if (runtime?.token === token) stopRuntime(runtime);
   });
