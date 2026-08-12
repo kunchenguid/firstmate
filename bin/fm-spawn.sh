@@ -233,6 +233,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -381,7 +383,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_model remote_effort remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -559,6 +561,8 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+  remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effective_effort=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
@@ -567,13 +571,6 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
-    return 1
-  }
   if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -581,6 +578,16 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  [ -n "$remote_target" ] \
+    && [ "$(fm_profile_normalize_harness "$remote_harness")" = "$(fm_profile_normalize_harness "$harness")" ] \
+    && [ "$remote_model" = "$(fm_profile_normalize_model "$model")" ] \
+    && [ "$remote_effort" = "$(fm_profile_normalize_effort "$effort")" ] || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned a profile different from the requested profile; preserving the remote route for reconciliation" >&2
+    return 1
+  }
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -1157,38 +1164,6 @@ case "$ARG3" in
     ;;
 esac
 
-# Codex's current installed catalog is model-qualified for max reasoning. Keep the
-# verified 0.147.0 catalog boundary explicit and fail closed for both a known
-# ceiling and a model the catalog does not identify. This is deliberately not an
-# adapter-wide max mapping: a requested max must never become an effective max in
-# metadata or the launch command when the selected model cannot carry it.
-codex_max_effort_capability() {
-  case "${1:-}" in
-    gpt-5.6-sol|gpt-5.6-sol-wm|gpt-5.6-terra|gpt-5.6-luna|codex-auto-review)
-      return 0 ;;
-    gpt-5.3-codex-spark)
-      return 1 ;;
-    *)
-      return 2 ;;
-  esac
-}
-
-validate_effort_capability() {
-  local harness=$1 model=${2:-default} effort=${3:-} capability
-  [ "$harness" = codex ] && [ "$effort" = max ] || return 0
-  codex_max_effort_capability "$model"
-  capability=$?
-  case "$capability" in
-    0) return 0 ;;
-    1)
-      echo "error: codex model '$model' does not advertise max reasoning effort (catalog ceiling: xhigh); refusing before metadata or launch" >&2
-      return 1 ;;
-    2)
-      echo "error: codex model '$model' has unknown max reasoning capability; select a model whose installed catalog advertises max (for example gpt-5.6-luna or gpt-5.6-sol); refusing before metadata or launch" >&2
-      return 1 ;;
-  esac
-}
-
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac
@@ -1236,7 +1211,7 @@ fi
 
 # Resolve Codex's model-qualified max capability after secondmate config tokens
 # have been applied, but before any endpoint, hook, or task metadata is created.
-validate_effort_capability "$HARNESS" "${MODEL:-default}" "${EFFORT:-}" || exit 1
+fm_profile_validate_effort_capability "$HARNESS" "${MODEL:-default}" "${EFFORT:-}" || exit 1
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -1346,7 +1321,7 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
         max)
-          codex_max_effort_capability "$model" || return 1
+          fm_profile_codex_max_effort_capability "$model" || return 1
           printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;

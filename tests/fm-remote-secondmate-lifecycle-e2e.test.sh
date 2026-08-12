@@ -724,6 +724,48 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+remote_parent_meta_before_reuse="$TMP_ROOT/parent-ios-before-reuse.meta"
+remote_route_meta_before_reuse="$TMP_ROOT/remote-ios-before-reuse.meta"
+cp "$PARENT/state/ios.meta" "$remote_parent_meta_before_reuse"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$remote_route_meta_before_reuse"
+herdr_launches_before_reuse=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+assert_contains "$out" 'remote=remote-mac backend=herdr' \
+  "an exact remote profile reuse did not return the existing route"
+herdr_launches_after_reuse=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+[ "$herdr_launches_before_reuse" -eq "$herdr_launches_after_reuse" ] \
+  || fail "an exact remote profile reuse launched a second endpoint"
+cmp -s "$remote_parent_meta_before_reuse" "$PARENT/state/ios.meta" \
+  || fail "an exact remote profile reuse changed the parent profile record"
+cmp -s "$remote_route_meta_before_reuse" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "an exact remote profile reuse changed the live remote profile record"
+pass "remote secondmate exact profile reuse preserves the live endpoint and both records"
+
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-profile-mismatch.meta"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-profile-mismatch.meta"
+herdr_launches_before_profile_mismatch=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_before_profile_mismatch=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness codex \
+  --model gpt-5.6-luna --effort max > "$TMP_ROOT/spawn-profile-mismatch.out" 2>&1
+profile_mismatch_rc=$?
+set -e
+[ "$profile_mismatch_rc" -ne 0 ] \
+  || fail "a remote profile mismatch reused the live endpoint"
+assert_grep 'requested profile' "$TMP_ROOT/spawn-profile-mismatch.out" \
+  "remote profile mismatch did not identify the requested profile comparison"
+cmp -s "$TMP_ROOT/parent-ios-before-profile-mismatch.meta" "$PARENT/state/ios.meta" \
+  || fail "remote profile mismatch changed the parent metadata"
+cmp -s "$TMP_ROOT/remote-ios-before-profile-mismatch.meta" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "remote profile mismatch changed the live remote metadata"
+herdr_launches_after_profile_mismatch=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_after_profile_mismatch=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+[ "$herdr_launches_before_profile_mismatch" -eq "$herdr_launches_after_profile_mismatch" ] \
+  || fail "remote profile mismatch launched a new Herdr endpoint"
+[ "$herdr_closes_before_profile_mismatch" -eq "$herdr_closes_after_profile_mismatch" ] \
+  || fail "remote profile mismatch stopped the live Herdr endpoint"
+pass "remote secondmate profile mismatch refuses without retargeting or stopping the endpoint"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
