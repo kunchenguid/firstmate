@@ -299,7 +299,7 @@ bin/fm-azure-pilot.sh destroy \
   --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID"
 ```
 
-The script inventories every VM, OS disk, task-state disk, and provider-account disk before mutation, refuses unknown or oversized inventories, and bounds every Azure CLI validation, preview, apply, worker, and cleanup call with a configurable 60-to-3,600-second deadline.
+The script inventories every VM, OS disk, task-state disk, and provider-account disk before mutation, refuses unknown or oversized inventories, and routes every scope, provider, SKU, quota, name, validation, preview, apply, worker, and cleanup Azure CLI call through one retained-state owner with a configurable 60-to-3,600-second deadline.
 Each validate/apply/worker call records `submitted`, `completed`, or `retained` operation state atomically; a timeout or failure preserves exact deployment/resource-group identity and requires live reconciliation before retry.
 It deallocates and deletes VMs first, removes durable-resource locks, deletes retained task/account disks only under the second explicit confirmation, and submits resource-group deletion last.
 Key Vault purge protection remains in force; the script never purges it.

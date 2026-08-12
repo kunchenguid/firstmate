@@ -317,7 +317,8 @@ PY
 
 scope_gate() {
   local account
-  account=$(az account show --subscription "$FM_AZURE_SUBSCRIPTION_ID" --output json --only-show-errors)
+  account=$(run_bounded_az_capture gate-scope account show --subscription "$FM_AZURE_SUBSCRIPTION_ID" --output json --only-show-errors) || \
+    refuse "scope gate timed out or failed; retained operation state requires reconciliation"
   jq -e \
     --arg subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --arg tenant "$FM_AZURE_TENANT_ID" \
@@ -340,20 +341,21 @@ provider_gate() {
     microsoft.insights
   )
   for namespace in "${namespaces[@]}"; do
-    state=$(az provider show --subscription "$FM_AZURE_SUBSCRIPTION_ID" --namespace "$namespace" --query registrationState --output tsv --only-show-errors)
+    state=$(run_bounded_az_capture "gate-provider-${namespace//./-}" provider show --subscription "$FM_AZURE_SUBSCRIPTION_ID" --namespace "$namespace" --query registrationState --output tsv --only-show-errors) || \
+      refuse "provider gate timed out or failed; retained operation state requires reconciliation"
     [ "$state" = Registered ] || refuse "provider is not Registered: $namespace ($state)"
   done
 }
 
 sku_gate() {
   local skus selected
-  skus=$(az vm list-skus \
+  skus=$(run_bounded_az_capture gate-sku vm list-skus \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --location "$REGION" \
     --resource-type virtualMachines \
     --all \
     --output json \
-    --only-show-errors)
+    --only-show-errors) || refuse "SKU gate timed out or failed; retained operation state requires reconciliation"
   selected=$(jq -cn --arg supervisor "$SUPERVISOR_SKU" --arg runner "$RUNNER_VALIDATION_SKU" --argjson workers "$WORKER_SKUS_JSON" '$workers + (if $runner == $supervisor or ($workers | index($runner)) != null then [] else [$runner] end) + [$supervisor] | unique')
   jq -e \
     --arg supervisor "$SUPERVISOR_SKU" \
@@ -380,7 +382,8 @@ sku_gate() {
 
 quota_gate() {
   local usage regional_free regional_limit worker_count declared_author_vcpus required_regional_free requirements family required family_limit family_free
-  usage=$(az vm list-usage --subscription "$FM_AZURE_SUBSCRIPTION_ID" --location "$REGION" --output json --only-show-errors)
+  usage=$(run_bounded_az_capture gate-quota vm list-usage --subscription "$FM_AZURE_SUBSCRIPTION_ID" --location "$REGION" --output json --only-show-errors) || \
+    refuse "quota gate timed out or failed; retained operation state requires reconciliation"
   regional_limit=$(jq -r '[.[] | select(.name.value == "cores")][0].limit // 0 | tonumber' <<<"$usage")
   regional_free=$(jq -r '[.[] | select(.name.value == "cores")][0] | (((.limit // 0) | tonumber) - ((.currentValue // 0) | tonumber))' <<<"$usage")
   worker_count=$(jq 'length' <<<"$WORKER_SLOTS_JSON")
@@ -438,14 +441,14 @@ PY
 
 name_gate() {
   local storage vault storage_available vault_available owned
-  storage=$(az storage account check-name \
+  storage=$(run_bounded_az_capture gate-name-storage-check storage account check-name \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --name "$FM_AZURE_STORAGE_NAME" \
     --output json \
-    --only-show-errors)
+    --only-show-errors) || refuse "storage-name gate timed out or failed; retained operation state requires reconciliation"
   storage_available=$(jq -r '.nameAvailable // .name_available // false' <<<"$storage")
   if [ "$storage_available" != true ]; then
-    owned=$(az storage account show \
+    owned=$(run_bounded_az_capture gate-name-storage-owner storage account show \
       --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
       --resource-group "$RESOURCE_GROUP" \
       --name "$FM_AZURE_STORAGE_NAME" \
@@ -455,15 +458,15 @@ name_gate() {
     [ "$owned" = "$RESOURCE_GROUP" ] || refuse "storage name is unavailable and is not the reviewed deployment's existing account"
   fi
 
-  vault=$(az rest \
+  vault=$(run_bounded_az_capture gate-name-vault-check rest \
     --method post \
     --url "https://management.azure.com/subscriptions/$FM_AZURE_SUBSCRIPTION_ID/providers/Microsoft.KeyVault/checkNameAvailability?api-version=2023-07-01" \
     --body "{\"name\":\"$FM_AZURE_KEY_VAULT_NAME\",\"type\":\"Microsoft.KeyVault/vaults\"}" \
     --output json \
-    --only-show-errors)
+    --only-show-errors) || refuse "Key Vault name gate timed out or failed; retained operation state requires reconciliation"
   vault_available=$(jq -r '.nameAvailable // false' <<<"$vault")
   if [ "$vault_available" != true ]; then
-    owned=$(az keyvault show \
+    owned=$(run_bounded_az_capture gate-name-vault-owner keyvault show \
       --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
       --resource-group "$RESOURCE_GROUP" \
       --name "$FM_AZURE_KEY_VAULT_NAME" \
@@ -683,13 +686,26 @@ PY
 run_bounded_az() {
   local operation=$1
   shift
+  run_bounded_az_capture "$operation" "$@"
+}
+
+run_bounded_az_capture() {
+  local operation=$1 output status
+  shift
   record_mutation_state "$operation" submitted "bounded Azure CLI call started"
-  if run_with_deadline "$AZURE_CLEANUP_TIMEOUT_SECONDS" az "$@"; then
+  output=$(mktemp "${TMPDIR:-/tmp}/fm-azure-output.XXXXXX")
+  chmod 600 "$output"
+  if run_with_deadline "$AZURE_CLEANUP_TIMEOUT_SECONDS" az "$@" >"$output"; then
     record_mutation_state "$operation" completed "bounded Azure CLI call completed"
+    cat "$output"
+    rm -f "$output"
     return 0
+  else
+    status=$?
   fi
+  rm -f "$output"
   record_mutation_state "$operation" retained "Azure CLI call timed out or failed; live state must be reconciled before retry"
-  return 1
+  return "$status"
 }
 
 run_validate() {

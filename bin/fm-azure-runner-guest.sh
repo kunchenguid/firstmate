@@ -28,22 +28,57 @@ done
 EGRESS_DEVICE=$(ip -o route show default | awk 'NR==1 {print $5}')
 [ -n "$EGRESS_DEVICE" ] || { echo "guest bootstrap: default egress device is unavailable" >&2; exit 125; }
 tc qdisc replace dev "$EGRESS_DEVICE" root tbf rate 1mbit burst 32kbit latency 400ms
+BOOTSTRAP_NETWORK_BYTE_CEILING=17179869184
+BOOTSTRAP_NETWORK_START=$((
+  $(<"/sys/class/net/$EGRESS_DEVICE/statistics/rx_bytes") +
+  $(<"/sys/class/net/$EGRESS_DEVICE/statistics/tx_bytes")
+))
+run_bootstrap_network() {
+  local network_pid status current
+  setsid "$@" &
+  network_pid=$!
+  while kill -0 "$network_pid" 2>/dev/null; do
+    current=$((
+      $(<"/sys/class/net/$EGRESS_DEVICE/statistics/rx_bytes") +
+      $(<"/sys/class/net/$EGRESS_DEVICE/statistics/tx_bytes")
+    ))
+    if [ $((current - BOOTSTRAP_NETWORK_START)) -gt "$BOOTSTRAP_NETWORK_BYTE_CEILING" ]; then
+      kill -TERM -- "-$network_pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL -- "-$network_pid" 2>/dev/null || true
+      wait "$network_pid" 2>/dev/null || true
+      echo "guest bootstrap: aggregate trusted-bootstrap network byte ceiling exceeded" >&2
+      exit 125
+    fi
+    sleep 0.1
+  done
+  if wait "$network_pid"; then status=0; else status=$?; fi
+  current=$((
+    $(<"/sys/class/net/$EGRESS_DEVICE/statistics/rx_bytes") +
+    $(<"/sys/class/net/$EGRESS_DEVICE/statistics/tx_bytes")
+  ))
+  [ $((current - BOOTSTRAP_NETWORK_START)) -le "$BOOTSTRAP_NETWORK_BYTE_CEILING" ] || {
+    echo "guest bootstrap: aggregate trusted-bootstrap network byte ceiling exceeded" >&2
+    exit 125
+  }
+  return "$status"
+}
 
 # Install only this hard-coded Ubuntu transport/Linux-test closure before any
 # repository bytes execute. Repository code never controls apt or gets root.
 # All bootstrap traffic ends before the untrusted networkless command starts.
 missing=()
-for tool in curl git python3 sha256sum tar systemd-run mkfs.ext4 mount runuser groupadd useradd getent tmux jq node npm xz; do
+for tool in curl git python3 sha256sum tar systemd-run mkfs.ext4 mount runuser groupadd useradd getent tmux jq node npm xz setsid; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y --no-install-recommends \
+  run_bootstrap_network apt-get update -qq
+  run_bootstrap_network apt-get install -y --no-install-recommends \
     ca-certificates curl git python3 python3-pip python3-venv e2fsprogs util-linux passwd systemd \
     tmux jq nodejs npm xz-utils ripgrep
 fi
-for tool in curl git python3 sha256sum tar systemd-run mkfs.ext4 mount runuser groupadd useradd getent tmux jq node npm xz; do
+for tool in curl git python3 sha256sum tar systemd-run mkfs.ext4 mount runuser groupadd useradd getent tmux jq node npm xz setsid; do
   command -v "$tool" >/dev/null 2>&1 || { echo "guest bootstrap: fixed tool closure is incomplete: $tool" >&2; exit 125; }
 done
 
@@ -54,7 +89,7 @@ INPUT=$BASE/input.tar.gz
 CURL_CONFIG=$BASE/curl-input.conf
 printf 'url = "%s"\nfail\nsilent\nshow-error\nconnect-timeout = 30\nmax-time = 300\nmax-filesize = 536870912\noutput = "%s"\n' "$INPUT_URL" "$INPUT" >"$CURL_CONFIG"
 unset INPUT_URL
-curl --config "$CURL_CONFIG"
+run_bootstrap_network curl --config "$CURL_CONFIG"
 rm -f "$CURL_CONFIG"
 ACTUAL_INPUT=sha256:$(sha256sum "$INPUT" | awk '{print $1}')
 [ "$ACTUAL_INPUT" = "$INPUT_DIGEST" ] || { echo "guest bootstrap: staged input digest mismatch" >&2; exit 125; }
@@ -66,7 +101,7 @@ import tarfile
 
 source = pathlib.Path(sys.argv[1])
 destination = pathlib.Path(sys.argv[2])
-allowed = {"request.json", "snapshot.bundle", "runner-exec.py", "shellcheck.tar.xz", "uv.tar.gz"}
+allowed = {"request.json", "snapshot.bundle", "runner-exec.py", "shellcheck.tar.xz", "uv.tar.gz", "agent-fleet-wheelhouse.tar"}
 with tarfile.open(source, "r:gz") as archive:
     members = archive.getmembers()
     if {member.name for member in members} != allowed:
@@ -84,14 +119,15 @@ BUNDLE=$BASE/snapshot.bundle
 EXECUTOR=$BASE/runner-exec.py
 SHELLCHECK_ARCHIVE=$BASE/shellcheck.tar.xz
 UV_ARCHIVE=$BASE/uv.tar.gz
-python3 - "$REQUEST" "$BUNDLE" "$EXECUTOR" "$SHELLCHECK_ARCHIVE" "$UV_ARCHIVE" "$GUEST_DIGEST" <<'PY'
+WHEELHOUSE_ARCHIVE=$BASE/agent-fleet-wheelhouse.tar
+python3 - "$REQUEST" "$BUNDLE" "$EXECUTOR" "$SHELLCHECK_ARCHIVE" "$UV_ARCHIVE" "$WHEELHOUSE_ARCHIVE" "$GUEST_DIGEST" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-request_path, bundle_path, executor_path, shellcheck_path, uv_path = map(pathlib.Path, sys.argv[1:6])
-expected_guest = sys.argv[6]
+request_path, bundle_path, executor_path, shellcheck_path, uv_path, wheelhouse_path = map(pathlib.Path, sys.argv[1:7])
+expected_guest = sys.argv[7]
 request = json.loads(request_path.read_text(encoding="utf-8"))
 unsigned = dict(request)
 supplied = unsigned.pop("request_digest", None)
@@ -108,6 +144,9 @@ if digest(shellcheck_path) != request["protocol"]["shellcheck_archive_digest"]:
     raise SystemExit("guest bootstrap: ShellCheck archive digest mismatch")
 if digest(uv_path) != request["protocol"]["uv_archive_digest"]:
     raise SystemExit("guest bootstrap: uv archive digest mismatch")
+closure = request["protocol"]["agent_fleet_python"]
+if digest(wheelhouse_path) != closure["archive_digest"] or wheelhouse_path.stat().st_size != closure["archive_bytes"]:
+    raise SystemExit("guest bootstrap: Agent Fleet wheelhouse archive mismatch")
 if request["protocol"]["guest_digest"] != expected_guest:
     raise SystemExit("guest bootstrap: guest protocol digest mismatch")
 limits = request["limits"]
@@ -170,6 +209,29 @@ install -m 0755 -o fmrunner -g fmrunner "$TOOL_STAGE/shellcheck-v0.11.0/shellche
 tar -xzf "$UV_ARCHIVE" -C "$TOOL_STAGE"
 install -m 0755 -o fmrunner -g fmrunner "$TOOL_STAGE/uv-x86_64-unknown-linux-gnu/uv" /work/home/.fm-runner-tools/uv/uv
 install -m 0755 -o fmrunner -g fmrunner "$TOOL_STAGE/uv-x86_64-unknown-linux-gnu/uvx" /work/home/.fm-runner-tools/uv/uvx
+WHEELHOUSE=/work/home/.fm-runner-tools/wheelhouse
+install -d -m 0700 -o fmrunner -g fmrunner "$WHEELHOUSE"
+tar -xf "$WHEELHOUSE_ARCHIVE" -C "$WHEELHOUSE"
+python3 - "$REQUEST" "$WHEELHOUSE" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+import tarfile
+
+request = json.load(open(sys.argv[1], encoding="utf-8"))
+root = pathlib.Path(sys.argv[2])
+expected = {item["file"]: item for item in request["protocol"]["agent_fleet_python"]["wheels"]}
+actual = {item.name for item in root.iterdir()}
+if actual != set(expected):
+    raise SystemExit("guest bootstrap: Agent Fleet wheelhouse file set mismatch")
+for name, item in expected.items():
+    path = root / name
+    if not path.is_file() or path.is_symlink() or path.stat().st_size != item["bytes"]:
+        raise SystemExit("guest bootstrap: Agent Fleet wheel identity mismatch")
+    if "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != item["digest"]:
+        raise SystemExit("guest bootstrap: Agent Fleet wheel digest mismatch")
+PY
 chown -R fmrunner:fmrunner /work/home/.fm-runner-tools
 /work/home/.fm-runner-tools/bin/shellcheck --version >/dev/null
 [ "$(/work/home/.fm-runner-tools/uv/uv --version)" = "uv 0.9.10" ] || { echo "guest bootstrap: staged uv version mismatch" >&2; exit 125; }
@@ -179,6 +241,24 @@ runuser -u fmrunner -- git -C /work/repo checkout --detach "$COMMIT" >/dev/null
 [ "$(git -C /work/repo rev-parse HEAD)" = "$COMMIT" ] || { echo "guest bootstrap: commit mismatch after clone" >&2; exit 125; }
 [ "$(git -C /work/repo rev-parse 'HEAD^{tree}')" = "$TREE" ] || { echo "guest bootstrap: tree mismatch after clone" >&2; exit 125; }
 [ -z "$(git -C /work/repo status --porcelain --untracked-files=all)" ] || { echo "guest bootstrap: cloned snapshot is dirty" >&2; exit 125; }
+LOCK_DIGEST=sha256:$(sha256sum /work/repo/tools/agent-fleet/uv.lock | awk '{print $1}')
+[ "$LOCK_DIGEST" = "$(read_request protocol.agent_fleet_python.lock_digest)" ] || { echo "guest bootstrap: Agent Fleet lock digest mismatch" >&2; exit 125; }
+runuser -u fmrunner -- /work/home/.fm-runner-tools/uv/uv venv --python /usr/bin/python3 /work/repo/tools/agent-fleet/.venv >/dev/null
+PYTEST_VERSION=$(python3 - "$REQUEST" <<'PY'
+import json
+import sys
+print(next(item["version"] for item in json.load(open(sys.argv[1], encoding="utf-8"))["protocol"]["agent_fleet_python"]["wheels"] if item["name"] == "pytest"))
+PY
+)
+RUFF_VERSION=$(python3 - "$REQUEST" <<'PY'
+import json
+import sys
+print(next(item["version"] for item in json.load(open(sys.argv[1], encoding="utf-8"))["protocol"]["agent_fleet_python"]["wheels"] if item["name"] == "ruff"))
+PY
+)
+runuser -u fmrunner -- env UV_OFFLINE=1 UV_NO_INDEX=1 \
+  /work/home/.fm-runner-tools/uv/uv pip install --python /work/repo/tools/agent-fleet/.venv/bin/python \
+  --offline --no-index --find-links "$WHEELHOUSE" "pytest==$PYTEST_VERSION" "ruff==$RUFF_VERSION" >/dev/null
 
 python3 - "$REQUEST" /work/repo <<'PY'
 import hashlib
@@ -310,7 +390,7 @@ RESULT_DIGEST=sha256:$(sha256sum "$RESULT_ARCHIVE" | awk '{print $1}')
 CURL_CONFIG=$BASE/curl-output.conf
 printf 'url = "%s"\nfail\nsilent\nshow-error\nconnect-timeout = 30\nmax-time = 300\nrequest = "PUT"\nheader = "x-ms-blob-type: BlockBlob"\nupload-file = "%s"\n' "$OUTPUT_URL" "$RESULT_ARCHIVE" >"$CURL_CONFIG"
 unset OUTPUT_URL
-curl --config "$CURL_CONFIG"
+run_bootstrap_network curl --config "$CURL_CONFIG"
 rm -f "$CURL_CONFIG"
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
 printf 'FM_AZURE_RESULT %s boot=%s\n' "$RESULT_DIGEST" "$BOOT_ID"

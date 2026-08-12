@@ -46,8 +46,8 @@ Package installation performed by a repository command must remain rootless and 
 Missing toolchain capability fails the command rather than triggering a local retry or privileged repository-controlled bootstrap.
 The fixed root bootstrap installs a hard-coded Ubuntu transport and Linux test-tool package closure before repository code starts when the pinned Canonical image lacks it.
 Repository code cannot alter that privileged package list, all package and staging traffic is shaped to one megabit per second and ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
-The controller pre-stages the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 release archives inside the digest-bound input.
-Trusted root verifies and installs both into the invocation-private unprivileged home before deny-all networking begins; the unprivileged command helper only verifies their versions and never downloads.
+The controller pre-stages the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 release archives plus the complete Linux x86_64 pytest/ruff wheel closure selected from the exact snapshot's Agent Fleet `uv.lock` inside the digest-bound input.
+Trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and forces repository `uv run --locked` commands to use that already-synchronized offline environment.
 
 ## Private control and VM boundary
 
@@ -115,7 +115,7 @@ There is no queue daemon and no warm runner compute.
 An empty local queue means zero runner VMs.
 Every invocation receives a separate VM, so two admitted shards run concurrently without sharing process, memory, disk, temp, or task state.
 
-Immediately before staging and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, VNet, validation-shard subnet, NSG, NAT, blob private endpoint, private-DNS zone group, approved blob connection, endpoint subnet/NIC, deny rules, and private-access properties.
+Immediately before staging and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
 It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, current retail rate, and active runner count.
 The software cap is four active runner VMs and may be configured only from one through eight, while live regional and per-family free-vCPU gates can impose a lower effective cap.
 The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
@@ -124,8 +124,8 @@ Lease loss stops before repository execution and retains exact state for reconci
 
 The normal budget limit is the active $1,000 target.
 An operator may select the commissioning ceiling of $1,500 through `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500` only during the approved commissioning window.
-Admission emits separate first-hour and first-day bounds itemized as VM compute, OS disk, NAT/public-IP, private endpoint/DNS/monitoring, boot diagnostics, shaped bootstrap/staging/result traffic, storage/control operations, the conservative $210 foundation reserve, and zero repository-command egress.
-The VM's complete bootstrap/output channel is shaped to one megabit per second, staging input and result output have explicit byte ceilings, trusted curl has connection/elapsed/size bounds, and Azure control operations have a fixed count ceiling.
+Admission emits separate first-hour and first-day bounds itemized as VM compute, OS-disk capacity, NAT Gateway, public IP, private endpoints, private DNS, monitoring, boot diagnostics, storage capacity, storage operations, control operations, provisioning/control interval, NAT data processing, Internet egress, trusted bootstrap traffic, the conservative $210 foundation reserve, and zero repository-command egress.
+The VM's complete bootstrap/output channel is shaped to one megabit per second, the trusted bootstrap terminates its exact network process group at an aggregate byte ceiling, staging input and result output have explicit byte ceilings, trusted curl has connection/elapsed/size bounds, and Azure control operations have a fixed count ceiling.
 The invocation template independently installs a 24-hour self-shutdown timer before repository execution, and every host subprocess and Azure CLI call has a five-minute deadline.
 Repository-controlled execution is networkless, so untrusted code cannot create an unbounded egress charge.
 An unreadable actual cost, forecast, retail rate, quota, or active inventory fails closed.
@@ -136,7 +136,7 @@ It never deletes an active VM, an uncollected result, an unfinished snapshot, or
 
 Local state lives under `$FM_HOME/state/azure-runner` by default and is written mode 0600 through an atomic replace plus directory `fsync` under a per-home file lock.
 The state record never stores a SAS value.
-It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, Managed Run Command, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, Run Command provisioning identity, boot, result, and cleanup identities.
+It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, both Managed Run Commands, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, both Run Command provisioning identities, boot, result, and cleanup identities.
 
 A controller restart runs `resume --invocation <id>`.
 Resume may poll the existing Managed Run Command, collect an already published output, or continue exact cleanup.
@@ -148,18 +148,18 @@ The old invocation ID is never reused.
 ## Cleanup
 
 Cleanup begins only after the complete result archive and every bound identity have been verified and retained locally.
-Before deletion, the controller re-reads every live disposable resource and compares the complete owner, role, home/task/task-generation, deployment-generation, invocation/attempt/fence, snapshot/command, SKU/class/cost, and cleanup-token tag set plus the recorded resource ID and ETag.
+Before the first deletion, the controller inventories and classifies the complete disposable set, including every VM child regardless of its current tags, and re-reads every planned resource to compare the complete owner, role, home/task/task-generation, deployment-generation, invocation/attempt/fence, snapshot/command, SKU/class/cost, and cleanup-token tag set plus the recorded resource ID and ETag.
 The VM also must retain its immutable instance ID, the NIC its resourceGuid and exact VM parent, the disk its uniqueId and exact managedBy VM, and the Managed Run Command its recorded provisioning identity.
-The VM-absent path inventories all resources in the group for the invocation and refuses any unplanned residual, including a Managed Run Command.
+The VM-absent path separately inventories all resources and Managed Run Commands in the group and refuses any unplanned or tagless VM child before deleting anything.
 Deletion uses the recorded ETag as an `If-Match` condition.
 A missing, foreign, replaced, or unreadable resource retains everything and reports ambiguity.
 
 Cleanup removes resources in this exact scope and order:
 
-1. The invocation's Managed Run Command child resource.
-2. The exact invocation VM.
-3. The exact recorded NIC.
-4. The exact recorded OS disk.
+1. The invocation's `execute` and `safety-shutdown` Managed Run Command child resources.
+2. The exact invocation VM, whose NIC and OS disk delete options are both `Detach`.
+3. The exact recorded NIC, after a stable-identity detached transition is recorded.
+4. The exact recorded OS disk, after a stable-identity detached transition is recorded.
 5. The exact input and output staging blobs.
 6. The local transient input payload, while retaining local verified result and state.
 

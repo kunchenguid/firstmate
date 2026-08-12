@@ -551,11 +551,15 @@ for function in ("run_validate", "run_preview", "run_apply", "run_worker_create"
     body = text.split(function + "() {", 1)[1].split("\n}\n", 1)[0]
     assert "run_bounded_az" in body, function
     assert not any(line.lstrip().startswith("az ") for line in body.splitlines()), function
+for function in ("scope_gate", "provider_gate", "sku_gate", "quota_gate", "name_gate"):
+    body = text.split(function + "() {", 1)[1].split("\n}\n", 1)[0]
+    assert "run_bounded_az_capture" in body, function
+    assert not any("$(az " in line or line.lstrip().startswith("az ") for line in body.splitlines()), function
 PY
   rm -f "$sourceable"
   # shellcheck disable=SC2031
   rm -rf "$state_dir"
-  pass "validate/preview/apply and worker mutations bound Azure CLI time and retain exact operation state"
+  pass "all live gates and validate/preview/apply/worker mutations share bounded Azure CLI ownership and retained state"
 }
 
 run_capacity_contract_checks() {
@@ -658,7 +662,7 @@ run_documentation_contract_checks() {
   assert_grep 'existing 10-vCPU Dasv6 allowance' "$DOC" "immediate runner and pilot quota contract is missing"
   assert_grep 'currently unavailable because its live family limit is 10' "$DOC" "unavailable homogeneous capacity is not explicit"
   assert_grep 'may instead select one of the foundation' "$DOC" "mixed-family runner selection contract is missing"
-  assert_grep 'bounds every Azure CLI validation, preview, apply, worker, and cleanup call' "$DOC" "bounded Azure CLI contract is missing"
+  assert_grep 'routes every scope, provider, SKU, quota, name, validation, preview, apply, worker, and cleanup Azure CLI call' "$DOC" "bounded Azure CLI contract is missing"
   assert_no_grep 'seven-day canary' "$DOC" "superseded time-based canary remains documented"
   pass "operator documentation preserves activation, interface, review, and file-transfer contracts"
 }

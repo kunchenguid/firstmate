@@ -24,6 +24,8 @@ make_repo() {
   git -C "$path" config user.name fixture
   git -C "$path" config user.email fixture@example.invalid
   mkdir -p "$path/declared"
+  mkdir -p "$path/tools/agent-fleet"
+  cp "$ROOT/tools/agent-fleet/uv.lock" "$path/tools/agent-fleet/uv.lock"
   printf 'locked\n' >"$path/declared/dependency.lock"
   printf '# fixture\n' >"$path/README.md"
   git -C "$path" add .
@@ -69,8 +71,8 @@ assert "customdata" not in text
 assert "authorized_keys" not in text
 assert vm["properties"]["securityProfile"]["securityType"] == "TrustedLaunch"
 assert vm["properties"]["securityProfile"]["encryptionAtHost"] is True
-assert vm["properties"]["storageProfile"]["osDisk"]["deleteOption"] == "Delete"
-assert vm["properties"]["networkProfile"]["networkInterfaces"][0]["properties"]["deleteOption"] == "Delete"
+assert vm["properties"]["storageProfile"]["osDisk"]["deleteOption"] == "Detach"
+assert vm["properties"]["networkProfile"]["networkInterfaces"][0]["properties"]["deleteOption"] == "Detach"
 assert "shutdown -h now" in safety_shutdown["properties"]["source"]["script"]
 assert "expiryUtc" in template["parameters"]
 host = Path(sys.argv[2]).read_text(encoding="utf-8")
@@ -78,10 +80,10 @@ guest = Path(sys.argv[3]).read_text(encoding="utf-8")
 executor = Path(sys.argv[4]).read_text(encoding="utf-8")
 for required in ("request_digest", "command_digest", "snapshot_digest", "vm_instance_id", "boot_id", "expected_result_digest"):
     assert required in host
-for required in ("MemoryMax", "MemorySwapMax=0", "TasksMax", "CPUQuota", "RuntimeMaxSec", "IPAddressDeny=any", "hidepid=2", "tc qdisc replace", "rate 1mbit", "max-filesize = 536870912"):
+for required in ("MemoryMax", "MemorySwapMax=0", "TasksMax", "CPUQuota", "RuntimeMaxSec", "IPAddressDeny=any", "hidepid=2", "tc qdisc replace", "rate 1mbit", "max-filesize = 536870912", "BOOTSTRAP_NETWORK_BYTE_CEILING", "aggregate trusted-bootstrap network byte ceiling"):
     assert required in guest
 assert "bootstrapEgressRateBitsPerSecond" in template["parameters"]
-assert "pip install" not in guest
+assert "python3 -m pip" not in guest and "run_bootstrap_network pip" not in guest
 for required in ("timeout=timeout_seconds", "foundation_gate", "If-Match", "identities", "max_billable_lifetime_hours"):
     assert required in host
 for forbidden in ("GITHUB_TOKEN", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "AZURE_CLIENT_SECRET", "SSH_AUTH_SOCK"):
@@ -164,8 +166,19 @@ assert state["resources"]["os_disk_id"].endswith("/" + state["resources"]["os_di
 input_path = Path(state["input_path"])
 assert state["input_digest"] == "sha256:" + hashlib.sha256(input_path.read_bytes()).hexdigest()
 with tarfile.open(input_path, "r:gz") as archive:
-    assert set(archive.getnames()) == {"request.json", "snapshot.bundle", "runner-exec.py", "shellcheck.tar.xz", "uv.tar.gz"}
+    assert set(archive.getnames()) == {"request.json", "snapshot.bundle", "runner-exec.py", "shellcheck.tar.xz", "uv.tar.gz", "agent-fleet-wheelhouse.tar"}
+assert request["protocol"]["agent_fleet_python"]["lock_digest"].startswith("sha256:")
+assert {item["name"] for item in request["protocol"]["agent_fleet_python"]["wheels"]} == {"iniconfig", "packaging", "pluggy", "pygments", "pytest", "ruff"}
 PY
+  mkdir -p "$tmp/offline-wheelhouse" "$tmp/offline-target"
+  tar -xOf "$home/state/azure-runner/payloads/$invocation/input.tar.gz" agent-fleet-wheelhouse.tar >"$tmp/wheelhouse.tar"
+  tar -xf "$tmp/wheelhouse.tar" -C "$tmp/offline-wheelhouse"
+  UV_CACHE_DIR="$tmp/empty-uv-cache" UV_OFFLINE=1 uv pip install \
+    --target "$tmp/offline-target" --python-platform x86_64-manylinux_2_17 \
+    --offline --no-index --find-links "$tmp/offline-wheelhouse" pytest==9.1.1 ruff==0.15.21 >/dev/null || \
+    fail "fresh empty-cache Linux target could not resolve the staged locked wheel closure offline"
+  [ -f "$tmp/offline-target/pytest/__init__.py" ] && [ -d "$tmp/offline-target/ruff-0.15.21.dist-info" ] || \
+    fail "fresh offline wheel closure did not install the locked pytest/ruff environment"
   printf 'dirty\n' >"$repo/untracked"
   if (cd "$repo" && runner "$home" "$fakebin" prepare --task task-two --generation generation-two -- echo no) >/dev/null 2>&1; then
     fail "prepare accepted an untracked file"
@@ -440,7 +453,7 @@ spec = importlib.util.spec_from_file_location("runner_host_foundation", sys.argv
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 env = {
-    "subscription": "sub", "resource_group": "rg", "storage": "store", "vnet": "vnet-prefix-eus",
+    "subscription": "sub", "resource_group": "rg", "prefix": "prefix", "storage": "store", "vnet": "vnet-prefix-eus",
     "subnet": "snet-validation-shards", "elastic_nsg": "nsg-prefix-elastic-isolated", "nat": "nat-prefix-eus",
     "blob_private_endpoint": "pe-prefix-blob", "blob_private_dns_zone": "privatelink.blob.core.windows.net",
     "deployment_generation": "gen-one", "owner": "owner", "azure_operation_count": 0,
@@ -453,16 +466,24 @@ vnet_id = rid("Microsoft.Network", "virtualNetworks", "vnet-prefix-eus")
 subnet_id = vnet_id + "/subnets/snet-validation-shards"
 nsg_id = rid("Microsoft.Network", "networkSecurityGroups", "nsg-prefix-elastic-isolated")
 nat_id = rid("Microsoft.Network", "natGateways", "nat-prefix-eus")
+pip_id = rid("Microsoft.Network", "publicIPAddresses", "pip-prefix-nat-eus")
 pe_id = rid("Microsoft.Network", "privateEndpoints", "pe-prefix-blob")
 dns_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
+dns_link_id = dns_id + "/virtualNetworkLinks/firstmate-vnet"
+pe_nic_id = rid("Microsoft.Network", "networkInterfaces", "pe-prefix-blob.nic")
 resources = {
-    store_id.lower(): {"id": store_id, "location": "eastus", "tags": common, "properties": {"publicNetworkAccess": "Disabled", "allowSharedKeyAccess": False, "allowBlobPublicAccess": False, "supportsHttpsTrafficOnly": True, "minimumTlsVersion": "TLS1_2", "networkAcls": {"defaultAction": "Deny", "bypass": "None"}}},
-    vnet_id.lower(): {"id": vnet_id, "location": "eastus", "tags": common, "properties": {}},
+    store_id.lower(): {"id": store_id, "location": "eastus", "kind": "StorageV2", "sku": {"name": "Standard_ZRS"}, "tags": common, "properties": {"accessTier": "Hot", "defaultToOAuthAuthentication": True, "publicNetworkAccess": "Disabled", "allowSharedKeyAccess": False, "allowBlobPublicAccess": False, "supportsHttpsTrafficOnly": True, "minimumTlsVersion": "TLS1_2", "networkAcls": {"defaultAction": "Deny", "bypass": "None"}}},
+    vnet_id.lower(): {"id": vnet_id, "location": "eastus", "tags": common, "properties": {"addressSpace": {"addressPrefixes": ["10.42.0.0/16"]}}},
     subnet_id.lower(): {"id": subnet_id, "properties": {"addressPrefix": "10.42.7.0/24", "networkSecurityGroup": {"id": nsg_id}, "natGateway": {"id": nat_id}, "privateEndpointNetworkPolicies": "Enabled"}},
-    nsg_id.lower(): {"id": nsg_id, "tags": common, "properties": {"securityRules": [{"name": "deny-public-inbound", "properties": {"direction": "Inbound", "access": "Deny", "sourceAddressPrefix": "Internet"}}, {"name": "deny-vnet-cross-compartment-inbound", "properties": {"direction": "Inbound", "access": "Deny", "sourceAddressPrefix": "VirtualNetwork"}}]}},
-    nat_id.lower(): {"id": nat_id, "location": "eastus", "tags": common, "properties": {}},
-    pe_id.lower(): {"id": pe_id, "tags": common, "properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}, "networkInterfaces": [{"id": "/nic/private"}], "privateLinkServiceConnections": [{"properties": {"privateLinkServiceId": store_id, "groupIds": ["blob"], "privateLinkServiceConnectionState": {"status": "Approved"}}}]}},
-    (pe_id + "/privateDnsZoneGroups/default").lower(): {"id": pe_id + "/privateDnsZoneGroups/default", "properties": {"privateDnsZoneConfigs": [{"properties": {"privateDnsZoneId": dns_id}}]}},
+    (vnet_id + "/subnets/snet-private-endpoints").lower(): {"id": vnet_id + "/subnets/snet-private-endpoints", "properties": {"addressPrefix": "10.42.3.0/27", "privateEndpointNetworkPolicies": "Disabled"}},
+    nsg_id.lower(): {"id": nsg_id, "location": "eastus", "tags": common, "properties": {"securityRules": [{"name": "deny-public-inbound", "properties": {"priority": 100, "direction": "Inbound", "access": "Deny", "protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "Internet", "destinationAddressPrefix": "*"}}, {"name": "deny-vnet-cross-compartment-inbound", "properties": {"priority": 110, "direction": "Inbound", "access": "Deny", "protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "VirtualNetwork", "destinationAddressPrefix": "*"}}]}},
+    pip_id.lower(): {"id": pip_id, "location": "eastus", "sku": {"name": "Standard"}, "tags": common, "properties": {"publicIPAllocationMethod": "Static", "publicIPAddressVersion": "IPv4", "idleTimeoutInMinutes": 4}},
+    nat_id.lower(): {"id": nat_id, "location": "eastus", "sku": {"name": "Standard"}, "tags": common, "properties": {"idleTimeoutInMinutes": 10, "publicIpAddresses": [{"id": pip_id}]}},
+    pe_id.lower(): {"id": pe_id, "location": "eastus", "tags": common, "properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}, "networkInterfaces": [{"id": pe_nic_id}], "privateLinkServiceConnections": [{"name": "blob", "properties": {"privateLinkServiceId": store_id, "groupIds": ["blob"], "privateLinkServiceConnectionState": {"status": "Approved"}}}]}},
+    pe_nic_id.lower(): {"id": pe_nic_id, "properties": {"resourceGuid": "pe-nic-guid", "privateEndpoint": {"id": pe_id}, "ipConfigurations": [{"properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}}}]}},
+    dns_id.lower(): {"id": dns_id, "location": "global", "tags": common},
+    dns_link_id.lower(): {"id": dns_link_id, "location": "global", "properties": {"registrationEnabled": False, "virtualNetwork": {"id": vnet_id}}},
+    (pe_id + "/privateDnsZoneGroups/default").lower(): {"id": pe_id + "/privateDnsZoneGroups/default", "properties": {"privateDnsZoneConfigs": [{"name": "blob", "properties": {"privateDnsZoneId": dns_id}}]}},
 }
 def run_gate(values):
     def fake_az(env_arg, args, **kwargs):
@@ -475,13 +496,23 @@ for resource_id, mutation in (
     (store_id, lambda r: r["tags"].update({"cleanup-owner": "foreign"})),
     (store_id, lambda r: r["properties"].update({"publicNetworkAccess": "Enabled"})),
     (vnet_id, lambda r: r.update({"id": vnet_id + "-foreign"})),
+    (vnet_id, lambda r: r["properties"]["addressSpace"].update({"addressPrefixes": ["10.99.0.0/16"]})),
     (subnet_id, lambda r: r["properties"]["networkSecurityGroup"].update({"id": nsg_id + "-foreign"})),
     (subnet_id, lambda r: r["properties"]["natGateway"].update({"id": nat_id + "-foreign"})),
+    (vnet_id + "/subnets/snet-private-endpoints", lambda r: r["properties"].update({"privateEndpointNetworkPolicies": "Enabled"})),
     (nsg_id, lambda r: r["properties"].update({"securityRules": []})),
+    (nsg_id, lambda r: r["properties"]["securityRules"].append({"name": "allow-public", "properties": {"priority": 90, "direction": "Inbound", "access": "Allow", "protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "Internet", "destinationAddressPrefix": "*"}})),
+    (pip_id, lambda r: r["sku"].update({"name": "Basic"})),
     (nat_id, lambda r: r["tags"].update({"deployment-generation": "foreign"})),
+    (nat_id, lambda r: r["properties"]["publicIpAddresses"][0].update({"id": "/foreign"})),
     (pe_id, lambda r: r["properties"]["subnet"].update({"id": "/foreign"})),
+    (pe_id, lambda r: r["properties"]["privateLinkServiceConnections"][0].update({"name": "foreign"})),
     (pe_id, lambda r: r["properties"]["privateLinkServiceConnections"][0]["properties"]["privateLinkServiceConnectionState"].update({"status": "Rejected"})),
     (pe_id, lambda r: r["properties"].update({"networkInterfaces": []})),
+    (pe_nic_id, lambda r: r["properties"]["privateEndpoint"].update({"id": "/foreign"})),
+    (dns_id, lambda r: r.update({"id": dns_id + "-foreign"})),
+    (dns_link_id, lambda r: r["properties"]["virtualNetwork"].update({"id": "/foreign"})),
+    (pe_id + "/privateDnsZoneGroups/default", lambda r: r["properties"]["privateDnsZoneConfigs"][0].update({"name": "foreign"})),
     (pe_id + "/privateDnsZoneGroups/default", lambda r: r["properties"]["privateDnsZoneConfigs"][0]["properties"].update({"privateDnsZoneId": "/foreign"})),
 ):
     changed = json.loads(json.dumps(resources))
@@ -558,6 +589,7 @@ state = {
         "nic_id": "/nic/exact",
         "os_disk_id": "/disk/exact",
         "run_command_name": "execute",
+        "safety_run_command_name": "safety-shutdown",
         "identities": {},
     },
     "attempt": 1,
@@ -590,9 +622,10 @@ assert cost["max_network_bytes"] == 0
 assert cost["max_billable_lifetime_hours"] == 24
 assert cost["max_increment"] >= 210
 assert set(cost["first_hour"]["categories"]) == {
-    "vm_compute", "os_disk", "nat_gateway_and_public_ip", "private_endpoints_dns_monitoring",
-    "boot_diagnostics", "bootstrap_traffic", "storage_capacity_operations_and_control",
-    "foundation_shared_meter_reserve", "repository_command_egress",
+    "vm_compute", "os_disk_storage_capacity", "nat_gateway", "public_ip", "private_endpoints",
+    "private_dns", "monitoring", "boot_diagnostics", "storage_capacity", "storage_operations",
+    "control_operations", "provisioning_control_interval", "nat_data_processing", "internet_egress",
+    "trusted_bootstrap_traffic", "foundation_shared_meter_reserve", "repository_command_egress",
 }
 assert cost["first_day"]["total"] > cost["first_hour"]["total"]
 assert cost["first_day"]["vm_network_bytes"] <= module.MAX_BOOTSTRAP_NETWORK_BYTES
@@ -607,14 +640,23 @@ resources = {
     "nic": {"id": "/nic/exact", "etag": '"nic-etag"', "tags": dict(expected_tags), "properties": {"resourceGuid": "nic-guid", "virtualMachine": {"id": "/vm/exact"}}},
     "disk": {"id": "/disk/exact", "etag": '"disk-etag"', "tags": dict(expected_tags), "managedBy": "/vm/exact", "properties": {"uniqueId": "disk-unique"}},
     "run-command": {"id": "/vm/exact/runCommands/execute", "etag": '"run-etag"', "tags": dict(expected_tags), "properties": {"provisioningState": "Succeeded"}},
+    "run-command-safety": {"id": "/vm/exact/runCommands/safety-shutdown", "etag": '"safety-etag"', "tags": dict(expected_tags), "properties": {"provisioningState": "Succeeded"}},
 }
 state["resources"].update({
     "vm_instance_id": "vm-instance",
     "run_command_id": resources["run-command"]["id"],
-    "identities": {kind: module.immutable_identity(value, kind) for kind, value in resources.items()},
+    "safety_run_command_id": resources["run-command-safety"]["id"],
+    "identities": {
+        "vm": module.immutable_identity(resources["vm"], "vm"),
+        "nic": module.immutable_identity(resources["nic"], "nic"),
+        "disk": module.immutable_identity(resources["disk"], "disk"),
+        "run-command": module.immutable_identity(resources["run-command"], "run-command"),
+        "run-command-execute": module.immutable_identity(resources["run-command"], "run-command"),
+        "run-command-safety": module.immutable_identity(resources["run-command-safety"], "run-command"),
+    },
 })
 original_reader = module.read_exact_resource
-for kind, resource in resources.items():
+for kind, resource in {key: value for key, value in resources.items() if key != "run-command-safety"}.items():
     resource_id = resource["id"]
     for tag in (
         "workload", "firstmate-role", "lifecycle", "deployment-generation", "cleanup-owner",
@@ -665,17 +707,99 @@ for kind, changed in (
 module.read_exact_resource = original_reader
 
 # VM-absent cleanup inventories residual Run Commands and refuses an unplanned one.
-module.az_command = lambda env_arg, args, **kwargs: ([{"id": "/vm/exact/runCommands/foreign", "tags": {"invocation-binding": state["invocation"]}}], 0, "")
+module.az_command = lambda env_arg, args, **kwargs: ([{"id": "/vm/exact/runCommands/foreign", "tags": {}}], 0, "")
 try:
     module.cleanup_partial_capacity(env, state)
 except module.RunnerError as exc:
     assert "unplanned residual" in str(exc)
 else:
-    raise AssertionError("residual Run Command was not inventoried")
+    raise AssertionError("tagless residual Run Command was not inventoried")
 
-# create_run_command publishes the complete ownership tags and records immutable identity.
+# A complete classify-before-delete pass must discover a later foreign NIC
+# before deleting either exact Run Command, both with and without a live VM.
+exact_by_id = {
+    resources["run-command"]["id"].lower(): resources["run-command"],
+    resources["run-command-safety"]["id"].lower(): resources["run-command-safety"],
+    resources["vm"]["id"].lower(): resources["vm"],
+    resources["disk"]["id"].lower(): resources["disk"],
+}
+foreign_nic = json.loads(json.dumps(resources["nic"]))
+foreign_nic["tags"]["cleanup-token"] = "foreign"
+def classify_reader(env_arg, resource_id, kind):
+    if resource_id.lower() == resources["nic"]["id"].lower():
+        return True, foreign_nic
+    value = exact_by_id.get(resource_id.lower())
+    return (value is not None), value
+listed = [{"id": value["id"], "tags": value.get("tags", {})} for value in resources.values()]
+delete_calls = []
+current_listing = [item for item in listed if item["id"].lower() != resources["vm"]["id"].lower()]
+module.read_exact_resource = classify_reader
+module.az_command = lambda env_arg, args, **kwargs: (current_listing, 0, "") if args[0:2] == ["resource", "list"] else delete_calls.append(args)
+module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
+for operation, listing in (
+    (lambda: module.cleanup_partial_capacity(env, state), [item for item in listed if item["id"].lower() != resources["vm"]["id"].lower()]),
+    (lambda: module.cleanup(env, dict(state, phase="result-collected")), listed),
+):
+    current_listing[:] = listing
+    delete_calls.clear()
+    try:
+        operation()
+    except module.RunnerError as exc:
+        assert "cleanup tag mismatch" in str(exc)
+    else:
+        raise AssertionError("foreign NIC was accepted by complete cleanup classification")
+    assert not delete_calls, "cleanup mutated an exact resource before classifying the later foreign NIC"
+
+# Exact positive cleanup deletes both commands before the VM and records the
+# only allowed NIC/disk ETag transition after Azure detaches them.
 import tempfile
 from pathlib import Path
+positive = json.loads(json.dumps(state))
+positive["phase"] = "result-collected"
+positive["staging"] = {"input_blob": "input", "output_blob": "output"}
+live = {
+    resources["run-command"]["id"].lower(): json.loads(json.dumps(resources["run-command"])),
+    resources["run-command-safety"]["id"].lower(): json.loads(json.dumps(resources["run-command-safety"])),
+    resources["vm"]["id"].lower(): json.loads(json.dumps(resources["vm"])),
+    resources["nic"]["id"].lower(): json.loads(json.dumps(resources["nic"])),
+    resources["disk"]["id"].lower(): json.loads(json.dumps(resources["disk"])),
+}
+deleted = []
+def positive_reader(env_arg, resource_id, kind):
+    value = live.get(resource_id.lower())
+    return (value is not None), value
+def positive_az(env_arg, args, **kwargs):
+    if args[0:2] == ["resource", "list"]:
+        return ([{"id": value["id"], "tags": value.get("tags", {})} for value in live.values()], 0, "")
+    if args[0:3] == ["rest", "--method", "delete"]:
+        resource_id = args[args.index("--url") + 1].split("https://management.azure.com", 1)[1].split("?", 1)[0]
+        value = live.pop(resource_id.lower())
+        deleted.append(value["id"])
+        if resource_id.lower() == resources["vm"]["id"].lower():
+            live[resources["nic"]["id"].lower()]["properties"].pop("virtualMachine", None)
+            live[resources["nic"]["id"].lower()]["etag"] = '"nic-detached"'
+            live[resources["disk"]["id"].lower()].pop("managedBy", None)
+            live[resources["disk"]["id"].lower()]["etag"] = '"disk-detached"'
+        return ({}, 0, "")
+    raise AssertionError("unexpected positive cleanup Azure call: {}".format(args))
+with tempfile.TemporaryDirectory() as tmp:
+    positive_env = dict(env, state_dir=Path(tmp))
+    payload = Path(tmp) / "payloads" / positive["invocation"]
+    payload.mkdir(parents=True)
+    positive["input_path"] = str(payload / "input.tar.gz")
+    module.read_exact_resource = positive_reader
+    module.az_command = positive_az
+    module.save_state = lambda *args, **kwargs: None
+    module.storage_delete = lambda *args, **kwargs: None
+    module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
+    module.cleanup(positive_env, positive)
+assert deleted == [
+    resources["run-command"]["id"], resources["run-command-safety"]["id"], resources["vm"]["id"],
+    resources["nic"]["id"], resources["disk"]["id"],
+]
+assert positive["phase"] == "complete"
+
+# create_run_command publishes the complete ownership tags and records immutable identity.
 with tempfile.TemporaryDirectory() as tmp:
     create_env = dict(env, state_dir=Path(tmp), subscription="sub")
     module.ensure_state_dirs(create_env)
@@ -683,7 +807,21 @@ with tempfile.TemporaryDirectory() as tmp:
     create_state["phase"] = "vm-created"
     create_state["request"]["protocol"] = {"guest_digest": "sha256:" + module.sha256_file(module.GUEST)}
     create_state["input_digest"] = "sha256:" + "4" * 64
-    create_state["resources"]["identities"].pop("run-command", None)
+    create_state["resources"]["identities"].pop("run-command-execute", None)
+    vm_for_adoption = json.loads(json.dumps(resources["vm"]))
+    vm_for_adoption["properties"].update({
+        "networkProfile": {"networkInterfaces": [{"id": resources["nic"]["id"]}]},
+        "storageProfile": {"osDisk": {"managedDisk": {"id": resources["disk"]["id"]}}},
+    })
+    adoption = {
+        resources["vm"]["id"].lower(): vm_for_adoption,
+        resources["nic"]["id"].lower(): resources["nic"],
+        resources["disk"]["id"].lower(): resources["disk"],
+        resources["run-command-safety"]["id"].lower(): resources["run-command-safety"],
+    }
+    module.read_exact_resource = lambda env_arg, resource_id, kind: (True, adoption[resource_id.lower()])
+    module.adopt_vm_identity(create_env, create_state, vm_for_adoption)
+    assert create_state["resources"]["identities"]["run-command-safety"]["provisioning_state"] == "Succeeded"
     captured = {}
     def fake_az(env_arg, args, **kwargs):
         if args[0:3] == ["rest", "--method", "put"]:
@@ -699,7 +837,7 @@ with tempfile.TemporaryDirectory() as tmp:
     module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
     module.create_run_command(create_env, create_state, "https://input", "https://output")
     assert captured["tags"] == module.ownership_tags(create_env, create_state)
-    assert create_state["resources"]["identities"]["run-command"]["provisioning_state"] == "Succeeded"
+    assert create_state["resources"]["identities"]["run-command-execute"]["provisioning_state"] == "Succeeded"
 PY
   pass "audit blockers stay fixed: complete ownership/immutable matrix, residual inventory, Run Command creation tags, deadlines, networkless command, and itemized cost bounds"
 }

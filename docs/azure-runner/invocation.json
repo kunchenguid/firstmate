@@ -123,7 +123,7 @@
           "osDisk": {
             "name": "[parameters('osDiskName')]",
             "createOption": "FromImage",
-            "deleteOption": "Delete",
+            "deleteOption": "Detach",
             "diskSizeGB": 96,
             "managedDisk": {
               "storageAccountType": "StandardSSD_LRS"
@@ -135,7 +135,7 @@
             {
               "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
               "properties": {
-                "deleteOption": "Delete",
+                "deleteOption": "Detach",
                 "primary": true
               }
             }
