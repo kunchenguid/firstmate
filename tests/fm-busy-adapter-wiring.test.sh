@@ -26,16 +26,28 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  list-windows) printf '%s\n' "${FM_FAKE_WINDOW_NAME:-}"; exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    previous=
+    for arg in "$@"; do
+      if [ "$previous" = -l ] && [ -n "${FM_FAKE_LITERALS:-}" ]; then
+        printf '%s\n' "$arg" >> "$FM_FAKE_LITERALS"
+        break
+      fi
+      previous=$arg
+    done
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex devin
   printf '%s\n' "$fakebin"
 }
 
@@ -52,6 +64,7 @@ make_spawn_case() {  # <name> <harness> <id>
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  : > "$case_dir/literals"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -59,13 +72,19 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # Every case here is a ship spawn, which carries an explicit delivery contract
   # (AGENTS.md section 7); these tests are about busy-state wiring, so they pass a
   # fixed valid one.
-  local home=$1 wt=$2 fakebin=$3
+  local home=$1 wt=$2 fakebin=$3 arg relaunch=0
   shift 3
-  set -- "$@" --mode no-mistakes --yolo off
+  for arg in "$@"; do
+    [ "$arg" != --relaunch ] || relaunch=1
+  done
+  [ "$relaunch" = 1 ] || set -- "$@" --mode no-mistakes --yolo off
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LITERALS="$home/../literals" \
+    FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-firstmate}" \
+    FM_FAKE_WINDOW_NAME="${FM_FAKE_WINDOW_NAME:-}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -256,6 +275,113 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+run_devin_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_devin_hooks_semantic_lifecycle() {
+  local rec id=busy-devin-1 out state hooks launch brief
+  rec=$(make_spawn_case devin-lifecycle devin "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "devin spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.devin/hooks.v1.json"
+  assert_present "$hooks" "devin spawn did not write its task-local hook file"
+  jq -e '.UserPromptSubmit[0].hooks[0].command' "$hooks" >/dev/null \
+    || fail "devin hook file lacks its native UserPromptSubmit command"
+  jq -e '.Stop[0].hooks[0].command' "$hooks" >/dev/null \
+    || fail "devin hook file lacks its native Stop command"
+  assert_present "$state/$id.busy-gen" "devin did not arm its semantic busy-state contract"
+  launch=$(cat "$CASE_DIR/literals")
+  brief=$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md
+  assert_contains "$launch" "--permission-mode dangerous" \
+    "devin launch did not select unattended permission mode"
+  assert_contains "$launch" "--respect-workspace-trust false" \
+    "devin launch did not suppress the interactive trust gate"
+  assert_contains "$launch" "--prompt-file '$brief'" \
+    "devin launch did not pass the absolute brief through --prompt-file"
+
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "the launch brief must seed Devin busy, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  run_devin_hook "$hooks" Stop || fail "Devin Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "Devin Stop did not touch the turn-end notification"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "idle devin-hook" ] \
+    || fail "Devin Stop must classify idle, got '$out'"
+
+  run_devin_hook "$hooks" UserPromptSubmit \
+    || fail "Devin UserPromptSubmit hook command failed"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "busy devin-hook" ] \
+    || fail "Devin UserPromptSubmit must classify busy, got '$out'"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" unknown \
+    --gen "$(cat "$state/$id.busy-gen")" --source fm-interrupt --event interrupt-delivered
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "unknown fm-interrupt" ] \
+    || fail "an unacknowledged Devin cancellation must remain unknown, got '$out'"
+
+  run_devin_hook "$hooks" Stop || fail "second Devin Stop hook command failed"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "idle devin-hook" ] \
+    || fail "a native Devin Stop must settle cancellation uncertainty, got '$out'"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_devin_hook "$hooks" UserPromptSubmit \
+    || fail "a stale Devin hook must still exit cleanly"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a stale Devin hook must not alter the replacement generation, got '$out'"
+  pass "devin task-local hooks open on UserPromptSubmit, settle unknown cancellation on Stop, and reject stale generations"
+}
+
+test_devin_refuses_to_replace_project_hook_file() {
+  local rec id=busy-devin-owned out hooks original exclude
+  rec=$(make_spawn_case devin-owned devin "$id")
+  read_case_record "$rec"
+  mkdir -p "$WT_DIR/.devin"
+  hooks="$WT_DIR/.devin/hooks.v1.json"
+  exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude) \
+    || fail "could not resolve the test worktree exclusion file"
+  printf '.devin/hooks.v1.json\n' >> "$exclude"
+  original='{"Stop":[{"hooks":[{"type":"command","command":"echo foreign"}]}]}'
+  printf '%s\n' "$original" > "$hooks"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 1 $? "devin spawn must refuse an existing project hook file"
+  assert_contains "$out" "will not replace project-owned Devin hooks" \
+    "devin hook ownership refusal was not explicit"
+  [ "$(cat "$hooks")" = "$original" ] \
+    || fail "devin spawn changed a project-owned hook file after refusing it"
+  pass "devin refuses to overwrite a project-owned hook file"
+}
+
+test_devin_relaunch_preserves_project_replacement() {
+  local rec id=busy-devin-relaunch out hooks foreign
+  rec=$(make_spawn_case devin-relaunch devin "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "devin spawn should succeed: $out"
+  hooks="$WT_DIR/.devin/hooks.v1.json"
+  foreign='{"Stop":[{"hooks":[{"type":"command","command":"echo project hook"}]}]}'
+  printf '%s\n' "$foreign" > "$hooks"
+
+  out=$(FM_FAKE_PANE_COMMAND=zsh FM_FAKE_WINDOW_NAME="fm-$id" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch --harness claude)
+  expect_code 0 $? "relaunch away from devin should succeed: $out"
+  [ "$(cat "$hooks")" = "$foreign" ] \
+    || fail "relaunch deleted or changed the project-replaced Devin hook"
+  assert_present "$WT_DIR/.claude/settings.local.json" \
+    "relaunch did not arm the replacement harness"
+  pass "relaunch preserves a project-replaced Devin hook while arming the replacement"
+}
+
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -350,5 +476,8 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
+test_devin_hooks_semantic_lifecycle
+test_devin_refuses_to_replace_project_hook_file
+test_devin_relaunch_preserves_project_replacement
 
 echo "all fm-busy-adapter-wiring tests passed"

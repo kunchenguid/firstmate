@@ -31,6 +31,7 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   devin-hook       Devin lifecycle hooks (UserPromptSubmit/Stop)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -138,6 +139,16 @@ fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
 
+# Devin CLI 3000.4.16's task-local UserPromptSubmit and Stop hooks were
+# observed live on 2026-08-11. The generation-bound writer opens a submitted
+# turn and Stop closes a completed one. Ctrl+C has no verified native close
+# event, so fm-control records unknown/fm-interrupt after proving the worker
+# remains alive; /quit is bounded by its proven dead-endpoint control path.
+# No unverified SessionEnd or cancellation hook is credited here.
+fm_busy_devin_verified() {
+  return 0
+}
+
 fm_busy_record_path() {  # <state-dir> <id>
   printf '%s/%s.busy-state' "$1" "$2"
 }
@@ -181,6 +192,9 @@ fm_busy_sources_for_harness() {  # <harness>
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
+      ;;
+    devin*)
+      adapter=devin-hook
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;

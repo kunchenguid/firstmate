@@ -36,6 +36,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
+Devin is the bounded-uncertainty exception: after a delivered but unacknowledged `Ctrl+C`, it records `unknown fm-interrupt`, never idle, so an absent native close event cannot leave a stale busy verdict until a later lifecycle hook settles it.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 

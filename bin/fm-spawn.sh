@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|devin)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -162,6 +162,9 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
+# Devin uses a gitignored task-local .devin/hooks.v1.json file.  fm-spawn
+# refuses an existing file rather than overwriting project hooks, and teardown
+# removes only a matching canonical Firstmate hook through the control-plane table.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -797,7 +800,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path hook expected actual gen
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -806,6 +809,20 @@ clear_relaunch_harness_wiring() {
   # unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
+  if [ "$harness" = devin ]; then
+    hook=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id") || return 1
+    if [ -n "$hook" ] && [ -f "$hook" ] && [ ! -L "$hook" ]; then
+      gen=$(fm_control_busy_current_gen "$state" "$id" 2>/dev/null || true)
+      [ -n "$gen" ] || return 0
+      expected=$(fm_control_devin_hook_json "$state/$id.turn-ended" "$FM_ROOT/bin/fm-busy-event.sh" \
+        "$state" "$id" "$gen") || return 1
+      actual=$(<"$hook") || return 1
+      if [ "$actual" = "$expected" ]; then
+        rm -f -- "$hook" || return 1
+      fi
+    fi
+    return 0
+  fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
@@ -1035,7 +1052,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|devin)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1130,6 +1147,11 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Devin CLI accepts an initial prompt file in its interactive mode.  The
+    # explicit dangerous permission mode and workspace-trust opt-out keep this
+    # isolated worker unattended without changing any user configuration.
+    # Its task-local Stop hook is installed below rather than in the command.
+    devin) printf '%s' '__DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false __MODELFLAG__--prompt-file __BRIEF__' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
     # ships approval prompts AND a filesystem/network sandbox ON by default
@@ -1218,6 +1240,13 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
+# Devin is verified for isolated crewmate/scout panes only.  Its SessionStart
+# hook fires, but no primary watcher/session-start transport is verified yet.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = devin ]; then
+  echo "error: devin is a verified crewmate/scout adapter only and cannot run a secondmate; its primary session-start and watcher protocol are not verified." >&2
+  exit 1
+fi
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -1287,6 +1316,29 @@ resolve_muse_binary() {
   return 1
 }
 
+resolve_devin_binary() {
+  local candidate dir
+  candidate=$(command -v devin 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        [ -z "$dir" ] || { printf '%s/%s\n' "$dir" "$(basename "$candidate")"; return 0; }
+        ;;
+    esac
+  fi
+  echo "error: devin executable not found on PATH; install Devin CLI or select a different verified harness" >&2
+  return 1
+}
+
+devin_preflight() {  # <absolute-devin-bin>
+  "$1" auth status >/dev/null 2>&1 || {
+    echo "error: Devin CLI is not authenticated for an unattended worker; run 'devin auth login' before selecting the devin harness" >&2
+    return 1
+  }
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1321,7 +1373,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|devin)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1377,8 +1429,8 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # kimi and devin likewise have no verified reasoning-effort flag; the
+    # requested axis stays in task metadata but never reaches the launch command.
   esac
 }
 
@@ -1412,6 +1464,14 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__DEVINBIN__*)
+    DEVIN_BIN=$(resolve_devin_binary) || exit 1
+    devin_preflight "$DEVIN_BIN" || exit 1
+    LAUNCH=${LAUNCH//__DEVINBIN__/$(shell_quote "$DEVIN_BIN")}
     ;;
 esac
 
@@ -2266,7 +2326,8 @@ if [ "$KIND" != secondmate ]; then
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
   # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
-  # opens, so neither is armed here.
+  # opens, so neither is armed here. Devin uses its live-proven
+  # UserPromptSubmit/Stop pair and is armed below.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
@@ -2277,7 +2338,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|devin*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2505,6 +2566,22 @@ EOF
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
+      ;;
+    devin*)
+      # The documented project hook file is the verified scope: it affects
+      # only this Firstmate task worktree and never the operator's Devin user
+      # configuration or another session. UserPromptSubmit opens the semantic
+      # busy turn, while Stop both wakes the watcher and closes it. Existing
+      # project hooks are not merged or replaced - refusing preserves their
+      # exact behavior.
+      if [ -e "$WT/.devin/hooks.v1.json" ] || [ -L "$WT/.devin/hooks.v1.json" ]; then
+        echo "error: refusing Devin spawn because $WT/.devin/hooks.v1.json already exists; Firstmate will not replace project-owned Devin hooks" >&2
+        exit 1
+      fi
+      mkdir -p "$WT/.devin"
+      fm_control_devin_hook_json "$TURNEND" "$FM_ROOT/bin/fm-busy-event.sh" \
+        "$STATE_REAL" "$ID" "$BUSY_GEN" > "$WT/.devin/hooks.v1.json"
+      exclude_path '.devin/hooks.v1.json'
       ;;
   esac
 fi
