@@ -164,7 +164,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 # position sits between the verb and the colon, and a complete token at the
 # head of the note is accepted as an EQUIVALENT position, because that
 # misplaced-colon shape is common real worker output whose stated key must
-# never silently collapse into the shared "default" bucket (issue #2109):
+# never silently collapse into the shared "default" bucket (issues #2081 and
+# #2109):
 #   needs-decision [key=api-shape]: <summary>
 #   needs-decision: [key=api-shape] <summary>
 #   resolved       [key=api-shape]: <how it was decided>

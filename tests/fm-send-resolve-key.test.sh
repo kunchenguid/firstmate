@@ -132,7 +132,7 @@ test_answer_send_closes_open_decision() {
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
 }
 
-# The reported failure behind issue #2109: a worker that put the colon first
+# The reported failure behind issues #2081 and #2109: a worker that put the colon first
 # (needs-decision: [key=X] ...) had its key silently folded to "default", so
 # the answer's --resolve-key X refused with "no open decision or blocker with
 # that key". The stated key must be honored in that position too, end to end

@@ -4,7 +4,8 @@
 # documented between the verb and the colon (needs-decision [key=x]: note), but
 # workers commonly write the colon first (needs-decision: [key=x] note); that
 # stated key must be honored, never silently folded into the shared "default"
-# bucket where an answer can close the wrong record (issue #2109). These tests
+# bucket where an answer can close the wrong record (issues #2081 and #2109).
+# These tests
 # drive the REAL status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
 # fold's own source text. Cross-drain cursor persistence and the incremental
@@ -58,6 +59,22 @@ test_stated_key_is_honored_in_both_positions() {
   [ "$before" = "$after" ] \
     || fail "the two key positions folded to different records: '$before' vs '$after'"
   pass "a stated [key=X] opens X whether it precedes or follows the verb colon"
+}
+
+test_no_colon_legacy_form_remains_accepted() {
+  local dir
+  dir=$(case_dir no-colon)
+  # Before the note-head form was accepted, the parser also accepted a keyed
+  # status line with no colon. Keep that existing interpretation intact while
+  # making the documented and note-head positions equivalent.
+  printf 'needs-decision [key=legacy] choose the legacy route\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'legacy\tneeds-decision\tneeds-decision [key=legacy] choose the legacy route\n')" \
+    "legacy no-colon open"
+
+  printf 'resolved [key=legacy] chose the legacy route\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "legacy no-colon resolution"
+  pass "the previously accepted no-colon keyed form still opens and closes its named key"
 }
 
 test_bare_keyless_line_still_folds_to_default() {
@@ -172,6 +189,7 @@ test_incremental_agrees_with_full_fold_across_appends() {
 }
 
 test_stated_key_is_honored_in_both_positions
+test_no_colon_legacy_form_remains_accepted
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision
