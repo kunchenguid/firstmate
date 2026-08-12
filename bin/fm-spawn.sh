@@ -3352,6 +3352,12 @@ preserve_relaunch_meta() {
   fi
 } > "$SPAWN_META_PATH"
 SPAWN_META_PUBLISH_STARTED=1
+if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+  if [ ! -f "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    echo "error: cannot publish task metadata at $STATE/$ID.meta: Is a directory or not a regular file" >&2
+    exit 1
+  fi
+fi
 mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
 SPAWN_PUBLICATION_COMPLETE=1
 RELAUNCH_REPLACEMENT_PENDING=0
