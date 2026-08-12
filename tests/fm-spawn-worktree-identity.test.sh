@@ -25,12 +25,21 @@
 # there is a linked worktree of the project's own repository, so it shares the
 # project's git common directory and must be refused on its own terms. One case
 # per signal that identifies such a home - the active home, the firstmate repo,
-# the seeded-home marker, and the fleet's operational directories - so no
-# recognition path is claimed without being driven. A project
+# a genuinely seeded secondmate home, and the fleet's operational directories -
+# so no recognition path is claimed without being driven. A project
 # directory nested inside another repository is refused for the mirror-image
 # reason - it inherits an identity it does not own. Two cases assert that
 # legitimate worktrees still spawn, including in the self-hosted shape, so the
 # assertion cannot pass by refusing everything.
+#
+# The seeded-home signal is a shape, not a file: the identity marker is
+# gitignored, so it outlives the cleanliness gates that release a worktree back
+# to the treehouse pool, and a leftover marker on an otherwise reusable checkout
+# must not cost the fleet that checkout. Three cases pin that boundary from both
+# sides - a lone stale marker and partial home residue still spawn, while a
+# fully seeded home is still refused - and a fourth drives an operational
+# directory symlinked out of a marked home, the shape that would otherwise talk
+# the check into accepting a real home as a task worktree.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -39,6 +48,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-identity)
 GIT_BIN=$(command -v git) || fail "git not found"
+MARKER=.fm-secondmate-home
 fm_git_identity
 
 # A fake tmux whose pane_current_path always answers FM_FAKE_PANE_PATH, i.e. a
@@ -148,12 +158,13 @@ make_selfhosted_case() {
   CASE_SUB_HOME="$CASE_DIR/sub-home"
   CASE_ALT_HOME="$CASE_DIR/alt-home"
   CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
-  # Real firstmate homes gitignore their private state and their seed marker, so
-  # ignore both here: an untracked operational directory would otherwise let a
-  # later, unrelated check (the base-freshen cleanliness refusal) stop these
-  # cases, and what the isolation assertion itself decides is what they measure.
+  # Real firstmate homes gitignore their private state, their home material and
+  # their seed marker, so ignore all of it here: an untracked operational
+  # directory would otherwise let a later, unrelated check (the base-freshen
+  # cleanliness refusal) stop these cases, and what the isolation assertion
+  # itself decides is what they measure.
   fm_git_init_commit "$CASE_PROJ"
-  printf '%s\n' 'data/' 'state/' 'config/' 'projects/' 'bin' '.fm-secondmate-home' > "$CASE_PROJ/.gitignore"
+  printf '%s\n' 'data/' 'state/' 'config/' 'projects/' 'bin' 'AGENTS.md' "$MARKER" > "$CASE_PROJ/.gitignore"
   git -C "$CASE_PROJ" add .gitignore
   git -C "$CASE_PROJ" commit -qm gitignore
   fm_git_add_origin "$CASE_PROJ" "$CASE_PROJ.origin.git"
@@ -161,8 +172,19 @@ make_selfhosted_case() {
   git -C "$CASE_PROJ" worktree add --quiet -b "home-$name" "$CASE_HOME"
   git -C "$CASE_PROJ" worktree add --quiet -b "sub-home-$name" "$CASE_SUB_HOME"
   git -C "$CASE_PROJ" worktree add --quiet -b "alt-home-$name" "$CASE_ALT_HOME"
-  printf '%s\n' "$id" > "$CASE_SUB_HOME/.fm-secondmate-home"
   seed_case_home "$id"
+}
+
+# seed_secondmate_home_shape <dir> <id>: build the whole shape bin/fm-home-seed.sh
+# leaves behind when it provisions a secondmate home - all four operational
+# directories, the firstmate home material, and the identity marker naming <id>,
+# which it writes last - so a case can drive a genuine home rather than the
+# marker residue that survives a pooled worktree's return.
+seed_secondmate_home_shape() {
+  local dir=$1 id=$2
+  mkdir -p "$dir/data" "$dir/state" "$dir/config" "$dir/projects" "$dir/bin"
+  printf 'home material for %s\n' "$id" > "$dir/AGENTS.md"
+  printf '%s\n' "$id" > "$dir/$MARKER"
 }
 
 # make_nested_project_case <name> <id>: the configured project is a plain
@@ -298,8 +320,16 @@ test_unreadable_repository_identity_is_refused() {
       run_identity_spawn "$id" "$CASE_WT")
     status=$?
     [ "$status" -ne 0 ] || fail "spawn proceeded with an unreadable repository identity (mode=$mode)"$'\n'"--- output ---"$'\n'"$out"
+    # Anchored to the WORKTREE side. "could not be established" alone is shared
+    # with the project-side refusal, so a shim whose directory scoping drifted
+    # onto the project query would still satisfy it while proving the wrong
+    # refusal; naming the worktree's own identity cannot pass that way.
+    assert_contains "$out" "the repository identity of treehouse get's worktree" \
+      "refusal did not name the worktree's own unestablished repository identity (mode=$mode)"
     assert_contains "$out" "could not be established" \
       "refusal did not name the unestablished repository identity (mode=$mode)"
+    assert_not_contains "$out" "repository identity of project" \
+      "the project side refused instead of the worktree side (mode=$mode)"
     assert_not_contains "$out" "spawned $id" \
       "spawn launched a worker despite an unreadable repository identity (mode=$mode)"
     assert_absent "$CASE_HOME/state/$id.meta" \
@@ -366,22 +396,97 @@ test_selfhosted_firstmate_home_is_refused() {
   pass "a firstmate home that belongs to the project's own repository is still refused"
 }
 
-# The same rule for a home this process is not itself running from: a seeded
-# firstmate home carrying the secondmate marker, and a worktree of the project's
-# repository like every other home in the self-hosted shape.
+# The same rule for a home this process is not itself running from: a genuinely
+# seeded firstmate home, and a worktree of the project's repository like every
+# other home in the self-hosted shape.
 test_selfhosted_seeded_home_is_refused() {
   local id out status
   id=identity-selfhosted-seeded-i9
   make_selfhosted_case identity-selfhosted-seeded "$id"
+  seed_secondmate_home_shape "$CASE_SUB_HOME" "$id"
 
   out=$(run_identity_spawn "$id" "$CASE_SUB_HOME")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a seeded firstmate home as the task worktree"$'\n'"--- output ---"$'\n'"$out"
   assert_contains "$out" "firstmate home" "refusal did not name the firstmate home"
+  assert_contains "$out" "seeded firstmate home for secondmate $id" \
+    "refusal did not name the seeded home as what identified it"
+  assert_not_contains "$out" "belongs to a different repository" \
+    "the seeded home was refused as a foreign repository rather than on the isolation boundary"
   assert_not_contains "$out" "spawned $id" "spawn launched a worker into a seeded firstmate home"
   assert_absent "$CASE_HOME/state/$id.meta" \
     "spawn recorded task metadata after refusing a seeded firstmate home"
   pass "a seeded firstmate home in the project's own repository is refused"
+}
+
+# The other side of that boundary, and the one that costs the fleet worktrees
+# when it is wrong: the identity marker is gitignored, so it survives the
+# cleanliness gates a worktree passes on its way back to the treehouse pool. A
+# reusable checkout carrying nothing but that leftover marker is still a task
+# worktree, and refusing it would strand a clean worktree until someone deleted
+# a file by hand.
+test_selfhosted_stale_marker_still_spawns() {
+  local id out status
+  id=identity-selfhosted-stale-marker-ie
+  make_selfhosted_case identity-selfhosted-stale-marker "$id"
+  printf '%s\n' "retired-secondmate" > "$CASE_WT/$MARKER"
+
+  out=$(run_identity_spawn "$id" "$CASE_WT")
+  status=$?
+  expect_code 0 "$status" "a reusable worktree carrying only a stale seed marker should still spawn"
+  assert_contains "$out" "spawned $id" \
+    "spawn did not report success for a worktree carrying only a stale seed marker"
+  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" \
+    "meta did not record the worktree that carried a stale seed marker"
+  pass "a lone stale seed marker does not veto an otherwise valid reusable checkout"
+}
+
+# Partial residue is not a home either: the marker and the firstmate home
+# material without the operational directories a provisioned home always has is
+# leftover shape, not a fleet home in service.
+test_selfhosted_partial_home_residue_still_spawns() {
+  local id out status
+  id=identity-selfhosted-partial-if
+  make_selfhosted_case identity-selfhosted-partial "$id"
+  mkdir -p "$CASE_WT/data" "$CASE_WT/bin"
+  printf 'leftover home material\n' > "$CASE_WT/AGENTS.md"
+  printf '%s\n' "retired-secondmate" > "$CASE_WT/$MARKER"
+
+  out=$(run_identity_spawn "$id" "$CASE_WT")
+  status=$?
+  expect_code 0 "$status" "a worktree carrying incomplete home residue should still spawn"
+  assert_contains "$out" "spawned $id" \
+    "spawn did not report success for a worktree carrying incomplete home residue"
+  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" \
+    "meta did not record the worktree that carried incomplete home residue"
+  pass "incomplete seeded-home residue is not mistaken for a firstmate home"
+}
+
+# Requiring the whole shape must not hand out an escape hatch: an operational
+# directory symlinked out of a marked home would otherwise break that shape and
+# argue a real home into being an ordinary task worktree. An unsafe operational
+# path inside a marked directory is refused on the home boundary, so the
+# unverifiable case fails closed like every other one here.
+test_selfhosted_unsafe_operational_home_is_refused() {
+  local id out status
+  id=identity-selfhosted-unsafe-ig
+  make_selfhosted_case identity-selfhosted-unsafe "$id"
+  seed_secondmate_home_shape "$CASE_SUB_HOME" "$id"
+  mkdir -p "$CASE_DIR/escaped-state"
+  rm -rf "${CASE_SUB_HOME:?}/state"
+  ln -s "$CASE_DIR/escaped-state" "$CASE_SUB_HOME/state"
+
+  out=$(run_identity_spawn "$id" "$CASE_SUB_HOME")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a marked home whose state directory is symlinked outside it"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "firstmate home" "refusal did not name the firstmate home boundary"
+  assert_contains "$out" "unsafe home shape" \
+    "refusal did not name the unsafe operational path as what identified the home"
+  assert_not_contains "$out" "spawned $id" \
+    "spawn launched a worker into a marked home with an operational path outside it"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing a marked home with an unsafe operational path"
+  pass "a symlinked operational path does not argue a marked home out of being one"
 }
 
 # The isolation check must discriminate, not blanket-refuse: in the very same
@@ -458,15 +563,25 @@ test_selfhosted_operational_home_is_refused() {
 # identity of its own to compare against: it inherits the enclosing
 # repository's, which would accept any worktree of that enclosing repository.
 test_nested_project_directory_is_refused() {
-  local id out status
+  local id out status enclosing_real
   id=identity-nested-project-ib
   make_nested_project_case identity-nested-project "$id"
+  # The refusal names physically resolved paths, so an operator can act on what
+  # it prints without re-resolving anything.
+  enclosing_real=$(cd "$CASE_ENCLOSING" && pwd -P)
 
   out=$(run_identity_spawn "$id" "$CASE_ENCLOSING_WT")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a worktree of the repository merely enclosing the project directory"$'\n'"--- output ---"$'\n'"$out"
-  assert_contains "$out" "not the top level of its own git repository" \
+  assert_contains "$out" "is nested inside another git repository" \
     "refusal did not name the project's inherited repository identity"
+  # The refusal has no migration path behind it, so it has to leave an operator
+  # holding the one they need: which repository swallowed the project, and where
+  # to register it instead.
+  assert_contains "$out" "The enclosing repository's top level is '$enclosing_real'" \
+    "refusal did not name the enclosing repository's top level"
+  assert_contains "$out" "re-register this project at '$enclosing_real'" \
+    "refusal did not say where the project must be re-registered"
   assert_not_contains "$out" "spawned $id" \
     "spawn launched a worker using an enclosing repository's identity"
   assert_absent "$CASE_HOME/state/$id.meta" \
@@ -517,6 +632,9 @@ test_project_without_repository_identity_is_refused
 test_project_worktree_still_spawns
 test_selfhosted_firstmate_home_is_refused
 test_selfhosted_seeded_home_is_refused
+test_selfhosted_stale_marker_still_spawns
+test_selfhosted_partial_home_residue_still_spawns
+test_selfhosted_unsafe_operational_home_is_refused
 test_selfhosted_firstmate_root_is_refused
 test_selfhosted_operational_home_is_refused
 test_selfhosted_project_worktree_still_spawns

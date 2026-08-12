@@ -204,6 +204,9 @@ ok - a project whose repository identity cannot be established refuses the launc
 ok - a legitimate worktree of the project's repository still spawns
 ok - a firstmate home that belongs to the project's own repository is still refused
 ok - a seeded firstmate home in the project's own repository is refused
+ok - a lone stale seed marker does not veto an otherwise valid reusable checkout
+ok - incomplete seeded-home residue is not mistaken for a firstmate home
+ok - a symlinked operational path does not argue a marked home out of being one
 ok - the firstmate repository root is refused even when it belongs to the project's repository
 ok - a directory holding the running fleet's operational state is refused as a home
 ok - an isolated worktree still spawns when firstmate's own homes share that repository
@@ -214,8 +217,11 @@ ok - an Orca worktree of the project's own repository still spawns
 
 The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
 The self-hosted cases and the nested-project case were each run against the unfixed assertion first, where all three spawned instead of refusing, reporting `worktree=<firstmate home>`, `worktree=<seeded home>`, and `worktree=<enclosing repository's worktree>` respectively.
-The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, the seeded-home marker, or a directory holding the running fleet's operational directories.
+The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, a genuinely seeded secondmate home, or a directory holding the running fleet's operational directories.
 Each of those four signals has its own case, so the enumeration claims nothing that is not driven through the executable.
+The seeded-home signal is the whole home shape that `bin/fm-ff-lib.sh` owns - the identity marker naming a secondmate, that home's operational directories, and the firstmate home material - because the marker is gitignored and therefore outlives the cleanliness gates a worktree passes on its way back to the treehouse pool.
+A checkout carrying nothing but that leftover marker, or the marker over incomplete home residue, still spawns and is still recorded as the task worktree; both cases refused before this shape replaced the bare-marker test.
+An operational directory symlinked out of a marked home is refused on the same boundary, so breaking a real home's shape cannot argue it into being an ordinary task worktree.
 The Orca cases need `node`, which the Orca adapter's JSON helpers require, and report themselves as not run when it is absent.
 
 ## Composer classification matrix

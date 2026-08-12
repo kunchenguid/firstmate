@@ -141,10 +141,15 @@
 #   back an enclosing repository's identity.
 #   Repository membership is not isolation, so the worker root is refused
 #   separately when it is a firstmate home - the active home, the firstmate
-#   repo, a directory carrying the seeded-home marker, or the holder of this
-#   fleet's operational directories - which repository identity alone cannot
-#   catch when firstmate itself is the project and its homes are worktrees of
-#   that same repository. Secondmate spawns keep skipping this assertion.
+#   repo, a genuinely seeded secondmate home, or the holder of this fleet's
+#   operational directories - which repository identity alone cannot catch when
+#   firstmate itself is the project and its homes are worktrees of that same
+#   repository. A seeded home is the whole shape bin/fm-ff-lib.sh defines (the
+#   identity marker naming a secondmate, that home's operational directories,
+#   and the firstmate home material), or a marked directory whose operational
+#   path is unsafe; the gitignored marker alone is residue that outlives a
+#   worktree's return to the pool and never condemns a clean checkout.
+#   Secondmate spawns keep skipping this assertion.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1551,35 +1556,17 @@ validate_firstmate_home_for_spawn() {
   printf '%s\n' "$abs_home"
 }
 
+# The operational-directory contract itself lives in bin/fm-ff-lib.sh
+# (validate_operational_dirs), which this script already sources; this is only
+# the launch-time refusal voice for it, so a secondmate launch and the seeded
+# home shape can never drift apart on what a safe home directory is.
 validate_firstmate_operational_dirs() {
-  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
-  for name in data state config projects; do
-    dir="$abs_home/$name"
-    if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
-      return 1
-    fi
-    if [ -d "$dir" ]; then
-      abs_dir=$(cd "$dir" && pwd -P)
-    elif [ -e "$dir" ]; then
-      echo "error: secondmate $name path is not a directory: $dir" >&2
-      return 1
-    else
-      abs_dir="$abs_home/$name"
-    fi
-    if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
-      return 1
-    fi
-  done
+  local abs_home=$1 abs_active_home=$2 abs_root=$3
+  if validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root"; then
+    return 0
+  fi
+  echo "error: $VALIDATION_ERROR: $VALIDATION_ERROR_PATH" >&2
+  return 1
 }
 
 if [ "$KIND" = secondmate ]; then
@@ -1738,12 +1725,19 @@ git_common_dir_real() {  # <dir>
 # firstmate itself is the project, a treehouse-leased secondmate home is a
 # linked worktree of that same repository, so it shares the project's git
 # common directory exactly as a legitimate task worktree does. The signals are
-# the ones this script already owns - the active home, the firstmate repo, the
-# seeded-home marker, and the operational directories this process is actually
-# reading and writing - and every comparison is between physically resolved
-# paths, never a path prefix, so a symlinked home cannot slip past by spelling.
+# the ones this script already owns - the active home, the firstmate repo, a
+# genuinely seeded secondmate home, and the operational directories this process
+# is actually reading and writing - and every comparison is between physically
+# resolved paths, never a path prefix, so a symlinked home cannot slip past by
+# spelling. The seeded-home signal asks bin/fm-ff-lib.sh, the owner of what a
+# seeded home IS, for the whole shape rather than for the marker alone: the
+# marker is gitignored, so it outlives a worktree's return to the pool, and a
+# lone leftover marker on an otherwise clean reusable checkout must not cost the
+# fleet that checkout. An unsafe or unresolvable operational path inside a
+# marked directory counts as a home too, so symlinking a home's data/ elsewhere
+# cannot argue that home out of being one.
 firstmate_home_reason() {  # <resolved-dir>
-  local dir=$1 candidate owner
+  local dir=$1 candidate owner home_shape
   if [ -z "$dir" ]; then
     printf '%s\n' 'its path could not be resolved'
     return 0
@@ -1756,10 +1750,22 @@ firstmate_home_reason() {  # <resolved-dir>
     printf '%s\n' 'it is the firstmate repository root'
     return 0
   fi
-  if [ -f "$dir/$SUB_HOME_MARKER" ]; then
-    printf "it carries the seeded firstmate home marker %s\n" "$SUB_HOME_MARKER"
-    return 0
-  fi
+  home_shape=0
+  # Asking is not diagnosing: "no" is the ordinary answer for a task worktree,
+  # so this probe stays silent and the refusal below is the only voice.
+  validate_secondmate_home_shape "$dir" yes 2>/dev/null || home_shape=$?
+  case "$home_shape" in
+    0)
+      printf "it is a seeded firstmate home for secondmate %s, carrying %s over that home's operational directories\n" \
+        "$VALIDATED_MARKER_ID" "$SUB_HOME_MARKER"
+      return 0
+      ;;
+    2)
+      printf "it carries the seeded firstmate home marker %s over an unsafe home shape (%s: %s)\n" \
+        "$SUB_HOME_MARKER" "$VALIDATION_ERROR" "$VALIDATION_ERROR_PATH"
+      return 0
+      ;;
+  esac
   for candidate in "$STATE" "$DATA" "$PROJECTS" "$CONFIG"; do
     [ -d "$candidate" ] || continue
     owner=$(cd "$candidate/.." 2>/dev/null && pwd -P) || continue
@@ -1826,7 +1832,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     exit 1
   fi
   if [ "$proj_top_real" != "$proj_real" ]; then
-    echo "error: project '$PROJ_ABS' is not the top level of its own git repository (the enclosing repository's top level is '$proj_top'), so its repository identity '$proj_repo' is inherited rather than its own; refusing to launch $source's worktree '$WT' against an identity the project does not own. Inspect target $inspect_target" >&2
+    echo "error: project '$PROJ_ABS' is nested inside another git repository instead of being its own repository's top level, so the repository identity '$proj_repo' it answers with belongs to that enclosing repository, not to the project. The enclosing repository's top level is '$proj_top_real'; re-register this project at '$proj_top_real', or give the nested directory its own repository, and dispatch again. Refusing to launch $source's worktree '$WT' against an identity the project does not own. Inspect target $inspect_target" >&2
     exit 1
   fi
   wt_repo=$(git_common_dir_real "$wt_real") || wt_repo=
