@@ -232,6 +232,15 @@ test_absent_capability_and_ownership_conflict_refuse() {
   assert_grep 'local-only secondmate route is absent or invalid' "$err" \
     "spawn did not enforce the absent local-project capability"
   assert_absent "$sub/state/no-capability.meta" "refused local-only spawn still published task metadata"
+  FM_HOME="$sub" "$ROOT/bin/fm-brief.sh" no-capability-scout alpha --scout >/dev/null \
+    || fail "could not scaffold absent-capability scout spawn fixture"
+  if FM_HOME="$sub" FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" no-capability-scout "$sub/projects/alpha" \
+      --scout --harness pi > /dev/null 2>"$err"; then
+    fail "secondmate scout spawn accepted a local-only project without the guarded capability"
+  fi
+  assert_grep 'local-only secondmate route is absent or invalid' "$err" \
+    "scout spawn did not enforce the absent local-project capability"
+  assert_absent "$sub/state/no-capability-scout.meta" "refused local-only scout spawn still published task metadata"
   if return_branch "$home" absent-task > /dev/null 2>"$err"; then
     fail "branch return proceeded without the guarded capability"
   fi

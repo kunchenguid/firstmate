@@ -101,8 +101,8 @@ fm_local_route_git_common_dir() { # <canonical repository top-level>
   fm_local_route_canonical_dir "$common"
 }
 
-fm_local_route_url_path() { # <repo> <URL>; prints canonical local filesystem path
-  local repo=$1 url=$2 path
+fm_local_route_url_path() { # <URL>; prints canonical local filesystem path
+  local url=$1 path
   case "$url" in
     /*) path=$url ;;
     file:///*) path=${url#file://} ;;
@@ -117,7 +117,7 @@ fm_local_route_all_remotes_local() { # <repository> <label>
     [ -n "$remote" ] || continue
     while IFS= read -r url; do
       [ -n "$url" ] || continue
-      if ! fm_local_route_url_path "$repo" "$url" >/dev/null 2>&1; then
+      if ! fm_local_route_url_path "$url" >/dev/null 2>&1; then
         FM_LOCAL_ROUTE_ERROR="$label has a non-local remote; local-only secondmate routes accept only absolute filesystem or file:/// transports"
         return 1
       fi
@@ -149,11 +149,11 @@ fm_local_route_exact_origin() { # <secondmate-project> <bound-main-project>
     FM_LOCAL_ROUTE_ERROR="secondmate project must have exactly one local origin"
     return 1
   }
-  fetch_path=$(fm_local_route_url_path "$repo" "$fetch_urls") || {
+  fetch_path=$(fm_local_route_url_path "$fetch_urls") || {
     FM_LOCAL_ROUTE_ERROR="secondmate project has a non-local remote"
     return 1
   }
-  push_path=$(fm_local_route_url_path "$repo" "$push_urls") || {
+  push_path=$(fm_local_route_url_path "$push_urls") || {
     FM_LOCAL_ROUTE_ERROR="secondmate project has a non-local remote"
     return 1
   }

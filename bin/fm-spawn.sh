@@ -1642,9 +1642,23 @@ fi
 # A local-only project remains main-home work unless local secondmate seeding
 # published the guarded local/NAS route capability. Validate that capability
 # before creating an endpoint or isolated task copy, so a hand-written project
-# registry entry or clone can never bypass the route owner.
-if [ "$KIND" = ship ] && [ "$MODE" = local-only ] \
-   && { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
+# registry entry or clone can never bypass the route owner. A ship task declares
+# local-only through --mode; a scout records no delivery posture, so its
+# classification comes from the registered posture in data/projects.md.
+LOCAL_ONLY_ROUTE_GUARD=0
+if { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+    LOCAL_ONLY_ROUTE_GUARD=1
+  elif [ "$KIND" = scout ]; then
+    SCOUT_REGISTERED_MODE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" 2>/dev/null | cut -d' ' -f1) \
+      || SCOUT_REGISTERED_MODE=
+    if [ "$SCOUT_REGISTERED_MODE" = local-only ]; then
+      LOCAL_ONLY_ROUTE_GUARD=1
+    fi
+  fi
+fi
+if [ "$LOCAL_ONLY_ROUTE_GUARD" -eq 1 ]; then
   [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
     echo "error: local-only secondmate home identity is unavailable or unsafe" >&2
     exit 1
