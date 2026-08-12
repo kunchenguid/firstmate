@@ -1414,10 +1414,18 @@ test_busy_pane_declared_pause_absorbs_repeat_wedge_nags() {
     [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "declared-paused busy round $round kept the wedge timer running"; }
     [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "declared-paused busy round $round kept a wedge escalation count"; }
     reap "$pid"
+    # Assert the absorb BEFORE acknowledging this intentional stop: the
+    # acknowledgement rewrites the durable queue, so a wedge wake queued by this
+    # round must be caught here rather than after the loop.
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] || fail "a declared-paused busy pane queued $wakes wedge wakes by over-threshold round $round"
+    # An intentionally stopped watcher leaves generation-bound downtime recovery
+    # armed, so acknowledge the cycle before the next round starts a fresh
+    # watcher - otherwise that watcher wakes on check: rearm-resurface and this
+    # test stops exercising the pause cadence it exists to pin.
+    ack_stopped_cycle "$state" || fail "could not acknowledge the intentional declared-pause round $round stop"
     round=$((round + 1))
   done
-  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
-  [ "$wakes" -eq 0 ] || fail "a declared-paused busy pane queued $wakes wedge wakes across three over-threshold rounds"
 
   # Phase B: the ticking-footer branch - the pane hash changes every poll, so the
   # watcher never reaches the stable-hash branch at all. Same declared pause, same
@@ -1439,6 +1447,7 @@ test_busy_pane_declared_pause_absorbs_repeat_wedge_nags() {
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 0 ] || fail "a changing-hash declared-paused busy pane queued $wakes wedge wakes"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional changing-hash phase-B stop"
 
   # Phase C: absorbed is not silenced. Age the pause past FM_PAUSE_RESURFACE_SECS
   # and it re-surfaces once, as a long-cadence recheck rather than a wedge.
@@ -1458,6 +1467,11 @@ test_busy_pane_declared_pause_absorbs_repeat_wedge_nags() {
   grep -F "awaiting external" "$out" >/dev/null || fail "the bounded recheck was not labeled a declared-pause recheck"
   grep -F "possible wedge" "$out" >/dev/null && fail "the bounded recheck mislabeled a declared pause as a possible wedge"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the bounded recheck did not record its re-surface throttle marker"
+  # Exactly one re-surface so far, asserted before the acknowledgement rewrites
+  # the queue. Phase D then proves no SECOND one lands inside the same window.
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "the bounded recheck queued $wakes stale wakes, want exactly 1"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the phase-C bounded-recheck wake"
 
   # Phase D: the throttle survives the busy path's own pause-tracking cleanup, so
   # the recheck fires once per window rather than on every poll of a busy pane.
@@ -1475,8 +1489,11 @@ test_busy_pane_declared_pause_absorbs_repeat_wedge_nags() {
   fi
   [ -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "the busy path discarded the pause re-surface throttle marker"; }
   reap "$pid"
+  # Phase C's single re-surface was already asserted and acknowledged, so any
+  # record here would be a SECOND re-surface inside the same window.
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
-  [ "$wakes" -eq 1 ] || fail "a declared-paused busy pane should re-surface exactly once per window, got $wakes wakes"
+  [ "$wakes" -eq 0 ] || fail "a declared-paused busy pane re-surfaced $wakes more times inside one recheck window, want exactly once per window"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-D stop"
 
   # Phase E: absorbing on the busy path must not spend the idle path's first sight
   # of this pane. window_is_busy reads a semantic event about the agent, not the
@@ -1571,6 +1588,7 @@ test_busy_pane_wedge_survives_without_and_after_a_declared_pause() {
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "a lifted pause kept its pause cadence marker on a busy pane"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "a lifted pause did not hand the busy pane back to the wedge timer"; }
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional lifted-pause round 1 stop"
 
   # Round 2: past that fresh threshold, the pane wedge-escalates exactly as an
   # over-age busy pane that never declared a pause does.
