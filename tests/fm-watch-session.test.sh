@@ -18,6 +18,8 @@ FM_ROOT_OVERRIDE="$PRIMARY_ROOT"
 export FM_ROOT_OVERRIDE
 CODEX_THREAD_ID=watch-session-tests
 export CODEX_THREAD_ID
+FM_FAKE_HARNESS_PID=$$
+export FM_FAKE_HARNESS_PID
 cd "$PRIMARY_ROOT" || exit 1
 
 prepare_watch_home() {
@@ -25,7 +27,7 @@ prepare_watch_home() {
   mkdir -p "$home/state" "$home/data" "$home/config"
   token="watch-$(basename "$home")"
   fm_test_write_primary_attestation "$FM_ROOT_OVERRIDE" \
-    "$home/state/.primary-attestation" "$token" || return 1
+    "$home/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID" || return 1
   printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
 }
 
@@ -112,6 +114,18 @@ case "$cmd" in
 esac
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*|*args=*|*command=*)
+    pid="${@: -1}"
+    [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf 'claude\n' || printf 'bash\n'
+    ;;
+  *ppid=*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
   printf '%s\n' "$fakebin"
 }
 
@@ -182,11 +196,11 @@ test_watch_session_start_status_stop_are_home_scoped() {
   sleep 300 &
   live=$!
   identity=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" \
-    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home-a")" \
+    PATH="$fakebin:$PATH" FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home-a")" \
     bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not identify the home A watcher"
   start=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" \
-    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home-a")" \
+    PATH="$fakebin:$PATH" FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home-a")" \
     bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not pin the home A watcher start"
   mkdir "$state_a/.watch.lock"
@@ -226,11 +240,11 @@ test_watch_session_stop_waits_for_starting_watcher() {
   sleep 300 &
   live=$!
   identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
-    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
+    PATH="$fakebin:$PATH" FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
     bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not identify the starting home watcher"
   start=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
-    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
+    PATH="$fakebin:$PATH" FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
     bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not pin the starting home watcher"
   (
@@ -265,7 +279,7 @@ test_watch_session_stop_fails_for_unpinned_legacy_watcher() {
   sleep 300 &
   live=$!
   identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
-    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
+    PATH="$fakebin:$PATH" FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
     bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not identify the legacy watcher"
   mkdir "$state/.watch.lock"
@@ -376,7 +390,7 @@ test_watch_session_grok_emergency_override_allows_fallback() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
     FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 \
-    "$fakebin/grok" -c 'rm -f "$FM_HOME/state/.primary-attestation"; printf "%s\n" "$$" > "$FM_HOME/state/.lock"; bash "$1" start; status=$?; exit "$status"' _ "$WATCH_SESSION" >"$out" 2>&1 \
+    "$fakebin/grok" -c 'FM_FAKE_HARNESS_PID=$$; export FM_FAKE_HARNESS_PID; rm -f "$FM_HOME/state/.primary-attestation"; printf "%s\n" "$$" > "$FM_HOME/state/.lock"; bash "$1" start; status=$?; exit "$status"' _ "$WATCH_SESSION" >"$out" 2>&1 \
     || fail "explicit Grok watch-session emergency override did not allow fallback: $(cat "$out")"
   grep -F 'watch-session: started target=' "$out" >/dev/null \
     || fail "Grok emergency override did not start the fallback runner"
