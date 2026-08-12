@@ -25,6 +25,14 @@ The hold remains the authoritative Captain's Call item until the captain's answe
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create holds.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
+## Deployed website completion
+
+Work that deployed a website is complete only when it is proven against the real production domain.
+Verify the deployed revision on that domain, confirm the page carries the intended revision, exercise one concrete interaction and record its observed result, and capture a screenshot of the verified page.
+A preview or staging URL, an HTTP status, or bare reachability is never sufficient proof.
+Attest that proof through the same completion command with `--deployed-site`, `--revision`, `--interaction`, and `--screenshot`, which the gate requires together and refuses to accept without an existing screenshot file.
+Work that deployed nothing omits those flags and follows the unchanged sequence below.
+
 ## Operating sequence
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.

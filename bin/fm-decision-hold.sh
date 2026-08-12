@@ -20,12 +20,19 @@
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>]
-#   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
+#   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...) \
+#     [--deployed-site <https-production-url> --revision <marker> \
+#      --interaction <observed-result> --screenshot <path>]
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #
-# `complete` is the shared investigation and visual-review completion gate.
+# `complete` is the shared investigation and visual-review completion gate. Work
+# that deployed a website attests its proof at this same gate: the four
+# deployment flags are required together, the site must be the https production
+# domain, and the screenshot file must exist, so a preview-only or
+# HTTP-status-only completion fails here. Work that deployed nothing omits them
+# and is unaffected.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
 # no unresolved captain decision. Later review passes may add keys; a live task's
 # metadata inventory is unioned idempotently. A post-teardown visual review can
@@ -289,6 +296,7 @@ command_hold() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0
+  local none=0 site='' revision='' interaction='' screenshot=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -302,15 +310,38 @@ command_complete() {
   fi
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
-  if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
-    supplied=''
-  else
-    while [ "$#" -gt 0 ]; do
-      [ "$1" != --none ] || fail "--none cannot be combined with decision keys"
-      validate_slug decision-key "$1"
-      supplied="${supplied}${supplied:+ }$1"
-      shift
-    done
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --none) none=1 ;;
+      --deployed-site) shift; site=${1:-} ;;
+      --revision) shift; revision=${1:-} ;;
+      --interaction) shift; interaction=${1:-} ;;
+      --screenshot) shift; screenshot=${1:-} ;;
+      -*) usage >&2; exit 2 ;;
+      *)
+        validate_slug decision-key "$1"
+        supplied="${supplied}${supplied:+ }$1"
+        ;;
+    esac
+    shift
+  done
+  [ "$none" = 0 ] || [ -z "$supplied" ] || fail "--none cannot be combined with decision keys"
+  [ "$none" = 1 ] || [ -n "$supplied" ] || { usage >&2; exit 2; }
+  # Deployed website work is proven at this same gate: attesting a deployment
+  # requires the whole production-domain proof together, so a preview-only or
+  # HTTP-status-only completion cannot pass it.
+  if [ -n "$site$revision$interaction$screenshot" ]; then
+    [ -n "$site" ] && [ -n "$revision" ] && [ -n "$interaction" ] && [ -n "$screenshot" ] \
+      || fail "a deployed website completion needs --deployed-site, --revision, --interaction, and --screenshot together"
+    validate_one_line deployed-site "$site"
+    validate_one_line revision "$revision"
+    validate_one_line interaction "$interaction"
+    validate_one_line screenshot "$screenshot"
+    case "$site" in
+      https://*) ;;
+      *) fail "--deployed-site must be the https production domain that was actually verified" ;;
+    esac
+    [ -f "$screenshot" ] || fail "--screenshot must name an existing screenshot file: $screenshot"
   fi
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
@@ -339,6 +370,10 @@ EOF
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+    fi
+    if [ -n "$site" ]; then
+      printf 'deployed_site=%s\ndeployed_revision=%s\ndeployed_interaction=%s\ndeployed_screenshot=%s\n' \
+        "$site" "$revision" "$interaction" "$screenshot" >> "$meta"
     fi
     fm_lock_release "$DECISION_META_LOCK"
     DECISION_META_LOCK_HELD=0
