@@ -91,10 +91,6 @@ fm_web_gate_surface_contract() {
   local brief=$1 count declared
   count=$(fm_web_gate_surface_line_count "$brief")
   if fm_web_gate_provenance_present "$brief"; then
-    if [ "$count" -eq 0 ]; then
-      printf '%s\n' web
-      return 0
-    fi
     [ "$count" -eq 1 ] || return 1
     declared=$(sed -n 's/^Surface contract: //p' "$brief")
     [ "$declared" = web ] || return 1

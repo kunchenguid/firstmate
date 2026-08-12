@@ -149,6 +149,27 @@ test_ship_spawn_rejects_missing_surface_contract() {
   pass "fm-spawn: missing ship surface contract refuses before launch"
 }
 
+test_ship_spawn_rejects_stamped_web_without_surface_contract() {
+  local rec id out rc brief
+  id=profile-stamped-missing-surface-z9
+  rec=$(make_spawn_case stamped-missing-surface claude "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web brief scaffold for stamped missing-surface test should succeed"
+  brief="$HOME_DIR/data/$id/brief.md"
+  sed -i '/^Surface contract: web$/d' "$brief"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  rc=$?
+  expect_code 1 "$rc" "stamped web brief without a surface contract must fail"
+  assert_contains "$out" "must contain exactly one Surface contract" \
+    "stamped missing surface refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "stamped missing surface refusal still wrote task metadata"
+  pass "fm-spawn: stamped web brief without surface contract refuses before launch"
+}
+
 test_ship_spawn_rejects_web_without_visual_gate_contract() {
   local rec id out status
   id=profile-missing-web-gate-z9
@@ -1048,6 +1069,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_ship_spawn_rejects_missing_surface_contract
+test_ship_spawn_rejects_stamped_web_without_surface_contract
 test_ship_spawn_rejects_web_without_visual_gate_contract
 test_ship_spawn_rejects_incomplete_web_gate_body
 test_ship_spawn_accepts_compliant_web_gate
