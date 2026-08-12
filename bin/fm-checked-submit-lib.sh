@@ -56,7 +56,7 @@ fm_backend_endpoint_lock_acquire() {
       return 2
     }
     if [ "$confirmed" = "$identity" ]; then
-      FM_BACKEND_ENDPOINT_TARGET=$target
+      FM_BACKEND_ENDPOINT_TARGET=${confirmed#*:}
       return 0
     fi
     fm_backend_endpoint_lock_release
