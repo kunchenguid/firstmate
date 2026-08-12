@@ -654,19 +654,57 @@ require_landed_code() {
     refuse "apply is allowed only from code already landed on origin's default branch"
 }
 
+record_mutation_state() {
+  local operation=$1 phase=$2 note=${3:-}
+  local state_dir state_file temp
+  state_dir=${FM_AZURE_MUTATION_STATE_DIR:-$ROOT/state/azure-pilot}
+  mkdir -p "$state_dir" 2>/dev/null || state_dir=${TMPDIR:-/tmp}
+  state_file="$state_dir/${operation}.json"
+  temp=$(mktemp "$state_dir/.${operation}.XXXXXX")
+  chmod 600 "$temp"
+  python3 - "$temp" "$operation" "$phase" "$note" "${DEPLOYMENT_NAME:-unknown}" "${RESOURCE_GROUP:-unknown}" <<'PY'
+import datetime
+import json
+import sys
+path, operation, phase, note, deployment, resource_group = sys.argv[1:]
+json.dump({
+    "schema": "fm.azure-pilot-mutation/v1",
+    "operation": operation,
+    "phase": phase,
+    "note": note,
+    "deployment": deployment,
+    "resourceGroup": resource_group,
+    "updatedAt": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+}, open(path, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+  mv "$temp" "$state_file"
+}
+
+run_bounded_az() {
+  local operation=$1
+  shift
+  record_mutation_state "$operation" submitted "bounded Azure CLI call started"
+  if run_with_deadline "$AZURE_CLEANUP_TIMEOUT_SECONDS" az "$@"; then
+    record_mutation_state "$operation" completed "bounded Azure CLI call completed"
+    return 0
+  fi
+  record_mutation_state "$operation" retained "Azure CLI call timed out or failed; live state must be reconciled before retry"
+  return 1
+}
+
 run_validate() {
   require_cloud_environment
   live_gates
   make_parameters_file
   trap cleanup_parameters EXIT HUP INT TERM
-  az deployment sub validate \
+  run_bounded_az validate deployment sub validate \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --location "$REGION" \
     --name "$DEPLOYMENT_NAME-validate" \
     --template-file "$TEMPLATE" \
     --parameters "@$PARAMS_FILE" \
     --output none \
-    --only-show-errors
+    --only-show-errors || refuse "Azure validation timed out or failed; retained operation state requires reconciliation"
   printf 'Azure validation: passed without applying resources\n'
 }
 
@@ -678,7 +716,7 @@ run_preview() {
   preview_file=$(mktemp "${TMPDIR:-/tmp}/fm-azure-pilot-preview.XXXXXX")
   chmod 600 "$preview_file"
   trap 'rm -f "${preview_file:-}"; cleanup_parameters' EXIT HUP INT TERM
-  az deployment sub what-if \
+  run_bounded_az preview deployment sub what-if \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --location "$REGION" \
     --name "$DEPLOYMENT_NAME-preview" \
@@ -687,7 +725,7 @@ run_preview() {
     --result-format FullResourcePayloads \
     --no-pretty-print \
     --output json \
-    --only-show-errors >"$preview_file"
+    --only-show-errors >"$preview_file" || refuse "Azure preview timed out or failed; retained operation state requires reconciliation"
   python3 - "$preview_file" <<'PY'
 import collections
 import json
@@ -713,7 +751,7 @@ run_apply() {
   live_gates
   make_parameters_file
   trap cleanup_parameters EXIT HUP INT TERM
-  az deployment sub create \
+  run_bounded_az apply deployment sub create \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --location "$REGION" \
     --name "$DEPLOYMENT_NAME" \
@@ -721,7 +759,7 @@ run_apply() {
     --parameters "@$PARAMS_FILE" \
     --mode Incremental \
     --output none \
-    --only-show-errors
+    --only-show-errors || refuse "Azure apply timed out or failed; retained operation state requires live reconciliation before retry"
   printf 'apply completed for profile=%s; cloud default remains blocked until every bounded acceptance leg passes\n' "$CAPACITY_PROFILE"
 }
 
@@ -805,7 +843,7 @@ run_worker_create() {
   live_gates
   make_parameters_file
   trap cleanup_parameters EXIT HUP INT TERM
-  az deployment sub create \
+  run_bounded_az "worker-create-$SLOT" deployment sub create \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --location "$REGION" \
     --name "$DEPLOYMENT_NAME-worker-$SLOT" \
@@ -813,7 +851,7 @@ run_worker_create() {
     --parameters "@$PARAMS_FILE" \
     --mode Incremental \
     --output none \
-    --only-show-errors
+    --only-show-errors || refuse "worker create timed out or failed; retained operation state requires live reconciliation before retry"
   printf 'worker slot created or reconciled; retained disks require exact task-generation proof before adoption\n'
 }
 
@@ -824,12 +862,12 @@ run_worker_deallocate() {
   scope_gate
   require_landed_code
   validate_slot
-  az vm deallocate \
+  run_bounded_az "worker-deallocate-$SLOT" vm deallocate \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --resource-group "$RESOURCE_GROUP" \
     --name "$WORKER_NAME" \
     --output none \
-    --only-show-errors
+    --only-show-errors || refuse "worker deallocation timed out or failed; retained operation state requires live reconciliation before retry"
   printf 'worker slot deallocated; retained task/account disks were not deleted\n'
 }
 
@@ -841,19 +879,19 @@ run_worker_delete() {
   require_landed_code
   validate_slot
   [ "$TASK_STATE_PRESERVED" -eq 1 ] || refuse "--task-state-preserved is required before disposable worker deletion"
-  az vm deallocate \
+  run_bounded_az "worker-delete-$SLOT-deallocate" vm deallocate \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --resource-group "$RESOURCE_GROUP" \
     --name "$WORKER_NAME" \
     --output none \
-    --only-show-errors
-  az vm delete \
+    --only-show-errors || refuse "worker delete deallocation timed out or failed; retained operation state requires live reconciliation before retry"
+  run_bounded_az "worker-delete-$SLOT-delete" vm delete \
     --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
     --resource-group "$RESOURCE_GROUP" \
     --name "$WORKER_NAME" \
     --yes \
     --output none \
-    --only-show-errors
+    --only-show-errors || refuse "worker deletion timed out or failed; retained operation state requires live reconciliation before retry"
   printf 'worker compute deleted; task and provider-account disks remain retained and unsnapshotted\n'
 }
 

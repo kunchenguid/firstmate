@@ -514,6 +514,50 @@ run_destroy_deadline_check() {
   pass "destroy bounds Azure cleanup calls and stops on timeout"
 }
 
+run_bounded_mutation_deadline_checks() {
+  local sourceable state_dir output status
+  sourceable=$(mktemp)
+  state_dir=$(mktemp -d)
+  write_sourceable_script "$sourceable"
+  set +e
+  output=$(
+    (
+      set -- help "$state_dir"
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      ROOT="$1"
+      # Assignments intentionally configure only this timeout-fixture subshell.
+      # shellcheck disable=SC2030
+      FM_AZURE_MUTATION_STATE_DIR="$1"
+      AZURE_CLEANUP_TIMEOUT_SECONDS=1
+      DEPLOYMENT_NAME=test-deployment
+      RESOURCE_GROUP=test-group
+      # Invoked indirectly by run_bounded_az.
+      # shellcheck disable=SC2329
+      az() { while :; do :; done; }
+      run_bounded_az apply deployment sub create
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "bounded Azure mutation accepted a hung CLI"
+  # shellcheck disable=SC2031
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["phase"])' "$state_dir/apply.json")" = retained ] || fail "timed-out mutation did not retain exact operation state"
+  python3 - "$SCRIPT" <<'PY' || fail "foundation mutating Azure calls bypass bounded state owner"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+for function in ("run_validate", "run_preview", "run_apply", "run_worker_create", "run_worker_deallocate", "run_worker_delete"):
+    body = text.split(function + "() {", 1)[1].split("\n}\n", 1)[0]
+    assert "run_bounded_az" in body, function
+    assert not any(line.lstrip().startswith("az ") for line in body.splitlines()), function
+PY
+  rm -f "$sourceable"
+  # shellcheck disable=SC2031
+  rm -rf "$state_dir"
+  pass "validate/preview/apply and worker mutations bound Azure CLI time and retain exact operation state"
+}
+
 run_capacity_contract_checks() {
   local sourceable output status
   sourceable=$(mktemp)
@@ -614,7 +658,7 @@ run_documentation_contract_checks() {
   assert_grep 'existing 10-vCPU Dasv6 allowance' "$DOC" "immediate runner and pilot quota contract is missing"
   assert_grep 'currently unavailable because its live family limit is 10' "$DOC" "unavailable homogeneous capacity is not explicit"
   assert_grep 'may instead select one of the foundation' "$DOC" "mixed-family runner selection contract is missing"
-  assert_grep 'bounds every Azure cleanup call' "$DOC" "bounded cleanup contract is missing"
+  assert_grep 'bounds every Azure CLI validation, preview, apply, worker, and cleanup call' "$DOC" "bounded Azure CLI contract is missing"
   assert_no_grep 'seven-day canary' "$DOC" "superseded time-based canary remains documented"
   pass "operator documentation preserves activation, interface, review, and file-transfer contracts"
 }
@@ -628,6 +672,7 @@ run_worker_create_plan_gate_check
 run_destroy_inventory_failure_checks
 run_destroy_unknown_disk_check
 run_destroy_deadline_check
+run_bounded_mutation_deadline_checks
 run_capacity_contract_checks
 run_documentation_contract_checks
 

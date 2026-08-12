@@ -45,8 +45,9 @@ Declared dependency paths are rehashed after the VM clones the bundle.
 Package installation performed by a repository command must remain rootless and derive from committed lockfiles or the selected reviewed image.
 Missing toolchain capability fails the command rather than triggering a local retry or privileged repository-controlled bootstrap.
 The fixed root bootstrap installs a hard-coded Ubuntu transport and Linux test-tool package closure before repository code starts when the pinned Canonical image lacks it.
-Repository code cannot alter that privileged package list, all package and staging traffic ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
-The unprivileged command helper then installs checksum-verified ShellCheck and hash-pinned uv into the invocation-private home.
+Repository code cannot alter that privileged package list, all package and staging traffic is shaped to one megabit per second and ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
+The controller pre-stages the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 release archives inside the digest-bound input.
+Trusted root verifies and installs both into the invocation-private unprivileged home before deny-all networking begins; the unprivileged command helper only verifies their versions and never downloads.
 
 ## Private control and VM boundary
 
@@ -114,7 +115,8 @@ There is no queue daemon and no warm runner compute.
 An empty local queue means zero runner VMs.
 Every invocation receives a separate VM, so two admitted shards run concurrently without sharing process, memory, disk, temp, or task state.
 
-Before staging or creating a VM, the controller proves the exact scope and the named foundation storage account, VNet, validation-shard subnet, private NSG/NAT binding, blob private endpoint, deployment generation, private-access settings, current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, current retail rate, and active runner count.
+Immediately before staging and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, VNet, validation-shard subnet, NSG, NAT, blob private endpoint, private-DNS zone group, approved blob connection, endpoint subnet/NIC, deny rules, and private-access properties.
+It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, current retail rate, and active runner count.
 The software cap is four active runner VMs and may be configured only from one through eight, while live regional and per-family free-vCPU gates can impose a lower effective cap.
 The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
 A short renewable Azure Blob lease serializes count-and-create admission across controllers without a machine-wide singleton daemon.
@@ -122,7 +124,8 @@ Lease loss stops before repository execution and retains exact state for reconci
 
 The normal budget limit is the active $1,000 target.
 An operator may select the commissioning ceiling of $1,500 through `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500` only during the approved commissioning window.
-Admission reserves the foundation's conservative $210 shared-meter allowance, $40 for runner disk, operations, diagnostics, and bounded trusted-bootstrap traffic, plus 24 hours of the selected-SKU compute rate.
+Admission emits separate first-hour and first-day bounds itemized as VM compute, OS disk, NAT/public-IP, private endpoint/DNS/monitoring, boot diagnostics, shaped bootstrap/staging/result traffic, storage/control operations, the conservative $210 foundation reserve, and zero repository-command egress.
+The VM's complete bootstrap/output channel is shaped to one megabit per second, staging input and result output have explicit byte ceilings, trusted curl has connection/elapsed/size bounds, and Azure control operations have a fixed count ceiling.
 The invocation template independently installs a 24-hour self-shutdown timer before repository execution, and every host subprocess and Azure CLI call has a five-minute deadline.
 Repository-controlled execution is networkless, so untrusted code cannot create an unbounded egress charge.
 An unreadable actual cost, forecast, retail rate, quota, or active inventory fails closed.
@@ -133,7 +136,7 @@ It never deletes an active VM, an uncollected result, an unfinished snapshot, or
 
 Local state lives under `$FM_HOME/state/azure-runner` by default and is written mode 0600 through an atomic replace plus directory `fsync` under a per-home file lock.
 The state record never stores a SAS value.
-It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, Managed Run Command, immutable VM instance, boot, result, and cleanup identities.
+It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, Managed Run Command, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, Run Command provisioning identity, boot, result, and cleanup identities.
 
 A controller restart runs `resume --invocation <id>`.
 Resume may poll the existing Managed Run Command, collect an already published output, or continue exact cleanup.
@@ -145,7 +148,9 @@ The old invocation ID is never reused.
 ## Cleanup
 
 Cleanup begins only after the complete result archive and every bound identity have been verified and retained locally.
-Before deletion, the controller re-reads every live disposable resource and compares invocation, fence, snapshot, and command tags plus the recorded resource ID and ETag; the VM also must retain its immutable instance ID, while the NIC and disk must remain managed by that exact VM.
+Before deletion, the controller re-reads every live disposable resource and compares the complete owner, role, home/task/task-generation, deployment-generation, invocation/attempt/fence, snapshot/command, SKU/class/cost, and cleanup-token tag set plus the recorded resource ID and ETag.
+The VM also must retain its immutable instance ID, the NIC its resourceGuid and exact VM parent, the disk its uniqueId and exact managedBy VM, and the Managed Run Command its recorded provisioning identity.
+The VM-absent path inventories all resources in the group for the invocation and refuses any unplanned residual, including a Managed Run Command.
 Deletion uses the recorded ETag as an `If-Match` condition.
 A missing, foreign, replaced, or unreadable resource retains everything and reports ambiguity.
 

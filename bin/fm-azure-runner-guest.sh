@@ -21,6 +21,14 @@ case "$GUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "guest bootstrap: b
 case "$INPUT_URL" in https://*) ;; *) echo "guest bootstrap: input capability is not HTTPS" >&2; exit 125 ;; esac
 case "$OUTPUT_URL" in https://*) ;; *) echo "guest bootstrap: output capability is not HTTPS" >&2; exit 125 ;; esac
 
+# Bound all VM egress before any package, staging, or result traffic.
+for tool in ip tc; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "guest bootstrap: pinned image lacks pre-network rate-control tool: $tool" >&2; exit 125; }
+done
+EGRESS_DEVICE=$(ip -o route show default | awk 'NR==1 {print $5}')
+[ -n "$EGRESS_DEVICE" ] || { echo "guest bootstrap: default egress device is unavailable" >&2; exit 125; }
+tc qdisc replace dev "$EGRESS_DEVICE" root tbf rate 1mbit burst 32kbit latency 400ms
+
 # Install only this hard-coded Ubuntu transport/Linux-test closure before any
 # repository bytes execute. Repository code never controls apt or gets root.
 # All bootstrap traffic ends before the untrusted networkless command starts.
@@ -44,7 +52,7 @@ rm -rf "$BASE"
 install -d -m 0700 -o root -g root "$BASE"
 INPUT=$BASE/input.tar.gz
 CURL_CONFIG=$BASE/curl-input.conf
-printf 'url = "%s"\nfail\nsilent\nshow-error\noutput = "%s"\n' "$INPUT_URL" "$INPUT" >"$CURL_CONFIG"
+printf 'url = "%s"\nfail\nsilent\nshow-error\nconnect-timeout = 30\nmax-time = 300\nmax-filesize = 536870912\noutput = "%s"\n' "$INPUT_URL" "$INPUT" >"$CURL_CONFIG"
 unset INPUT_URL
 curl --config "$CURL_CONFIG"
 rm -f "$CURL_CONFIG"
@@ -58,7 +66,7 @@ import tarfile
 
 source = pathlib.Path(sys.argv[1])
 destination = pathlib.Path(sys.argv[2])
-allowed = {"request.json", "snapshot.bundle", "runner-exec.py"}
+allowed = {"request.json", "snapshot.bundle", "runner-exec.py", "shellcheck.tar.xz", "uv.tar.gz"}
 with tarfile.open(source, "r:gz") as archive:
     members = archive.getmembers()
     if {member.name for member in members} != allowed:
@@ -74,14 +82,16 @@ PY
 REQUEST=$BASE/request.json
 BUNDLE=$BASE/snapshot.bundle
 EXECUTOR=$BASE/runner-exec.py
-python3 - "$REQUEST" "$BUNDLE" "$EXECUTOR" "$GUEST_DIGEST" <<'PY'
+SHELLCHECK_ARCHIVE=$BASE/shellcheck.tar.xz
+UV_ARCHIVE=$BASE/uv.tar.gz
+python3 - "$REQUEST" "$BUNDLE" "$EXECUTOR" "$SHELLCHECK_ARCHIVE" "$UV_ARCHIVE" "$GUEST_DIGEST" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-request_path, bundle_path, executor_path = map(pathlib.Path, sys.argv[1:4])
-expected_guest = sys.argv[4]
+request_path, bundle_path, executor_path, shellcheck_path, uv_path = map(pathlib.Path, sys.argv[1:6])
+expected_guest = sys.argv[6]
 request = json.loads(request_path.read_text(encoding="utf-8"))
 unsigned = dict(request)
 supplied = unsigned.pop("request_digest", None)
@@ -94,6 +104,10 @@ if digest(bundle_path) != request["repository"]["snapshot_digest"]:
     raise SystemExit("guest bootstrap: bundle digest mismatch")
 if digest(executor_path) != request["protocol"]["executor_digest"]:
     raise SystemExit("guest bootstrap: executor digest mismatch")
+if digest(shellcheck_path) != request["protocol"]["shellcheck_archive_digest"]:
+    raise SystemExit("guest bootstrap: ShellCheck archive digest mismatch")
+if digest(uv_path) != request["protocol"]["uv_archive_digest"]:
+    raise SystemExit("guest bootstrap: uv archive digest mismatch")
 if request["protocol"]["guest_digest"] != expected_guest:
     raise SystemExit("guest bootstrap: guest protocol digest mismatch")
 limits = request["limits"]
@@ -147,8 +161,19 @@ if ! id fmrunner >/dev/null 2>&1; then
 fi
 RUNNER_UID=$(id -u fmrunner)
 RUNNER_GID=$(id -g fmrunner)
-install -d -m 0700 -o fmrunner -g fmrunner /work/home /work/repo
+install -d -m 0700 -o fmrunner -g fmrunner /work/home /work/repo /work/home/.fm-runner-tools/bin /work/home/.fm-runner-tools/uv
 chown fmrunner:fmrunner /work
+TOOL_STAGE=$BASE/tools
+install -d -m 0700 -o root -g root "$TOOL_STAGE"
+tar -xJf "$SHELLCHECK_ARCHIVE" -C "$TOOL_STAGE"
+install -m 0755 -o fmrunner -g fmrunner "$TOOL_STAGE/shellcheck-v0.11.0/shellcheck" /work/home/.fm-runner-tools/bin/shellcheck
+tar -xzf "$UV_ARCHIVE" -C "$TOOL_STAGE"
+install -m 0755 -o fmrunner -g fmrunner "$TOOL_STAGE/uv-x86_64-unknown-linux-gnu/uv" /work/home/.fm-runner-tools/uv/uv
+install -m 0755 -o fmrunner -g fmrunner "$TOOL_STAGE/uv-x86_64-unknown-linux-gnu/uvx" /work/home/.fm-runner-tools/uv/uvx
+chown -R fmrunner:fmrunner /work/home/.fm-runner-tools
+/work/home/.fm-runner-tools/bin/shellcheck --version >/dev/null
+[ "$(/work/home/.fm-runner-tools/uv/uv --version)" = "uv 0.9.10" ] || { echo "guest bootstrap: staged uv version mismatch" >&2; exit 125; }
+rm -rf "$TOOL_STAGE"
 runuser -u fmrunner -- git clone --no-local "$BUNDLE" /work/repo >/dev/null
 runuser -u fmrunner -- git -C /work/repo checkout --detach "$COMMIT" >/dev/null
 [ "$(git -C /work/repo rev-parse HEAD)" = "$COMMIT" ] || { echo "guest bootstrap: commit mismatch after clone" >&2; exit 125; }
@@ -283,7 +308,7 @@ RESULT_ARCHIVE=$BASE/result.tar.gz
 )
 RESULT_DIGEST=sha256:$(sha256sum "$RESULT_ARCHIVE" | awk '{print $1}')
 CURL_CONFIG=$BASE/curl-output.conf
-printf 'url = "%s"\nfail\nsilent\nshow-error\nrequest = "PUT"\nheader = "x-ms-blob-type: BlockBlob"\nupload-file = "%s"\n' "$OUTPUT_URL" "$RESULT_ARCHIVE" >"$CURL_CONFIG"
+printf 'url = "%s"\nfail\nsilent\nshow-error\nconnect-timeout = 30\nmax-time = 300\nrequest = "PUT"\nheader = "x-ms-blob-type: BlockBlob"\nupload-file = "%s"\n' "$OUTPUT_URL" "$RESULT_ARCHIVE" >"$CURL_CONFIG"
 unset OUTPUT_URL
 curl --config "$CURL_CONFIG"
 rm -f "$CURL_CONFIG"

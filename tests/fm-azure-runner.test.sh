@@ -40,6 +40,7 @@ runner() {
     FM_AZURE_SUBSCRIPTION_ID="$SUB" \
     FM_AZURE_NAMING_PREFIX=fmtest \
     FM_AZURE_STORAGE_NAME=fmteststorage0001 \
+    FM_AZURE_OWNER_TAG=owner \
     FM_AZURE_DEPLOYMENT_GENERATION=gen-one \
     "$RUNNER" "$@"
 }
@@ -77,13 +78,18 @@ guest = Path(sys.argv[3]).read_text(encoding="utf-8")
 executor = Path(sys.argv[4]).read_text(encoding="utf-8")
 for required in ("request_digest", "command_digest", "snapshot_digest", "vm_instance_id", "boot_id", "expected_result_digest"):
     assert required in host
-for required in ("MemoryMax", "MemorySwapMax=0", "TasksMax", "CPUQuota", "RuntimeMaxSec", "IPAddressDeny=any", "hidepid=2"):
+for required in ("MemoryMax", "MemorySwapMax=0", "TasksMax", "CPUQuota", "RuntimeMaxSec", "IPAddressDeny=any", "hidepid=2", "tc qdisc replace", "rate 1mbit", "max-filesize = 536870912"):
     assert required in guest
+assert "bootstrapEgressRateBitsPerSecond" in template["parameters"]
+assert "pip install" not in guest
 for required in ("timeout=timeout_seconds", "foundation_gate", "If-Match", "identities", "max_billable_lifetime_hours"):
     assert required in host
 for forbidden in ("GITHUB_TOKEN", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "AZURE_CLIENT_SECRET", "SSH_AUTH_SOCK"):
     assert forbidden not in executor
 assert '"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' in executor
+command_helper = (Path(sys.argv[2]).parent / "fm-azure-runner-command.sh").read_text(encoding="utf-8")
+assert "curl" not in command_helper and "pip install" not in command_helper
+assert "uv 0.9.10" in command_helper and "0.11.0" in command_helper
 PY
   pass "invocation template and guest protocol preserve private identity-less bounded execution"
 }
@@ -158,7 +164,7 @@ assert state["resources"]["os_disk_id"].endswith("/" + state["resources"]["os_di
 input_path = Path(state["input_path"])
 assert state["input_digest"] == "sha256:" + hashlib.sha256(input_path.read_bytes()).hexdigest()
 with tarfile.open(input_path, "r:gz") as archive:
-    assert set(archive.getnames()) == {"request.json", "snapshot.bundle", "runner-exec.py"}
+    assert set(archive.getnames()) == {"request.json", "snapshot.bundle", "runner-exec.py", "shellcheck.tar.xz", "uv.tar.gz"}
 PY
   printf 'dirty\n' >"$repo/untracked"
   if (cd "$repo" && runner "$home" "$fakebin" prepare --task task-two --generation generation-two -- echo no) >/dev/null 2>&1; then
@@ -265,14 +271,27 @@ case "$1 $2" in
   "account show")
     printf '{"id":"%s","tenantId":"%s","state":"Enabled"}\n' "$FM_AZURE_SUBSCRIPTION_ID" "$FM_AZURE_TENANT_ID"
     ;;
-  "storage account")
-    printf '{"id":"/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Storage/storageAccounts/fmteststorage0001","location":"eastus","publicNetworkAccess":"Disabled","allowSharedKeyAccess":false,"allowBlobPublicAccess":false,"tags":{"workload":"firstmate","deployment-generation":"gen-one"}}\n' "$FM_AZURE_SUBSCRIPTION_ID"
-    ;;
-  "network vnet")
-    printf '{"location":"eastus","tags":{"workload":"firstmate","deployment-generation":"gen-one"},"subnets":[{"name":"snet-validation-shards","networkSecurityGroup":{"id":"/subscriptions/%s/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated"},"natGateway":{"id":"/subscriptions/%s/resourceGroups/rg/providers/Microsoft.Network/natGateways/nat-fmtest-eus"}}]}\n' "$FM_AZURE_SUBSCRIPTION_ID" "$FM_AZURE_SUBSCRIPTION_ID"
-    ;;
-  "network private-endpoint")
-    printf '[{"privateLinkServiceConnections":[{"privateLinkServiceId":"/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Storage/storageAccounts/fmteststorage0001","groupIds":["blob"]}]}]\n' "$FM_AZURE_SUBSCRIPTION_ID"
+  "resource show")
+    args="$*"
+    base="/subscriptions/$FM_AZURE_SUBSCRIPTION_ID/resourceGroups/rg-firstmate-pilot-eastus-001/providers"
+    common='"tags":{"workload":"firstmate","deployment-generation":"gen-one","cleanup-owner":"owner"}'
+    case "$args" in
+      *Microsoft.Storage/storageAccounts/fmteststorage0001*)
+        printf '{"id":"%s/Microsoft.Storage/storageAccounts/fmteststorage0001","location":"eastus",%s,"properties":{"publicNetworkAccess":"Disabled","allowSharedKeyAccess":false,"allowBlobPublicAccess":false,"supportsHttpsTrafficOnly":true,"minimumTlsVersion":"TLS1_2","networkAcls":{"defaultAction":"Deny","bypass":"None"}}}\n' "$base" "$common" ;;
+      *Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-validation-shards*)
+        printf '{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-validation-shards","properties":{"addressPrefix":"10.42.7.0/24","networkSecurityGroup":{"id":"%s/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated"},"natGateway":{"id":"%s/Microsoft.Network/natGateways/nat-fmtest-eus"},"privateEndpointNetworkPolicies":"Enabled"}}\n' "$base" "$base" "$base" ;;
+      *Microsoft.Network/virtualNetworks/vnet-fmtest-eus*)
+        printf '{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus","location":"eastus",%s,"properties":{}}\n' "$base" "$common" ;;
+      *Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated*)
+        printf '{"id":"%s/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated",%s,"properties":{"securityRules":[{"name":"deny-public-inbound","properties":{"direction":"Inbound","access":"Deny","sourceAddressPrefix":"Internet"}},{"name":"deny-vnet-cross-compartment-inbound","properties":{"direction":"Inbound","access":"Deny","sourceAddressPrefix":"VirtualNetwork"}}]}}\n' "$base" "$common" ;;
+      *Microsoft.Network/natGateways/nat-fmtest-eus*)
+        printf '{"id":"%s/Microsoft.Network/natGateways/nat-fmtest-eus","location":"eastus",%s,"properties":{}}\n' "$base" "$common" ;;
+      *Microsoft.Network/privateEndpoints/pe-fmtest-blob/privateDnsZoneGroups/default*)
+        printf '{"id":"%s/Microsoft.Network/privateEndpoints/pe-fmtest-blob/privateDnsZoneGroups/default","properties":{"privateDnsZoneConfigs":[{"properties":{"privateDnsZoneId":"%s/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"}}]}}\n' "$base" "$base" ;;
+      *Microsoft.Network/privateEndpoints/pe-fmtest-blob*)
+        printf '{"id":"%s/Microsoft.Network/privateEndpoints/pe-fmtest-blob",%s,"properties":{"subnet":{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-private-endpoints"},"networkInterfaces":[{"id":"%s/Microsoft.Network/networkInterfaces/pe-fmtest-blob.nic"}],"privateLinkServiceConnections":[{"properties":{"privateLinkServiceId":"%s/Microsoft.Storage/storageAccounts/fmteststorage0001","groupIds":["blob"],"privateLinkServiceConnectionState":{"status":"Approved"}}}]}}\n' "$base" "$common" "$base" "$base" "$base" ;;
+      *) exit 3 ;;
+    esac
     ;;
   "vm list-skus")
     if [ "$AZ_MODE" = restricted ]; then
@@ -339,9 +358,28 @@ write_fake_az_absence() {
 printf '%s\n' "$*" >>"$AZ_LOG"
 case "$1 $2" in
   "account show") printf '{"id":"%s","tenantId":"%s","state":"Enabled"}\n' "$FM_AZURE_SUBSCRIPTION_ID" "$FM_AZURE_TENANT_ID" ;;
-  "storage account") printf '{"id":"/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Storage/storageAccounts/fmteststorage0001","location":"eastus","publicNetworkAccess":"Disabled","allowSharedKeyAccess":false,"allowBlobPublicAccess":false,"tags":{"workload":"firstmate","deployment-generation":"gen-one"}}\n' "$FM_AZURE_SUBSCRIPTION_ID" ;;
-  "network vnet") printf '{"location":"eastus","tags":{"workload":"firstmate","deployment-generation":"gen-one"},"subnets":[{"name":"snet-validation-shards","networkSecurityGroup":{"id":"/nsg/nsg-fmtest-elastic-isolated"},"natGateway":{"id":"/nat/nat-fmtest-eus"}}]}\n' ;;
-  "network private-endpoint") printf '[{"privateLinkServiceConnections":[{"privateLinkServiceId":"/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Storage/storageAccounts/fmteststorage0001","groupIds":["blob"]}]}]\n' "$FM_AZURE_SUBSCRIPTION_ID" ;;
+  "resource show")
+    args="$*"
+    base="/subscriptions/$FM_AZURE_SUBSCRIPTION_ID/resourceGroups/rg-firstmate-pilot-eastus-001/providers"
+    common='"tags":{"workload":"firstmate","deployment-generation":"gen-one","cleanup-owner":"owner"}'
+    case "$args" in
+      *Microsoft.Storage/storageAccounts/fmteststorage0001*)
+        printf '{"id":"%s/Microsoft.Storage/storageAccounts/fmteststorage0001","location":"eastus",%s,"properties":{"publicNetworkAccess":"Disabled","allowSharedKeyAccess":false,"allowBlobPublicAccess":false,"supportsHttpsTrafficOnly":true,"minimumTlsVersion":"TLS1_2","networkAcls":{"defaultAction":"Deny","bypass":"None"}}}\n' "$base" "$common" ;;
+      *Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-validation-shards*)
+        printf '{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-validation-shards","properties":{"addressPrefix":"10.42.7.0/24","networkSecurityGroup":{"id":"%s/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated"},"natGateway":{"id":"%s/Microsoft.Network/natGateways/nat-fmtest-eus"},"privateEndpointNetworkPolicies":"Enabled"}}\n' "$base" "$base" "$base" ;;
+      *Microsoft.Network/virtualNetworks/vnet-fmtest-eus*)
+        printf '{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus","location":"eastus",%s,"properties":{}}\n' "$base" "$common" ;;
+      *Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated*)
+        printf '{"id":"%s/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated",%s,"properties":{"securityRules":[{"name":"deny-public-inbound","properties":{"direction":"Inbound","access":"Deny","sourceAddressPrefix":"Internet"}},{"name":"deny-vnet-cross-compartment-inbound","properties":{"direction":"Inbound","access":"Deny","sourceAddressPrefix":"VirtualNetwork"}}]}}\n' "$base" "$common" ;;
+      *Microsoft.Network/natGateways/nat-fmtest-eus*)
+        printf '{"id":"%s/Microsoft.Network/natGateways/nat-fmtest-eus","location":"eastus",%s,"properties":{}}\n' "$base" "$common" ;;
+      *Microsoft.Network/privateEndpoints/pe-fmtest-blob/privateDnsZoneGroups/default*)
+        printf '{"id":"%s/Microsoft.Network/privateEndpoints/pe-fmtest-blob/privateDnsZoneGroups/default","properties":{"privateDnsZoneConfigs":[{"properties":{"privateDnsZoneId":"%s/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"}}]}}\n' "$base" "$base" ;;
+      *Microsoft.Network/privateEndpoints/pe-fmtest-blob*)
+        printf '{"id":"%s/Microsoft.Network/privateEndpoints/pe-fmtest-blob",%s,"properties":{"subnet":{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-private-endpoints"},"networkInterfaces":[{"id":"%s/Microsoft.Network/networkInterfaces/pe-fmtest-blob.nic"}],"privateLinkServiceConnections":[{"properties":{"privateLinkServiceId":"%s/Microsoft.Storage/storageAccounts/fmteststorage0001","groupIds":["blob"],"privateLinkServiceConnectionState":{"status":"Approved"}}}]}}\n' "$base" "$common" "$base" "$base" "$base" ;;
+      *) exit 3 ;;
+    esac
+    ;;
   "storage blob") printf '{"exists":false}\n' ;;
   "vm show") exit 3 ;;
   "vm list") printf '[]\n' ;;
@@ -392,9 +430,103 @@ PY
   pass "missing VM is fenced absent and cannot create a duplicate invocation"
 }
 
-audit_blocker_regressions() {
-  python3 - "$HOST" <<'PY'
+foundation_binding_matrix() {
+  python3 - "$HOST" <<'PY' || fail "complete foundation identity/private-network matrix failed"
 import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("runner_host_foundation", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+env = {
+    "subscription": "sub", "resource_group": "rg", "storage": "store", "vnet": "vnet-prefix-eus",
+    "subnet": "snet-validation-shards", "elastic_nsg": "nsg-prefix-elastic-isolated", "nat": "nat-prefix-eus",
+    "blob_private_endpoint": "pe-prefix-blob", "blob_private_dns_zone": "privatelink.blob.core.windows.net",
+    "deployment_generation": "gen-one", "owner": "owner", "azure_operation_count": 0,
+}
+def rid(provider, kind, name):
+    return "/subscriptions/sub/resourceGroups/rg/providers/{}/{}/{}".format(provider, kind, name)
+common = {"workload": "firstmate", "deployment-generation": "gen-one", "cleanup-owner": "owner"}
+store_id = rid("Microsoft.Storage", "storageAccounts", "store")
+vnet_id = rid("Microsoft.Network", "virtualNetworks", "vnet-prefix-eus")
+subnet_id = vnet_id + "/subnets/snet-validation-shards"
+nsg_id = rid("Microsoft.Network", "networkSecurityGroups", "nsg-prefix-elastic-isolated")
+nat_id = rid("Microsoft.Network", "natGateways", "nat-prefix-eus")
+pe_id = rid("Microsoft.Network", "privateEndpoints", "pe-prefix-blob")
+dns_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
+resources = {
+    store_id.lower(): {"id": store_id, "location": "eastus", "tags": common, "properties": {"publicNetworkAccess": "Disabled", "allowSharedKeyAccess": False, "allowBlobPublicAccess": False, "supportsHttpsTrafficOnly": True, "minimumTlsVersion": "TLS1_2", "networkAcls": {"defaultAction": "Deny", "bypass": "None"}}},
+    vnet_id.lower(): {"id": vnet_id, "location": "eastus", "tags": common, "properties": {}},
+    subnet_id.lower(): {"id": subnet_id, "properties": {"addressPrefix": "10.42.7.0/24", "networkSecurityGroup": {"id": nsg_id}, "natGateway": {"id": nat_id}, "privateEndpointNetworkPolicies": "Enabled"}},
+    nsg_id.lower(): {"id": nsg_id, "tags": common, "properties": {"securityRules": [{"name": "deny-public-inbound", "properties": {"direction": "Inbound", "access": "Deny", "sourceAddressPrefix": "Internet"}}, {"name": "deny-vnet-cross-compartment-inbound", "properties": {"direction": "Inbound", "access": "Deny", "sourceAddressPrefix": "VirtualNetwork"}}]}},
+    nat_id.lower(): {"id": nat_id, "location": "eastus", "tags": common, "properties": {}},
+    pe_id.lower(): {"id": pe_id, "tags": common, "properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}, "networkInterfaces": [{"id": "/nic/private"}], "privateLinkServiceConnections": [{"properties": {"privateLinkServiceId": store_id, "groupIds": ["blob"], "privateLinkServiceConnectionState": {"status": "Approved"}}}]}},
+    (pe_id + "/privateDnsZoneGroups/default").lower(): {"id": pe_id + "/privateDnsZoneGroups/default", "properties": {"privateDnsZoneConfigs": [{"properties": {"privateDnsZoneId": dns_id}}]}},
+}
+def run_gate(values):
+    def fake_az(env_arg, args, **kwargs):
+        resource_id = args[args.index("--ids") + 1].lower()
+        return json.loads(json.dumps(values[resource_id])), 0, ""
+    module.az_command = fake_az
+    module.foundation_gate(env)
+run_gate(resources)
+for resource_id, mutation in (
+    (store_id, lambda r: r["tags"].update({"cleanup-owner": "foreign"})),
+    (store_id, lambda r: r["properties"].update({"publicNetworkAccess": "Enabled"})),
+    (vnet_id, lambda r: r.update({"id": vnet_id + "-foreign"})),
+    (subnet_id, lambda r: r["properties"]["networkSecurityGroup"].update({"id": nsg_id + "-foreign"})),
+    (subnet_id, lambda r: r["properties"]["natGateway"].update({"id": nat_id + "-foreign"})),
+    (nsg_id, lambda r: r["properties"].update({"securityRules": []})),
+    (nat_id, lambda r: r["tags"].update({"deployment-generation": "foreign"})),
+    (pe_id, lambda r: r["properties"]["subnet"].update({"id": "/foreign"})),
+    (pe_id, lambda r: r["properties"]["privateLinkServiceConnections"][0]["properties"]["privateLinkServiceConnectionState"].update({"status": "Rejected"})),
+    (pe_id, lambda r: r["properties"].update({"networkInterfaces": []})),
+    (pe_id + "/privateDnsZoneGroups/default", lambda r: r["properties"]["privateDnsZoneConfigs"][0]["properties"].update({"privateDnsZoneId": "/foreign"})),
+):
+    changed = json.loads(json.dumps(resources))
+    mutation(changed[resource_id.lower()])
+    try:
+        run_gate(changed)
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("foreign foundation binding accepted: {}".format(resource_id))
+
+# Dispatch proves immediately before staging and again immediately before compute create.
+sequence = []
+module.scope_gate = lambda e: None
+module.sku_quota_gate = lambda e, limits: None
+module.budget_gate = lambda e, limits: {"max_increment": 1}
+module.foundation_gate = lambda e: sequence.append("foundation")
+module.active_runner_vms = lambda e: []
+module.storage_upload = lambda *args, **kwargs: sequence.append("stage")
+module.blob_sas = lambda *args, **kwargs: "https://capability"
+module.create_vm = lambda e, s: sequence.append("create-vm")
+module.create_run_command = lambda *args, **kwargs: (_ for _ in ()).throw(module.RunnerError("stop after create"))
+module.transition = lambda e, s, phase, note=None, **updates: s.update({"phase": phase, **updates})
+class FakeLease:
+    def __init__(self, *args): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def assert_held(self): pass
+module.AdmissionLease = FakeLease
+state = {"request": {"limits": {"wall_seconds": 3600}}, "phase": "prepared", "input_path": "/input", "staging": {"input_blob": "in", "output_blob": "out"}}
+try:
+    module.dispatch_prepared({"subscription": "sub", "max_concurrency": 1}, state, "sub")
+except module.RunnerError as exc:
+    assert "stop after create" in str(exc)
+else:
+    raise AssertionError("dispatch fixture did not stop")
+assert sequence[-4:] == ["foundation", "stage", "foundation", "create-vm"]
+PY
+  pass "foundation exact owner/resource/subnet/NSG/NAT/private-endpoint/DNS matrix and mutation-boundary reproof pass"
+}
+
+audit_blocker_regressions() {
+  python3 - "$HOST" <<'PY' || fail "complete audit-blocker adversarial matrix failed"
+import importlib.util
+import json
 import subprocess
 import sys
 
@@ -412,16 +544,23 @@ else:
 state = {
     "invocation": "azr-aaaaaaaaaaaa",
     "request": {
+        "home_binding": "sha256:" + "0" * 64,
+        "task": "task-one",
+        "generation": "gen-one",
         "fence": "sha256:" + "1" * 64,
         "repository": {"snapshot_digest": "sha256:" + "2" * 64},
         "command_digest": "sha256:" + "3" * 64,
+        "resource_class": "behavior-heavy",
+        "limits": {"sku": "Standard_D4as_v6", "sku_family": "standardDav6Family", "wall_seconds": 3600},
     },
     "resources": {
         "vm_id": "/vm/exact",
         "nic_id": "/nic/exact",
         "os_disk_id": "/disk/exact",
+        "run_command_name": "execute",
         "identities": {},
     },
+    "attempt": 1,
 }
 foreign = {
     "id": "/nic/exact",
@@ -435,9 +574,9 @@ foreign = {
     "properties": {"virtualMachine": {"id": "/vm/foreign"}},
 }
 module.read_exact_resource = lambda env, resource_id, kind: (True, foreign)
-module.az_command = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("foreign resource reached delete"))
+module.az_command = lambda *args, **kwargs: ([], 0, "") if args[1][0:2] == ["resource", "list"] else (_ for _ in ()).throw(AssertionError("foreign resource reached delete"))
 try:
-    module.cleanup_partial_capacity({}, state)
+    module.cleanup_partial_capacity({"deployment_generation": "gen-one", "owner": "owner", "resource_group": "rg"}, state)
 except module.RunnerError as exc:
     assert "tag mismatch" in str(exc)
 else:
@@ -449,9 +588,120 @@ limits = {"sku": "Standard_D4as_v6", "network_bytes": 0}
 cost = module.budget_gate({"budget_limit": 1000}, limits)
 assert cost["max_network_bytes"] == 0
 assert cost["max_billable_lifetime_hours"] == 24
-assert cost["max_increment"] >= 250
+assert cost["max_increment"] >= 210
+assert set(cost["first_hour"]["categories"]) == {
+    "vm_compute", "os_disk", "nat_gateway_and_public_ip", "private_endpoints_dns_monitoring",
+    "boot_diagnostics", "bootstrap_traffic", "storage_capacity_operations_and_control",
+    "foundation_shared_meter_reserve", "repository_command_egress",
+}
+assert cost["first_day"]["total"] > cost["first_hour"]["total"]
+assert cost["first_day"]["vm_network_bytes"] <= module.MAX_BOOTSTRAP_NETWORK_BYTES
+assert cost["first_hour"]["vm_network_bytes"] < cost["first_day"]["vm_network_bytes"]
+assert cost["first_day"]["control_operation_ceiling"] == module.RUNNER_CONTROL_OPERATION_CEILING
+
+# Complete one-property-at-a-time disposable-resource identity matrix.
+env = {"deployment_generation": "gen-one", "owner": "owner", "resource_group": "rg"}
+expected_tags = module.ownership_tags(env, state)
+resources = {
+    "vm": {"id": "/vm/exact", "etag": '"vm-etag"', "tags": dict(expected_tags), "properties": {"vmId": "vm-instance"}},
+    "nic": {"id": "/nic/exact", "etag": '"nic-etag"', "tags": dict(expected_tags), "properties": {"resourceGuid": "nic-guid", "virtualMachine": {"id": "/vm/exact"}}},
+    "disk": {"id": "/disk/exact", "etag": '"disk-etag"', "tags": dict(expected_tags), "managedBy": "/vm/exact", "properties": {"uniqueId": "disk-unique"}},
+    "run-command": {"id": "/vm/exact/runCommands/execute", "etag": '"run-etag"', "tags": dict(expected_tags), "properties": {"provisioningState": "Succeeded"}},
+}
+state["resources"].update({
+    "vm_instance_id": "vm-instance",
+    "run_command_id": resources["run-command"]["id"],
+    "identities": {kind: module.immutable_identity(value, kind) for kind, value in resources.items()},
+})
+original_reader = module.read_exact_resource
+for kind, resource in resources.items():
+    resource_id = resource["id"]
+    for tag in (
+        "workload", "firstmate-role", "lifecycle", "deployment-generation", "cleanup-owner",
+        "home-binding", "task-binding", "task-generation", "invocation-binding", "attempt", "fence",
+        "snapshot-digest", "command-digest", "resource-class", "selected-sku", "sku-family",
+        "cost-attribution", "cleanup-token",
+    ):
+        changed = json.loads(json.dumps(resource))
+        changed["tags"][tag] = "foreign"
+        module.read_exact_resource = lambda env_arg, id_arg, kind_arg, changed=changed: (True, changed)
+        try:
+            module.verify_live_resource_identity(env, state, kind, resource_id)
+        except module.RunnerError:
+            pass
+        else:
+            raise AssertionError("foreign {} {} was accepted".format(kind, tag))
+for kind, field, container in (
+    ("vm", "vmId", "properties"),
+    ("nic", "resourceGuid", "properties"),
+    ("disk", "uniqueId", "properties"),
+    ("run-command", "provisioningState", "properties"),
+):
+    changed = json.loads(json.dumps(resources[kind]))
+    changed[container][field] = "foreign"
+    module.read_exact_resource = lambda env_arg, id_arg, kind_arg, changed=changed: (True, changed)
+    try:
+        module.verify_live_resource_identity(env, state, kind, resources[kind]["id"])
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("foreign {} immutable {} was accepted".format(kind, field))
+for kind, changed in (
+    ("nic", {"virtualMachine": {"id": "/vm/foreign"}, "resourceGuid": "nic-guid"}),
+    ("disk", {"uniqueId": "disk-unique"}),
+):
+    resource = json.loads(json.dumps(resources[kind]))
+    if kind == "nic":
+        resource["properties"].update(changed)
+    else:
+        resource["managedBy"] = "/vm/foreign"
+    module.read_exact_resource = lambda env_arg, id_arg, kind_arg, resource=resource: (True, resource)
+    try:
+        module.verify_live_resource_identity(env, state, kind, resources[kind]["id"])
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("foreign {} VM ownership was accepted".format(kind))
+module.read_exact_resource = original_reader
+
+# VM-absent cleanup inventories residual Run Commands and refuses an unplanned one.
+module.az_command = lambda env_arg, args, **kwargs: ([{"id": "/vm/exact/runCommands/foreign", "tags": {"invocation-binding": state["invocation"]}}], 0, "")
+try:
+    module.cleanup_partial_capacity(env, state)
+except module.RunnerError as exc:
+    assert "unplanned residual" in str(exc)
+else:
+    raise AssertionError("residual Run Command was not inventoried")
+
+# create_run_command publishes the complete ownership tags and records immutable identity.
+import tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as tmp:
+    create_env = dict(env, state_dir=Path(tmp), subscription="sub")
+    module.ensure_state_dirs(create_env)
+    create_state = json.loads(json.dumps(state))
+    create_state["phase"] = "vm-created"
+    create_state["request"]["protocol"] = {"guest_digest": "sha256:" + module.sha256_file(module.GUEST)}
+    create_state["input_digest"] = "sha256:" + "4" * 64
+    create_state["resources"]["identities"].pop("run-command", None)
+    captured = {}
+    def fake_az(env_arg, args, **kwargs):
+        if args[0:3] == ["rest", "--method", "put"]:
+            body_path = Path(args[args.index("--body") + 1][1:])
+            body = json.loads(body_path.read_text())
+            captured["tags"] = body["tags"]
+            return ({}, 0, "")
+        raise AssertionError("unexpected create Run Command call: {}".format(args))
+    run_resource = json.loads(json.dumps(resources["run-command"]))
+    run_resource["tags"] = module.ownership_tags(create_env, create_state)
+    module.az_command = fake_az
+    module.read_exact_resource = lambda env_arg, resource_id, kind: (True, run_resource)
+    module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
+    module.create_run_command(create_env, create_state, "https://input", "https://output")
+    assert captured["tags"] == module.ownership_tags(create_env, create_state)
+    assert create_state["resources"]["identities"]["run-command"]["provisioning_state"] == "Succeeded"
 PY
-  pass "audit blockers stay fixed: host deadlines, foreign replacement refusal, networkless command, and conservative cost ceiling"
+  pass "audit blockers stay fixed: complete ownership/immutable matrix, residual inventory, Run Command creation tags, deadlines, networkless command, and itemized cost bounds"
 }
 
 result_digest_rejection() {
@@ -489,9 +739,28 @@ PY
 printf '%s\n' "$*" >>"$AZ_LOG"
 case "$1 $2" in
   "account show") printf '{"id":"%s","tenantId":"%s","state":"Enabled"}\n' "$FM_AZURE_SUBSCRIPTION_ID" "$FM_AZURE_TENANT_ID" ;;
-  "storage account") printf '{"id":"/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Storage/storageAccounts/fmteststorage0001","location":"eastus","publicNetworkAccess":"Disabled","allowSharedKeyAccess":false,"allowBlobPublicAccess":false,"tags":{"workload":"firstmate","deployment-generation":"gen-one"}}\n' "$FM_AZURE_SUBSCRIPTION_ID" ;;
-  "network vnet") printf '{"location":"eastus","tags":{"workload":"firstmate","deployment-generation":"gen-one"},"subnets":[{"name":"snet-validation-shards","networkSecurityGroup":{"id":"/nsg/nsg-fmtest-elastic-isolated"},"natGateway":{"id":"/nat/nat-fmtest-eus"}}]}\n' ;;
-  "network private-endpoint") printf '[{"privateLinkServiceConnections":[{"privateLinkServiceId":"/subscriptions/%s/resourceGroups/rg-firstmate-pilot-eastus-001/providers/Microsoft.Storage/storageAccounts/fmteststorage0001","groupIds":["blob"]}]}]\n' "$FM_AZURE_SUBSCRIPTION_ID" ;;
+  "resource show")
+    args="$*"
+    base="/subscriptions/$FM_AZURE_SUBSCRIPTION_ID/resourceGroups/rg-firstmate-pilot-eastus-001/providers"
+    common='"tags":{"workload":"firstmate","deployment-generation":"gen-one","cleanup-owner":"owner"}'
+    case "$args" in
+      *Microsoft.Storage/storageAccounts/fmteststorage0001*)
+        printf '{"id":"%s/Microsoft.Storage/storageAccounts/fmteststorage0001","location":"eastus",%s,"properties":{"publicNetworkAccess":"Disabled","allowSharedKeyAccess":false,"allowBlobPublicAccess":false,"supportsHttpsTrafficOnly":true,"minimumTlsVersion":"TLS1_2","networkAcls":{"defaultAction":"Deny","bypass":"None"}}}\n' "$base" "$common" ;;
+      *Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-validation-shards*)
+        printf '{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-validation-shards","properties":{"addressPrefix":"10.42.7.0/24","networkSecurityGroup":{"id":"%s/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated"},"natGateway":{"id":"%s/Microsoft.Network/natGateways/nat-fmtest-eus"},"privateEndpointNetworkPolicies":"Enabled"}}\n' "$base" "$base" "$base" ;;
+      *Microsoft.Network/virtualNetworks/vnet-fmtest-eus*)
+        printf '{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus","location":"eastus",%s,"properties":{}}\n' "$base" "$common" ;;
+      *Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated*)
+        printf '{"id":"%s/Microsoft.Network/networkSecurityGroups/nsg-fmtest-elastic-isolated",%s,"properties":{"securityRules":[{"name":"deny-public-inbound","properties":{"direction":"Inbound","access":"Deny","sourceAddressPrefix":"Internet"}},{"name":"deny-vnet-cross-compartment-inbound","properties":{"direction":"Inbound","access":"Deny","sourceAddressPrefix":"VirtualNetwork"}}]}}\n' "$base" "$common" ;;
+      *Microsoft.Network/natGateways/nat-fmtest-eus*)
+        printf '{"id":"%s/Microsoft.Network/natGateways/nat-fmtest-eus","location":"eastus",%s,"properties":{}}\n' "$base" "$common" ;;
+      *Microsoft.Network/privateEndpoints/pe-fmtest-blob/privateDnsZoneGroups/default*)
+        printf '{"id":"%s/Microsoft.Network/privateEndpoints/pe-fmtest-blob/privateDnsZoneGroups/default","properties":{"privateDnsZoneConfigs":[{"properties":{"privateDnsZoneId":"%s/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"}}]}}\n' "$base" "$base" ;;
+      *Microsoft.Network/privateEndpoints/pe-fmtest-blob*)
+        printf '{"id":"%s/Microsoft.Network/privateEndpoints/pe-fmtest-blob",%s,"properties":{"subnet":{"id":"%s/Microsoft.Network/virtualNetworks/vnet-fmtest-eus/subnets/snet-private-endpoints"},"networkInterfaces":[{"id":"%s/Microsoft.Network/networkInterfaces/pe-fmtest-blob.nic"}],"privateLinkServiceConnections":[{"properties":{"privateLinkServiceId":"%s/Microsoft.Storage/storageAccounts/fmteststorage0001","groupIds":["blob"],"privateLinkServiceConnectionState":{"status":"Approved"}}}]}}\n' "$base" "$common" "$base" "$base" "$base" ;;
+      *) exit 3 ;;
+    esac
+    ;;
   "storage blob")
     destination=
     previous=
@@ -523,6 +792,7 @@ executor_semantics_unit
 request_integrity_unit
 admission_failures
 missing_vm_fences_attempt
+foundation_binding_matrix
 audit_blocker_regressions
 result_digest_rejection
 

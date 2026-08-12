@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import uuid
+import urllib.request
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,10 +43,24 @@ SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
 SAFE_ARTIFACT = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/+@:-]{1,240}$")
 LOCAL_COMMAND_TIMEOUT_SECONDS = 300
 MAX_STAGING_INPUT_BYTES = 512 * 1024**2
-MAX_NETWORK_BYTES = 1024**3
+MAX_BOOTSTRAP_NETWORK_BYTES = 16 * 1024**3
+MAX_RESULT_UPLOAD_BYTES = 600 * 1024**2
+BOOTSTRAP_RATE_BITS_PER_SECOND = 1_000_000
 MAX_BILLABLE_LIFETIME_HOURS = 24
+SHELLCHECK_ARCHIVE_BYTES = 2_559_196
+UV_ARCHIVE_BYTES = 21_427_164
 FOUNDATION_SHARED_METER_RESERVE_USD = 210.0
-RUNNER_METER_RESERVE_USD = 40.0
+FOUNDATION_HOURLY_METERS_USD = {
+    "nat_gateway_and_public_ip": 0.05,
+    "private_endpoints_dns_monitoring": 0.10,
+}
+RUNNER_HOURLY_METERS_USD = {
+    "os_disk": 0.02,
+    "boot_diagnostics": 0.01,
+}
+RUNNER_CONTROL_OPERATION_CEILING = 2_000
+RUNNER_OPERATION_RESERVE_USD = 20.0
+BOOTSTRAP_GIB_RATE_CEILING_USD = 0.25
 RESOURCE_API_VERSIONS = {
     "vm": "2024-03-01",
     "nic": "2023-09-01",
@@ -181,6 +196,7 @@ def environment():
         "FM_AZURE_SUBSCRIPTION_ID",
         "FM_AZURE_NAMING_PREFIX",
         "FM_AZURE_STORAGE_NAME",
+        "FM_AZURE_OWNER_TAG",
         "FM_AZURE_DEPLOYMENT_GENERATION",
     ]
     missing = [name for name in required if not os.environ.get(name)]
@@ -197,6 +213,7 @@ def environment():
     if not re.match(r"^[a-z0-9]{3,24}$", storage):
         raise RunnerError("FM_AZURE_STORAGE_NAME is malformed")
     generation = require_identifier("deployment generation", os.environ["FM_AZURE_DEPLOYMENT_GENERATION"])
+    owner = require_identifier("owner tag", os.environ["FM_AZURE_OWNER_TAG"])
     resource_group = os.environ.get("FM_AZURE_RESOURCE_GROUP", "rg-firstmate-pilot-eastus-001")
     max_concurrency = int(os.environ.get("FM_AZURE_RUNNER_MAX_CONCURRENCY", "4"))
     if max_concurrency < 1 or max_concurrency > 8:
@@ -211,6 +228,7 @@ def environment():
         "subscription": subscription,
         "prefix": prefix,
         "storage": storage,
+        "owner": owner,
         "deployment_generation": generation,
         "resource_group": resource_group,
         "max_concurrency": max_concurrency,
@@ -218,8 +236,13 @@ def environment():
         "home": home,
         "home_binding": "sha256:" + sha256_bytes(str(home).encode("utf-8")),
         "state_dir": state_dir,
+        "azure_operation_count": 0,
         "vnet": "vnet-{}-eus".format(prefix),
         "subnet": "snet-validation-shards",
+        "elastic_nsg": "nsg-{}-elastic-isolated".format(prefix),
+        "nat": "nat-{}-eus".format(prefix),
+        "blob_private_endpoint": "pe-{}-blob".format(prefix),
+        "blob_private_dns_zone": "privatelink.blob.core.windows.net",
     }
 
 
@@ -307,6 +330,69 @@ def new_invocation(attempt=1):
     if attempt > 1:
         return "{}-a{}".format(base, attempt)
     return base
+
+
+def download_pinned(url, destination, expected_digest, expected_bytes):
+    temp = destination.with_name(destination.name + ".tmp")
+    request = urllib.request.Request(url, headers={"User-Agent": "firstmate-azure-runner/1"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, open(temp, "xb") as handle:
+            remaining = expected_bytes
+            while True:
+                chunk = response.read(min(1024 * 1024, remaining + 1))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                if remaining < 0:
+                    raise RunnerError("pinned tool download exceeds its exact byte contract")
+                handle.write(chunk)
+        if remaining != 0 or sha256_file(temp) != expected_digest:
+            raise RunnerError("pinned tool download identity mismatch")
+        os.replace(str(temp), str(destination))
+        os.chmod(destination, 0o600)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+
+
+def prepare_tool_closure(payload_dir):
+    cache = Path(os.environ.get("FM_AZURE_RUNNER_TOOL_CACHE", str(Path(tempfile.gettempdir()) / "fm-azure-runner-tools")))
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(cache, 0o700)
+    lock_path = cache / ".lock"
+    tools = (
+        (
+            "shellcheck.tar.xz",
+            "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz",
+            "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
+            SHELLCHECK_ARCHIVE_BYTES,
+        ),
+        (
+            "uv.tar.gz",
+            "https://github.com/astral-sh/uv/releases/download/0.9.10/uv-x86_64-unknown-linux-gnu.tar.gz",
+            "440c4215b171e64061d65d16a23753dd25c29a7f7b1b0446c9e9aed0fa372f27",
+            UV_ARCHIVE_BYTES,
+        ),
+    )
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        for name, url, digest, size in tools:
+            cached = cache / name
+            if not cached.exists() or cached.stat().st_size != size or sha256_file(cached) != digest:
+                with contextlib.suppress(FileNotFoundError):
+                    cached.unlink()
+                download_pinned(url, cached, digest, size)
+    destinations = []
+    for name, _, digest, size in tools:
+        source = cache / name
+        destination = payload_dir / name
+        shutil.copyfile(source, destination)
+        os.chmod(destination, 0o600)
+        if destination.stat().st_size != size or sha256_file(destination) != digest:
+            raise RunnerError("copied pinned tool closure identity mismatch")
+        destinations.append(destination)
+    return tuple(destinations)
 
 
 def tree_digest(repo, relative):
@@ -424,6 +510,8 @@ def prepare(env, args, parent_state=None):
         "protocol": {
             "guest_digest": "sha256:" + sha256_file(GUEST),
             "executor_digest": "sha256:" + sha256_file(EXECUTOR),
+            "shellcheck_archive_digest": "sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
+            "uv_archive_digest": "sha256:440c4215b171e64061d65d16a23753dd25c29a7f7b1b0446c9e9aed0fa372f27",
         },
         "created_at": iso_utc(),
     }
@@ -435,9 +523,16 @@ def prepare(env, args, parent_state=None):
     executor_path = payload_dir / "runner-exec.py"
     shutil.copyfile(EXECUTOR, executor_path)
     os.chmod(executor_path, 0o600)
+    shellcheck_path, uv_archive_path = prepare_tool_closure(payload_dir)
     input_path = payload_dir / "input.tar.gz"
     with tarfile.open(input_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-        for source, name in ((request_path, "request.json"), (bundle_path, "snapshot.bundle"), (executor_path, "runner-exec.py")):
+        for source, name in (
+            (request_path, "request.json"),
+            (bundle_path, "snapshot.bundle"),
+            (executor_path, "runner-exec.py"),
+            (shellcheck_path, "shellcheck.tar.xz"),
+            (uv_archive_path, "uv.tar.gz"),
+        ):
             info = archive.gettarinfo(str(source), arcname=name)
             info.uid = 0
             info.gid = 0
@@ -446,6 +541,8 @@ def prepare(env, args, parent_state=None):
             info.mtime = 0
             with open(source, "rb") as handle:
                 archive.addfile(info, handle)
+    if input_path.stat().st_size > MAX_STAGING_INPUT_BYTES:
+        raise RunnerError("staged snapshot and pinned tool closure exceed the bounded input allowance")
     input_digest = "sha256:" + sha256_file(input_path)
     token = invocation.split("-")[1]
     vm_name = "vm-{}-run-{}".format(env["prefix"], token)
@@ -491,6 +588,9 @@ def prepare(env, args, parent_state=None):
 
 
 def az_command(env, args, check=True, parse_json=True):
+    env["azure_operation_count"] = int(env.get("azure_operation_count", 0)) + 1
+    if env["azure_operation_count"] > RUNNER_CONTROL_OPERATION_CEILING:
+        raise RunnerError("Azure control-operation ceiling exceeded; exact state is retained")
     command = ["az"] + list(args) + ["--subscription", env["subscription"], "--only-show-errors"]
     if parse_json and "--output" not in command and "-o" not in command:
         command += ["--output", "json"]
@@ -511,49 +611,108 @@ def scope_gate(env):
         raise RunnerError("selected tenant/subscription is not the exact enabled runner scope")
 
 
+def exact_id(env, provider, resource_type, name):
+    return "/subscriptions/{}/resourceGroups/{}/providers/{}/{}/{}".format(
+        env["subscription"], env["resource_group"], provider, resource_type, name
+    )
+
+
+def verify_foundation_tags(env, resource, label):
+    tags = resource.get("tags") or {}
+    if tags.get("workload") != "firstmate" or tags.get("deployment-generation") != env["deployment_generation"] or tags.get("cleanup-owner") != env["owner"]:
+        raise RunnerError("foundation {} owner/generation identity is not exact".format(label))
+
+
 def foundation_gate(env):
-    expected_generation = env["deployment_generation"]
-    storage, _, _ = az_command(env, [
-        "storage", "account", "show", "--resource-group", env["resource_group"], "--name", env["storage"],
-    ])
-    storage_tags = storage.get("tags") or {}
+    storage_id = exact_id(env, "Microsoft.Storage", "storageAccounts", env["storage"])
+    vnet_id = exact_id(env, "Microsoft.Network", "virtualNetworks", env["vnet"])
+    subnet_id = vnet_id + "/subnets/" + env["subnet"]
+    nsg_id = exact_id(env, "Microsoft.Network", "networkSecurityGroups", env["elastic_nsg"])
+    nat_id = exact_id(env, "Microsoft.Network", "natGateways", env["nat"])
+    endpoint_id = exact_id(env, "Microsoft.Network", "privateEndpoints", env["blob_private_endpoint"])
+    private_subnet_id = vnet_id + "/subnets/snet-private-endpoints"
+    dns_zone_id = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Network/privateDnsZones/{}".format(
+        env["subscription"], env["resource_group"], env["blob_private_dns_zone"]
+    )
+
+    storage, _, _ = az_command(env, ["resource", "show", "--ids", storage_id, "--api-version", "2023-05-01"])
+    verify_foundation_tags(env, storage, "storage")
+    properties = storage.get("properties", storage)
+    network_acls = properties.get("networkAcls") or {}
     if (
-        storage.get("location") != "eastus"
-        or storage.get("publicNetworkAccess") != "Disabled"
-        or storage.get("allowSharedKeyAccess") is not False
-        or storage.get("allowBlobPublicAccess") is not False
-        or storage_tags.get("workload") != "firstmate"
-        or storage_tags.get("deployment-generation") != expected_generation
+        str(storage.get("id", "")).lower() != storage_id.lower()
+        or storage.get("location") != "eastus"
+        or properties.get("publicNetworkAccess") != "Disabled"
+        or properties.get("allowSharedKeyAccess") is not False
+        or properties.get("allowBlobPublicAccess") is not False
+        or properties.get("supportsHttpsTrafficOnly") is not True
+        or properties.get("minimumTlsVersion") != "TLS1_2"
+        or network_acls.get("defaultAction") != "Deny"
+        or network_acls.get("bypass") != "None"
     ):
         raise RunnerError("foundation storage identity/private-security contract is not exact")
-    vnet, _, _ = az_command(env, [
-        "network", "vnet", "show", "--resource-group", env["resource_group"], "--name", env["vnet"],
-    ])
-    vnet_tags = vnet.get("tags") or {}
-    if vnet.get("location") != "eastus" or vnet_tags.get("workload") != "firstmate" or vnet_tags.get("deployment-generation") != expected_generation:
+
+    vnet, _, _ = az_command(env, ["resource", "show", "--ids", vnet_id, "--api-version", "2023-09-01"])
+    verify_foundation_tags(env, vnet, "VNet")
+    if str(vnet.get("id", "")).lower() != vnet_id.lower() or vnet.get("location") != "eastus":
         raise RunnerError("foundation VNet identity is not exact")
-    subnets = [item for item in vnet.get("subnets", []) if item.get("name") == env["subnet"]]
-    if len(subnets) != 1:
-        raise RunnerError("runner subnet is absent or ambiguous")
-    subnet = subnets[0]
-    nsg_id = str((subnet.get("networkSecurityGroup") or {}).get("id", ""))
-    nat_id = str((subnet.get("natGateway") or {}).get("id", ""))
-    if not nsg_id.lower().endswith("/nsg-{}-elastic-isolated".format(env["prefix"]).lower()) or not nat_id:
-        raise RunnerError("runner subnet is not bound to the reviewed private NSG/NAT contract")
-    peer_endpoints, _, _ = az_command(env, [
-        "network", "private-endpoint", "list", "--resource-group", env["resource_group"],
-    ])
-    expected_storage_id = str(storage.get("id", "")).lower()
-    approved = [
-        endpoint for endpoint in peer_endpoints
-        if any(
-            str(connection.get("privateLinkServiceId", "")).lower() == expected_storage_id
-            and "blob" in connection.get("groupIds", [])
-            for connection in endpoint.get("privateLinkServiceConnections", [])
-        )
-    ]
-    if len(approved) != 1:
-        raise RunnerError("foundation blob private endpoint is absent or ambiguous")
+    subnet, _, _ = az_command(env, ["resource", "show", "--ids", subnet_id, "--api-version", "2023-09-01"])
+    subnet_properties = subnet.get("properties", subnet)
+    if (
+        str(subnet.get("id", "")).lower() != subnet_id.lower()
+        or subnet_properties.get("addressPrefix") != "10.42.7.0/24"
+        or str((subnet_properties.get("networkSecurityGroup") or {}).get("id", "")).lower() != nsg_id.lower()
+        or str((subnet_properties.get("natGateway") or {}).get("id", "")).lower() != nat_id.lower()
+        or subnet_properties.get("privateEndpointNetworkPolicies") != "Enabled"
+    ):
+        raise RunnerError("runner subnet exact private binding is not exact")
+
+    nsg, _, _ = az_command(env, ["resource", "show", "--ids", nsg_id, "--api-version", "2023-09-01"])
+    verify_foundation_tags(env, nsg, "NSG")
+    rules = nsg.get("properties", {}).get("securityRules", [])
+    expected_rules = {
+        (rule.get("name"), rule.get("properties", {}).get("direction"), rule.get("properties", {}).get("access"), rule.get("properties", {}).get("sourceAddressPrefix"))
+        for rule in rules
+    }
+    if str(nsg.get("id", "")).lower() != nsg_id.lower() or not {
+        ("deny-public-inbound", "Inbound", "Deny", "Internet"),
+        ("deny-vnet-cross-compartment-inbound", "Inbound", "Deny", "VirtualNetwork"),
+    }.issubset(expected_rules):
+        raise RunnerError("runner NSG identity or deny rules are not exact")
+
+    nat, _, _ = az_command(env, ["resource", "show", "--ids", nat_id, "--api-version", "2023-09-01"])
+    verify_foundation_tags(env, nat, "NAT")
+    if str(nat.get("id", "")).lower() != nat_id.lower() or nat.get("location") != "eastus":
+        raise RunnerError("runner NAT identity is not exact")
+
+    endpoint, _, _ = az_command(env, ["resource", "show", "--ids", endpoint_id, "--api-version", "2023-09-01"])
+    verify_foundation_tags(env, endpoint, "private endpoint")
+    endpoint_properties = endpoint.get("properties", endpoint)
+    connections = endpoint_properties.get("privateLinkServiceConnections", [])
+    if len(connections) != 1:
+        raise RunnerError("blob private-link connection is absent or ambiguous")
+    connection = connections[0]
+    connection_properties = connection.get("properties", connection)
+    status = (connection_properties.get("privateLinkServiceConnectionState") or {}).get("status")
+    if (
+        str(endpoint.get("id", "")).lower() != endpoint_id.lower()
+        or str((endpoint_properties.get("subnet") or {}).get("id", "")).lower() != private_subnet_id.lower()
+        or str(connection_properties.get("privateLinkServiceId", "")).lower() != storage_id.lower()
+        or connection_properties.get("groupIds") != ["blob"]
+        or status != "Approved"
+        or len(endpoint_properties.get("networkInterfaces", [])) != 1
+    ):
+        raise RunnerError("foundation blob private endpoint identity/approval is not exact")
+
+    dns_group_id = endpoint_id + "/privateDnsZoneGroups/default"
+    dns_group, _, _ = az_command(env, ["resource", "show", "--ids", dns_group_id, "--api-version", "2023-09-01"])
+    configs = dns_group.get("properties", {}).get("privateDnsZoneConfigs", [])
+    if (
+        str(dns_group.get("id", "")).lower() != dns_group_id.lower()
+        or len(configs) != 1
+        or str(configs[0].get("properties", {}).get("privateDnsZoneId", "")).lower() != dns_zone_id.lower()
+    ):
+        raise RunnerError("foundation blob private-DNS binding is not exact")
 
 
 def sku_quota_gate(env, limits):
@@ -660,24 +819,54 @@ def retail_rate(env, sku):
     return min(prices)
 
 
+def itemized_cost_bound(rate, hours, limits):
+    rate_bound_bytes = BOOTSTRAP_RATE_BITS_PER_SECOND * 3600 * hours // 8
+    vm_network_bytes = min(MAX_BOOTSTRAP_NETWORK_BYTES, rate_bound_bytes)
+    bootstrap_bytes = SHELLCHECK_ARCHIVE_BYTES + UV_ARCHIVE_BYTES + MAX_STAGING_INPUT_BYTES + MAX_RESULT_UPLOAD_BYTES + vm_network_bytes
+    bootstrap_gib = bootstrap_bytes / float(1024**3)
+    categories = {
+        "vm_compute": rate * hours,
+        "os_disk": RUNNER_HOURLY_METERS_USD["os_disk"] * hours,
+        "nat_gateway_and_public_ip": FOUNDATION_HOURLY_METERS_USD["nat_gateway_and_public_ip"] * hours,
+        "private_endpoints_dns_monitoring": FOUNDATION_HOURLY_METERS_USD["private_endpoints_dns_monitoring"] * hours,
+        "boot_diagnostics": RUNNER_HOURLY_METERS_USD["boot_diagnostics"] * hours,
+        "bootstrap_traffic": bootstrap_gib * BOOTSTRAP_GIB_RATE_CEILING_USD,
+        "storage_capacity_operations_and_control": RUNNER_OPERATION_RESERVE_USD,
+        "foundation_shared_meter_reserve": FOUNDATION_SHARED_METER_RESERVE_USD,
+        "repository_command_egress": 0.0,
+    }
+    return {
+        "hours": hours,
+        "bootstrap_bytes": bootstrap_bytes,
+        "vm_network_bytes": vm_network_bytes,
+        "bootstrap_rate_bits_per_second": BOOTSTRAP_RATE_BITS_PER_SECOND,
+        "control_operation_ceiling": RUNNER_CONTROL_OPERATION_CEILING,
+        "input_bytes": MAX_STAGING_INPUT_BYTES,
+        "output_bytes": MAX_RESULT_UPLOAD_BYTES,
+        "repository_command_network_bytes": limits["network_bytes"],
+        "categories": categories,
+        "total": round(sum(categories.values()), 6),
+    }
+
+
 def budget_gate(env, limits):
     actual = cost_query(env, forecast=False)
     forecast = cost_query(env, forecast=True)
     rate = retail_rate(env, limits["sku"])
-    compute_ceiling = rate * MAX_BILLABLE_LIFETIME_HOURS
-    maximum_increment = FOUNDATION_SHARED_METER_RESERVE_USD + RUNNER_METER_RESERVE_USD + compute_ceiling
+    first_hour = itemized_cost_bound(rate, 1, limits)
+    first_day = itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits)
+    maximum_increment = first_day["total"]
     pressure = max(actual + maximum_increment, forecast + maximum_increment)
     if pressure >= env["budget_limit"]:
-        raise RunnerError("budget pressure stops new invocations (actual {:.2f}, forecast {:.2f}, worst-case increment {:.2f}, admitted ceiling {})".format(
-            actual, forecast, maximum_increment, env["budget_limit"]
+        raise RunnerError("budget pressure stops new invocations (actual {:.2f}, forecast {:.2f}, first-hour {:.2f}, first-day {:.2f}, admitted ceiling {})".format(
+            actual, forecast, first_hour["total"], first_day["total"], env["budget_limit"]
         ))
     return {
         "actual": actual,
         "forecast": forecast,
         "hourly_rate": rate,
-        "compute_ceiling": compute_ceiling,
-        "foundation_shared_meter_reserve": FOUNDATION_SHARED_METER_RESERVE_USD,
-        "runner_meter_reserve": RUNNER_METER_RESERVE_USD,
+        "first_hour": first_hour,
+        "first_day": first_day,
         "max_network_bytes": limits["network_bytes"],
         "max_billable_lifetime_hours": MAX_BILLABLE_LIFETIME_HOURS,
         "max_increment": maximum_increment,
@@ -816,19 +1005,16 @@ def blob_sas(env, blob, permissions, expiry):
     return stdout
 
 
-def deployment_parameters(env, state):
+def ownership_tags(env, state):
     request = state["request"]
-    resources = state["resources"]
     token = state["invocation"].split("-")[1]
     expiry = now_utc() + dt.timedelta(hours=MAX_BILLABLE_LIFETIME_HOURS)
-    subnet_id = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Network/virtualNetworks/{}/subnets/{}".format(
-        env["subscription"], env["resource_group"], env["vnet"], env["subnet"]
-    )
-    tags = {
+    return {
         "workload": "firstmate",
         "firstmate-role": "validation-shard",
         "lifecycle": "one-invocation-disposable",
         "deployment-generation": env["deployment_generation"],
+        "cleanup-owner": env["owner"],
         "home-binding": request["home_binding"],
         "task-binding": request["task"],
         "task-generation": request["generation"],
@@ -844,6 +1030,16 @@ def deployment_parameters(env, state):
         "expiry-utc": iso_utc(expiry),
         "cleanup-token": token,
     }
+
+
+def deployment_parameters(env, state):
+    request = state["request"]
+    resources = state["resources"]
+    expiry = now_utc() + dt.timedelta(hours=MAX_BILLABLE_LIFETIME_HOURS)
+    subnet_id = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Network/virtualNetworks/{}/subnets/{}".format(
+        env["subscription"], env["resource_group"], env["vnet"], env["subnet"]
+    )
+    tags = ownership_tags(env, state)
     return {
         "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
         "contentVersion": "1.0.0.0",
@@ -882,13 +1078,26 @@ def read_exact_resource(env, resource_id, kind):
 
 
 def immutable_identity(resource, label):
+    properties = resource.get("properties", resource)
     identity = {
         "id": str(resource.get("id", "")).lower(),
         "etag": resource.get("etag"),
     }
     if label == "vm":
-        identity["instance_id"] = resource.get("properties", {}).get("vmId") or resource.get("vmId")
-    if not identity["id"] or not identity["etag"] or (label == "vm" and not identity.get("instance_id")):
+        identity["instance_id"] = properties.get("vmId") or resource.get("vmId")
+    elif label == "nic":
+        identity["resource_guid"] = properties.get("resourceGuid") or resource.get("resourceGuid")
+    elif label == "disk":
+        identity["unique_id"] = properties.get("uniqueId") or resource.get("uniqueId")
+    elif label == "run-command":
+        identity["provisioning_state"] = properties.get("provisioningState")
+    required = {
+        "vm": "instance_id",
+        "nic": "resource_guid",
+        "disk": "unique_id",
+        "run-command": "provisioning_state",
+    }[label]
+    if not identity["id"] or not identity["etag"] or not identity.get(required):
         raise RunnerError("created {} immutable identity is incomplete".format(label))
     return identity
 
@@ -919,7 +1128,7 @@ def adopt_vm_identity(env, state, vm):
         exists, resource = read_exact_resource(env, resource_id, label)
         if not exists:
             raise RunnerError("created {} disappeared before immutable identity adoption".format(label))
-        verify_resource_tags(state, resource, label)
+        verify_resource_tags(env, state, resource, label)
         if label == "vm" and (resource.get("properties", {}).get("vmId") or resource.get("vmId")) != instance_id:
             raise RunnerError("created VM instance identity changed during adoption")
         if label == "nic" and str(resource.get("properties", {}).get("virtualMachine", {}).get("id", "")).lower() != resources["vm_id"].lower():
@@ -960,10 +1169,7 @@ def create_run_command(env, state, input_url, output_url):
     script = GUEST.read_text(encoding="utf-8")
     properties = {
         "location": "eastus",
-        "tags": {
-            "invocation-binding": state["invocation"],
-            "fence": state["request"]["fence"],
-        },
+        "tags": ownership_tags(env, state),
         "properties": {
             "source": {"script": script},
             "parameters": [
@@ -992,7 +1198,7 @@ def create_run_command(env, state, input_url, output_url):
     exists, run_command = read_exact_resource(env, run_id, "run-command")
     if not exists:
         raise RunnerError("managed run command disappeared before immutable identity adoption")
-    verify_resource_tags(state, run_command, "run-command")
+    verify_resource_tags(env, state, run_command, "run-command")
     state["resources"].setdefault("identities", {})["run-command"] = immutable_identity(run_command, "run-command")
     transition(env, state, "command-submitted", "managed control-plane command submitted")
 
@@ -1151,16 +1357,16 @@ def get_vm(env, state):
     return False, None
 
 
-def verify_resource_tags(state, resource, label):
+def verify_resource_tags(env, state, resource, label):
     tags = resource.get("tags") or {}
-    expected = state["request"]
-    for key, value in (
-        ("invocation-binding", state["invocation"]),
-        ("fence", expected["fence"]),
-        ("snapshot-digest", expected["repository"]["snapshot_digest"]),
-        ("command-digest", expected["command_digest"]),
+    expected = ownership_tags(env, state)
+    for key in (
+        "workload", "firstmate-role", "lifecycle", "deployment-generation", "cleanup-owner",
+        "home-binding", "task-binding", "task-generation", "invocation-binding", "attempt", "fence",
+        "snapshot-digest", "command-digest", "resource-class", "selected-sku", "sku-family",
+        "cost-attribution", "cleanup-token",
     ):
-        if tags.get(key) != value:
+        if tags.get(key) != expected[key]:
             raise RunnerError("live {} cleanup tag mismatch: {}".format(label, key))
 
 
@@ -1168,7 +1374,7 @@ def verify_live_resource_identity(env, state, kind, resource_id):
     exists, resource = read_exact_resource(env, resource_id, kind)
     if not exists:
         return False, None
-    verify_resource_tags(state, resource, kind)
+    verify_resource_tags(env, state, resource, kind)
     recorded = state["resources"].get("identities", {}).get(kind)
     if recorded is None or immutable_identity(resource, kind) != recorded:
         raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
@@ -1180,10 +1386,27 @@ def verify_live_resource_identity(env, state, kind, resource_id):
 
 
 def cleanup_partial_capacity(env, state):
-    for key, kind in (("nic_id", "nic"), ("os_disk_id", "disk")):
-        exists, _ = verify_live_resource_identity(env, state, kind, state["resources"][key])
+    planned = {
+        "run-command": state["resources"].get("run_command_id") or managed_run_command_id(state),
+        "nic": state["resources"]["nic_id"],
+        "disk": state["resources"]["os_disk_id"],
+    }
+    resources, _, _ = az_command(env, ["resource", "list", "--resource-group", env["resource_group"]])
+    expected_ids = {resource_id.lower(): kind for kind, resource_id in planned.items()}
+    residual = [
+        item for item in resources
+        if (item.get("tags") or {}).get("invocation-binding") == state["invocation"]
+        or str(item.get("id", "")).lower() in expected_ids
+    ]
+    residual_ids = {str(item.get("id", "")).lower() for item in residual}
+    unknown = sorted(residual_ids - set(expected_ids))
+    if unknown:
+        raise RunnerError("VM-absent invocation has an unplanned residual resource; cleanup retained ambiguous state")
+    for kind in ("run-command", "nic", "disk"):
+        resource_id = planned[kind]
+        exists, _ = verify_live_resource_identity(env, state, kind, resource_id)
         if exists:
-            delete_resource(env, state, state["resources"][key], kind)
+            delete_resource(env, state, resource_id, kind)
 
 
 def delete_resource(env, state, resource_id, kind):
@@ -1234,22 +1457,24 @@ def dispatch_prepared(env, state, confirm_subscription):
         raise RunnerError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     try:
         scope_gate(env)
-        foundation_gate(env)
         limits = state["request"]["limits"]
         sku_quota_gate(env, limits)
         cost = budget_gate(env, limits)
-        transition(env, state, "admission-checked", "scope, quota, SKU, and budget gates passed", cost=cost)
+        foundation_gate(env)
+        transition(env, state, "admission-checked", "scope, quota, SKU, budget, and exact foundation gates passed", cost=cost)
         with AdmissionLease(env, state) as lease:
             foundation_gate(env)
             sku_quota_gate(env, limits)
             active = active_runner_vms(env)
             if len(active) >= env["max_concurrency"]:
                 raise RunnerError("runner queue is at its bounded concurrency limit ({})".format(env["max_concurrency"]))
+            foundation_gate(env)
             storage_upload(env, state["input_path"], state["staging"]["input_blob"], overwrite=False)
             transition(env, state, "input-staged", "exact private input object uploaded")
             expiry = (now_utc() + dt.timedelta(seconds=limits["wall_seconds"] + 1800)).strftime("%Y-%m-%dT%H:%MZ")
             input_url = blob_sas(env, state["staging"]["input_blob"], "r", expiry)
             output_url = blob_sas(env, state["staging"]["output_blob"], "cw", expiry)
+            foundation_gate(env)
             create_vm(env, state)
             lease.assert_held()
         create_run_command(env, state, input_url, output_url)
@@ -1293,7 +1518,6 @@ def resume(env, state):
         print_logs_and_summary(state, state["result"])
         return int(state["result"]["exit_code"])
     scope_gate(env)
-    foundation_gate(env)
     if phase in ("result-published", "failed-retained") and state.get("expected_result_digest"):
         result = collect_result(env, state)
         cleanup(env, state)
@@ -1317,6 +1541,7 @@ def resume(env, state):
             print_logs_and_summary(state, result)
             return int(result["exit_code"])
         if vm_exists:
+            foundation_gate(env)
             adopt_vm_identity(env, state, vm)
             command_exists, _ = run_command_exists(env, state)
             if not command_exists:
@@ -1359,7 +1584,6 @@ def retry(env, old_state, args):
     if old_state.get("phase") != "absent-fenced" or old_state.get("old_lease_absent") is not True:
         raise RunnerError("retry requires old invocation absence to be proven by resume/reconcile")
     scope_gate(env)
-    foundation_gate(env)
     vm_exists, _ = get_vm(env, old_state)
     input_exists, _, _ = az_command(env, [
         "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
