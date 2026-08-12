@@ -30,7 +30,7 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   no-mistakes  implement -> review readiness -> deliverable acceptance -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
@@ -303,6 +303,13 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' DECISION_KEY_PROTOCOL <<'EOF' || true
+   The key token sits between the verb and the colon, never after it as `needs-decision: [key=...]`.
+   A decision or blocker you opened stays open until a matching `resolved` line lands: `resolved [key=<slug>]: {how}` for a decision or blocker you opened WITH a key, or bare `resolved: {how}` for one you opened WITHOUT a key (for example Rule 5's bare `blocked: {why}`, which has no key). A later `done:` or `working:` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append that same matching form yourself (keyed if you opened it with a key, bare `resolved: {how it cleared}` if you did not) as you resume.
+EOF
+DECISION_KEY_PROTOCOL=${DECISION_KEY_PROTOCOL%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -335,9 +342,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [key=<slug>]: {summary of options}\` and stop. Firstmate will reply with the decision.
-   The key token sits between the verb and the colon, never after it as \`needs-decision: [key=...]\`.
-   A decision or blocker you opened stays open until a matching \`resolved\` line lands: \`resolved [key=<slug>]: {how}\` for a decision or blocker you opened WITH a key, or bare \`resolved: {how}\` for one you opened WITHOUT a key (for example Rule 5's bare \`blocked: {why}\`, which has no key). A later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append that same matching form yourself (keyed if you opened it with a key, bare \`resolved: {how it cleared}\` if you did not) as you resume.
+$DECISION_KEY_PROTOCOL
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -485,9 +490,7 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision [key=<slug>]: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
-   The key token sits between the verb and the colon, never after it as \`needs-decision: [key=...]\`.
-   A decision or blocker you opened stays open until a matching \`resolved\` line lands: \`resolved [key=<slug>]: {how}\` for a decision or blocker you opened WITH a key, or bare \`resolved: {how}\` for one you opened WITHOUT a key (for example Rule 5's bare \`blocked: {why}\`, which has no key). A later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append that same matching form yourself (keyed if you opened it with a key, bare \`resolved: {how it cleared}\` if you did not) as you resume.
+$DECISION_KEY_PROTOCOL
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
