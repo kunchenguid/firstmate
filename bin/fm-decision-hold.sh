@@ -297,6 +297,7 @@ command_hold() {
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0
   local none=0 site='' revision='' interaction='' screenshot=''
+  local site_set=0 revision_set=0 interaction_set=0 screenshot_set=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -313,10 +314,10 @@ command_complete() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --none) none=1 ;;
-      --deployed-site) shift; site=${1:-} ;;
-      --revision) shift; revision=${1:-} ;;
-      --interaction) shift; interaction=${1:-} ;;
-      --screenshot) shift; screenshot=${1:-} ;;
+      --deployed-site) site_set=1; shift; site=${1:-}; [ -n "$site" ] || fail "deployed-site must not be empty" ;;
+      --revision) revision_set=1; shift; revision=${1:-}; [ -n "$revision" ] || fail "revision must not be empty" ;;
+      --interaction) interaction_set=1; shift; interaction=${1:-}; [ -n "$interaction" ] || fail "interaction must not be empty" ;;
+      --screenshot) screenshot_set=1; shift; screenshot=${1:-}; [ -n "$screenshot" ] || fail "screenshot must not be empty" ;;
       -*) usage >&2; exit 2 ;;
       *)
         validate_slug decision-key "$1"
@@ -330,9 +331,10 @@ command_complete() {
   # Deployed website work is proven at this same gate: attesting a deployment
   # requires the whole production-domain proof together, so a preview-only or
   # HTTP-status-only completion cannot pass it.
-  if [ -n "$site$revision$interaction$screenshot" ]; then
-    [ -n "$site" ] && [ -n "$revision" ] && [ -n "$interaction" ] && [ -n "$screenshot" ] \
+  if [ "$site_set$revision_set$interaction_set$screenshot_set" != 0000 ]; then
+    [ "$site_set$revision_set$interaction_set$screenshot_set" = 1111 ] \
       || fail "a deployed website completion needs --deployed-site, --revision, --interaction, and --screenshot together"
+    [ "$has_meta" = 1 ] || fail "deployed website completion requires live task metadata for durable recording"
     validate_one_line deployed-site "$site"
     validate_one_line revision "$revision"
     validate_one_line interaction "$interaction"
@@ -340,6 +342,10 @@ command_complete() {
     case "$site" in
       https://*) ;;
       *) fail "--deployed-site must be the https production domain that was actually verified" ;;
+    esac
+    case "${site#https://}" in
+      ''|*[![:space:]]*) ;;
+      *) fail "--deployed-site must include a non-empty https production domain" ;;
     esac
     [ -f "$screenshot" ] || fail "--screenshot must name an existing screenshot file: $screenshot"
   fi

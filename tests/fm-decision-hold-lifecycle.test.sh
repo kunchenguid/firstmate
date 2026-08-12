@@ -580,6 +580,10 @@ test_deployed_website_completion_requires_production_evidence() {
     && fail "a partial deployment attestation must not pass the completion gate"
   assert_contains "$out" "together" "partial deployment proof did not name the whole requirement"
 
+  out=$(run_decisions "$home" complete "$id" --none --screenshot "" 2>&1) \
+    && fail "an explicitly empty deployment flag must not pass the completion gate"
+  assert_contains "$out" "must not be empty" "empty deployment evidence was not rejected"
+
   out=$(run_decisions "$home" complete "$id" --none \
     --deployed-site https://preview.sample.example/x --revision sample-marker-1 \
     --interaction "clicked the sample control" --screenshot "$home/data/$id/absent.png" 2>&1) \
