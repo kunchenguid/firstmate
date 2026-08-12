@@ -2074,28 +2074,30 @@ spawn_endpoint_lock_release() {
   fm_backend_endpoint_lock_release
 }
 spawn_send_text_line() {  # <target> <text>
-  local target=$1 rc=0
+  local target=$1 operation_label=$W rc=0
   spawn_endpoint_lock_acquire "$target" || return 1
   target=$FM_BACKEND_ENDPOINT_TARGET
+  [ "$BACKEND" != cmux ] || operation_label=
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$target" "$2" || rc=$? ;;
     herdr) fm_backend_herdr_send_text_line "$target" "$2" || rc=$? ;;
-    zellij) fm_backend_zellij_send_text_line "$target" "$2" "$W" || rc=$? ;;
+    zellij) fm_backend_zellij_send_text_line "$target" "$2" "$operation_label" || rc=$? ;;
     orca) fm_backend_orca_send_text_line "$target" "$2" || rc=$? ;;
-    cmux) fm_backend_cmux_send_text_line "$target" "$2" "$W" || rc=$? ;;
+    cmux) fm_backend_cmux_send_text_line "$target" "$2" "$operation_label" || rc=$? ;;
   esac
   spawn_endpoint_lock_release
   return "$rc"
 }
 spawn_current_path() {  # <target>
-  local target=$1 rc=0 path
+  local target=$1 operation_label=$W rc=0 path
   spawn_endpoint_lock_acquire "$target" || return 1
   target=$FM_BACKEND_ENDPOINT_TARGET
+  [ "$BACKEND" != cmux ] || operation_label=
   case "$BACKEND" in
     tmux) path=$(fm_backend_tmux_current_path "$target") || rc=$? ;;
     herdr) path=$(fm_backend_herdr_current_path "$target") || rc=$? ;;
-    zellij) path=$(fm_backend_zellij_current_path "$target" "$W") || rc=$? ;;
-    cmux) path=$(fm_backend_cmux_current_path "$target" "$W") || rc=$? ;;
+    zellij) path=$(fm_backend_zellij_current_path "$target" "$operation_label") || rc=$? ;;
+    cmux) path=$(fm_backend_cmux_current_path "$target" "$operation_label") || rc=$? ;;
   esac
   spawn_endpoint_lock_release
   [ "$rc" -eq 0 ] || return "$rc"
@@ -2761,13 +2763,27 @@ spawn_endpoint_lock_acquire "$T" || {
   exit 1
 }
 LAUNCH_TARGET=$FM_BACKEND_ENDPOINT_TARGET
-spawn_send_literal "$LAUNCH_TARGET" "$LAUNCH"
+LAUNCH_LABEL=$W
+[ "$BACKEND" != cmux ] || LAUNCH_LABEL=
+case "$BACKEND" in
+  tmux) fm_backend_tmux_send_literal "$LAUNCH_TARGET" "$LAUNCH" ;;
+  herdr) fm_backend_herdr_send_literal "$LAUNCH_TARGET" "$LAUNCH" ;;
+  zellij) fm_backend_zellij_send_literal "$LAUNCH_TARGET" "$LAUNCH" "$LAUNCH_LABEL" ;;
+  orca) fm_backend_orca_send_literal "$LAUNCH_TARGET" "$LAUNCH" ;;
+  cmux) fm_backend_cmux_send_literal "$LAUNCH_TARGET" "$LAUNCH" "$LAUNCH_LABEL" ;;
+esac
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$LAUNCH_TARGET" Enter
+case "$BACKEND" in
+  tmux) fm_backend_tmux_send_key "$LAUNCH_TARGET" Enter ;;
+  herdr) fm_backend_herdr_send_key "$LAUNCH_TARGET" Enter ;;
+  zellij) fm_backend_zellij_send_key "$LAUNCH_TARGET" Enter "$LAUNCH_LABEL" ;;
+  orca) fm_backend_orca_send_key "$LAUNCH_TARGET" Enter ;;
+  cmux) fm_backend_cmux_send_key "$LAUNCH_TARGET" Enter "$LAUNCH_LABEL" ;;
+esac
 spawn_endpoint_lock_release
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

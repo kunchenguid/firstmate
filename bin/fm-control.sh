@@ -354,15 +354,17 @@ send_interrupt_keys() {
   fm_backend_endpoint_lock_acquire "$BACKEND" "$T" "$LABEL" \
     || die "could not acquire the endpoint lock before interrupting task $ID on $BACKEND"
   local locked_target=$FM_BACKEND_ENDPOINT_TARGET
+  local operation_label=$LABEL
+  [ "$BACKEND" != cmux ] || operation_label=
   while [ "$i" -lt "$repeat" ]; do
-    if ! fm_backend_send_key_unlocked "$BACKEND" "$locked_target" "$key" "$LABEL"; then
+    if ! fm_backend_send_key_unlocked "$BACKEND" "$locked_target" "$key" "$operation_label"; then
       fm_backend_endpoint_lock_release
       die "interrupt key $key was not delivered to task $ID on $BACKEND"
     fi
     i=$((i + 1))
     [ "$i" -ge "$repeat" ] || sleep 0.2
   done
-  if [ -n "$clear" ] && ! fm_backend_send_key_unlocked "$BACKEND" "$locked_target" "$clear" "$LABEL"; then
+  if [ -n "$clear" ] && ! fm_backend_send_key_unlocked "$BACKEND" "$locked_target" "$clear" "$operation_label"; then
     fm_backend_endpoint_lock_release
     die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
   fi

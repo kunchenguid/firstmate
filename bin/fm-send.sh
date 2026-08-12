@@ -129,14 +129,15 @@ fm_send_id_from_meta() {  # <meta-file>
 # WHICH adapters need that clear, and which key clears them, comes from the one
 # control-plane capability table (bin/fm-control-lib.sh) rather than a second
 # copy here - the same table bin/fm-control.sh's interrupt verb reads.
-fm_send_clear_after_interrupt() {  # <key>
-  local key=$1 family clear
+fm_send_clear_after_interrupt() {  # <key> [target]
+  local key=$1 target=${2:-$T} family clear operation_label=$EXPECTED_LABEL
   [ "$key" = Escape ] || return 0
   family=$(fm_control_harness_family "$TARGET_HARNESS") || return 0
   clear=$(fm_control_interrupt_clear_key "$family") || return 0
   [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
+  [ "$TARGET_BACKEND" != cmux ] || operation_label=
+  if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$target" "$clear" "$operation_label"; then
     echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
@@ -429,12 +430,14 @@ if [ "${1:-}" = "--key" ]; then
       exit 1
     }
     trap 'fm_backend_endpoint_lock_release' EXIT
-    if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$FM_BACKEND_ENDPOINT_TARGET" "$key" "$EXPECTED_LABEL"; then
+    operation_label=$EXPECTED_LABEL
+    [ "$TARGET_BACKEND" != cmux ] || operation_label=
+    if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$FM_BACKEND_ENDPOINT_TARGET" "$key" "$operation_label"; then
       echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
     fi
   fi
-  fm_send_clear_after_interrupt "$semantic_key" || exit 1
+  fm_send_clear_after_interrupt "$semantic_key" "${FM_BACKEND_ENDPOINT_TARGET:-$T}" || exit 1
   if [ "$TARGET_BACKEND" != remote ]; then
     fm_backend_endpoint_lock_release
     trap - EXIT

@@ -74,6 +74,7 @@ fm_backend_endpoint_lock_release() {
 fm_backend_serialized_send_key() {
   local backend=$1 target=$2 expected_label=${4:-} rc=0
   fm_backend_endpoint_lock_acquire "$backend" "$target" "$expected_label" || return 2
+  [ "$backend" != cmux ] || expected_label=
   fm_backend_send_key_unlocked "$backend" "$FM_BACKEND_ENDPOINT_TARGET" "$3" "$expected_label" || rc=$?
   fm_backend_endpoint_lock_release
   return "$rc"
@@ -82,6 +83,7 @@ fm_backend_serialized_send_key() {
 fm_backend_serialized_send_text_submit() {
   local backend=$1 target=$2 expected_label=${7:-} verdict rc=0
   fm_backend_endpoint_lock_acquire "$backend" "$target" "$expected_label" || return 2
+  [ "$backend" != cmux ] || expected_label=
   verdict=$(fm_backend_send_text_submit_unlocked "$backend" "$FM_BACKEND_ENDPOINT_TARGET" "$3" "$4" "$5" "$6" "$expected_label") || rc=$?
   printf '%s' "${verdict:-send-failed}"
   fm_backend_endpoint_lock_release
@@ -93,6 +95,7 @@ fm_backend_checked_send_text_submit() {
   local composer verdict rc=0
   fm_backend_endpoint_lock_acquire "$backend" "$target" "$expected_label" || return 2
   target=$FM_BACKEND_ENDPOINT_TARGET
+  [ "$backend" != cmux ] || expected_label=
   if ! composer=$(fm_backend_composer_state "$backend" "$target" "$expected_label"); then
     composer=unknown
   fi

@@ -633,6 +633,7 @@ test_serialized_send_key_recovers_stale_target_by_label() {
   cmux_workspace_list_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222" "$title"
   cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title"
   cmux_panes_response "$dir" 6 "dddddddd-3333-3333-3333-333333333333"
+  cmux_panes_response "$dir" 7 "dddddddd-3333-3333-3333-333333333333"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key cmux "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT"
