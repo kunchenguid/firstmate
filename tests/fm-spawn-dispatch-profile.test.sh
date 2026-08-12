@@ -788,39 +788,59 @@ SH
 }
 
 test_raw_omp_dispatch_policy_is_structural() {
-  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script canonical_dir canonical_omp canonical_bun decoy_omp
+  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script canonical_dir canonical_omp canonical_bun canonical_wrapper
+  local decoy_omp decoy_wrapper nonexec_wrapper wrapper_collision omp_only cwd_decoy node_bin
   command -v node >/dev/null 2>&1 || { pass "raw OMP structural policy skipped without node"; return; }
   canonical_dir="$TMP_ROOT/raw-policy-bin"
   mkdir -p "$canonical_dir"
   canonical_omp="$canonical_dir/omp"
   canonical_bun="$canonical_dir/bun"
+  canonical_wrapper="$canonical_dir/start-omp.sh"
   decoy_omp="$TMP_ROOT/raw-policy-decoy/omp"
+  decoy_wrapper="$TMP_ROOT/raw-policy-decoy/start-omp.sh"
+  nonexec_wrapper="$TMP_ROOT/raw-policy-nonexec/start-omp.sh"
+  wrapper_collision="$TMP_ROOT/raw-policy-collision"
+  omp_only="$TMP_ROOT/raw-policy-omp-only"
+  cwd_decoy="$TMP_ROOT/raw-policy-cwd"
+  node_bin=$(command -v node)
   mkdir -p "${decoy_omp%/*}"
+  mkdir -p "${nonexec_wrapper%/*}" "$wrapper_collision" "$omp_only" "$cwd_decoy"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$canonical_omp"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$canonical_bun"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$decoy_omp"
-  chmod +x "$canonical_omp" "$canonical_bun" "$decoy_omp"
-  omp_script="$TMP_ROOT/start-omp.sh"
-  agent_script="$TMP_ROOT/raw-policy-agent.sh"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$canonical_wrapper"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$decoy_wrapper"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$nonexec_wrapper"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$wrapper_collision/start-omp.sh"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$cwd_decoy/start-omp.sh"
+  chmod +x "$canonical_omp" "$canonical_bun" "$decoy_omp" "$canonical_wrapper" "$decoy_wrapper" "$wrapper_collision/start-omp.sh" "$cwd_decoy/start-omp.sh"
+  chmod -x "$nonexec_wrapper"
+  ln -s "$canonical_omp" "$omp_only/omp"
+  omp_script="$TMP_ROOT/raw-policy-agent.sh"
+  agent_script="$TMP_ROOT/raw-policy-decoy-agent.sh"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$omp_script"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" omp' > "$agent_script"
   for command in \
     "nice -n10 $canonical_omp --raw-flag" \
     "time -f%E $canonical_omp --raw-flag" \
-    "$omp_script --raw-flag" \
+    "$canonical_wrapper --raw-flag" \
+    "start-omp.sh --raw-flag" \
     "bash $omp_script" \
     "bash < $omp_script" \
     "env -S '$canonical_omp --raw-flag'" \
+    "env -S 'start-omp.sh --raw-flag'" \
     "env FOO=bar $canonical_omp --raw-flag" \
     "env --ignore-environment $canonical_omp --raw-flag" \
     "env --split-string='$canonical_omp --raw-flag'" \
     "$canonical_bun $canonical_omp --raw-flag" \
     "$canonical_bun run $canonical_omp --raw-flag"; do
-    result=$(PATH="$canonical_dir:$PATH" node "$policy" --command "$command")
+    result=$(PATH="$canonical_dir:$PATH" "$node_bin" "$policy" --command "$command")
     [ "$result" = omp ] || fail "raw OMP command '$command' was classified as '$result'"
   done
   for command in \
     "$decoy_omp --raw-flag" \
+    "$decoy_wrapper --raw-flag" \
+    "$nonexec_wrapper --raw-flag" \
     "echo omp" \
     "printf '%s\\n' omp" \
     "echo 'omp'" \
@@ -830,9 +850,13 @@ test_raw_omp_dispatch_policy_is_structural() {
     "env -S" \
     "env --unknown $canonical_omp --raw-flag" \
     "bash $agent_script"; do
-    result=$(PATH="$canonical_dir:$PATH" node "$policy" --command "$command")
+    result=$(PATH="$canonical_dir:$PATH" "$node_bin" "$policy" --command "$command")
     [ "$result" = other ] || fail "non-OMP command '$command' was classified as '$result'"
   done
+  result=$(PATH="$wrapper_collision:$canonical_dir:$PATH" "$node_bin" "$policy" --command 'start-omp.sh --raw-flag')
+  [ "$result" = other ] || fail "a PATH-colliding start-omp.sh was classified as '$result'"
+  result=$(cd "$cwd_decoy" && PATH="$omp_only:$(dirname "$node_bin"):/usr/bin:/bin" "$node_bin" "$policy" --command 'start-omp.sh --raw-flag')
+  [ "$result" = other ] || fail "a cwd start-omp.sh decoy was classified as '$result'"
   pass "raw OMP ownership policy distinguishes executed commands from mentions"
 }
 

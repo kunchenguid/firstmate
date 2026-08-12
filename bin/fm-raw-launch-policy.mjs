@@ -32,8 +32,37 @@ function resolveExecutable(value, cwd = process.cwd()) {
   return null;
 }
 
+function resolveCommandCandidate(name) {
+  if (!name || name.includes("/")) return null;
+  for (const directory of (process.env.PATH || "").split(":").filter(Boolean)) {
+    const candidate = `${directory}/${name}`;
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 const canonicalOmpPath = resolveExecutable("omp");
 const canonicalBunPath = resolveExecutable("bun");
+const canonicalOmpCommandPath = resolveCommandCandidate("omp");
+
+function resolveCanonicalWrapperPath() {
+  const directories = new Set();
+  if (canonicalOmpCommandPath) directories.add(dirname(resolvePath(canonicalOmpCommandPath)));
+  if (canonicalOmpPath) directories.add(dirname(canonicalOmpPath));
+  const paths = new Set();
+  for (const directory of directories) {
+    const path = resolveExecutable(resolvePath(directory, "start-omp.sh"));
+    if (path) paths.add(path);
+  }
+  return paths.size === 1 ? paths.values().next().value : null;
+}
+
+const canonicalWrapperPath = resolveCanonicalWrapperPath();
 
 function isOmpWord(word, cwd = process.cwd()) {
   return Boolean(word && word.literal && canonicalOmpPath
@@ -43,6 +72,11 @@ function isOmpWord(word, cwd = process.cwd()) {
 function isBunWord(word, cwd = process.cwd()) {
   return Boolean(word && word.literal && canonicalBunPath
     && resolveExecutable(word, cwd) === canonicalBunPath);
+}
+
+function isSupportedWrapperWord(word, cwd = process.cwd()) {
+  return Boolean(word && word.literal && canonicalWrapperPath
+    && resolveExecutable(word, cwd) === canonicalWrapperPath);
 }
 
 function bunScriptTarget(position) {
@@ -181,8 +215,11 @@ function shellInputScriptTarget(tokens, position) {
   return null;
 }
 
-function supportedWrapperScriptTarget(position) {
-  return basename(position.command?.value || "") === "start-omp.sh" ? position.command : null;
+function supportedWrapperScriptTarget(position, cwd) {
+  const command = position.command;
+  if (!isSupportedWrapperWord(command, cwd)) return null;
+  const resolved = resolveExecutable(command, cwd);
+  return resolved ? { ...command, value: resolved } : null;
 }
 
 function shellScriptUsesOmp(word, depth, cwd) {
@@ -224,7 +261,7 @@ function containsOmpCommand(source, depth = 0, cwd = process.cwd()) {
     const command = basename(position.command.value);
     const script = shellScriptTarget(position)
       || shellInputScriptTarget(node, position)
-      || supportedWrapperScriptTarget(position);
+      || supportedWrapperScriptTarget(position, nodeCwd);
     if (script && shellScriptUsesOmp(script, depth, nodeCwd)) return true;
     if (SHELLS.has(command)) {
       for (let index = position.index + 1; index < position.words.length; index += 1) {
