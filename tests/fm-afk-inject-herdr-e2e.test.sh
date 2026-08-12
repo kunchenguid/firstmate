@@ -59,11 +59,25 @@ SUPERVISOR_TARGET=
 PANE_ID=
 LOOP_SCRIPT=
 
+terminate_daemon() {
+  local i=0
+  [ -n "${DAEMON_PID:-}" ] || return 0
+  kill "$DAEMON_PID" 2>/dev/null || true
+  while kill -0 "$DAEMON_PID" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    kill -KILL "$DAEMON_PID" 2>/dev/null || true
+  fi
+  wait "$DAEMON_PID" 2>/dev/null || true
+  DAEMON_PID=""
+}
+
 cleanup_all() {
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
-    kill "$DAEMON_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" 2>/dev/null || true
+    terminate_daemon
   fi
   herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
@@ -295,9 +309,7 @@ start_daemon() {
 stop_daemon() {
   [ -n "${DAEMON_PID:-}" ] || return 0
   afk_exit "$STATE_DIR" 2>/dev/null || true
-  kill "$DAEMON_PID" 2>/dev/null || true
-  wait "$DAEMON_PID" 2>/dev/null || true
-  DAEMON_PID=""
+  terminate_daemon
   sleep 1
 }
 
