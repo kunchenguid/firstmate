@@ -364,6 +364,9 @@ case "${1:-}" in
     command_text=${4:-}
     case "$command_text" in
       'cd '*)
+        if [ -n "${FM_FAKE_BLOCK_META_PATH:-}" ]; then
+          mkdir -p "$FM_FAKE_BLOCK_META_PATH"
+        fi
         if [ "${FM_FAKE_SUPPRESS_PANE_CWD:-0}" = 1 ]; then
           :
         else
@@ -382,7 +385,7 @@ SH
 }
 
 test_treehouse_lease_lifecycle() {
-  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id abort_id live_pid real_sleep
+  local home proj wt stopped_wt live_wt contender_wt successor_wt fakebin pane out status id abort_id publish_id live_pid real_sleep
   home="$TMP_ROOT/lease-home"
   proj=$(make_repo "$TMP_ROOT/lease-proj")
   fakebin=$(make_lease_lifecycle_fakebin "$TMP_ROOT/lease-fake")
@@ -437,6 +440,26 @@ test_treehouse_lease_lifecycle() {
     FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" status --json \
     | jq -e --arg holder "$abort_id" '[.. | objects | .lease_holder? // empty] | index($holder) != null' >/dev/null; then
     fail "aborted spawn leaked its pre-cwd-discovery lease"
+  fi
+
+  publish_id=lease-publish-ll2
+  mkdir -p "$home/data/$publish_id"
+  printf 'brief\n' > "$home/data/$publish_id/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX=fake \
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" FM_FAKE_PANE_STATE="$pane" \
+    FM_FAKE_BLOCK_META_PATH="$home/state/$publish_id.meta" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" "$publish_id" "$proj" codex \
+    --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 1 "$status" "spawn with unpublished metadata should abort: $out"
+  assert_contains "$out" "could not publish spawn metadata for task $publish_id" \
+    "spawn dropped its metadata publication error"
+  if FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" status --json \
+    | jq -e --arg holder "$publish_id" '[.. | objects | .lease_holder? // empty] | index($holder) != null' >/dev/null; then
+    fail "metadata publication failure leaked its acquired lease"
   fi
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
