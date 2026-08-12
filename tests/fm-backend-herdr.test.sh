@@ -23,6 +23,9 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+FM_HOME="$TMP_ROOT/herdr-test-home"
+mkdir -p "$FM_HOME"
+export FM_HOME
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
@@ -2962,11 +2965,16 @@ SH
 # reporting <agent-status> on the pane and <foreground> as its sole foreground
 # process, and echo the verdict.
 herdr_agent_state_case() {  # <name> <agent-status> <foreground> <polls>
-  local name=$1 status=$2 foreground=$3 polls=$4 dir log resp fb ps_bin
+  local name=$1 status=$2 foreground=$3 polls=$4 dir log resp fb ps_bin state
   dir="$TMP_ROOT/$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/3.out"
+  case "$status" in
+    working) state=working ;;
+    blocked) state=blocked ;;
+    *) state=idle ;;
+  esac
+  printf '{"result":{"agent":{"agent_status":"%s","state":"%s"}}}\n' "$status" "$state" > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"%s","state":"%s"}}}\n' "$status" "$state" > "$resp/3.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":["%s"],"name":"%s","pid":67}]}}}\n' \
     "$foreground" "${foreground##*/}" > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")

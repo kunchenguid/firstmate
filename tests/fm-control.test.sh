@@ -884,7 +884,15 @@ fg=$(cat "$D/foreground")
 case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
-  "agent get") printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$(cat "$D/agent-status")" ;;
+  "agent get")
+    status=$(cat "$D/agent-status")
+    case "$status" in
+      working) state=working ;;
+      blocked) state=blocked ;;
+      *) state=idle ;;
+    esac
+    printf '{"result":{"agent":{"agent_status":"%s","state":"%s"}}}\n' "$status" "$state"
+    ;;
   "pane process-info")
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":["%s"],"name":"%s","pid":67}]}}}\n' \
       "$fg" "${fg##*/}" ;;
