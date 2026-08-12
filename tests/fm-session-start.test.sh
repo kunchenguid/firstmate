@@ -228,7 +228,8 @@ make_fake_ps_claude() {
 }
 
 make_fake_ps_harness() {
-  local fakebin=$1 harness=$2 cursor_versions="$fakebin/cursor-install/cursor-agent/versions/2026.08.04-aaa8809"
+  local fakebin=$1 harness=$2
+  local cursor_versions="$fakebin/cursor-install/cursor-agent/versions/2026.08.04-aaa8809"
   case "$harness" in
     cursor|cursor-alias)
       # Cursor identity is the executable's own CLI probe plus the CURSOR_AGENT

@@ -943,6 +943,7 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
     if [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
       if ! declare -F fm_cursor_composer_strip >/dev/null 2>&1; then
         cursor_lib_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || return 1
+        # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
         . "$cursor_lib_dir/fm-cursor-lib.sh"
       fi
       # Cursor renders its cursor cell in reverse video between de-emphasised

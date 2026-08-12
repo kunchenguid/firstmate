@@ -39,6 +39,7 @@ scan_token_process() {
   esac
   return 1
 }
+# shellcheck disable=SC2329  # invoked via `trap cleanup EXIT` below
 cleanup() {
   if [ -n "$OBSERVER_PID" ]; then
     : > "$OBSERVER_STOP"
@@ -271,16 +272,16 @@ EOF
 }
 
 scan_launch_group() {
-  local record_pid record_identity record_pgid own_pgid pid current_pgid record_sid own_sid current_sid saved_pgid
-  IFS=$'\t' read -r record_pid record_identity record_pgid < "$LAUNCH_PID_FILE" 2>/dev/null || return 0
+  local record_pid record_pgid own_pgid pid current_pgid record_sid own_sid current_sid saved_pgid
+  IFS=$'\t' read -r record_pid _ record_pgid < "$LAUNCH_PID_FILE" 2>/dev/null || return 0
   case "$record_pgid" in ''|*[!0-9]*|0|1) return 0 ;; esac
   saved_pgid=$record_pgid
   IFS=$'\t' read -r record_pgid record_sid < <(sed -n '3p' "$LAUNCH_PID_FILE")
   [ -n "$record_pgid" ] || record_pgid=$saved_pgid
   own_pgid=$(LC_ALL=C ps -p "$$" -o pgid= 2>/dev/null || true)
-  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
+  own_pgid=${own_pgid//[[:space:]]/}
   own_sid=$(LC_ALL=C ps -p "$$" -o sid= 2>/dev/null || true)
-  own_sid=$(printf '%s' "$own_sid" | tr -d '[:space:]')
+  own_sid=${own_sid//[[:space:]]/}
   [ "$record_pgid" != "$own_pgid" ] || [ "$record_sid" != "$own_sid" ] || return 0
   if [ -z "${FM_PROC_ROOT_OVERRIDE:-}" ]; then
     PIDS=$(LC_ALL=C ps -u "$(id -u)" -o pid= -o pgid= -o sid= 2>/dev/null || true)
@@ -316,9 +317,9 @@ EOF
     [ "$PID" != "$record_pid" ] || continue
     [ -n "$WORKER_PID" ] && [ "$PID" = "$WORKER_PID" ] && continue
     current_pgid=$(LC_ALL=C ps -p "$PID" -o pgid= 2>/dev/null || true)
-    current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
+    current_pgid=${current_pgid//[[:space:]]/}
     current_sid=$(LC_ALL=C ps -p "$PID" -o sid= 2>/dev/null || true)
-    current_sid=$(printf '%s' "$current_sid" | tr -d '[:space:]')
+    current_sid=${current_sid//[[:space:]]/}
     if [ "$current_pgid" = "$record_pgid" ] || \
        { [ -n "$record_sid" ] && [ "$current_sid" = "$record_sid" ]; }; then
       FOUND=1
@@ -398,9 +399,9 @@ FM_CURSOR_BOUNDARY_PID_FILE="$LAUNCH_PID_FILE" bash -c '
     [ -n "$value" ] && identity="lstart=$value"
   fi
   pgid=$(LC_ALL=C ps -p "$pid" -o pgid= 2>/dev/null || true)
-  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
+  pgid=${pgid//[[:space:]]/}
   sid=$(LC_ALL=C ps -p "$pid" -o sid= 2>/dev/null || true)
-  sid=$(printf '%s' "$sid" | tr -d '[:space:]')
+  sid=${sid//[[:space:]]/}
   printf "%s\t%s\t%s\n" "$pid" "$identity" "$pgid" > "$FM_CURSOR_BOUNDARY_PID_FILE"
   printf "%s\t%s\n" "${FM_CURSOR_LAUNCH_TOKEN:-}" "${FM_CURSOR_EXECUTABLE:-}" >> "$FM_CURSOR_BOUNDARY_PID_FILE"
   printf "%s\t%s\n" "$pgid" "$sid" >> "$FM_CURSOR_BOUNDARY_PID_FILE"

@@ -127,7 +127,7 @@ fm_cursor_resolve_binary() {
 
 # Read one argv element without flattening it into a whitespace-delimited command line.
 fm_cursor_ps_arg_at() {  # <args> <index>
-  local args=$1 wanted=$2 token= ch quote= escaped=0 started=0 index=0 i
+  local args=$1 wanted=$2 token='' ch quote='' escaped=0 started=0 index=0 i
   for ((i = 0; i < ${#args}; i++)); do
     ch=${args:i:1}
     if [ "$escaped" -eq 1 ]; then
@@ -543,14 +543,14 @@ EOF
 
 fm_cursor_launch_boundary_complete_file() {  # <launch-record> <completion-file>
   local launch_file=$1 completion_file=$2
-  local launch_pid launch_identity launch_pgid launch_token launch_executable launch_sid
+  local launch_pid launch_identity launch_pgid launch_token launch_sid
   local own_pgid own_sid current_pgid current_sid pid pids worker_pid worker_file
   local token_absent_file tree_complete_file
   [ -f "$launch_file" ] && [ -f "$completion_file" ] || return 1
   IFS=$'\t' read -r launch_pid launch_identity launch_pgid < "$launch_file" || return 1
   case "$launch_pid" in ''|*[!0-9]*) return 1 ;; esac
   case "$launch_identity" in starttime=*|lstart=*) ;; *) return 1 ;; esac
-  IFS=$'\t' read -r launch_token launch_executable < <(sed -n '2p' "$launch_file")
+  IFS=$'\t' read -r launch_token _ < <(sed -n '2p' "$launch_file")
   case "$launch_token" in ''|*[![:xdigit:]]*) return 1 ;; esac
   worker_file="${launch_file%.launch}.worker"
   token_absent_file="${launch_file%.launch}.token.absent"
