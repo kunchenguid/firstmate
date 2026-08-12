@@ -85,6 +85,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SECOND_MATE_REGISTRY_BACKUP=
+SECOND_MATE_REGISTRY_TRANSACTION_FILE=
+SECOND_MATE_REGISTRY_TRANSACTION_PHASE=
 SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
 SECOND_MATE_REGISTRY_HOME_REMOVED=0
 SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED=0
@@ -1966,28 +1968,95 @@ remove_secondmate_registry_entry() {
   mv -- "$tmp" "$SECONDMATE_REG"
 }
 
-secondmate_registry_transaction_begin() {
-  local id=$1 dir backup
-  [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ] || return 0
-  [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ] || return 1
-  dir=$(dirname -- "$SECONDMATE_REG") || return 1
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  backup=$(mktemp "$STATE/.secondmate-registry-$id.XXXXXX") || return 1
-  chmod 600 "$backup" || { rm -f -- "$backup"; return 1; }
-  cp -p "$SECONDMATE_REG" "$backup" || {
-    rm -f -- "$backup"
+secondmate_registry_transaction_field() {
+  local key=$1
+  awk -F= -v wanted="$key" '$1 == wanted { value = substr($0, index($0, "=") + 1) } END { if (value != "") print value }' \
+    "$SECOND_MATE_REGISTRY_TRANSACTION_FILE"
+}
+
+secondmate_registry_transaction_record_write() {
+  local phase=$1 tmp
+  tmp=$(mktemp "$STATE/.$ID.secondmate-registry-txn.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  {
+    printf 'id=%s\n' "$ID"
+    printf 'meta_identity=%s\n' "$TEARDOWN_META_IDENTITY"
+    printf 'registry=%s\n' "$SECONDMATE_REG"
+    printf 'home=%s\n' "$HOME_PATH"
+    printf 'backup=%s\n' "$SECOND_MATE_REGISTRY_BACKUP"
+    printf 'phase=%s\n' "$phase"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" || {
+    rm -f -- "$tmp"
     return 1
   }
-  SECOND_MATE_REGISTRY_BACKUP=$backup
+  [ -f "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" ] \
+    && [ ! -L "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" ] \
+    && [ -O "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" ]
+}
+
+secondmate_registry_transaction_clear() {
+  [ -z "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" ] \
+    || rm -f -- "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" || return 1
+  [ -z "$SECOND_MATE_REGISTRY_BACKUP" ] \
+    || rm -f -- "$SECOND_MATE_REGISTRY_BACKUP" || return 1
+  SECOND_MATE_REGISTRY_BACKUP=
+  SECOND_MATE_REGISTRY_TRANSACTION_FILE=
+  SECOND_MATE_REGISTRY_TRANSACTION_PHASE=
+  SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
+}
+
+secondmate_registry_transaction_validate() {
+  local file=$1 expected_backup expected_phase state_dir backup_dir backup_base
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
+  SECOND_MATE_REGISTRY_TRANSACTION_FILE=$file
+  [ "$(secondmate_registry_transaction_field id)" = "$ID" ] || return 1
+  [ "$(secondmate_registry_transaction_field meta_identity)" = "$TEARDOWN_META_IDENTITY" ] || return 1
+  [ "$(secondmate_registry_transaction_field registry)" = "$SECONDMATE_REG" ] || return 1
+  [ "$(secondmate_registry_transaction_field home)" = "$HOME_PATH" ] || return 1
+  expected_backup=$(secondmate_registry_transaction_field backup)
+  state_dir=$(cd "$STATE" 2>/dev/null && pwd -P) || return 1
+  backup_dir=$(dirname -- "$expected_backup") || return 1
+  backup_dir=$(cd "$backup_dir" 2>/dev/null && pwd -P) || return 1
+  [ "$backup_dir" = "$state_dir" ] || return 1
+  backup_base=${expected_backup##*/}
+  case "$backup_base" in
+    ".secondmate-registry-$ID".*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$expected_backup" ] && [ ! -L "$expected_backup" ] && [ -O "$expected_backup" ] || return 1
+  expected_phase=$(secondmate_registry_transaction_field phase)
+  case "$expected_phase" in
+    prepared|registry-removed|home-removed|committed) ;;
+    *) return 1 ;;
+  esac
+  SECOND_MATE_REGISTRY_BACKUP=$expected_backup
+  SECOND_MATE_REGISTRY_TRANSACTION_PHASE=$expected_phase
   SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=1
 }
 
-secondmate_registry_transaction_restore() {
-  local dir tmp
-  [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ] || return 0
-  [ "$SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED" != 1 ] || return 0
-  [ "$SECOND_MATE_REGISTRY_HOME_REMOVED" != 1 ] || return 0
-  [ -f "$SECOND_MATE_REGISTRY_BACKUP" ] || return 1
+secondmate_registry_transaction_registry_has_id() {
+  [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ] || return 1
+  [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ] || return 2
+  awk -v wanted="$ID" '$1 == "-" && $2 == wanted { found = 1 } END { exit(found ? 0 : 1) }' "$SECONDMATE_REG"
+}
+
+secondmate_registry_transaction_restore_registry() {
+  local dir tmp expected
+  if [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ]; then
+    [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ] || return 1
+    expected=$(mktemp "$STATE/.secondmate-registry-expected.XXXXXX") || return 1
+    chmod 600 "$expected" || { rm -f -- "$expected"; return 1; }
+    awk -v wanted="$ID" '!($1 == "-" && $2 == wanted)' "$SECOND_MATE_REGISTRY_BACKUP" > "$expected" || {
+      rm -f -- "$expected"
+      return 1
+    }
+    cmp -s "$expected" "$SECONDMATE_REG" || {
+      rm -f -- "$expected"
+      return 1
+    }
+    rm -f -- "$expected" || return 1
+  fi
   dir=$(dirname -- "$SECONDMATE_REG") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   tmp=$(mktemp "$dir/.secondmates.md.restore.XXXXXX") || return 1
@@ -1996,21 +2065,119 @@ secondmate_registry_transaction_restore() {
     rm -f -- "$tmp"
     return 1
   }
-  mv -- "$tmp" "$SECONDMATE_REG" || {
+  mv -f -- "$tmp" "$SECONDMATE_REG" || {
     rm -f -- "$tmp"
     return 1
   }
-  rm -f -- "$SECOND_MATE_REGISTRY_BACKUP" || return 1
-  SECOND_MATE_REGISTRY_BACKUP=
-  SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
+}
+
+secondmate_registry_transaction_begin() {
+  local id=$1 dir backup existing_phase registry_state
+  SECOND_MATE_REGISTRY_TRANSACTION_FILE="$STATE/$id.secondmate-registry.txn"
+  if [ -e "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" ] || [ -L "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" ]; then
+    secondmate_registry_transaction_validate "$SECOND_MATE_REGISTRY_TRANSACTION_FILE" || return 1
+    existing_phase=$SECOND_MATE_REGISTRY_TRANSACTION_PHASE
+    case "$existing_phase" in
+      prepared)
+        if [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ]; then
+          if secondmate_registry_transaction_registry_has_id; then
+            :
+          else
+            registry_state=$?
+            [ "$registry_state" -eq 1 ] || return 1
+            secondmate_registry_transaction_restore_registry || return 1
+            secondmate_registry_transaction_clear || return 1
+          fi
+        else
+          SECOND_MATE_REGISTRY_TRANSACTION_PHASE=home-removed
+          secondmate_registry_transaction_record_write home-removed || return 1
+          SECOND_MATE_REGISTRY_HOME_REMOVED=1
+        fi
+        ;;
+      home-removed)
+        [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ] && return 1
+        if secondmate_registry_transaction_registry_has_id; then
+          :
+        else
+          registry_state=$?
+          [ "$registry_state" -eq 1 ] || return 1
+          SECOND_MATE_REGISTRY_TRANSACTION_PHASE=registry-removed
+          secondmate_registry_transaction_record_write registry-removed || return 1
+        fi
+        SECOND_MATE_REGISTRY_HOME_REMOVED=1
+        ;;
+      registry-removed)
+        [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ] && return 1
+        if secondmate_registry_transaction_registry_has_id; then
+          registry_state=0
+        else
+          registry_state=$?
+        fi
+        [ "$registry_state" -eq 1 ] || return 1
+        SECOND_MATE_REGISTRY_HOME_REMOVED=1
+        ;;
+      committed)
+        [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ] && return 1
+        if secondmate_registry_transaction_registry_has_id; then
+          registry_state=0
+        else
+          registry_state=$?
+        fi
+        [ "$registry_state" -eq 1 ] || return 1
+        SECOND_MATE_REGISTRY_HOME_REMOVED=1
+        SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED=1
+        secondmate_registry_transaction_clear || return 1
+        ;;
+    esac
+  fi
+  if [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" != 1 ]; then
+    [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ] || return 0
+    [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ] || return 1
+    dir=$(dirname -- "$SECONDMATE_REG") || return 1
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    backup=$(mktemp "$STATE/.secondmate-registry-$id.XXXXXX") || return 1
+    chmod 600 "$backup" || { rm -f -- "$backup"; return 1; }
+    cp -p "$SECONDMATE_REG" "$backup" || {
+      rm -f -- "$backup"
+      return 1
+    }
+    SECOND_MATE_REGISTRY_BACKUP=$backup
+    SECOND_MATE_REGISTRY_TRANSACTION_PHASE=prepared
+    SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=1
+    secondmate_registry_transaction_record_write prepared || {
+      secondmate_registry_transaction_clear || true
+      return 1
+    }
+  fi
+}
+
+secondmate_registry_transaction_restore() {
+  local registry_state
+  [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ] || return 0
+  [ "$SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED" != 1 ] || return 0
+  if [ "$SECOND_MATE_REGISTRY_HOME_REMOVED" = 1 ] || {
+    [ -n "$HOME_PATH" ] && [ ! -e "$HOME_PATH" ] && [ ! -L "$HOME_PATH" ];
+  }; then
+    return 0
+  fi
+  if secondmate_registry_transaction_registry_has_id; then
+    secondmate_registry_transaction_clear
+    return
+  else
+    registry_state=$?
+  fi
+  [ "$registry_state" -eq 1 ] || return 1
+  secondmate_registry_transaction_restore_registry || return 1
+  secondmate_registry_transaction_clear
 }
 
 secondmate_registry_transaction_commit() {
   [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ] || return 0
-  rm -f -- "$SECOND_MATE_REGISTRY_BACKUP" || return 1
-  SECOND_MATE_REGISTRY_BACKUP=
-  SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE=0
+  [ "$SECOND_MATE_REGISTRY_HOME_REMOVED" = 1 ] || return 1
+  SECOND_MATE_REGISTRY_TRANSACTION_PHASE=committed
+  secondmate_registry_transaction_record_write committed || return 1
   SECOND_MATE_REGISTRY_TRANSACTION_COMMITTED=1
+  secondmate_registry_transaction_clear
 }
 
 if [ "$KIND" = secondmate ]; then
@@ -2417,16 +2584,28 @@ if [ "$KIND" = secondmate ]; then
     echo "error: could not prepare secondmate $ID registry recovery; preserving home and task state" >&2
     exit 1
   }
-  remove_secondmate_registry_entry "$ID" || {
-    echo "error: could not remove secondmate $ID from its registry; preserving home and task state" >&2
-    exit 1
-  }
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
-  if [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ]; then
-    echo "error: secondmate home $HOME_PATH remains after cleanup; preserving its registry and task state" >&2
-    exit 1
+  if [ "$SECOND_MATE_REGISTRY_HOME_REMOVED" != 1 ]; then
+    remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
+    if [ -e "$HOME_PATH" ] || [ -L "$HOME_PATH" ]; then
+      echo "error: secondmate home $HOME_PATH remains after cleanup; preserving its registry and task state" >&2
+      exit 1
+    fi
+    SECOND_MATE_REGISTRY_HOME_REMOVED=1
+    if [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ]; then
+      SECOND_MATE_REGISTRY_TRANSACTION_PHASE=home-removed
+      secondmate_registry_transaction_record_write home-removed || exit 1
+    fi
   fi
-  SECOND_MATE_REGISTRY_HOME_REMOVED=1
+  if [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ] \
+     && [ "$SECOND_MATE_REGISTRY_TRANSACTION_PHASE" != registry-removed ] \
+     && [ "$SECOND_MATE_REGISTRY_TRANSACTION_PHASE" != committed ]; then
+    remove_secondmate_registry_entry "$ID" || {
+      echo "error: could not remove secondmate $ID from its registry; preserving home and task state" >&2
+      exit 1
+    }
+    SECOND_MATE_REGISTRY_TRANSACTION_PHASE=registry-removed
+    secondmate_registry_transaction_record_write registry-removed || exit 1
+  fi
 fi
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
   if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" \
@@ -2475,6 +2654,10 @@ teardown_meta_identity_matches || {
   echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
   exit 1
 }
+secondmate_registry_transaction_commit || {
+  echo "error: secondmate registry recovery binding could not be retired; preserving its recovery record" >&2
+  exit 1
+}
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
   :
 elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
@@ -2518,10 +2701,6 @@ teardown_release_top_slot_lock || {
 }
 teardown_release_herdr_presentation_lock || {
   echo "error: could not release the Herdr presentation lock for $ID" >&2
-  exit 1
-}
-secondmate_registry_transaction_commit || {
-  echo "error: secondmate registry recovery binding could not be retired; preserving its recovery record" >&2
   exit 1
 }
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
