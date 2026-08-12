@@ -948,6 +948,10 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-web-gate-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
