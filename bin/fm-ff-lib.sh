@@ -89,94 +89,69 @@ VALIDATED_MARKER_ID=""
 VALIDATION_ERROR=""
 VALIDATION_ERROR_PATH=""
 
-# The operational-directory contract of a secondmate home, and its one owner:
-# data/, state/, config/ and projects/ must each resolve INSIDE the home and
-# never into the active firstmate home or the firstmate repo.
-# Returns 0 when the contract holds, 2 when a path violates it, and 1 when
-# <require_present> is "yes" and a directory is simply absent. That distinction
-# exists for the worker-isolation assertion in bin/fm-spawn.sh: absent structure
-# is leftover residue, while a path escaping the home is unsafe on any reading,
-# so an unsafe path always outranks an absent one and is reported first.
+# The operational-directory rules for a secondmate home: data/, state/, config/
+# and projects/ must each resolve INSIDE the home and never into the active
+# firstmate home or the firstmate repo. This is the owner for every caller that
+# sources this library, which is bin/fm-spawn.sh plus this file's own callers;
+# bin/fm-backlog-handoff.sh and bin/fm-home-seed.sh deliberately keep their own
+# same-named validators and do not source this library, so a change here does
+# not reach them.
 # VALIDATION_ERROR carries the reason, VALIDATION_ERROR_PATH the offending path.
 # shellcheck disable=SC2034 # VALIDATION_ERROR_PATH is an output global read by sourcing callers (bin/fm-spawn.sh).
-validate_operational_dirs() {  # <abs-home> <abs-active-home> <abs-root> [<require_present>]
-  local abs_home=$1 abs_active_home=$2 abs_root=$3 require_present=${4:-no}
-  local name dir abs_dir missing_error="" missing_path=""
+validate_operational_dirs() {  # <abs-home> <abs-active-home> <abs-root>
+  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
   VALIDATION_ERROR_PATH=""
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
       VALIDATION_ERROR="secondmate $name directory must resolve inside the secondmate home"
       VALIDATION_ERROR_PATH="$dir"
-      return 2
+      return 1
     fi
     if [ -d "$dir" ]; then
       abs_dir=$(cd "$dir" && pwd -P) || {
         VALIDATION_ERROR="secondmate $name directory cannot be resolved"
         VALIDATION_ERROR_PATH="$dir"
-        return 2
+        return 1
       }
     elif [ -e "$dir" ]; then
       VALIDATION_ERROR="secondmate $name path is not a directory"
       VALIDATION_ERROR_PATH="$dir"
-      return 2
+      return 1
     else
-      if [ -z "$missing_error" ]; then
-        missing_error="secondmate $name directory is missing"
-        missing_path="$dir"
-      fi
       abs_dir="$abs_home/$name"
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
       VALIDATION_ERROR="secondmate $name directory must resolve inside the secondmate home"
       VALIDATION_ERROR_PATH="$dir"
-      return 2
+      return 1
     fi
     if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
       VALIDATION_ERROR="secondmate $name directory cannot be inside the active firstmate home"
       VALIDATION_ERROR_PATH="$dir"
-      return 2
+      return 1
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
       VALIDATION_ERROR="secondmate $name directory cannot be inside the firstmate repo"
       VALIDATION_ERROR_PATH="$dir"
-      return 2
+      return 1
     fi
   done
-  if [ "$require_present" = yes ] && [ -n "$missing_error" ]; then
-    VALIDATION_ERROR="$missing_error"
-    VALIDATION_ERROR_PATH="$missing_path"
-    return 1
-  fi
   return 0
 }
 
-# The id-independent shape of a seeded secondmate home, and the one owner of
-# what that shape IS: a home that is neither the active firstmate home nor the
-# firstmate repo nor tangled with either, operational directories that hold the
-# contract above, an identity marker that is a regular file naming SOME
-# secondmate, and the firstmate home material (AGENTS.md and bin/).
-# validate_secondmate_home() asks this and then the one id-dependent question on
-# top - does the marker name THIS secondmate - while the worker-isolation
-# assertion in bin/fm-spawn.sh asks this one alone, since there the question is
-# "is this a seeded home at all" with no id in hand.
-# Returns 0 for a seeded home, 1 when the directory is not one, and 2 when it
-# carries the marker but an operational path is unsafe or unresolvable. A
-# refusing caller must treat 2 as a home too: otherwise symlinking an
-# operational directory out of a real home would argue that home out of being
-# one, which is exactly the acceptance this shape check exists to deny.
-# <require_materialized> "yes" additionally requires the operational directories
-# to EXIST. bin/fm-home-seed.sh creates all four before it writes the marker, so
-# a home in service always has them, and requiring them is what separates such a
-# home from a reusable checkout carrying nothing but leftover marker residue:
-# the marker is gitignored, so it survives a worktree's return to a pool and
-# must never on its own condemn a clean checkout. Callers that already hold a
-# REGISTERED home pass no and keep the looser rule they have always applied.
+# The id-independent shape of a seeded secondmate home: a home that is neither
+# the active firstmate home nor the firstmate repo nor tangled with either,
+# operational directories that hold the rules above, an identity marker that is
+# a regular file naming SOME secondmate, and the firstmate home material
+# (AGENTS.md and bin/). validate_secondmate_home() asks this and then the one
+# id-dependent question on top - does the marker name THIS secondmate - so the
+# two sides of that question have a single definition between them.
 # Sets VALIDATED_HOME and VALIDATED_MARKER_ID on success, VALIDATION_ERROR
 # otherwise.
-validate_secondmate_home_shape() {  # <home> [<require_materialized>]
-  local home=$1 require_materialized=${2:-no}
-  local abs_home abs_active_home abs_root marker opdirs_rc
+validate_secondmate_home_shape() {  # <home>
+  local home=$1
+  local abs_home abs_active_home abs_root marker
   VALIDATED_HOME=""
   VALIDATED_MARKER_ID=""
   VALIDATION_ERROR=""
@@ -221,14 +196,7 @@ validate_secondmate_home_shape() {  # <home> [<require_materialized>]
     return 1
   fi
   marker="$abs_home/$SUB_HOME_MARKER"
-  opdirs_rc=0
-  validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" "$require_materialized" || opdirs_rc=$?
-  if [ "$opdirs_rc" -ne 0 ]; then
-    if [ "$opdirs_rc" -eq 2 ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
-      return 2
-    fi
-    return 1
-  fi
+  validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
   if [ -L "$marker" ]; then
     VALIDATION_ERROR="secondmate marker must not be a symlink"
     return 1

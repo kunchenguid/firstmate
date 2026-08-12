@@ -141,14 +141,12 @@
 #   back an enclosing repository's identity.
 #   Repository membership is not isolation, so the worker root is refused
 #   separately when it is a firstmate home - the active home, the firstmate
-#   repo, a genuinely seeded secondmate home, or the holder of this fleet's
-#   operational directories - which repository identity alone cannot catch when
-#   firstmate itself is the project and its homes are worktrees of that same
-#   repository. A seeded home is the whole shape bin/fm-ff-lib.sh defines (the
-#   identity marker naming a secondmate, that home's operational directories,
-#   and the firstmate home material), or a marked directory whose operational
-#   path is unsafe; the gitignored marker alone is residue that outlives a
-#   worktree's return to the pool and never condemns a clean checkout.
+#   repo, a directory carrying the seeded-home marker, or the holder of this
+#   fleet's operational directories - which repository identity alone cannot
+#   catch when firstmate itself is the project and its homes are worktrees of
+#   that same repository. The marker alone is enough to refuse; keeping a
+#   returned pool worktree free of one belongs to the home lifecycle
+#   (remove_firstmate_home in bin/fm-teardown.sh), not to this gate.
 #   Secondmate spawns keep skipping this assertion.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
@@ -1556,10 +1554,13 @@ validate_firstmate_home_for_spawn() {
   printf '%s\n' "$abs_home"
 }
 
-# The operational-directory contract itself lives in bin/fm-ff-lib.sh
-# (validate_operational_dirs), which this script already sources; this is only
-# the launch-time refusal voice for it, so a secondmate launch and the seeded
-# home shape can never drift apart on what a safe home directory is.
+# The operational-directory rules themselves come from bin/fm-ff-lib.sh
+# (validate_operational_dirs), which this script sources; this is only the
+# launch-time refusal voice for them, so a secondmate launch and the shared
+# seeded-home validation can never drift apart on what a safe home directory is.
+# bin/fm-backlog-handoff.sh and bin/fm-home-seed.sh still carry their own
+# same-named validators and do not source that library, so editing it changes
+# this caller and bin/fm-ff-lib.sh's own callers, not those two.
 validate_firstmate_operational_dirs() {
   local abs_home=$1 abs_active_home=$2 abs_root=$3
   if validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root"; then
@@ -1725,19 +1726,19 @@ git_common_dir_real() {  # <dir>
 # firstmate itself is the project, a treehouse-leased secondmate home is a
 # linked worktree of that same repository, so it shares the project's git
 # common directory exactly as a legitimate task worktree does. The signals are
-# the ones this script already owns - the active home, the firstmate repo, a
-# genuinely seeded secondmate home, and the operational directories this process
-# is actually reading and writing - and every comparison is between physically
-# resolved paths, never a path prefix, so a symlinked home cannot slip past by
-# spelling. The seeded-home signal asks bin/fm-ff-lib.sh, the owner of what a
-# seeded home IS, for the whole shape rather than for the marker alone: the
-# marker is gitignored, so it outlives a worktree's return to the pool, and a
-# lone leftover marker on an otherwise clean reusable checkout must not cost the
-# fleet that checkout. An unsafe or unresolvable operational path inside a
-# marked directory counts as a home too, so symlinking a home's data/ elsewhere
-# cannot argue that home out of being one.
+# the ones this script already owns - the active home, the firstmate repo, the
+# seeded-home marker, and the operational directories this process is actually
+# reading and writing - and every comparison is between physically resolved
+# paths, never a path prefix, so a symlinked home cannot slip past by spelling.
+# The marker alone is sufficient: a directory a secondmate identity was written
+# into is not a task worktree, whatever else of that home is still on disk, and
+# demanding more of the shape would arm a worker inside a marked home that had
+# lost any one of its operational directories. The marker outliving a worktree's
+# return to the pool is a lifecycle defect and is fixed at the lifecycle owner
+# (remove_firstmate_home in bin/fm-teardown.sh clears identity before the
+# return), never by teaching this gate to overlook an identity it can see.
 firstmate_home_reason() {  # <resolved-dir>
-  local dir=$1 candidate owner home_shape
+  local dir=$1 candidate owner
   if [ -z "$dir" ]; then
     printf '%s\n' 'its path could not be resolved'
     return 0
@@ -1750,25 +1751,16 @@ firstmate_home_reason() {  # <resolved-dir>
     printf '%s\n' 'it is the firstmate repository root'
     return 0
   fi
-  home_shape=0
-  # Asking is not diagnosing: "no" is the ordinary answer for a task worktree,
-  # so this probe stays silent and the refusal below is the only voice.
-  validate_secondmate_home_shape "$dir" yes 2>/dev/null || home_shape=$?
-  case "$home_shape" in
-    0)
-      printf "it is a seeded firstmate home for secondmate %s, carrying %s over that home's operational directories\n" \
-        "$VALIDATED_MARKER_ID" "$SUB_HOME_MARKER"
-      return 0
-      ;;
-    2)
-      printf "it carries the seeded firstmate home marker %s over an unsafe home shape (%s: %s)\n" \
-        "$SUB_HOME_MARKER" "$VALIDATION_ERROR" "$VALIDATION_ERROR_PATH"
-      return 0
-      ;;
-  esac
+  if [ -f "$dir/$SUB_HOME_MARKER" ]; then
+    printf "it carries the seeded firstmate home marker %s\n" "$SUB_HOME_MARKER"
+    return 0
+  fi
   for candidate in "$STATE" "$DATA" "$PROJECTS" "$CONFIG"; do
     [ -d "$candidate" ] || continue
-    owner=$(cd "$candidate/.." 2>/dev/null && pwd -P) || continue
+    # Resolve the candidate itself before stepping up: `cd "$candidate/.."`
+    # would strip the last component textually and answer with the parent of a
+    # SYMLINKED override rather than the parent of the home it points into.
+    owner=$(cd "$candidate" 2>/dev/null && cd -P .. && pwd -P) || continue
     if [ "$dir" = "$owner" ]; then
       printf "it holds this fleet's operational directory %s\n" "$candidate"
       return 0

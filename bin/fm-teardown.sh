@@ -58,6 +58,24 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+#
+# Retiring a leased home also clears the identity that home owns, and this
+# function is where that contract lives (remove_firstmate_home). A pooled home
+# keeps its directory across the return, and every artifact that makes it a home
+# rather than a checkout - the .fm-secondmate-home and .fm-secondmate-parent
+# markers and the data/, state/, config/ and projects/ directories - is
+# gitignored, so the pool's clean-and-reset leaves all of it in place (confirmed
+# against treehouse v2.1.1) and the next task would be handed a worktree still
+# wearing a retired secondmate's identity. Identity is cleared only after every
+# ownership and safety check has passed and only while the lease is still held,
+# and it is cleared transactionally, exactly like the process-event state beside
+# it: the artifacts are staged aside, the checkout is returned, and the staging
+# is deleted only once that return succeeded. A failed return puts the identity
+# back before reporting the failure, so a home is never left half cleared while
+# its route is still registered, and a failed restoration exits
+# TEARDOWN_HOME_IDENTITY_RESTORE_FAILED naming the staging directory. A
+# symlinked identity artifact refuses retirement rather than being moved, since
+# clearing it could reach outside the home.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1219,6 +1237,7 @@ STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
+TEARDOWN_HOME_IDENTITY_RESTORE_FAILED=5
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -1953,7 +1972,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup identity_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -1969,11 +1988,23 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+    # A pooled home keeps its directory across the return, and every artifact
+    # that makes it a HOME rather than a checkout is gitignored, so the pool
+    # hands the next task a worktree still wearing this secondmate's identity
+    # unless retirement takes it off. Stage it while the lease is still held and
+    # every safety check has already passed, so a failed return can hand the
+    # home back exactly as it was rather than leaving it half cleared.
+    identity_backup=$(snapshot_firstmate_home_identity "$abs_home_path" "$label") || {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      restore_firstmate_home_identity "$abs_home_path" "$label" "$identity_backup" || return $?
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    }
+    [ -z "$identity_backup" ] || rm -rf -- "$identity_backup"
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -1983,6 +2014,86 @@ remove_firstmate_home() {
   fi
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
   return 1
+}
+
+# Everything a seeded secondmate home owns that makes it a home rather than a
+# reusable checkout: the identity markers bin/fm-home-seed.sh writes and the
+# operational directories it creates. All of them are gitignored, so none of
+# them is removed by the pool's own clean-and-reset on return.
+firstmate_home_identity_artifacts() {
+  printf '%s\n' "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER" data state config projects
+}
+
+# Move a pooled home's identity aside into a private staging directory, echoing
+# that directory (empty when the home owned nothing). Staging is a move, not a
+# copy, so what goes back to the pool is a checkout; the staged copy is what
+# restore_firstmate_home_identity puts back when the return fails, and only a
+# successful return may delete it.
+# Ownership is never inferred from resemblance: the caller has already proved
+# through validate_firstmate_home_for_removal that this path is the seeded home
+# of the expected secondmate, and each artifact is re-checked here through the
+# same validate_removal_target rules. A symlinked artifact is refused outright
+# rather than moved, because moving the link would leave whatever it pointed at
+# behind and clearing its target could reach outside the home.
+snapshot_firstmate_home_identity() {  # <home> <label>
+  local home=$1 label=$2 backup name path staged
+  staged=0
+  for name in $(firstmate_home_identity_artifacts); do
+    path="$home/$name"
+    { [ -e "$path" ] || [ -L "$path" ]; } || continue
+    if [ -L "$path" ]; then
+      echo "REFUSED: $label $home has a symlinked identity artifact $path; retirement cannot prove what clearing it would remove" >&2
+      return 1
+    fi
+    validate_removal_target "$path" "$label identity artifact" >/dev/null || return 1
+    if ! path_is_ancestor_of "$home" "$(removal_target_abs_path "$path")"; then
+      echo "REFUSED: $label identity artifact $path does not resolve inside $home" >&2
+      return 1
+    fi
+    staged=1
+  done
+  if [ "$staged" -eq 0 ]; then
+    printf '\n'
+    return 0
+  fi
+  backup=$(umask 077; mktemp -d "${home%/*}/.fm-home-identity.XXXXXX") || {
+    echo "REFUSED: cannot stage the retiring identity of $label $home" >&2
+    return 1
+  }
+  for name in $(firstmate_home_identity_artifacts); do
+    path="$home/$name"
+    { [ -e "$path" ] || [ -L "$path" ]; } || continue
+    if ! mv -f -- "$path" "$backup/$name"; then
+      echo "REFUSED: cannot stage identity artifact $path for $label $home" >&2
+      restore_firstmate_home_identity "$home" "$label" "$backup" || return $?
+      return 1
+    fi
+  done
+  printf '%s\n' "$backup"
+}
+
+# Put a staged identity back exactly as it was, so a home whose return failed
+# keeps both its identity and its route rather than living on half cleared.
+restore_firstmate_home_identity() {  # <home> <label> <backup>
+  local home=$1 label=$2 backup=$3 name path
+  [ -n "$backup" ] || return 0
+  [ -d "$backup" ] && [ ! -L "$backup" ] || {
+    echo "error: identity restoration failed for $label $home; recovery staging is unavailable at $backup" >&2
+    return "$TEARDOWN_HOME_IDENTITY_RESTORE_FAILED"
+  }
+  for name in $(firstmate_home_identity_artifacts); do
+    path="$backup/$name"
+    { [ -e "$path" ] || [ -L "$path" ]; } || continue
+    if [ -e "$home/$name" ] || [ -L "$home/$name" ]; then
+      echo "error: identity restoration failed for $label $home; $home/$name reappeared during retirement, recover it from $backup" >&2
+      return "$TEARDOWN_HOME_IDENTITY_RESTORE_FAILED"
+    fi
+    if ! mv -f -- "$path" "$home/$name"; then
+      echo "error: identity restoration failed for $label $home; recover its identity from $backup" >&2
+      return "$TEARDOWN_HOME_IDENTITY_RESTORE_FAILED"
+    fi
+  done
+  rm -rf -- "$backup"
 }
 
 firstmate_home_has_process_events() {

@@ -170,7 +170,13 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 Membership is positive proof that the worktree and the project share one git common directory rather than an inference from the path, because any other repository is a real worktree root distinct from the project too, and that identity is the project's own only when the configured project directory is itself its repository's top level.
 Membership is not isolation, so a second, independent check refuses a worker root that is one of firstmate's own homes.
 That check is what covers the self-hosted fleet, where firstmate is its own project and its homes are linked worktrees of the very repository the task belongs to, so repository identity alone would accept them.
+A secondmate identity marker is by itself enough to refuse a checkout, because a directory an identity was written into is not a task worktree whatever else of that home is still on disk; keeping a pooled checkout free of one is retirement's job rather than the launch gate's.
 Either property that cannot be established refuses the launch instead of passing, and secondmate spawns and secondmate relaunches are outside this assertion because a secondmate home is a firstmate home rather than a project worktree.
+
+Retiring a leased secondmate home is the other half of that boundary, and `fm-teardown.sh` owns it.
+A pooled home keeps its directory across `treehouse return`, and everything that makes it a home rather than a checkout is gitignored, so the pool's clean-and-reset cannot remove it and the next task would inherit a retired secondmate's identity.
+`remove_firstmate_home` therefore clears that identity itself, transactionally and only once every ownership and safety check has passed while the lease is still held, so a failed return hands the home back exactly as it was instead of leaving it half cleared.
+Its header owns the exact artifact list and failure modes, and `tests/fm-teardown-home-identity.test.sh` drives the lifecycle against a throwaway repository with its own pool.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact home signals and refusal mechanics for both boundaries, `tests/fm-spawn-worktree-identity.test.sh` and `tests/fm-spawn-pool-base-freshen.test.sh` own the portable regression coverage, and [`verification/runtime-backends.md`](verification/runtime-backends.md#worker-isolation-repository-identity) records the per-backend isolation evidence.
 

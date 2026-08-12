@@ -25,21 +25,22 @@
 # there is a linked worktree of the project's own repository, so it shares the
 # project's git common directory and must be refused on its own terms. One case
 # per signal that identifies such a home - the active home, the firstmate repo,
-# a genuinely seeded secondmate home, and the fleet's operational directories -
-# so no recognition path is claimed without being driven. A project
+# the seeded-home marker, and the fleet's operational directories - so no
+# recognition path is claimed without being driven. A project
 # directory nested inside another repository is refused for the mirror-image
 # reason - it inherits an identity it does not own. Two cases assert that
 # legitimate worktrees still spawn, including in the self-hosted shape, so the
 # assertion cannot pass by refusing everything.
 #
-# The seeded-home signal is a shape, not a file: the identity marker is
-# gitignored, so it outlives the cleanliness gates that release a worktree back
-# to the treehouse pool, and a leftover marker on an otherwise reusable checkout
-# must not cost the fleet that checkout. Three cases pin that boundary from both
-# sides - a lone stale marker and partial home residue still spawn, while a
-# fully seeded home is still refused - and a fourth drives an operational
-# directory symlinked out of a marked home, the shape that would otherwise talk
-# the check into accepting a real home as a task worktree.
+# The marker decides on its own: a checkout a secondmate identity was written
+# into is not a task worktree, whatever else of that home survives, so a marked
+# checkout with nothing else left and a marked home whose operational path was
+# symlinked away are both refused here. Keeping a returned pool worktree free of
+# a marker is retirement's job, and tests/fm-teardown-home-identity.test.sh
+# drives that end of it. The operational-directory signal is driven twice, once
+# through a plain override and once through a symlinked one, because stepping up
+# from the override textually would answer with the parent of the link instead
+# of the home it points into.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -409,8 +410,8 @@ test_selfhosted_seeded_home_is_refused() {
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a seeded firstmate home as the task worktree"$'\n'"--- output ---"$'\n'"$out"
   assert_contains "$out" "firstmate home" "refusal did not name the firstmate home"
-  assert_contains "$out" "seeded firstmate home for secondmate $id" \
-    "refusal did not name the seeded home as what identified it"
+  assert_contains "$out" "seeded firstmate home marker" \
+    "refusal did not name the seed marker as what identified the home"
   assert_not_contains "$out" "belongs to a different repository" \
     "the seeded home was refused as a foreign repository rather than on the isolation boundary"
   assert_not_contains "$out" "spawned $id" "spawn launched a worker into a seeded firstmate home"
@@ -419,54 +420,34 @@ test_selfhosted_seeded_home_is_refused() {
   pass "a seeded firstmate home in the project's own repository is refused"
 }
 
-# The other side of that boundary, and the one that costs the fleet worktrees
-# when it is wrong: the identity marker is gitignored, so it survives the
-# cleanliness gates a worktree passes on its way back to the treehouse pool. A
-# reusable checkout carrying nothing but that leftover marker is still a task
-# worktree, and refusing it would strand a clean worktree until someone deleted
-# a file by hand.
-test_selfhosted_stale_marker_still_spawns() {
+# The marker is the identity, and it alone decides: a checkout a secondmate
+# identity was written into is not a task worktree, whatever else of that home
+# is still on disk. Requiring more of the shape would arm a worker inside a
+# marked home that had merely lost one of its directories, so a marked checkout
+# with nothing else left is still refused here. Keeping a returned pool worktree
+# free of a marker belongs to retirement instead, which is where
+# tests/fm-teardown-home-identity.test.sh drives it.
+test_selfhosted_marker_alone_is_refused() {
   local id out status
-  id=identity-selfhosted-stale-marker-ie
-  make_selfhosted_case identity-selfhosted-stale-marker "$id"
+  id=identity-selfhosted-marker-only-ie
+  make_selfhosted_case identity-selfhosted-marker-only "$id"
   printf '%s\n' "retired-secondmate" > "$CASE_WT/$MARKER"
 
   out=$(run_identity_spawn "$id" "$CASE_WT")
   status=$?
-  expect_code 0 "$status" "a reusable worktree carrying only a stale seed marker should still spawn"
-  assert_contains "$out" "spawned $id" \
-    "spawn did not report success for a worktree carrying only a stale seed marker"
-  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" \
-    "meta did not record the worktree that carried a stale seed marker"
-  pass "a lone stale seed marker does not veto an otherwise valid reusable checkout"
+  [ "$status" -ne 0 ] || fail "spawn accepted a checkout carrying a secondmate identity marker"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "seeded firstmate home marker" \
+    "refusal did not name the seed marker as what identified the home"
+  assert_not_contains "$out" "spawned $id" \
+    "spawn launched a worker into a checkout carrying a secondmate identity marker"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing a marked checkout"
+  pass "a secondmate identity marker alone refuses the checkout as a task worktree"
 }
 
-# Partial residue is not a home either: the marker and the firstmate home
-# material without the operational directories a provisioned home always has is
-# leftover shape, not a fleet home in service.
-test_selfhosted_partial_home_residue_still_spawns() {
-  local id out status
-  id=identity-selfhosted-partial-if
-  make_selfhosted_case identity-selfhosted-partial "$id"
-  mkdir -p "$CASE_WT/data" "$CASE_WT/bin"
-  printf 'leftover home material\n' > "$CASE_WT/AGENTS.md"
-  printf '%s\n' "retired-secondmate" > "$CASE_WT/$MARKER"
-
-  out=$(run_identity_spawn "$id" "$CASE_WT")
-  status=$?
-  expect_code 0 "$status" "a worktree carrying incomplete home residue should still spawn"
-  assert_contains "$out" "spawned $id" \
-    "spawn did not report success for a worktree carrying incomplete home residue"
-  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" \
-    "meta did not record the worktree that carried incomplete home residue"
-  pass "incomplete seeded-home residue is not mistaken for a firstmate home"
-}
-
-# Requiring the whole shape must not hand out an escape hatch: an operational
-# directory symlinked out of a marked home would otherwise break that shape and
-# argue a real home into being an ordinary task worktree. An unsafe operational
-# path inside a marked directory is refused on the home boundary, so the
-# unverifiable case fails closed like every other one here.
+# A marked home whose operational path is symlinked away is still that home:
+# breaking the shape of a home cannot argue it into being an ordinary task
+# worktree, because the identity is what the gate reads.
 test_selfhosted_unsafe_operational_home_is_refused() {
   local id out status
   id=identity-selfhosted-unsafe-ig
@@ -480,8 +461,8 @@ test_selfhosted_unsafe_operational_home_is_refused() {
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a marked home whose state directory is symlinked outside it"$'\n'"--- output ---"$'\n'"$out"
   assert_contains "$out" "firstmate home" "refusal did not name the firstmate home boundary"
-  assert_contains "$out" "unsafe home shape" \
-    "refusal did not name the unsafe operational path as what identified the home"
+  assert_contains "$out" "seeded firstmate home marker" \
+    "refusal did not name the seed marker as what identified the home"
   assert_not_contains "$out" "spawned $id" \
     "spawn launched a worker into a marked home with an operational path outside it"
   assert_absent "$CASE_HOME/state/$id.meta" \
@@ -559,6 +540,33 @@ test_selfhosted_operational_home_is_refused() {
   pass "a directory holding the running fleet's operational state is refused as a home"
 }
 
+# The same signal, reached through a SYMLINKED operational override, which is
+# how a fleet points a stable path at whichever home it is running from.
+# Stepping up from the override textually answers with the parent of the link
+# rather than of the home it points into, so the home this fleet is actually
+# reading and writing goes unrecognized and a worker is armed inside it.
+test_selfhosted_symlinked_operational_home_is_refused() {
+  local id out status
+  id=identity-selfhosted-symlinked-op-ih
+  make_selfhosted_case identity-selfhosted-symlinked-op "$id"
+  mkdir -p "$CASE_ALT_HOME/state" "$CASE_DIR/links"
+  touch "$CASE_ALT_HOME/state/.last-watcher-beat"
+  ln -s "$CASE_ALT_HOME/state" "$CASE_DIR/links/state"
+  CASE_STATE="$CASE_DIR/links/state"
+
+  out=$(run_identity_spawn "$id" "$CASE_ALT_HOME")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the home a symlinked operational override points into"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "firstmate home" "refusal did not name the firstmate home boundary"
+  assert_contains "$out" "operational directory" \
+    "refusal did not name the operational directory as what identified the home"
+  assert_not_contains "$out" "spawned $id" \
+    "spawn launched a worker into the home a symlinked operational override points into"
+  assert_absent "$CASE_ALT_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing a symlink-reached operational home"
+  pass "a symlinked operational override still identifies the home it points into"
+}
+
 # A project directory that is not its repository's top level has no repository
 # identity of its own to compare against: it inherits the enclosing
 # repository's, which would accept any worktree of that enclosing repository.
@@ -632,11 +640,11 @@ test_project_without_repository_identity_is_refused
 test_project_worktree_still_spawns
 test_selfhosted_firstmate_home_is_refused
 test_selfhosted_seeded_home_is_refused
-test_selfhosted_stale_marker_still_spawns
-test_selfhosted_partial_home_residue_still_spawns
+test_selfhosted_marker_alone_is_refused
 test_selfhosted_unsafe_operational_home_is_refused
 test_selfhosted_firstmate_root_is_refused
 test_selfhosted_operational_home_is_refused
+test_selfhosted_symlinked_operational_home_is_refused
 test_selfhosted_project_worktree_still_spawns
 test_nested_project_directory_is_refused
 if command -v node >/dev/null 2>&1; then

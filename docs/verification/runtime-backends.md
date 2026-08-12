@@ -204,11 +204,11 @@ ok - a project whose repository identity cannot be established refuses the launc
 ok - a legitimate worktree of the project's repository still spawns
 ok - a firstmate home that belongs to the project's own repository is still refused
 ok - a seeded firstmate home in the project's own repository is refused
-ok - a lone stale seed marker does not veto an otherwise valid reusable checkout
-ok - incomplete seeded-home residue is not mistaken for a firstmate home
+ok - a secondmate identity marker alone refuses the checkout as a task worktree
 ok - a symlinked operational path does not argue a marked home out of being one
 ok - the firstmate repository root is refused even when it belongs to the project's repository
 ok - a directory holding the running fleet's operational state is refused as a home
+ok - a symlinked operational override still identifies the home it points into
 ok - an isolated worktree still spawns when firstmate's own homes share that repository
 ok - a project nested inside another repository refuses the launch instead of borrowing its identity
 ok - an Orca worktree belonging to another repository is refused
@@ -217,12 +217,40 @@ ok - an Orca worktree of the project's own repository still spawns
 
 The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
 The self-hosted cases and the nested-project case were each run against the unfixed assertion first, where all three spawned instead of refusing, reporting `worktree=<firstmate home>`, `worktree=<seeded home>`, and `worktree=<enclosing repository's worktree>` respectively.
-The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, a genuinely seeded secondmate home, or a directory holding the running fleet's operational directories.
+The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, the seeded-home marker, or a directory holding the running fleet's operational directories.
 Each of those four signals has its own case, so the enumeration claims nothing that is not driven through the executable.
-The seeded-home signal is the whole home shape that `bin/fm-ff-lib.sh` owns - the identity marker naming a secondmate, that home's operational directories, and the firstmate home material - because the marker is gitignored and therefore outlives the cleanliness gates a worktree passes on its way back to the treehouse pool.
-A checkout carrying nothing but that leftover marker, or the marker over incomplete home residue, still spawns and is still recorded as the task worktree; both cases refused before this shape replaced the bare-marker test.
-An operational directory symlinked out of a marked home is refused on the same boundary, so breaking a real home's shape cannot argue it into being an ordinary task worktree.
+The marker decides on its own: a checkout a secondmate identity was written into is refused whatever else of that home survives, and a marked home whose operational directory was symlinked away is refused too, so breaking a home's shape cannot argue it into being an ordinary task worktree.
+The operational-directory signal is driven twice, through a plain override and through a symlinked one, because stepping up from the override textually answers with the parent of the link instead of the home it points into; the symlinked case spawned into that home before the fix.
+Keeping a pooled checkout free of a stale marker belongs to retirement rather than to this gate, and the section below records that evidence.
 The Orca cases need `node`, which the Orca adapter's JSON helpers require, and report themselves as not run when it is absent.
+
+## Retired home identity and the treehouse pool
+
+The pooled-home retirement boundary was validated on 2026-08-12 with treehouse v2.1.1, git 2.50.1, on macOS 15.6.1 arm64.
+A leased worktree carrying `.fm-secondmate-home` plus `data/`, `state/`, `config/` and `projects/` was returned with `treehouse return --force`, and every one of those paths survived the return and was handed straight back on the next `treehouse get --lease`.
+`git status --porcelain` reported nothing at any point, because a firstmate checkout gitignores all of them, which is why no cleanliness gate anywhere in the fleet catches this residue.
+So a returned pool slot kept a retired secondmate's identity, and the next ship or scout dispatched into it was refused by the spawn-time isolation guard until someone deleted the file by hand.
+The residue is created by the home lifecycle, so it is cleared by the home lifecycle: `remove_firstmate_home` in `bin/fm-teardown.sh` stages those artifacts aside after every ownership and safety check has passed and while the lease is still held, returns the checkout, and deletes the staging only once the return succeeded.
+
+```sh
+tests/fm-teardown-home-identity.test.sh
+```
+
+Bounded output from the lifecycle regression:
+
+```text
+ok - a seeded home in service keeps its identity and operational state
+ok - a successful retirement returns a reusable checkout with no home residue
+ok - a failed return restores the complete home and keeps its registration
+ok - a symlinked identity artifact refuses retirement instead of guessing
+ok - an unrelated reusable checkout in the same pool is untouched
+ok - no identity is cleared before the ownership check passes
+ok - the next lease after a retirement is accepted and carries no home residue
+```
+
+Each case leases from a throwaway repository whose `treehouse.toml` points `root` inside that case's own temporary tree, so no live fleet pool, home, or task id is touched, and the file reports itself as not run when the real treehouse binary is absent rather than passing vacuously.
+The clean-checkout case and the next-lease case were both run against the unretired teardown first, where the marker survived retirement and was handed to the next lease, which is the reported failure end to end.
+The failed-return case drives a treehouse whose `return` fails and asserts that the home gets its identity, its contents, and its registration back, matching the existing contract that a home whose lease cannot be released is preserved rather than half cleared.
 
 ## Composer classification matrix
 
