@@ -724,7 +724,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+fm_backend_send_text_submit_unlocked() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
@@ -736,6 +736,16 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
+}
+
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+  if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    . "$FM_BACKEND_LIB_DIR/fm-wake-lib.sh"
+  fi
+  if ! command -v fm_backend_serialized_send_text_submit >/dev/null 2>&1; then
+    . "$FM_BACKEND_LIB_DIR/fm-checked-submit-lib.sh"
+  fi
+  fm_backend_serialized_send_text_submit "$@"
 }
 
 # fm_backend_kill: remove the task's session endpoint (best-effort; a

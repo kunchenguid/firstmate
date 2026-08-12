@@ -168,7 +168,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
 
     (
       kill() { printf 'kill %s\n' "$*" >> "$action_log"; }
-      fm_backend_send_text_submit() { printf 'interrupt %s\n' "$*" >> "$action_log"; }
+      fm_backend_send_text_submit_unlocked() { printf 'interrupt %s\n' "$*" >> "$action_log"; }
       LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
       PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
         FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
@@ -1732,7 +1732,7 @@ test_inject_msg_herdr_busy_guard_defers() {
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
     pane_is_busy() { return 0; }
     fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
-    fm_backend_send_text_submit() { fail "send_text_submit should not run when the busy-guard defers"; }
+    fm_backend_send_text_submit_unlocked() { fail "send_text_submit should not run when the busy-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer (return non-zero) when the herdr supervisor pane is busy"
     fi
@@ -1749,7 +1749,7 @@ test_inject_msg_herdr_composer_guard_defers() {
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
-    fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
+    fm_backend_send_text_submit_unlocked() { fail "send_text_submit should not run when the composer-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr composer has pending input"
     fi
@@ -1765,7 +1765,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   (
     fm_backend_target_exists() { return 1; }
     pane_is_busy() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
-    fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
+    fm_backend_send_text_submit_unlocked() { fail "send_text_submit should not run when the pane does not exist"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:gone" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr target does not exist"
     fi
@@ -1782,7 +1782,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'empty'; }
-    fm_backend_send_text_submit() {
+    fm_backend_send_text_submit_unlocked() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
       case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
       printf 'empty'
@@ -1807,7 +1807,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'unknown'; }
-    fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
+    fm_backend_send_text_submit_unlocked() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer (never inject) when the composer reads unknown (dead shell / unreadable)"
     fi
@@ -1824,7 +1824,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'future-state'; }
-    fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
+    fm_backend_send_text_submit_unlocked() { fail "send_text_submit must not run for an unrecognized composer state"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer on an unrecognized composer state"
     fi

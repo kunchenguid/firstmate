@@ -30,15 +30,30 @@ fm_checked_submit_namespace() {
   printf '%s' "$dir"
 }
 
-fm_backend_checked_send_text_submit() {
-  local backend=$1 target=$2 text=$3 retries=$4 enter_sleep=$5 settle=$6 expected_label=${7:-}
-  local identity sum size namespace lock composer verdict rc=0
+fm_checked_submit_lock_path() {
+  local backend=$1 target=$2 identity sum size namespace
   identity="$backend"$'\t'"$target"
   read -r sum size _ <<EOF
 $(printf '%s' "$identity" | cksum)
 EOF
-  namespace=$(fm_checked_submit_namespace) || return 2
-  lock="$namespace/endpoint-$sum-$size.lock"
+  namespace=$(fm_checked_submit_namespace) || return 1
+  printf '%s/endpoint-%s-%s.lock' "$namespace" "$sum" "$size"
+}
+
+fm_backend_serialized_send_text_submit() {
+  local backend=$1 target=$2 lock verdict rc=0
+  lock=$(fm_checked_submit_lock_path "$backend" "$target") || return 2
+  fm_lock_acquire_wait "$lock" || return 2
+  verdict=$(fm_backend_send_text_submit_unlocked "$@") || rc=$?
+  printf '%s' "${verdict:-send-failed}"
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+fm_backend_checked_send_text_submit() {
+  local backend=$1 target=$2 text=$3 retries=$4 enter_sleep=$5 settle=$6 expected_label=${7:-}
+  local lock composer verdict rc=0
+  lock=$(fm_checked_submit_lock_path "$backend" "$target") || return 2
   fm_lock_acquire_wait "$lock" || return 2
   if ! composer=$(fm_backend_composer_state "$backend" "$target" "$expected_label"); then
     composer=unknown
@@ -48,7 +63,7 @@ EOF
     fm_lock_release "$lock"
     return 0
   fi
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$text" "$retries" "$enter_sleep" "$settle" "$expected_label") || rc=$?
+  verdict=$(fm_backend_send_text_submit_unlocked "$backend" "$target" "$text" "$retries" "$enter_sleep" "$settle" "$expected_label") || rc=$?
   printf '%s' "${verdict:-send-failed}"
   fm_lock_release "$lock"
   return "$rc"
