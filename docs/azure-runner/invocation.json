@@ -1,0 +1,218 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "region": {
+      "type": "string",
+      "defaultValue": "eastus",
+      "allowedValues": ["eastus"]
+    },
+    "vmName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "nicName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "osDiskName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "subnetId": {
+      "type": "string"
+    },
+    "vmSize": {
+      "type": "string",
+      "allowedValues": [
+        "Standard_D4as_v6",
+        "Standard_D4as_v7",
+        "Standard_D4s_v6",
+        "Standard_D4ads_v7",
+        "Standard_D4ds_v6",
+        "Standard_D4s_v7",
+        "Standard_D4ds_v7",
+        "Standard_D4ads_v6"
+      ]
+    },
+    "ubuntuImageVersion": {
+      "type": "string",
+      "defaultValue": "24.04.202608070"
+    },
+    "expiryUtc": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 20,
+      "metadata": {
+        "description": "Exact UTC shutdown deadline formatted as YYYY-MM-DDTHH:MM:SSZ."
+      }
+    },
+    "expiryTimeOfDay": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 4,
+      "metadata": {
+        "description": "Exact UTC deallocation time formatted as HHmm."
+      }
+    },
+    "tags": {
+      "type": "object"
+    },
+    "bootstrapEgressRateBitsPerSecond": {
+      "type": "int",
+      "defaultValue": 1000000,
+      "minValue": 1000000,
+      "maxValue": 1000000
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('nicName')]",
+      "location": "[parameters('region')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "enableAcceleratedNetworking": true,
+        "auxiliaryMode": "None",
+        "ipConfigurations": [
+          {
+            "name": "primary",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[parameters('subnetId')]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('vmName')]",
+      "location": "[parameters('region')]",
+      "zones": ["1"],
+      "tags": "[parameters('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "securityProfile": {
+          "securityType": "TrustedLaunch",
+          "uefiSettings": {
+            "secureBootEnabled": true,
+            "vTpmEnabled": true
+          },
+          "encryptionAtHost": true
+        },
+        "osProfile": {
+          "computerName": "[parameters('vmName')]",
+          "adminUsername": "fmbootstrap",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "provisionVMAgent": true
+          }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "ubuntu-24_04-lts",
+            "sku": "server",
+            "version": "[parameters('ubuntuImageVersion')]"
+          },
+          "osDisk": {
+            "name": "[parameters('osDiskName')]",
+            "createOption": "FromImage",
+            "deleteOption": "Detach",
+            "diskSizeGB": 96,
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
+              "properties": {
+                "deleteOption": "Detach",
+                "primary": true
+              }
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/runCommands",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/safety-shutdown', parameters('vmName'))]",
+      "location": "[parameters('region')]",
+      "tags": "[parameters('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "source": {
+          "script": "[format('set -eu\\ncat > /etc/systemd/system/fm-azure-runner-expiry.service <<\"EOF\"\\n[Unit]\\nDescription=Stop expired disposable Firstmate Azure runner\\n[Service]\\nType=oneshot\\nExecStart=/usr/sbin/shutdown -h now\\nEOF\\ncat > /etc/systemd/system/fm-azure-runner-expiry.timer <<\"EOF\"\\n[Unit]\\nDescription=Bound disposable Firstmate Azure runner lifetime\\n[Timer]\\nOnCalendar={0}\\nPersistent=true\\nUnit=fm-azure-runner-expiry.service\\n[Install]\\nWantedBy=timers.target\\nEOF\\nsystemctl daemon-reload\\nsystemctl enable --now fm-azure-runner-expiry.timer', parameters('expiryUtc'))]"
+        },
+        "asyncExecution": false,
+        "timeoutInSeconds": 300,
+        "treatFailureAsDeploymentFailure": true
+      }
+    },
+    {
+      "type": "Microsoft.DevTestLab/schedules",
+      "apiVersion": "2018-09-15",
+      "name": "[format('shutdown-{0}', parameters('vmName'))]",
+      "location": "[parameters('region')]",
+      "tags": "[parameters('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "status": "Enabled",
+        "taskType": "ComputeVmShutdownTask",
+        "dailyRecurrence": {
+          "time": "[parameters('expiryTimeOfDay')]"
+        },
+        "timeZoneId": "UTC",
+        "targetResourceId": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+        "notificationSettings": {
+          "status": "Disabled"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "vmId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+    },
+    "nicId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+    },
+    "osDiskId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Compute/disks', parameters('osDiskName'))]"
+    },
+    "ttlScheduleId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.DevTestLab/schedules', format('shutdown-{0}', parameters('vmName')))]"
+    }
+  }
+}

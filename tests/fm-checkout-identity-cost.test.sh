@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Cost-shape tests for the checkout identity primitives in
 # bin/fm-checkout-lock-lib.sh.
 #
