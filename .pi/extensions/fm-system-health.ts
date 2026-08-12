@@ -1,13 +1,22 @@
 // Firstmate's compact Pi system-health status.
 //
-// The extension reports OS free RAM and sampled aggregate CPU utilization only.
-// It deliberately does not call a subprocess or inspect files, so the status stays
-// cheap and truthful on macOS and on platforms where only Node's portable metrics exist.
+// The extension reports available RAM and sampled aggregate CPU utilization only.
+//
+// Memory semantics are platform-specific on purpose. Node's `os.freemem()` reports
+// only wholly unused pages, which on macOS excludes the inactive, speculative, and
+// purgeable pages the OS itself counts as available. Reporting that number would
+// show a single-digit percentage on an idle Mac while macOS reports two thirds free.
+// On macOS the extension therefore derives available memory from `vm_stat` page
+// counts, matching the OS view within rounding. Elsewhere `os.freemem()` is truthful
+// and is used directly. The `vm_stat` call is a bounded, cached subprocess run only
+// from the sampler at its fixed cadence, never from render() or a repaint.
 import * as os from "node:os";
+import { execFile } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const SYSTEM_HEALTH_STATUS_KEY = "firstmate-system-health";
 export const SYSTEM_HEALTH_REFRESH_MS = 3_000;
+export const SYSTEM_HEALTH_VM_STAT_TIMEOUT_MS = 1_000;
 
 export type CpuTimesLike = {
   user: number;
@@ -35,14 +44,77 @@ export type HealthSources = {
   totalMemoryBytes?: number;
   freeMemoryBytes?: number;
   cpus?: readonly CpuInfoLike[];
+  // When true the macOS availability rules apply and `freeMemoryBytes` is ignored,
+  // because `os.freemem()` is not a truthful availability signal on that platform.
+  isMacOs?: boolean;
+  // Parsed `vm_stat` counters; absent when the source could not be read.
+  vmStat?: VmStatPageCounts;
 };
 
 export type HealthTone = "muted" | "warning" | "error";
 export type MetricKind = "memory" | "cpu";
 export type HealthTheme = Pick<ExtensionContext["ui"]["theme"], "fg">;
 
+// The subset of `vm_stat` page counters needed to describe macOS memory availability.
+export type VmStatPageCounts = {
+  pageSizeBytes: number;
+  wired: number;
+  compressorOccupied: number;
+};
+
 function boundedPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
+}
+
+function parseVmStatCounter(text: string, label: string): number | undefined {
+  // vm_stat prints "Pages wired down:      274568." — a trailing period, and the
+  // label itself may contain regex-significant characters in future macOS versions.
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escaped}:\\s*(\\d+)\\.?\\s*$`, "m").exec(text);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+export function parseVmStat(text: string | undefined): VmStatPageCounts | undefined {
+  if (!text) return undefined;
+  const pageSizeMatch = /page size of (\d+) bytes/.exec(text);
+  const pageSizeBytes = pageSizeMatch ? Number(pageSizeMatch[1]) : undefined;
+  const wired = parseVmStatCounter(text, "Pages wired down");
+  const compressorOccupied = parseVmStatCounter(text, "Pages occupied by compressor");
+  if (
+    pageSizeBytes === undefined ||
+    !Number.isFinite(pageSizeBytes) ||
+    pageSizeBytes <= 0 ||
+    wired === undefined ||
+    compressorOccupied === undefined
+  ) {
+    return undefined;
+  }
+  return { pageSizeBytes, wired, compressorOccupied };
+}
+
+// macOS treats wired and compressor-occupied pages as genuinely unavailable; active,
+// inactive, speculative, and purgeable pages are all reclaimable and are counted as
+// available by the OS. This mirrors the percentage `memory_pressure` reports.
+export function calculateMacOsAvailableMemoryPercent(
+  counts: VmStatPageCounts | undefined,
+  totalMemoryBytes: number | undefined,
+): number | undefined {
+  if (
+    !counts ||
+    totalMemoryBytes === undefined ||
+    !Number.isFinite(totalMemoryBytes) ||
+    totalMemoryBytes <= 0
+  ) {
+    return undefined;
+  }
+  const totalPages = totalMemoryBytes / counts.pageSizeBytes;
+  if (!Number.isFinite(totalPages) || totalPages <= 0) return undefined;
+  const unavailablePages = counts.wired + counts.compressorOccupied;
+  if (!Number.isFinite(unavailablePages) || unavailablePages < 0) return undefined;
+  if (unavailablePages > totalPages) return undefined;
+  return boundedPercent(((totalPages - unavailablePages) / totalPages) * 100);
 }
 
 export function calculateMemoryFreePercent(
@@ -107,10 +179,12 @@ export function sampleHealthSources(
   previousCpuSnapshot?: CpuSnapshot,
 ): { metrics: HealthMetrics; cpuSnapshot: CpuSnapshot | undefined } {
   const metrics: HealthMetrics = {};
-  const memoryFreePercent = calculateMemoryFreePercent(
-    sources.totalMemoryBytes,
-    sources.freeMemoryBytes,
-  );
+  // On macOS only the vm_stat-derived availability is truthful, so when that source
+  // is missing the memory metric is omitted rather than falling back to the
+  // os.freemem() ratio, which would read as near-zero on a healthy Mac.
+  const memoryFreePercent = sources.isMacOs
+    ? calculateMacOsAvailableMemoryPercent(sources.vmStat, sources.totalMemoryBytes)
+    : calculateMemoryFreePercent(sources.totalMemoryBytes, sources.freeMemoryBytes);
   if (memoryFreePercent !== undefined) metrics.memoryFreePercent = memoryFreePercent;
 
   const cpuSnapshot = captureCpuSnapshot(sources.cpus);
@@ -138,15 +212,40 @@ function readOptionalCpus(): readonly CpuInfoLike[] | undefined {
   }
 }
 
-export function sampleCurrentHealth(previousCpuSnapshot?: CpuSnapshot): {
+// Runs `vm_stat` with a bounded timeout and no shell. Resolves to undefined on any
+// failure so an unavailable source degrades to an omitted metric rather than a guess.
+export function readVmStat(
+  platform: string = process.platform,
+  timeoutMs: number = SYSTEM_HEALTH_VM_STAT_TIMEOUT_MS,
+): Promise<VmStatPageCounts | undefined> {
+  if (platform !== "darwin") return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "/usr/bin/vm_stat",
+        [],
+        { timeout: timeoutMs, maxBuffer: 64 * 1024, windowsHide: true },
+        (error, stdout) => resolve(error ? undefined : parseVmStat(stdout)),
+      );
+    } catch {
+      resolve(undefined);
+    }
+  });
+}
+
+export async function sampleCurrentHealth(previousCpuSnapshot?: CpuSnapshot): Promise<{
   metrics: HealthMetrics;
   cpuSnapshot: CpuSnapshot | undefined;
-} {
+}> {
+  const isMacOs = process.platform === "darwin";
+  const vmStat = await readVmStat();
   return sampleHealthSources(
     {
       totalMemoryBytes: readOptionalNumber(() => os.totalmem()),
       freeMemoryBytes: readOptionalNumber(() => os.freemem()),
       cpus: readOptionalCpus(),
+      isMacOs,
+      vmStat,
     },
     previousCpuSnapshot,
   );
@@ -205,9 +304,11 @@ export default function systemHealthExtension(pi: ExtensionAPI): void {
   let timer: ReturnType<typeof setInterval> | undefined;
   let previousCpuSnapshot: CpuSnapshot | undefined;
   let latestMetrics: HealthMetrics = {};
+  let startGeneration = 0;
 
   const clearTimer = (ctx?: ExtensionContext): void => {
     active = false;
+    startGeneration += 1;
     if (timer !== undefined) clearInterval(timer);
     timer = undefined;
     previousCpuSnapshot = undefined;
@@ -220,19 +321,31 @@ export default function systemHealthExtension(pi: ExtensionAPI): void {
     ctx.ui.setStatus(SYSTEM_HEALTH_STATUS_KEY, text || undefined);
   };
 
-  const sample = (ctx: ExtensionContext): void => {
-    const result = sampleCurrentHealth(previousCpuSnapshot);
-    previousCpuSnapshot = result.cpuSnapshot;
-    latestMetrics = result.metrics;
-    publish(ctx);
+  // Guards against a slow vm_stat call overlapping the next tick, and against a
+  // sample that resolves after shutdown resurrecting a cleared status.
+  let sampling = false;
+
+  const sample = async (ctx: ExtensionContext): Promise<void> => {
+    if (sampling) return;
+    sampling = true;
+    const generation = startGeneration;
+    try {
+      const result = await sampleCurrentHealth(previousCpuSnapshot);
+      if (generation !== startGeneration) return;
+      previousCpuSnapshot = result.cpuSnapshot;
+      latestMetrics = result.metrics;
+      publish(ctx);
+    } finally {
+      sampling = false;
+    }
   };
 
   const start = (_event: unknown, ctx: ExtensionContext): void => {
     clearTimer(ctx);
     active = true;
-    sample(ctx);
+    void sample(ctx);
     timer = setInterval(() => {
-      if (active) sample(ctx);
+      if (active) void sample(ctx);
     }, SYSTEM_HEALTH_REFRESH_MS);
     timer.unref?.();
   };
