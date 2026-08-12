@@ -691,23 +691,27 @@ fm_busy_cursor_turn_state() {  # <transcript>
   [ -f "$1" ] || return 1
   if command -v jq >/dev/null 2>&1; then
     LC_ALL=C jq -Rr '
-      fromjson?
-      | if .type? == "turn_ended" then "close"
-        elif .role? == "user" then "open"
-        else "other"
-        end
+      try (
+        fromjson
+        | if type == "object" and .type? == "turn_ended" then "close"
+          elif type == "object" and .role? == "user" then "open"
+          else "other"
+          end
+      ) catch "malformed"
     ' "$1"
   else
     LC_ALL=C awk '
       /^[[:space:]]*\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"turn_ended"([[:space:]]*[,}])/ { print "close"; next }
       /^[[:space:]]*\{[[:space:]]*"role"[[:space:]]*:[[:space:]]*"user"([[:space:]]*[,}])/ { print "open"; next }
-      { print "other" }
+      /^[[:space:]]*\{.*\}[[:space:]]*$/ { print "other"; next }
+      { print "malformed" }
     ' "$1"
   fi | LC_ALL=C awk '
-    $0 == "close" { open = 0; seen = 1; next }
-    $0 == "open" { open = 1; seen = 1 }
+    $0 == "close" { open = 0; seen = 1; malformed = 0; next }
+    $0 == "open" { open = 1; seen = 1; next }
+    $0 == "malformed" { if (!open) malformed = 1; next }
     END {
-      if (!seen) { print "none"; exit }
+      if (!seen || (!open && malformed)) { print "none"; exit }
       print (open ? "busy" : "settled")
     }
   '
