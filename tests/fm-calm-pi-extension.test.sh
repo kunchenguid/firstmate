@@ -531,12 +531,50 @@ if (classifyCalls() !== 1) {
 if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
   throw new Error("an evicted-then-recomputed message stopped being hidden");
 }
+
+// Reloading the extension re-runs the installer against the already-patched prototype.
+// The warm classification cache must survive that, or a reload during an active run
+// re-spawns the classifier for every message already sitting in the dock.
+mode.session = {
+  getSteeringMessages: () => [operational],
+  getFollowUpMessages: () => [genuine],
+};
+mode.updatePendingMessagesDisplay();
+layout.installCalmOperationalUserLayout();
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+if (classifyCalls() !== 0) {
+  throw new Error(
+    `reinstalling the adapter discarded the classification cache and re-ran the classifier ${classifyCalls()} time(s)`,
+  );
+}
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("reinstalling the adapter stopped hiding the operational dock row");
+}
+if (!dockText().includes(genuine)) {
+  throw new Error("reinstalling the adapter hid the genuine queued captain message");
+}
+
+// The reload must still adopt the reloaded Calm visibility state, so turning Calm off
+// after a reinstall has to restore the operational row.
+visibility.setCalmPresentation(false);
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (!dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("after a reinstall, Calm-off did not restore the operational dock row");
+}
+visibility.setCalmPresentation(true);
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("after a reinstall, re-enabling Calm did not hide the operational dock row");
+}
 JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm dock classification-reuse failed: $out"
   [ -z "$out" ] || fail "Pi calm dock classification-reuse printed output: $out"
-  pass "repainting the pending dock reuses cached operational classification, still classifies new messages once, and keeps the cache bounded"
+  pass "repainting the pending dock reuses cached operational classification across reinstalls, still classifies new messages once, keeps the cache bounded, and still tracks Calm toggles"
 }
 
 test_pi_private_member_probe_fails_loudly() {

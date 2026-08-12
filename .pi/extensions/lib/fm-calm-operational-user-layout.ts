@@ -152,8 +152,12 @@ export function installCalmOperationalUserLayout(): void {
   };
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {
+    // hidesOperationalInput closes over this module's Calm visibility state, so a reload
+    // must adopt the new one. isOperationalInput is deliberately left alone: it classifies
+    // by the same version-stable rules either way, and replacing it would throw away the
+    // warm classification cache and re-spawn the classifier for every already-queued
+    // message on the next dock repaint.
     installed.hidesOperationalInput = hidesOperationalInput;
-    installed.isOperationalInput = isOperationalInput;
     return;
   }
 
