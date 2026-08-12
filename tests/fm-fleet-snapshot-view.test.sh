@@ -28,6 +28,20 @@ for arg in "$@"; do
   if [ "$prev" = "-t" ]; then target=$arg; fi
   prev=$arg
 done
+if [ "${FM_TEST_REQUIRE_PARALLEL:-0}" = 1 ] && [ "${1:-}" = display-message ]; then
+  marker=${target//[^[:alnum:]._-]/_}
+  : > "${FM_HOME:?}/state/.parallel-$marker"
+  parallel=0
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    count=0
+    for seen in "${FM_HOME:?}"/state/.parallel-*; do
+      [ -e "$seen" ] && count=$((count + 1))
+    done
+    if [ "$count" -ge 2 ]; then parallel=1; break; fi
+    sleep 0.1
+  done
+  [ "$parallel" -eq 1 ] || : > "${FM_HOME:?}/state/parallelism-failed"
+fi
 case "${1:-}" in
   list-windows)
     sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
@@ -133,7 +147,7 @@ EOF
 }
 
 test_empty_fleet_json() {
-  local home out view
+  local home out local_out view
   home=$(make_home empty)
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
@@ -146,6 +160,13 @@ test_empty_fleet_json() {
       and .main_inventory.unstructured_current_count == 0
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
+  local_out=$(FM_HOME="$home" "$SNAPSHOT" --local-json)
+  printf '%s' "$local_out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and .secondmate_current.collection == "skipped-local-only"
+      and (.secondmate_current.records | length) == 0
+      and (.secondmate_landed.records | length) == 0
+  ' >/dev/null || fail "local-only snapshot did not disclose skipped cross-home aggregation: $local_out"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
@@ -195,6 +216,24 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+test_task_current_state_reads_are_parallel() {
+  local home fakebin out id
+  home=$(make_home parallel-task-state)
+  for id in first-task second-task third-task; do
+    mkdir -p "$home/projects/$id"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
+      "harness=codex" "kind=ship" "mode=ship"
+  done
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_TEST_REQUIRE_PARALLEL=1 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '([.tasks[].id] | sort) == ["first-task","second-task","third-task"]' >/dev/null \
+    || fail "parallel task-state fixture lost task rows: $out"
+  [ ! -e "$home/state/parallelism-failed" ] \
+    || fail "task current-state reads ran serially"
+  pass "snapshot reads independent task current states in parallel"
 }
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
@@ -781,6 +820,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_task_current_state_reads_are_parallel
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

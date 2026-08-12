@@ -40,6 +40,7 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
@@ -55,11 +56,21 @@ const observationStoreRecoveryLockPath = resolve(stateDirectory, ".fleet-dashboa
 
 const WATCH_LOCAL_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_LOCAL_SECONDS || "5", 10);
 const WATCH_GITHUB_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_GITHUB_SECONDS || "120", 10);
+const requestedForgeTimeoutMs = Number.parseInt(process.env.FM_FLEET_FORGE_TIMEOUT_MS || "60000", 10);
+const FORGE_REFRESH_TIMEOUT_MS = Number.isInteger(requestedForgeTimeoutMs) && requestedForgeTimeoutMs > 0
+  ? requestedForgeTimeoutMs
+  : 60000;
 const GITHUB_OPTIONAL_PR_LIMIT = 6;
 const REVIEW_REQUEST_LIMIT = 1000;
 const REVIEW_REQUEST_TIMELINE_LIMIT = 20;
 const READABLE_ID_LIMIT = 28;
 const OBSERVATION_STORE_VERSION = 1;
+const DEFAULT_BUCKET_LIMITS = Object.freeze({
+  decisions: 2,
+  "ours-in-review": 2,
+  "review-obligations": 2,
+  reviewing: 1,
+});
 const REVIEW_THREADS_QUERY = `
 query FleetDashboardReviewThreads($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -915,6 +926,80 @@ function fetchGithubStatuses(urls, viewer = null) {
   return { fetchedAtMs: Date.now(), results, error };
 }
 
+function fetchForgeState(inputs) {
+  const reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
+    ? fetchReviewRequests()
+    : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
+  const urls = githubPrUrls(inputs, reviewRequests);
+  return {
+    reviewRequests,
+    github: urls.length > 0 ? fetchGithubStatuses(urls, reviewRequests.viewer) : null,
+    quota: fetchQuota(),
+  };
+}
+
+function fetchForgeStateAsync(inputs) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const worker = new Worker(new URL(import.meta.url), {
+      workerData: { operation: "fetch-forge-state", inputs },
+    });
+    let settled = false;
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      settle(() => {
+        worker.unref();
+        rejectPromise(new Error(`forge refresh timed out after ${FORGE_REFRESH_TIMEOUT_MS}ms`));
+      });
+    }, FORGE_REFRESH_TIMEOUT_MS);
+    worker.once("message", (message) => {
+      settle(() => {
+        if (message.ok) resolvePromise(message.value);
+        else rejectPromise(new Error(message.error));
+      });
+    });
+    worker.once("error", (error) => {
+      settle(() => rejectPromise(error));
+    });
+    worker.once("exit", (code) => {
+      settle(() => rejectPromise(new Error(`forge refresh worker exited ${code} without a result`)));
+    });
+  });
+}
+
+function runLocalWorker(operation) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const worker = new Worker(new URL(import.meta.url), {
+      workerData: { operation },
+    });
+    let settled = false;
+    worker.once("message", (message) => {
+      settled = true;
+      if (message.ok) resolvePromise(message.value);
+      else rejectPromise(new Error(message.error));
+    });
+    worker.once("error", (error) => {
+      settled = true;
+      rejectPromise(error);
+    });
+    worker.once("exit", (code) => {
+      if (!settled) rejectPromise(new Error(`${operation} worker exited ${code} without a result`));
+    });
+  });
+}
+
+async function collectEssentialLocalInputsAsync() {
+  const [snapshot, reviews] = await Promise.all([
+    runLocalWorker("collect-fleet-snapshot"),
+    runLocalWorker("collect-review-relationships"),
+  ]);
+  return { snapshot, telemetryRows: null, telemetryPresent: existsSync(telemetryPath), reviews };
+}
+
 function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github, reviewRequests, quota }) {
   const observedMilliseconds = Date.parse(snapshot.generated || "");
   const backlogPresent = snapshot.backlog?.present === true;
@@ -1441,6 +1526,11 @@ function clip(text, width) {
 }
 
 function githubAgeLine(github, nowMs) {
+  if (github?.loading) {
+    if (!github.fetchedAtMs) return "checking GitHub…";
+    const ageSeconds = secondsSince(github.fetchedAtMs, nowMs);
+    return `checking GitHub… (last checked ${formatDuration(ageSeconds) ?? "?"} ago)`;
+  }
   if (!github) {
     return "github status not checked";
   }
@@ -1466,16 +1556,27 @@ function recapNeedsPedroLabel(recap) {
 }
 
 function visibleBucketItems(bucket, showAll) {
-  // PR checks and waiting state stay visible because this section replaces a GitHub status trip.
-  if (showAll || ["ours-in-review", "review-obligations"].includes(bucket.key)) return bucket.items;
-  return bucket.items.filter((item) =>
-    ["yellow", "red"].includes(item.markerKey) && !["aged", "answered"].includes(item.attentionClass),
+  if (showAll) return bucket.items;
+  const candidates = bucket.items.filter((item) =>
+    item.isNew || (
+      ["yellow", "red"].includes(item.markerKey) &&
+      !["aged", "answered"].includes(item.attentionClass)
+    ),
   );
+  return candidates
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const rank = ({ item }) => item.markerKey === "red" ? 0 : item.isNew ? 1 : 2;
+      return rank(left) - rank(right) || left.index - right.index;
+    })
+    .slice(0, DEFAULT_BUCKET_LIMITS[bucket.key] ?? 0)
+    .map(({ item }) => item);
 }
 
 function collapsedBucketLabel(bucket, count) {
   if (bucket.key === "decisions") return `${count} deferred decision${count === 1 ? "" : "s"}`;
-  if (bucket.key === "ours-in-review") return `${count} other PR${count === 1 ? "" : "s"}`;
+  if (bucket.key === "ours-in-review") return `${count} deferred PR${count === 1 ? "" : "s"}`;
+  if (bucket.key === "review-obligations") return `${count} review request${count === 1 ? "" : "s"}`;
   if (bucket.key === "reviewing") return `${count} review relationship${count === 1 ? "" : "s"}`;
   return `${count} other item${count === 1 ? "" : "s"}`;
 }
@@ -1515,20 +1616,24 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
   ) {
     lines.push(`${paint("bold", "ATTENTION NOW")} | nothing needs Pedro`);
   } else {
-    lines.push(paint("bold", "ATTENTION NOW"));
     const counts = [
       model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
       model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
       model.recap.obligations.length > 0 ? `${model.recap.obligations.length} review${model.recap.obligations.length === 1 ? "" : "s"} waiting` : null,
     ].filter(Boolean);
-    lines.push(`  ${counts.join(" | ")}`);
-    const featured = recapFeaturedItems(model.recap);
-    for (const item of featured) {
-      lines.push(`  ${paint(item.marker.color, item.marker.glyph)} ${clip(item.name, Math.max(1, width - 4))}`);
-    }
-    const hidden = model.recap.needsPedro.length + model.recap.stuck.length + model.recap.obligations.length - featured.length;
-    if (hidden > 0) {
-      lines.push(paint("dim", `  +${hidden} more below`));
+    if (!showAll) {
+      lines.push(`${paint("bold", "ATTENTION NOW")} | ${counts.join(" | ")}`);
+    } else {
+      lines.push(paint("bold", "ATTENTION NOW"));
+      lines.push(`  ${counts.join(" | ")}`);
+      const featured = recapFeaturedItems(model.recap);
+      for (const item of featured) {
+        lines.push(`  ${paint(item.marker.color, item.marker.glyph)} ${clip(item.name, Math.max(1, width - 4))}`);
+      }
+      const hidden = model.recap.needsPedro.length + model.recap.stuck.length + model.recap.obligations.length - featured.length;
+      if (hidden > 0) {
+        lines.push(paint("dim", `  +${hidden} more below`));
+      }
     }
   }
 
@@ -1536,7 +1641,13 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
     lines.push("");
     const visibleItems = visibleBucketItems(bucket, showAll);
     const hiddenCount = bucket.items.length - visibleItems.length;
-    const count = showAll || bucket.key === "review-obligations" ? ` (${bucket.items.length})` : "";
+    const count = showAll
+      ? ` (${bucket.items.length})`
+      : hiddenCount > 0
+        ? ` · ${collapsedBucketLabel(bucket, hiddenCount)} - --all shows`
+        : bucket.key === "review-obligations"
+          ? ` (${bucket.items.length})`
+          : "";
     const label = `${bucket.name}${count} `;
     const header = `── ${label}${"─".repeat(Math.max(0, width - label.length - 3))}`;
     lines.push(paint("dim", clip(header, width)));
@@ -1561,9 +1672,6 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
           `${paint("dim", `${prefix}${stablePrefix}`)}${marker} ${paint(item.attentionClass === "aged" ? "dim" : null, title)}${item.isNew ? paint("yellow", newnessSuffix) : ""}`,
         );
       }
-    }
-    if (hiddenCount > 0) {
-      lines.push(paint("dim", clip(`   … ${collapsedBucketLabel(bucket, hiddenCount)} - --all shows`, width)));
     }
   }
   lines.push("");
@@ -1857,14 +1965,24 @@ function renderHtml(model) {
 }
 
 function collectLocalInputs() {
-  const snapshotText = run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--json"]);
+  const snapshot = collectFleetSnapshot();
+  const telemetry = collectTelemetry();
+  const reviews = collectReviewRelationships();
+  return { snapshot, ...telemetry, reviews };
+}
+
+function collectFleetSnapshot() {
+  const snapshotText = run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--local-json"]);
   let snapshot;
   try {
     snapshot = JSON.parse(snapshotText);
   } catch {
     throw new Error("fm-fleet-snapshot.sh returned malformed JSON");
   }
+  return snapshot;
+}
 
+function collectTelemetry() {
   const telemetryPresent = existsSync(telemetryPath);
   let telemetryRows = null;
   if (telemetryPresent) {
@@ -1879,9 +1997,7 @@ function collectLocalInputs() {
       throw new Error("fm-model-telemetry.sh returned malformed JSON");
     }
   }
-
-  const reviews = collectReviewRelationships();
-  return { snapshot, telemetryRows, telemetryPresent, reviews };
+  return { telemetryRows, telemetryPresent };
 }
 
 function githubPrUrls(inputs, reviewRequests = null) {
@@ -2140,6 +2256,20 @@ function hasMeaningfulNewness(current, previous) {
     hasExternalThreadChange(current.externalThreads, previous.externalThreads);
 }
 
+function previewNewness(model) {
+  const store = readObservationStore();
+  for (const item of model.buckets.flatMap((bucket) => bucket.items)) {
+    const entry = store?.rows?.[item.identity] ?? null;
+    item.isNew = entry?.pending === true;
+    item.observationSnapshot = {
+      watched: watchedValuesForItem(item),
+      pending: item.isNew,
+      revision: observationRevisionForItem(item, model),
+    };
+  }
+  numberModelRows(model);
+}
+
 function applyNewness(model) {
   withObservationStoreLock(() => {
     const items = model.buckets.flatMap((bucket) => bucket.items);
@@ -2207,9 +2337,15 @@ function markRowSeen(item) {
       observed &&
       (current?.pending === true) === observed.pending &&
       revisionCovers(observed.revision, current?.pendingRevision ?? null) &&
-      (JSON.stringify(current.watched) !== JSON.stringify(watched) || current.pending === true)
+      (JSON.stringify(current?.watched ?? null) !== JSON.stringify(watched) || current?.pending === true)
     ) {
-      store.rows[item.identity] = { ...current, watched, pending: false, pendingRevision: null };
+      store.rows[item.identity] = {
+        ...current,
+        watched,
+        pending: false,
+        pendingRevision: null,
+        row: current?.row ?? retainedRowForItem(item),
+      };
       writeObservationStore(store);
     }
   });
@@ -2244,10 +2380,26 @@ function watchLoop(width, useColor, showAll) {
   let input = "";
   let inputError = null;
   let refreshTimer = null;
+  let inputs = null;
+  let localRefreshInFlight = false;
+  let localRefreshError = null;
+  let forgeRefreshInFlight = false;
+  let lastForgeRefreshAtMs = null;
+  let firstForgeRefresh = true;
 
   const draw = () => {
-    if (!model) return;
     const frameWidth = width ?? process.stdout.columns ?? 80;
+    if (!model) {
+      const detail = localRefreshError
+        ? `local fleet state unavailable: ${localRefreshError}`
+        : "loading local fleet state…";
+      const prompt = input
+        ? `select row: ${input}_ while local state loads | q: exit`
+        : "q: exit";
+      const body = `FIRSTMATE FLEET\n\n${detail}\n\n${prompt}\n`;
+      process.stdout.write(`\u001b[H${body}\u001b[J`);
+      return;
+    }
     let body;
     if (selectedIdentity !== null) {
       if (selectedAcknowledged) {
@@ -2262,36 +2414,99 @@ function watchLoop(width, useColor, showAll) {
       body += "\nb or escape: back | q: exit\n";
     } else {
       body = renderTerminal(model, frameWidth, useColor, showAll, Date.now());
-      const prompt = inputError ?? (input ? `select row: ${input}_ then Enter` : "select: type row number + Enter | q: exit");
+      const prompt = inputError ?? (input
+        ? `select row: ${input}_ then Enter`
+        : localRefreshInFlight
+          ? "refreshing local fleet state… | q: exit"
+          : "select: type row number + Enter | q: exit");
       body += `${useColor ? ANSI.dim : ""}${clip(prompt, Math.min(frameWidth, 80))}${useColor ? ANSI.reset : ""}\n`;
     }
     process.stdout.write(`\u001b[H${body}\u001b[J`);
   };
 
-  const frame = () => {
-    try {
-      const inputs = collectLocalInputs();
-      if (github === null || secondsSince(github.fetchedAtMs, Date.now()) >= WATCH_GITHUB_SECONDS) {
-        reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
-          ? fetchReviewRequests()
-          : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
-        github = fetchGithubStatuses(githubPrUrls(inputs, reviewRequests), reviewRequests.viewer);
-        quota = fetchQuota();
-      }
-      model = buildModel({ ...inputs, github, reviewRequests, quota });
-      applyNewness(model);
-      if (
-        selectedIdentity !== null &&
-        !model.buckets.flatMap((bucket) => bucket.items).some((item) => item.identity === selectedIdentity)
-      ) {
-        selectedIdentity = null;
-        selectedAcknowledged = false;
-      }
-      draw();
-    } catch (error) {
-      process.stdout.write(`\u001b[Hfm-fleet-dashboard: ${error.message}\n\u001b[J`);
+  const rebuildModel = (previewOnly = false) => {
+    model = buildModel({ ...inputs, github, reviewRequests, quota });
+    if (previewOnly) previewNewness(model);
+    else applyNewness(model);
+    if (
+      selectedIdentity !== null &&
+      !model.buckets.flatMap((bucket) => bucket.items).some((item) => item.identity === selectedIdentity)
+    ) {
+      selectedIdentity = null;
+      selectedAcknowledged = false;
     }
-    refreshTimer = setTimeout(frame, WATCH_LOCAL_SECONDS * 1000);
+    draw();
+  };
+
+  const refreshForge = () => {
+    forgeRefreshInFlight = true;
+    github = github
+      ? { ...github, loading: true }
+      : { loading: true, fetchedAtMs: null, results: new Map(), error: null };
+    if (reviewRequests === null) {
+      reviewRequests = {
+        available: false,
+        loading: true,
+        fetchedAtMs: null,
+        viewer: null,
+        items: [],
+        reason: "checking GitHub…",
+      };
+    }
+    if (quota === null) {
+      quota = { available: false, loading: true, fetchedAtMs: null, providers: [], reason: "checking quota…" };
+    }
+    rebuildModel(firstForgeRefresh);
+    fetchForgeStateAsync(inputs).then((forge) => {
+      ({ github, reviewRequests, quota } = forge);
+      forgeRefreshInFlight = false;
+      lastForgeRefreshAtMs = Date.now();
+      rebuildModel(false);
+      firstForgeRefresh = false;
+    }).catch((error) => {
+      const fetchedAtMs = Date.now();
+      github = { loading: false, fetchedAtMs, results: new Map(), error: error.message };
+      reviewRequests = {
+        available: false,
+        fetchedAtMs,
+        viewer: null,
+        items: [],
+        reason: error.message,
+      };
+      quota = { available: false, fetchedAtMs, providers: [], reason: error.message };
+      forgeRefreshInFlight = false;
+      lastForgeRefreshAtMs = fetchedAtMs;
+      rebuildModel(false);
+      firstForgeRefresh = false;
+    });
+  };
+
+  const frame = () => {
+    if (localRefreshInFlight) return;
+    localRefreshInFlight = true;
+    localRefreshError = null;
+    draw();
+    const telemetryPromise = runLocalWorker("collect-telemetry").catch(() => ({
+      telemetryRows: null,
+      telemetryPresent: existsSync(telemetryPath),
+    }));
+    collectEssentialLocalInputsAsync().then((collected) => {
+      inputs = collected;
+      const forgeIsDue = lastForgeRefreshAtMs === null ||
+        secondsSince(lastForgeRefreshAtMs, Date.now()) >= WATCH_GITHUB_SECONDS;
+      if (forgeIsDue && !forgeRefreshInFlight) refreshForge();
+      else rebuildModel(firstForgeRefresh);
+      return telemetryPromise;
+    }).then((telemetry) => {
+      inputs = { ...inputs, ...telemetry };
+      rebuildModel(firstForgeRefresh);
+    }).catch((error) => {
+      localRefreshError = error.message;
+      draw();
+    }).finally(() => {
+      localRefreshInFlight = false;
+      refreshTimer = setTimeout(frame, WATCH_LOCAL_SECONDS * 1000);
+    });
   };
 
   process.stdin.on("keypress", (_character, key) => {
@@ -2335,43 +2550,65 @@ function watchLoop(width, useColor, showAll) {
   });
 
   process.on("exit", () => clearTimeout(refreshTimer));
+  draw();
   frame();
 }
 
-try {
-  const { outputPath, width, showAll, showRow, watch } = parseArguments(process.argv.slice(2));
-  if (outputPath !== null) {
-    assertSafeOutput(outputPath);
+if (!isMainThread && workerData?.operation === "fetch-forge-state") {
+  try {
+    parentPort.postMessage({ ok: true, value: fetchForgeState(workerData.inputs) });
+  } catch (error) {
+    parentPort.postMessage({ ok: false, error: error.message });
   }
-  if (watch) {
-    watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
-  } else {
-    const inputs = collectLocalInputs();
-    const reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
-      ? fetchReviewRequests()
-      : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
-    const urls = githubPrUrls(inputs, reviewRequests);
-    const github = urls.length > 0 ? fetchGithubStatuses(urls, reviewRequests.viewer) : null;
-    const quota = fetchQuota();
-    const model = buildModel({ ...inputs, github, reviewRequests, quota });
-    applyNewness(model);
-    if (showRow !== null) {
-      process.stdout.write(expandRow(
-        model,
-        typeof showRow === "number" ? { number: showRow } : { identity: showRow },
-      ));
-    } else if (outputPath !== null) {
-      writeAtomically(outputPath, renderHtml(model));
-      process.stdout.write(`${outputPath}\n`);
-    } else {
-      const terminalWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
-      const useColor = process.env.NO_COLOR
-        ? false
-        : Boolean(process.stdout.isTTY) || Boolean(process.env.FORCE_COLOR);
-      process.stdout.write(renderTerminal(model, terminalWidth, useColor, showAll));
+} else if (!isMainThread && workerData?.operation === "collect-fleet-snapshot") {
+  try {
+    parentPort.postMessage({ ok: true, value: collectFleetSnapshot() });
+  } catch (error) {
+    parentPort.postMessage({ ok: false, error: error.message });
+  }
+} else if (!isMainThread && workerData?.operation === "collect-telemetry") {
+  try {
+    parentPort.postMessage({ ok: true, value: collectTelemetry() });
+  } catch (error) {
+    parentPort.postMessage({ ok: false, error: error.message });
+  }
+} else if (!isMainThread && workerData?.operation === "collect-review-relationships") {
+  try {
+    parentPort.postMessage({ ok: true, value: collectReviewRelationships() });
+  } catch (error) {
+    parentPort.postMessage({ ok: false, error: error.message });
+  }
+} else if (isMainThread) {
+  try {
+    const { outputPath, width, showAll, showRow, watch } = parseArguments(process.argv.slice(2));
+    if (outputPath !== null) {
+      assertSafeOutput(outputPath);
     }
+    if (watch) {
+      watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
+    } else {
+      const inputs = collectLocalInputs();
+      const { github, reviewRequests, quota } = fetchForgeState(inputs);
+      const model = buildModel({ ...inputs, github, reviewRequests, quota });
+      applyNewness(model);
+      if (showRow !== null) {
+        process.stdout.write(expandRow(
+          model,
+          typeof showRow === "number" ? { number: showRow } : { identity: showRow },
+        ));
+      } else if (outputPath !== null) {
+        writeAtomically(outputPath, renderHtml(model));
+        process.stdout.write(`${outputPath}\n`);
+      } else {
+        const terminalWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
+        const useColor = process.env.NO_COLOR
+          ? false
+          : Boolean(process.stdout.isTTY) || Boolean(process.env.FORCE_COLOR);
+        process.stdout.write(renderTerminal(model, terminalWidth, useColor, showAll));
+      }
+    }
+  } catch (error) {
+    process.stderr.write(`fm-fleet-dashboard: ${error.message}\n`);
+    process.exit(1);
   }
-} catch (error) {
-  process.stderr.write(`fm-fleet-dashboard: ${error.message}\n`);
-  process.exit(1);
 }

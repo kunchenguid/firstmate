@@ -55,6 +55,11 @@ SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -f "$FM_HOME/slow-local-fixture" ] && [ ! -f "$FM_HOME/local-refresh-started" ]; then
+  touch "$FM_HOME/local-refresh-started"
+  sleep "${FM_TEST_LOCAL_SLEEP_SECONDS:-4}"
+  touch "$FM_HOME/local-refresh-finished"
+fi
 case "${1:-}" in
   list-windows)
     printf '%s\n' fm-decision-task fm-review-task fm-stuck-pr fm-mm-alpha fm-zz-zulu
@@ -74,6 +79,11 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -f "$FM_HOME/slow-github-fixture" ] && [ ! -f "$FM_HOME/github-refresh-started" ]; then
+  touch "$FM_HOME/github-refresh-started"
+  sleep "${FM_TEST_GITHUB_SLEEP_SECONDS:-2}"
+  touch "$FM_HOME/github-refresh-finished"
+fi
 if [ "${1:-}" = "search" ]; then
   if [ -f "$FM_HOME/fetch-priority-fixture" ]; then
     printf '[{"author":{"login":"one"},"number":950,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review one","url":"https://github.com/monalee/artemis/pull/950"},{"author":{"login":"two"},"number":951,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review two","url":"https://github.com/monalee/artemis/pull/951"},{"author":{"login":"three"},"number":952,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review three","url":"https://github.com/monalee/artemis/pull/952"},{"author":{"login":"four"},"number":953,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review four","url":"https://github.com/monalee/artemis/pull/953"},{"author":{"login":"five"},"number":954,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review five","url":"https://github.com/monalee/artemis/pull/954"},{"author":{"login":"six"},"number":955,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review six","url":"https://github.com/monalee/artemis/pull/955"}]'
@@ -620,7 +630,7 @@ test_clean_list_uses_truthful_markers_and_priority_order() {
 }
 
 test_default_rows_are_one_line_with_a_fresh_recap() {
-  local home fakebin out title_line
+  local home fakebin out title_line total_lines
   home=$(make_home interaction-list)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -630,24 +640,23 @@ test_default_rows_are_one_line_with_a_fresh_recap() {
   assert_contains "$out" "ATTENTION NOW" "fresh recap band is absent"
   assert_contains "$out" "3 need Pedro | 1 stuck | 2 reviews waiting" \
     "recap included deferred holds or omitted a review obligation"
-  assert_contains "$out" "Decide the public API" "recap did not name a current need"
-  assert_contains "$out" "+4 more below" "recap truncation hid its remaining-attention count"
+  assert_not_contains "$out" "+4 more below" "recap repeats rows instead of staying a one-line summary"
   title_line=$(printf '%s\n' "$out" | grep -F "PR 4003 |" | tail -1)
   assert_not_contains "$title_line" "firstmate" "default row includes project detail"
   assert_not_contains "$title_line" "for " "default row includes age detail"
   assert_contains "$out" "PR 4003 | local checks unknown | unregistered" \
     "actionable PR row omits established status"
-  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
-    "default screen hides established PR checks and review state"
-  assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
-    "default screen hides a PR waiting on review"
-  assert_contains "$out" "PR 4002 | local checks unknown | unregistered" \
-    "default screen hides a PR whose state remains unknown"
-  assert_not_contains "$out" "other PRs" "default screen still collapses our PR status rows"
+  assert_not_contains "$out" "PR 4001 |" "non-actionable PR detail stayed on the one-glance screen"
+  assert_not_contains "$out" "PR 4004 |" "waiting PR detail stayed on the one-glance screen"
+  assert_not_contains "$out" "PR 4002 |" "unknown PR detail stayed on the one-glance screen"
+  assert_contains "$out" "3 deferred PRs" "collapsed PR status has no counted --all affordance"
   assert_not_contains "$out" "$OUR_PR" "default list leaked a PR link"
   assert_contains "$out" "github status checked just now" "cached forge facts lost their explicit age"
+  total_lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  printf 'default_80_rows=%s\n' "$total_lines"
+  [ "$total_lines" -le 23 ] || fail "default cockpit exceeds one glance: $total_lines rows"
   [ "${#title_line}" -le 80 ] || fail "fixed terminal measure exceeded 80 columns"
-  pass "default view is a fixed-measure one-line list with fresh local recap"
+  pass "default view is a bounded one-glance list with a fresh local recap"
 }
 
 test_expansion_includes_evidence_derived_recommendation() {
@@ -729,6 +738,8 @@ test_absent_sources_and_unreachable_reviews_stay_honest() {
   out=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z "$DASHBOARD" --width 80) \
     || fail "absent-source terminal render failed"
   assert_contains "$out" "backlog absent" "missing backlog was not disclosed"
+  assert_contains "$out" "github status not checked" \
+    "empty fleet claimed a GitHub check without any PR URLs"
   assert_not_contains "$out" "telemetry absent" "source inventory leaked onto the default screen"
   assert_not_contains "$out" "token spend not measured" "measurement inventory leaked onto the default screen"
   assert_contains "$out" "captain holds unknown" "absent backlog rendered as an empty decisions list"
@@ -802,6 +813,189 @@ test_watch_flag_needs_a_terminal_and_stays_exclusive() {
   pass "watch mode refuses non-terminals and stays exclusive with file output"
 }
 
+test_watch_paints_and_accepts_input_during_forge_refresh() {
+  local home fakebin metrics paint_ms
+  home=$(make_home watch-pty)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  touch "$home/slow-local-fixture" "$home/slow-github-fixture"
+
+  metrics=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" <<'PY'
+import fcntl
+import os
+import pty
+import select
+import struct
+import subprocess
+import sys
+import termios
+import time
+
+
+def read_available(master_fd, output):
+    readable, _, _ = select.select([master_fd], [], [], 0)
+    if not readable:
+        return
+    try:
+        chunk = os.read(master_fd, 65536)
+    except OSError:
+        return
+    if chunk:
+        output.extend(chunk)
+
+
+dashboard, home = sys.argv[1:]
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "30",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "120",
+    "FM_TEST_LOCAL_SLEEP_SECONDS": "4",
+    "FM_TEST_GITHUB_SLEEP_SECONDS": "4",
+    "NO_COLOR": "1",
+})
+
+
+def launch():
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    before = termios.tcgetattr(slave_fd)
+    monitor_fd = os.dup(slave_fd)
+    process = subprocess.Popen(
+        [dashboard, "--watch", "--width", "80"],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+        env=environment,
+    )
+    os.close(slave_fd)
+    return process, master_fd, monitor_fd, before
+
+
+# Run 1: a digit is typed only after the deliberately slow local refresh starts.
+local_started = os.path.join(home, "local-refresh-started")
+local_finished = os.path.join(home, "local-refresh-finished")
+process, master_fd, slave_fd, before = launch()
+started_at = time.monotonic()
+output = bytearray()
+first_paint_ms = None
+key_sent = False
+key_honoured_during_local = False
+deadline = started_at + 30
+while time.monotonic() < deadline and process.poll() is None:
+    read_available(master_fd, output)
+    if first_paint_ms is None and b"FIRSTMATE FLEET" in output:
+        first_paint_ms = (time.monotonic() - started_at) * 1000
+    if not key_sent and os.path.exists(local_started) and not os.path.exists(local_finished):
+        os.write(master_fd, b"1")
+        key_sent = True
+    if key_sent and b"select row: 1_ while local state loads" in output:
+        key_honoured_during_local = not os.path.exists(local_finished)
+        break
+    time.sleep(0.01)
+while not os.path.exists(local_finished) and time.monotonic() < deadline:
+    read_available(master_fd, output)
+    time.sleep(0.01)
+if process.poll() is None:
+    os.write(master_fd, b"q")
+exit_deadline = time.monotonic() + 3
+while process.poll() is None and time.monotonic() < exit_deadline:
+    read_available(master_fd, output)
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+exit_code = process.wait(timeout=3)
+read_available(master_fd, output)
+after = termios.tcgetattr(slave_fd)
+cleanup = b"\x1b[?25h\x1b[?1049l"
+first_cleanup = cleanup in output
+first_tty_restored = bool(after[3] & termios.ICANON) and bool(before[3] & termios.ICANON)
+os.close(master_fd)
+os.close(slave_fd)
+
+# Run 2: keep the established digit+Enter proof specifically inside forge refresh.
+os.remove(os.path.join(home, "slow-local-fixture"))
+for marker in ("github-refresh-started", "github-refresh-finished"):
+    path = os.path.join(home, marker)
+    if os.path.exists(path):
+        os.remove(path)
+forge_started = os.path.join(home, "github-refresh-started")
+forge_finished = os.path.join(home, "github-refresh-finished")
+process, master_fd, slave_fd, before = launch()
+row_started_at = time.monotonic()
+row_output = bytearray()
+row_paint_ms = None
+first_row_before_forge = False
+key_sent = False
+expanded_before_forge = False
+deadline = row_started_at + 30
+while time.monotonic() < deadline and process.poll() is None:
+    read_available(master_fd, row_output)
+    if row_paint_ms is None and b"d:decision-task-api" in row_output:
+        row_paint_ms = (time.monotonic() - row_started_at) * 1000
+        first_row_before_forge = not os.path.exists(forge_finished)
+    if row_paint_ms is not None and not key_sent and os.path.exists(forge_started):
+        os.write(master_fd, b"1\r")
+        key_sent = True
+    if key_sent and b"row id: d:decision-task-api" in row_output:
+        expanded_before_forge = not os.path.exists(forge_finished)
+        break
+    time.sleep(0.01)
+if process.poll() is None:
+    forge_deadline = time.monotonic() + 8
+    while not os.path.exists(forge_finished) and time.monotonic() < forge_deadline:
+        read_available(master_fd, row_output)
+        time.sleep(0.01)
+    os.write(master_fd, b"q")
+exit_deadline = time.monotonic() + 3
+while process.poll() is None and time.monotonic() < exit_deadline:
+    read_available(master_fd, row_output)
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+row_exit_code = process.wait(timeout=3)
+read_available(master_fd, row_output)
+row_after = termios.tcgetattr(slave_fd)
+row_cleanup = cleanup in row_output
+row_tty_restored = bool(row_after[3] & termios.ICANON) and bool(before[3] & termios.ICANON)
+os.close(master_fd)
+os.close(slave_fd)
+
+print(f"first_paint_ms={first_paint_ms:.3f}" if first_paint_ms is not None else "first_paint_ms=missing")
+print(f"keypress_during_local_honoured={int(key_honoured_during_local)}")
+print(f"first_row_paint_ms={row_paint_ms:.3f}" if row_paint_ms is not None else "first_row_paint_ms=missing")
+print(f"first_row_before_forge={int(first_row_before_forge)}")
+print(f"keypress_during_forge_honoured={int(expanded_before_forge)}")
+print(f"loading_label_seen={int(b'checking GitHub' in row_output)}")
+print(f"exit_code={exit_code}")
+print(f"row_exit_code={row_exit_code}")
+print(f"cursor_and_alternate_restored={int(first_cleanup and row_cleanup)}")
+print(f"tty_canonical_restored={int(first_tty_restored and row_tty_restored)}")
+if first_paint_ms is None or row_paint_ms is None or not expanded_before_forge:
+    print(f"output_tail={bytes(output[-500:] + row_output[-2000:])!r}")
+PY
+  ) \
+    || fail "PTY dashboard driver failed"
+  printf '%s\n' "$metrics"
+  paint_ms=$(printf '%s\n' "$metrics" | awk -F= '$1 == "first_paint_ms" { print $2 }')
+  [ "$paint_ms" != "missing" ] || fail "watch mode never painted an immediate loading frame"
+  assert_contains "$metrics" "keypress_during_local_honoured=1" \
+    "keypress was not handled while the local snapshot worker was still blocked"
+  assert_contains "$metrics" "first_row_before_forge=1" \
+    "first local row stayed behind the forge refresh"
+  assert_contains "$metrics" "keypress_during_forge_honoured=1" \
+    "row selection was not handled while the forge refresh was still blocked"
+  assert_contains "$metrics" "loading_label_seen=1" "initial local paint hid the in-flight GitHub check"
+  assert_contains "$metrics" "exit_code=0" "q during local refresh did not exit watch mode cleanly"
+  assert_contains "$metrics" "row_exit_code=0" "q during forge refresh did not exit watch mode cleanly"
+  assert_contains "$metrics" "cursor_and_alternate_restored=1" \
+    "watch exit did not show the cursor and leave the alternate screen"
+  assert_contains "$metrics" "tty_canonical_restored=1" "watch exit left the terminal in raw mode"
+  pass "watch paints locally, handles input during forge refresh, and restores the terminal"
+}
+
 test_ignored_operational_directories_are_never_output_targets() {
   local home directory output error rc
   home=$(make_home forbidden-output)
@@ -818,20 +1012,20 @@ test_ignored_operational_directories_are_never_output_targets() {
   pass "dashboard refuses data, state, and config output roots"
 }
 
-test_default_screen_collapses_deferred_rows_without_hiding_our_prs() {
+test_default_screen_defers_non_actionable_rows_without_losing_full_inventory() {
   local home fakebin out all
   home=$(make_home minimal-default)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
 
   out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) || fail "minimal render failed"
-  assert_contains "$out" "2 deferred decisions" "aged and answered-looking holds have no counted affordance"
+  assert_contains "$out" "4 deferred decisions" "non-immediate decisions have no counted affordance"
   assert_contains "$out" "3 review relationships" "review work in progress has no counted affordance"
-  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
-    "default minimalism hid the PR checks Pedro uses to avoid a GitHub trip"
-  assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
-    "default minimalism hid what an open PR is waiting on"
-  assert_not_contains "$out" "other PRs" "our PR rows remain behind a collapsed affordance"
+  assert_contains "$out" "PR 4003 | local checks unknown | unregistered" \
+    "the locally stuck PR did not earn a default row"
+  assert_not_contains "$out" "PR 4001 |" "non-actionable PR stayed on the default screen"
+  assert_not_contains "$out" "PR 4004 |" "waiting PR stayed on the default screen"
+  assert_contains "$out" "3 deferred PRs" "deferred PRs have no counted affordance"
   assert_not_contains "$out" "Renew the signing certificate" "aged hold stayed on the default screen"
   assert_not_contains "$out" "Pick the flake-fix destination" "answered-looking hold stayed on the default screen"
   assert_not_contains "$out" "sources backlog" "non-actionable source inventory stayed on the default screen"
@@ -839,8 +1033,40 @@ test_default_screen_collapses_deferred_rows_without_hiding_our_prs() {
   all=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "expanded list render failed"
   assert_contains "$all" "Renew the signing certificate" "--all cannot reach an aged hold"
   assert_contains "$all" "Pick the flake-fix destination" "--all cannot reach an answered-looking hold"
+  assert_contains "$all" "PR 4001 | checks green | changes requested by reviewer-two" \
+    "--all cannot reach a deferred PR status"
+  assert_contains "$all" "PR 4004 | local checks unknown | waiting on local-reviewer" \
+    "--all cannot reach a waiting PR"
   assert_contains "$all" "PR 4188" "--all cannot reach a collapsed review relationship"
-  pass "default screen collapses deferred work without hiding our PR status"
+  pass "default screen defers non-actionable rows while --all preserves full status"
+}
+
+test_default_slots_prioritize_new_rows_and_name_hidden_reviews() {
+  local home fakebin seeded changed updated review_home review_fakebin review_out
+  home=$(make_home priority-slots)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  seeded=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "priority-slot baseline render failed"
+  assert_not_contains "$seeded" "[NEW]" "priority-slot baseline was not seeded quietly"
+  updated="$home/data/backlog.md.updated"
+  awk '{ sub(/This is not yet decided and still needs Pedro\./, "Pedro must now choose the credential rotation window."); print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) \
+    || fail "priority-slot changed render failed"
+  printf '%s\n' "$changed" | rg -F "Decide whether to rotate the credential" | rg -F "[NEW]" >/dev/null \
+    || fail "a NEW decision behind the cap did not win a default slot: $changed"
+
+  review_home=$(make_home review-slot-label)
+  write_live_fixture "$review_home"
+  touch "$review_home/fetch-priority-fixture"
+  review_fakebin=$(make_fakebin "$review_home")
+  review_out=$(NO_COLOR=1 render_terminal "$review_home" "$review_fakebin" --width 80) \
+    || fail "review-slot label render failed"
+  assert_contains "$review_out" "4 review requests - --all shows" \
+    "hidden review requests were mislabeled as generic items"
+  pass "NEW work wins default slots and hidden review requests keep their meaning"
 }
 
 test_readable_ids_survive_colliding_rows_and_support_prefix_lookup() {
@@ -1068,7 +1294,7 @@ test_registered_ours_are_fetched_before_capped_optional_urls() {
   done
   fakebin=$(make_fakebin "$home")
 
-  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) || fail "fetch-priority render failed"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "fetch-priority render failed"
   assert_contains "$out" "github status checked just now" "successful bounded GitHub fetch lost its freshness header"
   assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
     "registered OURS URL was displaced from the bounded GitHub fetch set"
@@ -1242,6 +1468,149 @@ test_expansion_marks_only_the_selected_row_seen() {
   printf '%s\n' "$after" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
     || fail "expanding one row marked another row seen"
   pass "expansion marks only the selected row seen"
+}
+
+test_watch_expansion_acknowledges_new_row_during_forge_loading() {
+  local home fakebin changed row_id row_number store metrics
+  home=$(make_home watch-newness-ack)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "watch-newness baseline render failed"
+  printf 'needs-decision [key=api-shape]: Choose the versioned public API shape.\n' \
+    > "$home/state/decision-task.status"
+  changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "watch-newness changed render failed"
+  row_id=$(printf '%s\n' "$changed" | rg -F "Decide the public API" | awk '{print $2}')
+  row_number=$(printf '%s\n' "$changed" | rg -F "Decide the public API" | awk '{print $1}')
+  [ -n "$row_id" ] && [ -n "$row_number" ] || fail "watch-newness row was not addressable"
+  touch "$home/slow-github-fixture"
+
+  metrics=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" "$row_id" "$row_number" <<'PY'
+import fcntl, os, pty, select, struct, subprocess, sys, termios, time
+
+dashboard, home, row_id, row_number = sys.argv[1:]
+master, slave = pty.openpty()
+monitor = os.dup(slave)
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "30",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "120",
+    "FM_TEST_GITHUB_SLEEP_SECONDS": "4",
+    "NO_COLOR": "1",
+})
+process = subprocess.Popen(
+    [dashboard, "--watch", "--width", "80"],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=environment,
+)
+os.close(slave)
+output = bytearray()
+selected_during_forge = False
+deadline = time.monotonic() + 30
+started = os.path.join(home, "github-refresh-started")
+finished = os.path.join(home, "github-refresh-finished")
+sent = False
+while process.poll() is None and time.monotonic() < deadline:
+    if select.select([master], [], [], 0.02)[0]:
+        try:
+            output.extend(os.read(master, 65536))
+        except OSError:
+            break
+    if not sent and os.path.exists(started) and row_id.encode() in output and b"[NEW]" in output:
+        os.write(master, row_number.encode() + b"\r")
+        sent = True
+    if sent and b"row id: " + row_id.encode() in output:
+        selected_during_forge = not os.path.exists(finished)
+        break
+while not os.path.exists(finished) and time.monotonic() < deadline:
+    if select.select([master], [], [], 0.02)[0]:
+        try:
+            output.extend(os.read(master, 65536))
+        except OSError:
+            break
+if process.poll() is None:
+    os.write(master, b"q")
+exit_deadline = time.monotonic() + 3
+while process.poll() is None and time.monotonic() < exit_deadline:
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+exit_code = process.wait(timeout=3)
+os.close(master)
+os.close(monitor)
+print(f"selected_during_forge={int(selected_during_forge)}")
+print(f"exit_code={exit_code}")
+PY
+  ) || fail "watch-newness PTY driver failed"
+  assert_contains "$metrics" "selected_during_forge=1" \
+    "NEW row was not expanded while forge data was still loading"
+  assert_contains "$metrics" "exit_code=0" "watch-newness PTY did not exit cleanly"
+  jq -e --arg id "$row_id" '.rows[$id].pending == false' "$store" >/dev/null \
+    || fail "expansion during forge loading did not persist the seen marker"
+  pass "watch expansion during forge loading persistently acknowledges a NEW row"
+}
+
+test_watch_forge_refresh_has_a_deadline() {
+  local home fakebin metrics
+  home=$(make_home watch-forge-timeout)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  touch "$home/slow-github-fixture"
+  metrics=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" <<'PY'
+import fcntl, os, pty, select, struct, subprocess, sys, termios, time
+
+dashboard, home = sys.argv[1:]
+master, slave = pty.openpty()
+monitor = os.dup(slave)
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "30",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "120",
+    "FM_FLEET_FORGE_TIMEOUT_MS": "250",
+    "FM_TEST_GITHUB_SLEEP_SECONDS": "4",
+    "NO_COLOR": "1",
+})
+process = subprocess.Popen(
+    [dashboard, "--watch", "--width", "80"],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=environment,
+)
+os.close(slave)
+output = bytearray()
+timeout_seen = False
+timeout_before_command_finished = False
+deadline = time.monotonic() + 8
+finished = os.path.join(home, "github-refresh-finished")
+while process.poll() is None and time.monotonic() < deadline:
+    if select.select([master], [], [], 0.02)[0]:
+        try:
+            output.extend(os.read(master, 65536))
+        except OSError:
+            break
+    if b"forge refresh timed out" in output:
+        timeout_seen = True
+        timeout_before_command_finished = not os.path.exists(finished)
+        break
+if process.poll() is None:
+    process.kill()
+exit_code = process.wait(timeout=3)
+os.close(master)
+os.close(monitor)
+print(f"forge_timeout_seen={int(timeout_seen)}")
+print(f"forge_timeout_before_command_finished={int(timeout_before_command_finished)}")
+print(f"exit_code={exit_code}")
+PY
+  ) || fail "forge-timeout PTY driver failed"
+  assert_contains "$metrics" "forge_timeout_seen=1" "wedged forge worker had no visible deadline"
+  assert_contains "$metrics" "forge_timeout_before_command_finished=1" \
+    "forge deadline did not settle before the blocked command"
+  pass "watch forge refresh fails visibly at a bounded deadline"
 }
 
 test_unseen_newness_survives_a_watched_value_reverting() {
@@ -1639,8 +2008,10 @@ test_absent_sources_and_unreachable_reviews_stay_honest
 test_html_page_renders_minimal_sections_with_reachable_detail
 test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
+test_watch_paints_and_accepts_input_during_forge_refresh
 test_ignored_operational_directories_are_never_output_targets
-test_default_screen_collapses_deferred_rows_without_hiding_our_prs
+test_default_screen_defers_non_actionable_rows_without_losing_full_inventory
+test_default_slots_prioritize_new_rows_and_name_hidden_reviews
 test_readable_ids_survive_colliding_rows_and_support_prefix_lookup
 test_detail_contract_uses_report_evidence_and_slow_quota_without_fabrication
 test_review_obligations_are_distinct_and_oldest_first
@@ -1651,6 +2022,8 @@ test_corrupt_observation_store_reseeds_silently
 test_empty_observation_store_reseeds_silently
 test_identical_newness_render_stays_quiet_and_does_not_mark_seen
 test_expansion_marks_only_the_selected_row_seen
+test_watch_expansion_acknowledges_new_row_during_forge_loading
+test_watch_forge_refresh_has_a_deadline
 test_watched_field_change_flags_exactly_one_row
 test_excluded_events_never_flag_newness
 test_unseen_newness_survives_a_watched_value_reverting

@@ -94,6 +94,7 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_TASK_CONCURRENCY=${FM_SNAPSHOT_TASK_CONCURRENCY:-20}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -124,6 +125,7 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_TASK_CONCURRENCY "$FM_SNAPSHOT_TASK_CONCURRENCY"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -138,10 +140,14 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
+       fm-fleet-snapshot.sh --local-json
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
+
+--local-json preserves the schema but skips registered-secondmate aggregation;
+callers use it when they need only this home's backlog and task inventory.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -167,6 +173,7 @@ EOF
 OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
+  --local-json) OUTPUT_MODE=local-json ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
@@ -223,6 +230,33 @@ crew_state_json() {  # <id>
   esac
   jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
+}
+
+local_task_runtime_json() {  # <meta-file> <id>
+  local meta=$1 id=$2 current remote_host backend target kind endpoint_exists=null agent_alive=not_checked
+  current=$(crew_state_json "$id")
+  remote_host=$(meta_value "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    jq -n --argjson current "$current" \
+      '{current:$current,backend:null,target:null,endpoint_exists:null,agent_alive:"not_checked"}'
+    return 0
+  fi
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  kind=$(meta_value "$meta" kind)
+  if [ -n "$target" ]; then
+    if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+      endpoint_exists=true
+    else
+      endpoint_exists=false
+    fi
+  fi
+  if [ "$kind" = secondmate ] && [ -n "$target" ]; then
+    agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+  fi
+  jq -n --argjson current "$current" --arg backend "$backend" --arg target "$target" \
+    --argjson endpoint_exists "$endpoint_exists" --arg agent_alive "$agent_alive" \
+    '{current:$current,backend:$backend,target:$target,endpoint_exists:$endpoint_exists,agent_alive:$agent_alive}'
 }
 
 status_event_json() {  # <status-log>
@@ -403,10 +437,36 @@ task_json_lines() {
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
+  local current_state_dir current_state_failed=0 current_state_pid current_state_pids='' current_state_batch=0
+  local task_row_dir task_row_failed=0 task_row_pid task_row_pids='' task_row_batch=0 task_row_count=0
 
+  current_state_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.tasks.XXXXXX") || return 1
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
+    (local_task_runtime_json "$meta" "$id" > "$current_state_dir/$id.json") &
+    current_state_pids="$current_state_pids $!"
+    current_state_batch=$((current_state_batch + 1))
+    if [ "$current_state_batch" -ge "$FM_SNAPSHOT_TASK_CONCURRENCY" ]; then
+      for current_state_pid in $current_state_pids; do
+        wait "$current_state_pid" || current_state_failed=1
+      done
+      current_state_pids=''
+      current_state_batch=0
+    fi
+  done
+  for current_state_pid in $current_state_pids; do
+    wait "$current_state_pid" || current_state_failed=1
+  done
+  if [ "$current_state_failed" -ne 0 ]; then
+    rm -rf "$current_state_dir"
+    return 1
+  fi
+
+  task_json_for_meta() {  # <meta-file>
+    meta=$1
+    id=$(basename "$meta" .meta)
+    report_present=0
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
@@ -424,8 +484,8 @@ task_json_lines() {
       [ -n "$backend" ] || backend=unknown
       target=$(meta_value "$meta" remote_target)
     else
-      backend=$(fm_backend_of_meta "$meta")
-      target=$(fm_backend_target_of_meta "$meta")
+      backend=$(jq -r '.backend' "$current_state_dir/$id.json")
+      target=$(jq -r '.target' "$current_state_dir/$id.json")
     fi
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
@@ -440,7 +500,7 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
+    current_json=$(jq -c '.current' "$current_state_dir/$id.json")
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -500,16 +560,8 @@ task_json_lines() {
         agent_alive=unknown
       fi
     else
-      if [ -n "$target" ]; then
-        if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
-          endpoint_exists=true
-        else
-          endpoint_exists=false
-        fi
-      fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
-      fi
+      endpoint_exists=$(jq -r '.endpoint_exists' "$current_state_dir/$id.json")
+      agent_alive=$(jq -r '.agent_alive' "$current_state_dir/$id.json")
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
@@ -597,7 +649,39 @@ task_json_lines() {
              return_channel_note:null}
           end)
       }'
-  done | jq -s 'sort_by(.id)'
+  }
+
+  task_row_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.rows.XXXXXX") || {
+    rm -rf "$current_state_dir"
+    return 1
+  }
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    (task_json_for_meta "$meta" > "$task_row_dir/$id.json") &
+    task_row_pids="$task_row_pids $!"
+    task_row_batch=$((task_row_batch + 1))
+    task_row_count=$((task_row_count + 1))
+    if [ "$task_row_batch" -ge "$FM_SNAPSHOT_TASK_CONCURRENCY" ]; then
+      for task_row_pid in $task_row_pids; do wait "$task_row_pid" || task_row_failed=1; done
+      task_row_pids=''
+      task_row_batch=0
+    fi
+  done
+  for task_row_pid in $task_row_pids; do wait "$task_row_pid" || task_row_failed=1; done
+  if [ "$task_row_failed" -ne 0 ]; then
+    rm -rf "$current_state_dir" "$task_row_dir"
+    return 1
+  fi
+  if [ "$task_row_count" -eq 0 ]; then
+    jq -n '[]'
+  else
+    jq -s 'sort_by(.id)' "$task_row_dir"/*.json
+  fi
+  local task_json_rc=$?
+  rm -rf "$current_state_dir"
+  rm -rf "$task_row_dir"
+  return "$task_json_rc"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1121,11 +1205,30 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
        inconclusive:any(($activity_results + $decision_results)[]; .verdict == "inconclusive")}'
 }
 
+local_secondmate_summary() {  # <validated-home>
+  run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$1" \
+    FM_STATE_OVERRIDE="$1/state" \
+    FM_DATA_OVERRIDE="$1/data" \
+    FM_CONFIG_OVERRIDE="$1/config" \
+    FM_PROJECTS_OVERRIDE="$1/projects" \
+    FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" \
+    FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
+    FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
+    FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
+    FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
+    FM_SNAPSHOT_TASK_CONCURRENCY="$FM_SNAPSHOT_TASK_CONCURRENCY" \
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null
+}
+
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
+  local summary_dir summary_pids='' summary_pid preflight_home preflight_id preflight_remote preflight_error preflight_seen=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
     ($registry.records // []) as $registered
@@ -1147,6 +1250,32 @@ secondmate_current_json() {  # <parent-tasks-json>
   rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
   truncated=$((total - shown))
+
+  summary_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.secondmates.XXXXXX") || return 1
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    preflight_id=$(printf '%s' "$row" | jq -r '.id')
+    preflight_home=$(printf '%s' "$row" | jq -r '.home // ""')
+    preflight_remote=$(printf '%s' "$row" | jq -r '.remote // false')
+    preflight_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
+    [ -z "$preflight_error" ] || continue
+    [ "$preflight_remote" = false ] || continue
+    case "$preflight_home" in /*) : ;; *) continue ;; esac
+    validate_secondmate_home "$preflight_id" "$preflight_home" 2>/dev/null || continue
+    preflight_home=$VALIDATED_HOME
+    case " $preflight_seen " in
+      *" $preflight_home "*) continue ;;
+      *) preflight_seen="$preflight_seen $preflight_home" ;;
+    esac
+    (
+      local_secondmate_summary "$preflight_home" > "$summary_dir/$preflight_id.json"
+      printf '%s' "$?" > "$summary_dir/$preflight_id.rc"
+    ) &
+    summary_pids="$summary_pids $!"
+  done <<EOF
+$rows
+EOF
+  for summary_pid in $summary_pids; do wait "$summary_pid" || true; done
 
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -1202,21 +1331,11 @@ secondmate_current_json() {  # <parent-tasks-json>
         summary=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
           "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
         summary_rc=$?
+      elif [ -f "$summary_dir/$id.rc" ]; then
+        summary=$(<"$summary_dir/$id.json")
+        summary_rc=$(<"$summary_dir/$id.rc")
       else
-        summary=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
-          FM_ROOT_OVERRIDE="$FM_ROOT" \
-          FM_HOME="$home" \
-          FM_STATE_OVERRIDE="$home/state" \
-          FM_DATA_OVERRIDE="$home/data" \
-          FM_CONFIG_OVERRIDE="$home/config" \
-          FM_PROJECTS_OVERRIDE="$home/projects" \
-          FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" \
-          FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
-          FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
-          FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
-          FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
-          FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null)
+        summary=$(local_secondmate_summary "$home")
         summary_rc=$?
       fi
       if [ "$summary_rc" -ne 0 ]; then
@@ -1313,6 +1432,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   done <<EOF
 $rows
 EOF
+  rm -rf "$summary_dir"
   jq -n \
     --argjson registry "$(printf '%s' "$union" | jq '.registry')" \
     --argjson records "$records" \
@@ -1368,8 +1488,15 @@ fi
 SCOUT_REPORTS_JSON=$(scout_report_lines)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
-SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
-  || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
+if [ "$OUTPUT_MODE" = local-json ]; then
+  SECONDMATE_CURRENT_JSON=$(jq -n '
+    {collection:"skipped-local-only",
+     registry:{present:null,available:false,complete:false,reason:"skipped by --local-json",records:[]},
+     records:[],total_registered:0,total:0,shown:0,truncated:0}')
+else
+  SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
+    || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
+fi
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
