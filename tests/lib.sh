@@ -170,6 +170,33 @@ SH
   done
 }
 
+# fm_fake_treehouse <fakebin> [worktree-path]
+# Stub `treehouse` for spawn fixtures. fm-spawn.sh acquires the task worktree
+# itself with `treehouse get --lease --lease-holder <id>` and READS the acquired
+# path from stdout, so a silent exit-0 stub is not a usable treehouse: it makes
+# every spawn abort on an empty lease. This stub answers `get` with
+# $FM_TREEHOUSE_GET_PATH, then $FM_FAKE_PANE_PATH so a fixture that already
+# declares where its fake endpoint lands needs no second variable, then the
+# optional baked <worktree-path> for a fixture that names the worktree when it
+# builds the fakebin. `get --help` keeps advertising --lease, the capability
+# bootstrap probes for. Every other subcommand exits 0.
+fm_fake_treehouse() {
+  local fakebin=$1 baked=${2:-}
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ]; then
+  if [ "\${2:-}" = --help ]; then
+    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <id>]'
+    exit 0
+  fi
+  printf '%s\n' "\${FM_TREEHOUSE_GET_PATH:-\${FM_FAKE_PANE_PATH:-$baked}}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

@@ -175,6 +175,7 @@ SH
 set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_TREEHOUSE_REC"
 if [ "${1:-}" = get ]; then
+  [ "${FM_TREEHOUSE_GET_SILENT:-0}" = 1 ] && exit 0
   printf '%s\n' "${FM_TREEHOUSE_GET_PATH:-${FM_FAKE_PANE_PATH:-}}"
   exit 0
 fi
@@ -284,6 +285,45 @@ test_spawn_cwd_discovery_failure_returns_durable_lease() {
     "cwd-discovery failure must not substitute the unrelated endpoint worktree for the lease"
   assert_absent "$home/state/abort-cwd-kk1.meta" "stale cwd must not be published as task metadata"
   pass "fm-spawn: cwd-discovery failure returns its durable lease"
+}
+
+# The acquired path IS the lease. A `treehouse get` that exits 0 without naming
+# a usable directory leaves the endpoint nothing to enter, so the cwd poll below
+# it can never converge: spawn must refuse right there with the real reason
+# instead of spending the poll's full 60s and then blaming the endpoint.
+test_spawn_refuses_an_unusable_lease_without_waiting_out_the_poll() {
+  local home proj fakebin rec started elapsed out status
+  home="$TMP_ROOT/spawn-unusable-lease-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-unusable-lease-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-unusable-lease-fake")
+  rec="$TMP_ROOT/spawn-unusable-lease-treehouse.log"
+  : > "$rec"
+
+  started=$SECONDS
+  out=$(FM_TREEHOUSE_REC="$rec" FM_TREEHOUSE_GET_SILENT=1 \
+        run_spawn "$home" unusable-lease-mm2 "$proj" "$TMP_ROOT/spawn-unusable-lease-fake" "$fakebin"); status=$?
+  elapsed=$((SECONDS - started))
+  expect_code 1 "$status" "a lease that named no worktree must abort the spawn"
+  assert_contains "$out" "returned no usable worktree path" \
+    "an empty lease must be refused by its own reason, not a later symptom"
+  assert_not_contains "$out" "did not enter a worktree within 60s" \
+    "an empty lease must not be reported as an endpoint that failed to move"
+  [ "$elapsed" -lt 30 ] || fail "an empty lease waited out the cwd poll ($elapsed s) instead of refusing immediately"
+  assert_no_grep "treehouse return" "$rec" "nothing was leased, so nothing may be returned"
+  assert_absent "$home/state/unusable-lease-mm2.meta" "a refused lease must not publish task metadata"
+
+  # A lease that names a path which is not there is equally unusable, but it did
+  # take a pool slot, so that one must go back.
+  : > "$rec"
+  out=$(FM_TREEHOUSE_REC="$rec" FM_TREEHOUSE_GET_PATH="$TMP_ROOT/spawn-unusable-lease-missing" \
+        run_spawn "$home" unusable-lease-mm3 "$proj" "$TMP_ROOT/spawn-unusable-lease-fake" "$fakebin"); status=$?
+  expect_code 1 "$status" "a lease naming a missing directory must abort the spawn"
+  assert_contains "$out" "returned no usable worktree path" \
+    "a lease naming a missing directory must be refused by the same reason"
+  assert_grep "treehouse return --force $TMP_ROOT/spawn-unusable-lease-missing" "$rec" \
+    "a lease that was taken must be returned even when its path is unusable"
+  pass "fm-spawn: an unusable durable lease is refused immediately, with the pool slot returned only when one was taken"
 }
 
 # The lease-return call is the same operation fm-teardown.sh's
@@ -413,6 +453,7 @@ test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_abort_returns_durable_lease
+test_spawn_refuses_an_unusable_lease_without_waiting_out_the_poll
 test_spawn_cwd_discovery_failure_returns_durable_lease
 test_spawn_abort_lease_return_retries_transient_lock
 test_spawn_tmux_window_construction

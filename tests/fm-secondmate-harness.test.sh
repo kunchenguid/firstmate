@@ -605,6 +605,10 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
+  # A crew/scout spawn through this stub leases its own worktree before the pane
+  # ever moves, so the fakebin must shadow treehouse too - BASE_PATH deliberately
+  # carries no real one.
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -1021,14 +1025,7 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
+  fm_fake_treehouse "$fakebin"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then

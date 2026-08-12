@@ -2221,11 +2221,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if ! WT=$( ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) ); then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get --lease failed for $PROJ_ABS; no worktree was leased for $ID" >&2
     exit 1
   fi
-  TREEHOUSE_ABORT_CLEANUP=1
-  TREEHOUSE_ABORT_WT=$WT
+  # The acquired path IS the lease: a `treehouse get` that exits 0 without
+  # printing a usable directory leaves nothing to cd into, nothing to return,
+  # and nothing the cwd poll below could ever converge on. Refuse here with the
+  # real reason instead of spending the poll's full 60s on a wait that cannot
+  # succeed and then blaming the endpoint.
+  if [ -n "$WT" ]; then
+    TREEHOUSE_ABORT_CLEANUP=1
+    TREEHOUSE_ABORT_WT=$WT
+  fi
+  if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+    echo "error: treehouse get --lease returned no usable worktree path for $ID (got '$WT'); check the treehouse pool for $PROJ_ABS" >&2
+    exit 1
+  fi
   leased_wt_real=$(real_path_or_raw "$TREEHOUSE_ABORT_WT")
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
   WT=

@@ -207,8 +207,18 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
+if [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  # Arm the post-create abort without touching the real pool: lease the plain
+  # non-worktree directory the herdr stub also reports as the pane's cwd, so
+  # spawn reaches its isolation refusal. Its abort then returns that same
+  # non-pool path, which only this stub may answer.
+  if [ "${1:-}" = get ]; then
+    printf '%s\n' "$POST_CREATE_ABORT_CONTROL/not-a-worktree"
+    exit 0
+  fi
+  if [ "${1:-}" = return ]; then
+    exit 0
+  fi
 fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
@@ -819,7 +829,7 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
-mkdir -p "$POST_CREATE_ABORT_CONTROL"
+mkdir -p "$POST_CREATE_ABORT_CONTROL" "$POST_CREATE_ABORT_CONTROL/not-a-worktree"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
