@@ -255,6 +255,28 @@ test_invalid_effort_and_wrong_harness_refuse_without_runtime_input() {
   pass "fm-codex-effort: refuses invalid effort and non-Codex tasks without side effects"
 }
 
+test_lifecycle_and_metadata_locks_refuse_before_runtime_input() {
+  local dir lock out rc
+  dir=$(make_case control-lock)
+  lock="$dir/home/state/.control-effort-task.lock"
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  out=$(run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a concurrent lifecycle action was accepted"
+  assert_contains "$out" "lifecycle action" "control-lock refusal was unclear"
+  [ ! -s "$dir/runtime.log" ] || fail "control-lock refusal contacted the runtime"
+
+  dir=$(make_case metadata-lock)
+  lock="$dir/home/state/.meta-effort-task.lock"
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  out=$(run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a concurrent metadata update was accepted"
+  assert_contains "$out" "metadata update" "metadata-lock refusal was unclear"
+  [ ! -s "$dir/runtime.log" ] || fail "metadata-lock refusal contacted the runtime"
+  pass "fm-codex-effort: serializes with lifecycle actions and metadata writers"
+}
+
 test_busy_and_ambiguous_runtime_states_refuse() {
   local dir before out rc
   dir=$(make_case busy-agent)
@@ -322,6 +344,7 @@ test_unverified_backends_refuse_before_input() {
 test_success_changes_effort_in_place_and_then_metadata
 test_tmux_reference_path_uses_semantic_reasoning_key
 test_invalid_effort_and_wrong_harness_refuse_without_runtime_input
+test_lifecycle_and_metadata_locks_refuse_before_runtime_input
 test_busy_and_ambiguous_runtime_states_refuse
 test_swallowed_input_and_changed_ui_never_report_success
 test_unverified_backends_refuse_before_input

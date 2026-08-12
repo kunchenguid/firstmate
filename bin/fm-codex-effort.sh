@@ -72,14 +72,30 @@ meta="$STATE/$task_id.meta"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$ROOT/bin/fm-wake-lib.sh"
 
-lock="$STATE/.codex-effort-$task_id.lock"
-if ! fm_lock_try_acquire "$lock"; then
-  refuse "another effort-switch operation already owns task $task_id."
+control_lock="$STATE/.control-$task_id.lock"
+meta_lock=$(fm_meta_lock_path "$meta") \
+  || refuse "could not resolve the metadata lock for task $task_id."
+if ! fm_lock_try_acquire "$control_lock"; then
+  refuse "another lifecycle action is already running for task $task_id."
 fi
+control_lock_held=1
+if ! fm_lock_try_acquire "$meta_lock"; then
+  fm_lock_release "$control_lock"
+  control_lock_held=0
+  refuse "another metadata update is already running for task $task_id."
+fi
+meta_lock_held=1
 tmp_meta=
 cleanup() {
   [ -z "$tmp_meta" ] || rm -f -- "$tmp_meta" 2>/dev/null || true
-  fm_lock_release "$lock"
+  if [ "$meta_lock_held" = 1 ]; then
+    fm_lock_release "$meta_lock"
+    meta_lock_held=0
+  fi
+  if [ "$control_lock_held" = 1 ]; then
+    fm_lock_release "$control_lock"
+    control_lock_held=0
+  fi
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
