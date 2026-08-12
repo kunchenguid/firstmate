@@ -680,7 +680,9 @@ SPAWN_ENDPOINT_KIND=
 SPAWN_ENDPOINT_ACQUISITION_FILE=
 SPAWN_ENDPOINT_UNRESOLVED=0
 FM_BACKEND_ACQUISITION_FILE=
+FM_BACKEND_ACQUISITION_TASK_ID=
 export FM_BACKEND_ACQUISITION_FILE
+export FM_BACKEND_ACQUISITION_TASK_ID
 SPAWN_WORKTREE_CLEANUP=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_PROJECT=
@@ -719,6 +721,11 @@ spawn_acquisition_field() {  # <file> <key>
   ' "$file"
 }
 
+spawn_herdr_acquisition_value_valid() {
+  [ -n "${1:-}" ] || return 1
+  fm_spawn_cleanup_field_valid "$1"
+}
+
 spawn_register_endpoint() {
   SPAWN_ENDPOINT_CLEANUP=1
   SPAWN_ENDPOINT_BACKEND=$1
@@ -745,11 +752,13 @@ spawn_prepare_endpoint_acquisition() {
   chmod 600 "$file" || { rm -f "$file"; return 1; }
   SPAWN_ENDPOINT_ACQUISITION_FILE=$file
   FM_BACKEND_ACQUISITION_FILE=$file
+  FM_BACKEND_ACQUISITION_TASK_ID=$ID
   export FM_BACKEND_ACQUISITION_FILE
+  export FM_BACKEND_ACQUISITION_TASK_ID
 }
 
 spawn_register_endpoint_from_file() {
-  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label
+  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label record_task_id
   [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
   backend=$(spawn_acquisition_field "$file" backend) || return 1
   kind=$(spawn_acquisition_field "$file" kind) || return 1
@@ -785,14 +794,27 @@ spawn_register_endpoint_from_file() {
       spawn_register_endpoint cmux "$workspace_id" "$surface_id" "$label" cmux-workspace
       ;;
     herdr:herdr-tab|herdr:target)
+      record_task_id=$(spawn_acquisition_field "$file" task_id) || return 1
+      [ "$record_task_id" = "${ID:-}" ] || return 1
+      spawn_herdr_acquisition_value_valid "$record_task_id" || return 1
       session=$(spawn_acquisition_field "$file" session) || return 1
       workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
       tab_id=$(spawn_acquisition_field "$file" tab_id) || return 1
-      spawn_register_endpoint herdr "$session" "$workspace_id:$tab_id" "$label" herdr-tab
+      spawn_herdr_acquisition_value_valid "$session" || return 1
+      spawn_herdr_acquisition_value_valid "$workspace_id" || return 1
+      spawn_herdr_acquisition_value_valid "$tab_id" || return 1
+      spawn_herdr_acquisition_value_valid "$label" || return 1
       if [ "$kind" = target ]; then
         pane_id=$(spawn_acquisition_field "$file" pane_id) || return 1
         [ -n "$pane_id" ] || return 1
+        spawn_herdr_acquisition_value_valid "$pane_id" || return 1
       fi
+      spawn_register_endpoint herdr "$session" "$workspace_id:$tab_id" "$label" herdr-tab
+      ;;
+    herdr:herdr-unresolved)
+      record_task_id=$(spawn_acquisition_field "$file" task_id) || return 1
+      [ "$record_task_id" = "${ID:-}" ] || return 1
+      spawn_herdr_acquisition_value_valid "$record_task_id" || return 1
       ;;
     *) return 1 ;;
   esac
@@ -880,6 +902,13 @@ spawn_register_endpoint_or_abort() {
     SPAWN_ENDPOINT_BACKEND=$backend
     SPAWN_ENDPOINT_LABEL=$label
     SPAWN_ENDPOINT_KIND=cmux-unresolved
+    return 1
+  fi
+  if [ "$backend" = herdr ] && [ "$result" = herdr-unresolved ]; then
+    SPAWN_ENDPOINT_UNRESOLVED=1
+    SPAWN_ENDPOINT_BACKEND=$backend
+    SPAWN_ENDPOINT_LABEL=$label
+    SPAWN_ENDPOINT_KIND=herdr-unresolved
     return 1
   fi
   if spawn_register_endpoint_from_file; then

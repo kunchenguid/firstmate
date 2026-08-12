@@ -782,6 +782,47 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
 }
 
+test_create_task_rejects_multidocument_response_without_corrupt_record() {
+  local dir log resp fb record out status task_id
+  dir="$TMP_ROOT/create-task-multidoc"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; record="$dir/acquisition"; : > "$log"
+  task_id=herdr-multidoc-1
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
+  printf '%s\n%s\n' \
+    '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' \
+    '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_ACQUISITION_FILE="$record" FM_BACKEND_ACQUISITION_TASK_ID="$task_id" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-multidoc /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must reject a multi-document provider response"
+  assert_contains "$out" "herdr-unresolved" "multi-document Herdr response did not leave the unresolved fallback result"
+  assert_contains "$(cat "$record")" 'backend=herdr' "multi-document Herdr response did not publish a backend-bound unresolved record"
+  assert_contains "$(cat "$record")" "task_id=$task_id" "multi-document Herdr response did not bind the unresolved record to its task"
+  assert_contains "$(cat "$record")" 'kind=herdr-unresolved' "multi-document Herdr response did not publish the unresolved acquisition kind"
+  assert_not_contains "$(cat "$record")" 'tab_id=' "multi-document Herdr response published an ambiguous tab identity"
+  pass "fm_backend_herdr_create_task: rejects multi-document responses and preserves a task-bound unresolved record"
+}
+
+test_create_task_keeps_safe_tab_fallback_when_pane_is_malformed() {
+  local dir log resp fb record out status
+  dir="$TMP_ROOT/create-task-malformed-pane"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; record="$dir/acquisition"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2\nbad"}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_ACQUISITION_FILE="$record" FM_BACKEND_ACQUISITION_TASK_ID=herdr-safe-tab-1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-safe-pane /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must report the malformed pane response as a partial acquisition"
+  assert_contains "$(cat "$record")" 'kind=herdr-tab' "malformed pane response did not publish the safe tab fallback kind"
+  assert_contains "$(cat "$record")" 'tab_id=w1:t2' "malformed pane response did not preserve the exact safe tab identity"
+  assert_contains "$(cat "$record")" 'task_id=herdr-safe-tab-1' "safe tab fallback record was not task-bound"
+  [ "$(awk -F= '$1 == "pane_id" { print substr($0, index($0, "=") + 1) }' "$record")" = "" ] \
+    || fail "malformed pane response published pane bytes instead of the safe tab-only fallback"
+  pass "fm_backend_herdr_create_task: preserves a safe exact tab fallback without publishing malformed pane bytes"
+}
+
 test_spawn_registers_herdr_partial_acquisition_fallback() {
   local dir home proj wt id fb out status
   dir="$TMP_ROOT/spawn-herdr-partial-acquisition"
@@ -4340,6 +4381,8 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
+test_create_task_rejects_multidocument_response_without_corrupt_record
+test_create_task_keeps_safe_tab_fallback_when_pane_is_malformed
 test_spawn_registers_herdr_partial_acquisition_fallback
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor

@@ -42,6 +42,8 @@ FM_BACKEND_ACQUISITION_FILE="$TMP_ROOT/records/zellij.record"
 fm_backend_zellij_acquisition_record firstmate fm-zellij 7 8 || fail 'zellij acquisition record failed'
 FM_BACKEND_ACQUISITION_FILE="$TMP_ROOT/records/cmux.record"
 fm_backend_cmux_acquisition_record fm-cmux ws-cmux sf-cmux || fail 'cmux acquisition record failed'
+FM_BACKEND_ACQUISITION_TASK_ID=writer-herdr
+export FM_BACKEND_ACQUISITION_TASK_ID
 FM_BACKEND_ACQUISITION_FILE="$TMP_ROOT/records/herdr.record"
 fm_backend_herdr_acquisition_record firstmate ws-herdr tab-herdr fm-herdr pane-herdr || fail 'herdr acquisition record failed'
 
