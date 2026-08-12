@@ -9,8 +9,9 @@
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# GitHub reports a PR head that contains the current local work, or - when no
+# recorded or discoverable PR is known to be unmerged - its content is already
+# present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
@@ -19,6 +20,7 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
+# A known open or closed-unmerged PR blocks the content fallback.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
@@ -830,7 +832,9 @@ EOF
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
 # for both the PR state and head. Returns non-zero when the PR is not merged, the
 # current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# occurs. Returns 2 when the resolved PR is known to be open or closed without a
+# merge, so the caller refuses without consulting the provenance-blind content
+# fallback.
 pr_is_merged() {
   local branch=$1 target view state head current
   if [ -n "$PR_URL" ]; then
@@ -845,6 +849,7 @@ pr_is_merged() {
   [ "$state" != "$view" ] || return 1
   case "$state" in
     MERGED|merged) ;;
+    OPEN|open|CLOSED|closed) return 2 ;;
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
@@ -882,11 +887,16 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# default branch and no resolved PR is known to be unmerged. The fallback still
+# covers the no-PR and gh-error paths. False only for genuinely unlanded work.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
+  local branch=$1 pr_rc
+  if pr_is_merged "$branch"; then
+    return 0
+  else
+    pr_rc=$?
+  fi
+  [ "$pr_rc" -ne 2 ] || return 1
   content_in_default
 }
 

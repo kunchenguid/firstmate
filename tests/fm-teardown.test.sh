@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) no-mistakes + recorded OPEN PR + sibling content landed -> REFUSE (live PR wins)
+#   (aa) no-mistakes + gh lookup error + content in default      -> ALLOW  (fallback preserved)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -274,6 +276,35 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitHub lookups to report PR 7 as open with the supplied head.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,open" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -885,6 +916,51 @@ test_content_in_default_fallback_allows() {
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_open_pr_with_sibling_content_in_default_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case open-pr-sibling-content)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$pr_head"
+  printf '%s\n' 'done: PR checks green but not merged' > "$case_dir/state/task-x1.status"
+
+  # A sibling PR independently lands the same content while this task's own
+  # recorded PR remains open. Content equality must not authorize teardown.
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr-sibling-content: teardown should refuse while the recorded PR is open"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-sibling-content: no REFUSED line in stderr"
+  assert_present "$case_dir/state/task-x1.meta" "open-pr-sibling-content: teardown removed task metadata"
+  assert_present "$case_dir/state/task-x1.status" "open-pr-sibling-content: teardown removed task status"
+  pass "recorded open PR prevents sibling content in default from authorizing teardown"
+}
+
+test_gh_error_with_content_in_default_allows() {
+  local case_dir rc
+  case_dir=$(make_case gh-error-content-landed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  add_gh_axi_error "$case_dir"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gh-error-content-landed: teardown should retain the content fallback on lookup error"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "gh-error-content-landed: teardown printed a REFUSED line"
+  pass "GitHub lookup error retains the content-in-default fallback"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -2619,6 +2695,8 @@ test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_open_pr_with_sibling_content_in_default_refuses
+test_gh_error_with_content_in_default_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
