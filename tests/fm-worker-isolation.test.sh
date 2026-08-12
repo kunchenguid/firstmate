@@ -1197,6 +1197,33 @@ test_malformed_metadata_record_retains() {
   pass "malformed pooled-slot metadata retains the lease"
 }
 
+test_nonregular_metadata_record_retains() {
+  local rec verdict
+  for kind in directory dangling-symlink regular-symlink; do
+    rec=$(make_slot_world "slot-nonregular-$kind")
+    read_slot_world "$rec"
+    fm_write_meta "$WORLD/home/state/task-nonregular.meta" \
+      "window=firstmate:fm-task-nonregular" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    if [ "$kind" = directory ]; then
+      mkdir "$WORLD/home/state/nonregular-sibling.meta"
+    elif [ "$kind" = dangling-symlink ]; then
+      ln -s "$WORLD/home/state/missing-record" "$WORLD/home/state/nonregular-sibling.meta"
+    else
+      fm_write_meta "$WORLD/home/state/nonregular-target" \
+        "window=firstmate:fm-nonregular-target" "worktree=$OTHER_WT" "project=$PROJ_DIR" \
+        "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+      ln -s "$WORLD/home/state/nonregular-target" "$WORLD/home/state/nonregular-sibling.meta"
+    fi
+    ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+      && fm_slot_stamp_write "$WT_DIR" task-nonregular "$WORLD/home" )
+    verdict=$(slot_verdict "$WORLD/home/state" task-nonregular "$WT_DIR" "$WORLD/home")
+    assert_contains "$verdict" "retain: all-home slot metadata evidence is unavailable" \
+      "$kind metadata authorized pooled-slot disposal"
+  done
+  pass "non-regular pooled-slot metadata retains the lease"
+}
+
 test_missing_ownership_stamp_retains() {
   local rec verdict
   rec=$(make_slot_world slot-missing-stamp)
@@ -1689,6 +1716,7 @@ test_clean_ownership_disposes
 test_unexpected_metadata_scan_failure_retains
 test_metadata_record_read_failure_retains
 test_malformed_metadata_record_retains
+test_nonregular_metadata_record_retains
 test_missing_ownership_stamp_retains
 test_relinquish_refuses_without_ownership_evidence
 test_missing_recorded_worktree_retains

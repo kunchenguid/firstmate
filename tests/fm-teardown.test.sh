@@ -1691,9 +1691,9 @@ test_projection_teardown_closes_owned_live_pane() {
   make_herdr_teardown_fake "$case_dir"
   cat > "$case_dir/fakebin/herdr-bound-close" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "pane close \$2" >> "$case_dir/herdr.log"
+printf '%s\n' "pane close \$3" >> "$case_dir/herdr.log"
 tmp="$case_dir/herdr-state.json.tmp"
-jq --arg pane "\$2" '.panes |= [.[] | select(.pane_id != \$pane)]' "$case_dir/herdr-state.json" > "\$tmp"
+jq --arg pane "\$3" '.panes |= [.[] | select(.pane_id != \$pane)]' "$case_dir/herdr-state.json" > "\$tmp"
 mv "\$tmp" "$case_dir/herdr-state.json"
 SH
   chmod +x "$case_dir/fakebin/herdr-bound-close"

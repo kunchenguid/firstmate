@@ -44,9 +44,14 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
-if [ "${1:-}" = api ] && [ "${2:-}" = schema ] && [ "${3:-}" = --json ] \
-   && [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" != 1 ]; then
-  printf '%s\n' '{"properties":{"method":{"const":"pane.close_bound"}},"$defs":{"PaneCloseBoundParams":{"properties":{"expected_pid":{"type":"integer"}}}}}'
+if [ "${1:-}" = api ] && [ "${2:-}" = schema ] && [ "${3:-}" = --json ]; then
+  if [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" = 1 ]; then
+    exit 0
+  elif [ "${FM_HERDR_SCHEMA_MODE:-}" = bad ]; then
+    printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/OtherParams"}}}]},"$defs":{"OtherParams":{"properties":{"expected_pid":{"type":"integer"}},"required":["expected_pid"]}}}}'
+  else
+    printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/PaneCloseBoundParams"}},"required":["method","params"],"type":"object"},{"properties":{"method":{"const":"tab.close_bound"},"params":{"$ref":"#/schemas/request/$defs/TabCloseBoundParams"}},"required":["method","params"],"type":"object"}],"$defs":{"PaneCloseBoundParams":{"properties":{"pane_id":{"type":"string"},"expected_pid":{"type":"integer"},"expected_start_time":{"type":"string"}},"required":["pane_id","expected_pid","expected_start_time"],"type":"object"},"TabCloseBoundParams":{"properties":{"workspace_id":{"type":"string"},"tab_id":{"type":"string"},"pane_id":{"type":"string"}},"required":["workspace_id","tab_id","pane_id"],"type":"object"}}}}}'
+  fi
   exit 0
 fi
 n=$next
@@ -110,8 +115,14 @@ done
 
 case "$cmd $sub" in
   "api schema")
-    if [ "${3:-}" = --json ] && [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" != 1 ]; then
-      printf '%s\n' '{"properties":{"method":{"const":"pane.close_bound"}},"$defs":{"PaneCloseBoundParams":{"properties":{"expected_pid":{"type":"integer"}}}}}'
+    if [ "${3:-}" = --json ]; then
+      if [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" = 1 ]; then
+        :
+      elif [ "${FM_HERDR_SCHEMA_MODE:-}" = bad ]; then
+        printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/OtherParams"}}}]},"$defs":{"OtherParams":{"properties":{"expected_pid":{"type":"integer"}},"required":["expected_pid"]}}}}'
+      else
+        printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/PaneCloseBoundParams"}},"required":["method","params"],"type":"object"},{"properties":{"method":{"const":"tab.close_bound"},"params":{"$ref":"#/schemas/request/$defs/TabCloseBoundParams"}},"required":["method","params"],"type":"object"}],"$defs":{"PaneCloseBoundParams":{"properties":{"pane_id":{"type":"string"},"expected_pid":{"type":"integer"},"expected_start_time":{"type":"string"}},"required":["pane_id","expected_pid","expected_start_time"],"type":"object"},"TabCloseBoundParams":{"properties":{"workspace_id":{"type":"string"},"tab_id":{"type":"string"},"pane_id":{"type":"string"}},"required":["workspace_id","tab_id","pane_id"],"type":"object"}}}}}'
+      fi
     fi
     ;;
   "status --json")
@@ -119,6 +130,9 @@ case "$cmd $sub" in
     ;;
   "workspace list")
     jq_state '{result:{workspaces:.workspaces}}'
+    ;;
+  "session list")
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"/tmp/fake-herdr.sock"}]}\n' "${HERDR_SESSION:-}"
     ;;
   "workspace create")
     n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
@@ -173,6 +187,25 @@ esac
 exit 0
 SH
   chmod +x "$fb/herdr"
+  cat > "$fb/herdr-bound-close" <<'SH'
+#!/usr/bin/env bash
+set -eu
+STATE="${FM_FAKE_HERDR_STATE:?}"
+[ "${2:-}" = --tab ] || exit 2
+workspace=${3:-}
+tab=${4:-}
+pane=${5:-}
+printf 'BOUND_TAB_CLOSE\x1f%s\x1f%s\x1f%s\n' "$workspace" "$tab" "$pane" >> "${FM_HERDR_LOG:?}"
+tmp="$STATE.tmp.$$"
+jq --arg w "$workspace" --arg t "$tab" --arg p "$pane" '
+  if any(.tabs[]; .workspace_id == $w and .tab_id == $t and .pane_id == $p)
+  then .tabs |= [.[] | select(.tab_id != $t)]
+  else error("bound tab identity mismatch")
+  end
+' "$STATE" > "$tmp"
+mv "$tmp" "$STATE"
+SH
+  chmod +x "$fb/herdr-bound-close"
   printf '%s\n' "$fb"
 }
 
@@ -235,6 +268,19 @@ test_version_check_refuses_without_atomic_bound_close() {
   [ "$status" -ne 0 ] || fail "version_check should refuse a provider without atomic bound close"
   assert_contains "$out" "pane.close_bound" "version_check did not report the missing atomic close capability"
   pass "fm_backend_herdr_version_check: refuses a provider without atomic bound close"
+}
+
+test_version_check_refuses_mismatched_bound_schema() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/version-mismatched-bound-schema"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","channel":"stable","protocol":14}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_MODE=bad \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "version_check should refuse an unrelated schema definition"
+  assert_contains "$out" "pane.close_bound" "version_check did not report the mismatched bound-close schema"
+  pass "fm_backend_herdr_version_check: refuses a mismatched bound-close schema"
 }
 
 test_version_check_refuses_missing_herdr() {
@@ -722,15 +768,20 @@ test_close_active_husk_focuses_replacement() {
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t2"; }
     fm_backend_herdr_projection_focus_restore() { printf "%s\n" "$2" >> "$FOCUS_LOG"; }
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
     fm_backend_herdr_cli() {
       case "$2 $3" in
         "tab get")
           printf "{\"result\":{\"tab\":{\"workspace_id\":\"w1\",\"tab_id\":\"%s\"}}}" "$4"
           ;;
+        "pane get")
+          printf "{\"result\":{\"pane\":{\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\",\"pane_id\":\"w1:p2\"}}}"
+          ;;
         "tab close") printf "%s\n" "$4" >> "$CLOSE_LOG" ;;
       esac
     }
-    fm_backend_herdr_close_tab_focus_preserving default w1 w1:t2 w1:t3
+    fm_backend_herdr_projection_provider_close_tab_bound() { printf "%s\n" "$3" >> "$CLOSE_LOG"; }
+    fm_backend_herdr_close_tab_focus_preserving default w1 w1:t2 w1:t3 husk w1:p2
   ' "$ROOT"
   [ "$(cat "$dir/close")" = w1:t2 ] || fail "active husk close did not target the restored husk"
   [ "$(cat "$dir/focus")" = $'w1\tw1:t3\nw1\tw1:t3' ] \
@@ -2857,6 +2908,7 @@ test_workspace_ensure_prunes_default_tab() {
   local dir log state fb raw container seeded wsid ids pane tabcount
   dir="$TMP_ROOT/prune-default"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
+  export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
@@ -2883,14 +2935,15 @@ EOF
   [ "$tabcount" = 1 ] || fail "the auto-created default tab should be pruned once a real task tab exists, $tabcount tab(s) remain: $(jq -c '.tabs' "$state")"
   jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)][0].label' "$state" | grep -qx 'fm-prunetest' \
     || fail "the surviving tab should be the real task tab, not the default: $(jq -c '.tabs' "$state")"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "create_task did not close the default tab's pane"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1fw1\x1fw1:t2\x1fw1:p2' "create_task did not close the default tab through the bound provider"
   pass "fm_backend_herdr_create_task: prunes exactly the seeded default tab container_ensure identified, once the first real task tab exists"
 }
 
 test_repeated_cycles_reuse_one_workspace_no_orphans() {
-  local dir log state fb i raw container seeded wsid ids pane first_ws="" wscount total tabcount created
+  local dir log state fb i raw container seeded wsid ids tab pane first_ws="" wscount total tabcount created
   dir="$TMP_ROOT/cycles"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
+  export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   for i in 1 2 3; do
     raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
@@ -2909,13 +2962,14 @@ test_repeated_cycles_reuse_one_workspace_no_orphans() {
     ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-cycle$i" "$seeded" ) \
       || fail "cycle $i: create_task failed"
-    read -r _ pane <<EOF
+    read -r tab pane <<EOF
 $ids
 EOF
     [ -n "$pane" ] || fail "cycle $i: create_task returned no pane id"
     PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill "$1"' "$ROOT" "fmtest:$pane" \
-      || fail "cycle $i: kill failed"
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_provider_close_tab_bound "$1" "$2" "$3" "$4"' \
+      "$ROOT" fmtest "$wsid" "$tab" "$pane" \
+      || fail "cycle $i: bound tab cleanup failed"
   done
   # exactly one firstmate workspace survives three spawn/teardown cycles
   wscount=$(jq -r '[.workspaces[]|select(.label=="firstmate")]|length' "$state")
@@ -2954,6 +3008,7 @@ test_adopted_workspace_never_prunes_default_tab() {
   local dir log state fb raw container seeded ids pane
   dir="$TMP_ROOT/adopt-no-prune"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
+  export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   # Pre-seed a workspace that ALREADY exists before this spawn runs (as if a
   # previous session created it), with a single tab labeled "1" - the same
   # shape herdr's own auto-seeded default tab has, but this run's own
@@ -2995,6 +3050,7 @@ test_label_collision_startup_workspace_leaves_live_tab_alone() {
   local dir log state fb raw container seeded ids pane
   dir="$TMP_ROOT/label-collision"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
+  export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   # Mimic a bare `herdr workspace create --cwd <dir-named-firstmate>` (no
   # --label): the resulting workspace's label is the cwd basename, and its
   # one auto-created tab is still labeled "1" - indistinguishable, by label
@@ -3032,6 +3088,7 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   local dir log state fb raw container seeded seeded_pane ids pane
   dir="$TMP_ROOT/prune-busy-defense"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
+  export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
@@ -3369,6 +3426,7 @@ test_wait_transition_clean_timeout_returns_1() {
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_without_atomic_bound_close
+test_version_check_refuses_mismatched_bound_schema
 test_version_check_refuses_missing_herdr
 test_workspace_label_primary_home_no_marker
 test_workspace_label_secondmate_home_uses_marker_id
@@ -3385,6 +3443,7 @@ test_repeated_cycles_reuse_one_workspace_no_orphans
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
+unset FM_BACKEND_HERDR_BOUND_CLOSE_HELPER
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live

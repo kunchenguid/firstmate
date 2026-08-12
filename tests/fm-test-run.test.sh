@@ -459,7 +459,7 @@ import json
 import os
 
 config = json.loads(os.environ["CONFIG_JSON"])
-assert config["commands"]["test"] == "bash bin/fm-run-behavior-tests.sh"
+assert config["commands"]["test"] == "bash bin/fm-test-run.sh tests/fm-worker-isolation.test.sh tests/fm-slot-occupant-proof.test.sh tests/fm-spawn-route.test.sh tests/fm-teardown.test.sh"
 PY
   status=$?
   expect_code 0 "$status" "the gate must delegate tests to the canonical runner"

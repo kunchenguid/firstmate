@@ -166,8 +166,27 @@ fm_backend_herdr_bound_close_capable() {
   local schema
   schema=$(herdr api schema --json 2>/dev/null) || return 1
   printf '%s' "$schema" | jq -e '
-    any(.. | objects; .const? == "pane.close_bound")
-    and any(.. | objects; ((.properties? // {}) | has("expected_pid")))
+    . as $root
+    | def params_for($method):
+        $root.schemas.request.oneOf[]?
+        | select(.properties.method.const? == $method)
+        | .properties.params."$ref"?
+        | select(startswith("#/schemas/request/$defs/"))
+        | split("/")[-1] as $name
+        | $root.schemas.request."$defs"[$name]?;
+    def required_type($schema; $field; $type):
+      (($schema.required // []) | index($field)) != null
+      and (($schema.properties[$field].type? // null) == $type);
+    (params_for("pane.close_bound")) as $pane
+    | (params_for("tab.close_bound")) as $tab
+    | ($pane != null)
+      and required_type($pane; "pane_id"; "string")
+      and required_type($pane; "expected_pid"; "integer")
+      and required_type($pane; "expected_start_time"; "string")
+      and ($tab != null)
+      and required_type($tab; "workspace_id"; "string")
+      and required_type($tab; "tab_id"; "string")
+      and required_type($tab; "pane_id"; "string")
   ' >/dev/null 2>&1
 }
 
@@ -631,12 +650,22 @@ fm_backend_herdr_paths_same() {
 }
 
 fm_backend_herdr_projection_provider_close_bound() {
-  local session=$1 pane_id=$2 pid=$3
+  local session=${1:-} pane_id=${2:-} pid=${3:-} start_time=${4:-}
   local socket helper=${FM_BACKEND_HERDR_BOUND_CLOSE_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-pane-close-bound.py}
+  [ -n "$session" ] && [ -n "$pane_id" ] && [ -n "$pid" ] && [ -n "$start_time" ] || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
   [ -x "$helper" ] || return 1
-  "$helper" "$socket" "$pane_id" "$pid" >/dev/null 2>&1 || return 1
+  "$helper" "$socket" --pane "$pane_id" "$pid" "$start_time" >/dev/null 2>&1 || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
+}
+
+fm_backend_herdr_projection_provider_close_tab_bound() {
+  local session=${1:-} workspace_id=${2:-} tab_id=${3:-} pane_id=${4:-}
+  local socket helper=${FM_BACKEND_HERDR_BOUND_CLOSE_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-pane-close-bound.py}
+  [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  [ -x "$helper" ] || return 1
+  "$helper" "$socket" --tab "$workspace_id" "$tab_id" "$pane_id" >/dev/null 2>&1
 }
 
 fm_backend_herdr_projection_task_identity_matches() {
@@ -710,7 +739,8 @@ fm_backend_herdr_projection_close_bound_pane() {
   fm_agent_pid_start_matches "$FM_BACKEND_HERDR_BOUND_PID" "$FM_BACKEND_HERDR_BOUND_PID_START" || return 1
   fm_agent_worker_identity_matches "$FM_BACKEND_HERDR_BOUND_PID" "$expected_task" "$expected_home" || return 1
   fm_backend_herdr_projection_provider_close_bound \
-    "$session" "$pane_id" "$FM_BACKEND_HERDR_BOUND_PID" || return 1
+    "$session" "$pane_id" "$FM_BACKEND_HERDR_BOUND_PID" \
+    "$FM_BACKEND_HERDR_BOUND_PID_START" || return 1
 }
 
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [workspace] [tab] [label] [harness] [task] [path] [home]
@@ -1048,6 +1078,7 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
 # function independently re-checks the tab count as a second layer.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
   local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id agent_out agent_status
+  local focus_before active_tab
   [ -n "$tab_id" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
   tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
@@ -1059,8 +1090,23 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
   agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   [ "$agent_status" = working ] && return 0
-  [ "$close_mode" = focus-preserving ] || return 1
-  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id"
+  case "$close_mode" in
+    direct) ;;
+    focus-preserving)
+      focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+      active_tab=${focus_before#*$'\t'}
+      if [ "$active_tab" = "$tab_id" ]; then
+        echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_projection_provider_close_tab_bound \
+    "$session" "$wsid" "$tab_id" "$pane_id" || return 1
+  if [ "$close_mode" = focus-preserving ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || return 1
+  fi
 }
 
 # fm_backend_herdr_workspace_ensure: this HOME's persistent workspace inside
@@ -1293,7 +1339,9 @@ fm_backend_herdr_close_tab_focus_preserving() {
     state=$(fm_backend_herdr_pane_agent_state "$session" "$required_pane") || return 1
     [ "$state" = "$required_agent_state" ] || return 1
   fi
-  if fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1; then
+  [ -n "$required_pane" ] || return 1
+  if fm_backend_herdr_projection_provider_close_tab_bound \
+    "$session" "$wsid" "$tab_id" "$required_pane"; then
     close_status=0
   else
     close_status=$?
@@ -2459,16 +2507,17 @@ fm_backend_herdr_submit_enter() {  # <target> <retries> <enter-sleep> [expected-
 # Verified: closing a tab's only pane closes the tab too, so a separate tab
 # close is unnecessary.
 fm_backend_herdr_kill() {  # <target>
-  local state expected_pid=${2:-}
+  local state expected_pid=${2:-} expected_start_time=${3:-}
   fm_backend_herdr_target_ready "$1" || return 1
   state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   case "$state" in
     dead) return 0 ;;
     no-agent) return 1 ;;
     live)
-      [ -n "$expected_pid" ] || return 1
+      [ -n "$expected_pid" ] && [ -n "$expected_start_time" ] || return 1
       fm_backend_herdr_projection_provider_close_bound \
-        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$expected_pid" || return 1
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$expected_pid" \
+        "$expected_start_time" || return 1
       ;;
     unknown) return 1 ;;
   esac

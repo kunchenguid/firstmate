@@ -292,7 +292,11 @@ fm_slot_meta_referencing_tasks() {
       return 2
     fi
     for meta in "$meta_state"/*.meta; do
-      [ -f "$meta" ] || continue
+      if [ -e "$meta" ] || [ -L "$meta" ]; then
+        [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
+      else
+        continue
+      fi
       [ -r "$meta" ] || return 2
       id=$(basename "$meta" .meta)
       [ "$home_real" = "$current_home" ] && [ "$id" = "$self" ] && continue
