@@ -2,8 +2,10 @@
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# tasks, then print a backlog-refresh reminder and the teardown curation-pass
+# trigger for ship and scout teardowns (a secondmate teardown prints neither,
+# since secondmates are not backlog items). Both are print-only and run after
+# every safety check has already passed, so neither can affect a refusal.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -168,6 +170,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -917,6 +921,57 @@ backlog_refresh_reminder() {
     printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+  fi
+}
+
+# --- teardown curation pass --------------------------------------------------
+# AGENTS.md section 7 makes a curation pass part of teardown, and the stow skill
+# owns the pass itself. This script's whole job for it is to make the pass
+# unmissable and to hand over the evidence it is about to destroy.
+#
+# WHY TEARDOWN: it is the one point in the lifecycle that already stops and
+# already forces a review (the unlanded-work refusal, the unresolved-decision
+# completion gate), so a finished task's durable knowledge gets routed while it
+# is still routable rather than whenever someone remembers.
+#
+# WHAT IT MUST NOT DO: nothing below participates in any safety decision. Both
+# functions run after every refusal has already passed and after cleanup has
+# already succeeded; they only print. A curation pass can therefore never be a
+# reason teardown proceeds where it would otherwise refuse.
+#
+# THE EVIDENCE: data/<id>/brief.md and data/<id>/report.md survive teardown, and
+# a ship task's commits live on the remote by the time the landed-work check
+# lets teardown run. The wake log state/<id>.status is the one readable piece of
+# this task's evidence teardown itself destroys, so a bounded tail of it is
+# captured BEFORE the rm and printed with the trigger. That is what makes
+# "routed before its evidence is discarded" true rather than aspirational.
+CURATION_STATUS_TAIL=
+CURATION_STATUS_TAIL_DEFAULT=12
+
+# Read a bounded, per-line-capped tail of this task's wake log into
+# CURATION_STATUS_TAIL. Must be called while state/<id>.status still exists.
+# A missing log is an ordinary empty result, never an error: teardown's outcome
+# does not depend on it.
+capture_curation_status_tail() {
+  local status="$STATE/$ID.status" lines=${FM_TEARDOWN_CURATION_STATUS_TAIL:-$CURATION_STATUS_TAIL_DEFAULT}
+  case "$lines" in ''|*[!0-9]*|0) lines=$CURATION_STATUS_TAIL_DEFAULT ;; esac
+  [ -f "$status" ] || return 0
+  CURATION_STATUS_TAIL=$(
+    tail -n "$lines" "$status" 2>/dev/null | while IFS= read -r line; do
+      fm_cap_line "$line"
+    done
+  ) || CURATION_STATUS_TAIL=
+}
+
+curation_pass_reminder() {
+  # Secondmates are not backlog work items and their retirement is owned by
+  # secondmate-provisioning, exactly as the backlog reminder above treats them.
+  [ "$KIND" = secondmate ] && return 0
+  printf '%s\n' "Curation: $ID is finished, so run the teardown curation pass before moving on. Load the stow skill for it; route each durable finding to its AGENTS.md section 6 owner and CURATE the destination rather than appending to it - rewriting or retiring an entry this task disproved is a better result than a new one, and adding nothing is the common one."
+  printf '%s\n' "Curation evidence that survives: data/$ID/brief.md, and data/$ID/report.md for a scout."
+  if [ -n "$CURATION_STATUS_TAIL" ]; then
+    printf '%s\n' "Curation evidence this cleanup just destroyed - the last lines of state/$ID.status, which no longer exists:"
+    printf '%s\n' "$CURATION_STATUS_TAIL"
   fi
 }
 
@@ -2537,8 +2592,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Last read of the wake log before status_retire_presentation_task's own rm
+# deletes it; the curation pass reminder hands the tail over. Print-only, so
+# it changes nothing below.
+capture_curation_status_tail
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
@@ -2551,3 +2610,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
+curation_pass_reminder

@@ -13,6 +13,9 @@
 #     read-once contract precedes both
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
+#   - the standing daily fleet report: its trigger is today's report file being
+#     absent, it stays silent for the rest of that day, it survives a --reemit,
+#     and it is skipped for a read-only session and a secondmate home
 #   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
 #   - the per-line status-tail cap and its truncation marker
 #   - startup backlog composition: done rows dropped, every in-flight/held/
@@ -529,6 +532,25 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
+}
+
+# make_fake_date <fakebin> <YYYY-MM-DD>: pin `date +%Y-%m-%d` to one day and
+# delegate every other invocation to the real date. The daily-report trigger
+# compares against today's date, so a test that reads the clock separately from
+# the script can straddle midnight; pinning it removes that flake outright
+# rather than leaving a once-a-day window open.
+make_fake_date() {
+  local fakebin=$1 day=$2 real
+  real=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 1 ] && [ "\$1" = '+%Y-%m-%d' ]; then
+  printf '%s\n' '$day'
+  exit 0
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$fakebin/date"
 }
 
 run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
@@ -1953,6 +1975,10 @@ EOF
   assert_contains "$reemit" "CONTEXT" "--reemit dropped the context digest"
   assert_contains "$reemit" "FLEET STATE" "--reemit dropped the fleet-state digest"
   assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"
+  # A compaction loses the standing daily-report obligation exactly as it loses
+  # the wake queue, so the re-emit must carry it too.
+  assert_contains "$reemit" "Daily fleet report" \
+    "--reemit dropped the standing daily fleet report directive"
 
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
@@ -2201,6 +2227,111 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+# --- the standing daily fleet report -----------------------------------------
+# AGENTS.md section 3 makes writing data/status-report-<YYYY-MM-DD>.md standing
+# rather than a captain request. A session has no clock between turns, so the
+# only mechanism available is this once-per-session digest testing whether
+# today's report file exists. These tests pin that trigger and its three
+# exclusions.
+
+test_daily_report_directive_on_first_session_of_day() {
+  local rec root home fakebin out today
+  rec=$(new_world daily-report-first)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  today=2026-05-04
+  make_fake_date "$fakebin" "$today"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Daily fleet report" \
+    "the first session of a day did not name the missing dated report"
+  assert_contains "$out" "$home/data/status-report-$today.md" \
+    "the daily report directive did not name today's exact report path"
+  assert_contains "$out" "/bearings file" \
+    "the daily report directive did not name the command that writes it"
+  assert_contains "$out" "standing, not a captain request" \
+    "the daily report directive did not state that it is standing"
+
+  pass "the first session of a day is directed to write the dated fleet report"
+}
+
+test_daily_report_silent_once_today_report_exists() {
+  local rec root home fakebin out today
+  rec=$(new_world daily-report-written)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  today=2026-05-04
+  make_fake_date "$fakebin" "$today"
+  # Yesterday's report must not satisfy today's trigger, so seed both and let
+  # only today's absence-or-presence decide.
+  printf '# stale\n' > "$home/data/status-report-2026-01-01.md"
+  printf '# Bearings\n' > "$home/data/status-report-$today.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "Daily fleet report" \
+    "a later session the same day repeated the daily report directive"
+
+  # Prove the same fixture DOES fire once today's report is the only thing missing,
+  # so the assertion above cannot pass vacuously.
+  rm -f "$home/data/status-report-$today.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Daily fleet report" \
+    "the directive did not return once today's report was removed"
+
+  pass "the daily report directive fires on today's absence only, once per day"
+}
+
+test_daily_report_skipped_in_a_secondmate_home() {
+  local rec root home fakebin out
+  rec=$(new_world daily-report-secondmate)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'sm-alpha\n' > "$home/.fm-secondmate-home"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "Daily fleet report" \
+    "a secondmate home was directed to write a captain-facing report"
+
+  pass "a secondmate home is never directed to write the dated fleet report"
+}
+
+test_daily_report_skipped_on_a_read_only_session() {
+  local rec root home fakebin holder_pid out
+  rec=$(new_world daily-report-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" \
+    "the read-only fixture did not actually refuse the lock"
+  assert_not_contains "$out" "Daily fleet report" \
+    "a read-only session was directed to write into data/"
+
+  pass "a read-only session is never directed to write the dated fleet report"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2426,6 +2557,10 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_daily_report_directive_on_first_session_of_day
+test_daily_report_silent_once_today_report_exists
+test_daily_report_skipped_in_a_secondmate_home
+test_daily_report_skipped_on_a_read_only_session
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

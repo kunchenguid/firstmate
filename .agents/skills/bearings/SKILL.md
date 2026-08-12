@@ -23,6 +23,8 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
 - `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
 - Treat `file` only as an explicit invocation option in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", or "make a file" as file mode unless the invocation explicitly includes the standalone `file` option.
+- The session-start digest's "Daily fleet report" directive is itself an explicit file-mode invocation, not a natural-language request: run `/bearings file` for it exactly as if the captain had typed it.
+  That directive is the standing daily trigger and `bin/fm-session-start.sh` owns when it fires; this skill's only job for it is the report.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
 - `/bearings include PRs` remains chat-only and makes the live-PR opt-in.
 - `/bearings file include PRs` writes the dated report and makes the live-PR opt-in.

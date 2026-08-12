@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Sweep the current session for uncaptured durable knowledge, file it to disk, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+description: Sweep the current session for uncaptured durable knowledge, file it to disk, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current. Also use at every ship or scout teardown, where bin/fm-teardown.sh prints the trigger and this skill's scoped teardown curation pass runs instead of the full startup-memory pass.
 user-invocable: true
 metadata:
   internal: true
@@ -13,6 +13,7 @@ metadata:
 Sweep this session for durable knowledge that exists only in conversation, then leave the next session with a compact current operating map rather than an accumulating journal.
 Memory entries are tiered and decay between passes, and stale material retires to a cold archive instead of being deleted.
 This skill writes only through the existing Firstmate ownership and write boundaries.
+It has two entry points: a `/stow` invocation, which performs the complete required startup-memory pass below, and a task teardown, which performs only the scoped teardown curation pass.
 
 ## Memory tiers and entry markers
 
@@ -206,6 +207,26 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, archiving a stale entry to `data/memory-archive.md`, autonomous offload of an eligible non-pinned conditional entry to an already-existing allowed owner through the reduce flow above, captain-approved offload of a pinned durable conditional entry to a JIT-loaded owner executed through the migration step above, or deletion of an entry that is a duplicate or already preserved through a stronger existing owner.
    A stale unique fact is never deleted, only archived.
    Do not invent another graduation path.
+
+## Teardown curation pass
+
+`bin/fm-teardown.sh` prints this pass's trigger at the end of every ship and scout teardown, so it runs once per finished task without anyone having to remember it.
+It is scoped to that one task: it never runs the required startup-memory pass, the budget report, the decay sweep, the offload sweep, or the secondmate cascade.
+It runs after teardown has already completed and it changes no teardown outcome; the unlanded-work refusal and the unresolved-decision completion gate are owned entirely by that script and this pass can never relax either.
+Teardown prints the bounded tail of the task's wake log as it deletes it, because that is the one piece of the task's evidence teardown itself destroys.
+
+1. Sweep this task alone: what the work proved or disproved, what cost time that a future session could skip, a captain preference stated in passing, and project-intrinsic facts that project's own contributors need.
+2. Route each finding to its `AGENTS.md` section 6 owner, which is the source of truth for destinations and is not restated here.
+3. Curate the destination instead of appending to it.
+   Read the whole destination file first, ask what the finding supersedes, then take the strongest of these that applies: rewrite an existing entry so one current sentence replaces two, retire an entry this task proved obsolete, or add a new stamped entry only when nothing there already covers it.
+4. Removal and rewriting are the point of this pass rather than a side effect it tolerates.
+   An entry this task disproved is corrected or retired, never left standing next to its correction, and a pass that leaves the destination file shorter is a good outcome.
+5. Adding nothing is the common outcome and the correct one when the task produced no durable knowledge.
+   Never write an entry to show the pass ran.
+6. Removal still goes through the existing owners: prune a memory entry by moving it to `data/memory-archive.md` with provenance, replace a task note through `tasks-axi update <id> --body-file <path>` with `--archive-body` where recoverability matters, and never plainly delete a unique current fact.
+7. Stamp anything newly written with today's date and its tier per the marking rules above.
+
+This pass has no captain-facing report of its own; fold anything the captain needs into the teardown outcome already being reported.
 
 ## One-time migration of unmarked entries
 

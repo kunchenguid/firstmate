@@ -45,7 +45,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       the day's dated fleet report when it is still absent:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
@@ -851,6 +852,35 @@ if fm_pf_relay_active "$FM_HOME" \
     printf '\nEach line is a public reply this home still owes. Reconcile terminal results with\n'
     printf '%s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh deliver <id>. Load fmx-respond for the procedure.\n' "$FM_ROOT"
+  fi
+fi
+
+# The day's dated fleet report, which AGENTS.md section 3 makes a standing
+# operating parameter rather than something the captain has to ask for.
+# WHY THE TRIGGER LIVES HERE and not in prose or in the bearings skill: a
+# session has no clock it can consult between turns, so "daily" has no mechanism
+# behind it and would decay into the same advice-that-loses-to-urgency this
+# replaces. This digest is the only point that runs exactly once per session
+# with the lock held, which makes "the first session of a day" a fact it can
+# establish and no later turn can.
+# The trigger is the artifact's own absence: today's report either exists or it
+# does not. That is idempotent across every session of the same day, needs no
+# marker file of its own, and stays silent on all but the first - a routine
+# confirmation costs nothing here, exactly as bootstrap's do.
+# --reemit deliberately still prints it. A /clear or compaction loses the
+# obligation exactly as it loses the wake queue, and the file check is what stops
+# a re-emit from asking twice for a report already written.
+# Excluded: a read-only session, because writing the report mutates data/ and
+# this session holds no authority to; and a secondmate home, because the report
+# is captain-facing and a secondmate never addresses the captain.
+if [ "$READ_ONLY" -eq 0 ] \
+  && [ ! -e "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ]; then
+  DAILY_REPORT_FILE="$DATA/status-report-$(date +%Y-%m-%d).md"
+  if [ ! -f "$DAILY_REPORT_FILE" ]; then
+    subsection "Daily fleet report"
+    printf 'not written yet for today: %s\n' "$DAILY_REPORT_FILE"
+    printf 'Write it this session with /bearings file, which stays the single owner of the\n'
+    printf "report's contents and format. This is standing, not a captain request.\n"
   fi
 fi
 

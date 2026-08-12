@@ -49,6 +49,12 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers the teardown curation pass (AGENTS.md section 7): the trigger is
+# printed on every completed ship/scout teardown, it permits removal and
+# rewriting rather than only addition, it hands over the bounded wake-log tail
+# that this cleanup deletes, and it never appears on a refusal - so the pass can
+# never be a reason teardown proceeds where it would otherwise refuse.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -612,6 +618,84 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
     && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
   pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
+}
+
+test_teardown_prints_curation_pass_with_destroyed_status_evidence() {
+  local case_dir out
+  case_dir=$(make_case curation-pass)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'working: reproduced the wedge' \
+    'done: PR https://github.com/example/repo/pull/7 checks green' \
+    > "$case_dir/state/task-x1.status"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed on the curation-pass case"
+  printf '%s\n' "$out" | grep -F 'Curation: task-x1 is finished' >/dev/null \
+    || fail "teardown did not print the curation pass trigger: $out"
+  printf '%s\n' "$out" | grep -F 'Load the stow skill' >/dev/null \
+    || fail "teardown's curation trigger did not name its owning skill: $out"
+  printf '%s\n' "$out" | grep -F 'AGENTS.md section 6' >/dev/null \
+    || fail "teardown's curation trigger did not name the routing owner: $out"
+  # The whole point of the pass: it must be able to remove and rewrite, not only add.
+  printf '%s\n' "$out" | grep -F 'rewriting or retiring an entry this task disproved' >/dev/null \
+    || fail "teardown's curation trigger did not permit removal and rewriting: $out"
+  printf '%s\n' "$out" | grep -F 'adding nothing is the common one' >/dev/null \
+    || fail "teardown's curation trigger did not allow an empty pass: $out"
+  # The evidence teardown itself destroys is handed over in the same output, which
+  # is what makes the routing happen before the evidence is gone.
+  printf '%s\n' "$out" | grep -F 'reproduced the wedge' >/dev/null \
+    || fail "teardown did not hand over the status-log evidence it deleted: $out"
+  printf '%s\n' "$out" | grep -F "data/task-x1/brief.md" >/dev/null \
+    || fail "teardown did not name the evidence that survives: $out"
+  assert_absent "$case_dir/state/task-x1.status" \
+    "curation-pass: the wake log should still have been deleted by cleanup"
+  pass "teardown prints the curation pass and hands over the wake evidence it destroys"
+}
+
+test_teardown_curation_evidence_is_bounded_and_line_capped() {
+  local case_dir out long i
+  case_dir=$(make_case curation-bounds)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  long="working: $(printf 'x%.0s' $(seq 1 400))"
+  for i in 1 2 3 4 5; do
+    printf 'working: event %s\n' "$i" >> "$case_dir/state/task-x1.status"
+  done
+  printf '%s\n' "$long" >> "$case_dir/state/task-x1.status"
+
+  out=$(FM_TEARDOWN_CURATION_STATUS_TAIL=2 run_teardown "$case_dir") \
+    || fail "teardown failed on the curation-bounds case"
+  printf '%s\n' "$out" | grep -F 'working: event 5' >/dev/null \
+    || fail "teardown dropped a line inside the curation tail bound: $out"
+  printf '%s\n' "$out" | grep -F 'working: event 4' >/dev/null \
+    && fail "teardown ignored FM_TEARDOWN_CURATION_STATUS_TAIL: $out"
+  printf '%s\n' "$out" | grep -F '[truncated]' >/dev/null \
+    || fail "teardown did not apply the shared per-line cap to the curation tail: $out"
+  pass "the curation tail honors its line bound and the shared per-line cap"
+}
+
+test_refused_teardown_never_prints_the_curation_pass() {
+  local case_dir rc
+  case_dir=$(make_case curation-refusal)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  printf '%s\n' 'working: something worth keeping' > "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "curation-refusal: unlanded work must still refuse"
+  assert_grep REFUSED "$case_dir/stderr" "curation-refusal: teardown should refuse"
+  assert_not_contains "$(cat "$case_dir/stdout" "$case_dir/stderr")" "Curation:" \
+    "curation-refusal: a refusal must not print the curation pass"
+  # The refusal path leaves the evidence in place, so the pass has nothing to run
+  # after and cannot become a reason the work was let go.
+  assert_present "$case_dir/state/task-x1.status" \
+    "curation-refusal: the wake log must survive a refusal"
+  pass "a teardown refusal prints no curation pass and preserves the task's evidence"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -2594,6 +2678,9 @@ EOF
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+test_teardown_prints_curation_pass_with_destroyed_status_evidence
+test_teardown_curation_evidence_is_bounded_and_line_capped
+test_refused_teardown_never_prints_the_curation_pass
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
