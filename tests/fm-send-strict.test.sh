@@ -54,6 +54,9 @@ case "${1:-}" in
         fi
         printf '╭──────────────────────────────╮\n│ > %-27.27s│\n╰──────────────────────────────╯\n' "${1:-}" > "$FM_FAKE_TMUX_COMPOSER"
         [ "${FM_FAKE_TMUX_SWALLOW_ENTER:-0}" != 1 ] || printf 'esc to interrupt\n' >> "$FM_FAKE_TMUX_COMPOSER"
+      elif [ "${1:-}" = C-c ]; then
+        [ ! -d "${FM_FAKE_TMUX_TYPE_HOLD:-}.active" ] || : > "$FM_FAKE_TMUX_TYPE_HOLD.overlap"
+        printf '╭────╮\n│    │\n╰────╯\n' > "$FM_FAKE_TMUX_COMPOSER"
       elif [ "${1:-}" = Enter ]; then
         if [ "${FM_FAKE_TMUX_SWALLOW_ENTER:-0}" != 1 ]; then
           printf '╭────╮\n│    │\n╰────╯\n' > "$FM_FAKE_TMUX_COMPOSER"
@@ -284,7 +287,7 @@ test_busy_queue_confirmation_survives_empty_preflight() {
 }
 
 test_concurrent_sends_serialize_per_endpoint() {
-  local dir fb first_home second_home first_tmp second_tmp task endpoint log composer hold first_pid second_pid first_rc second_rc i
+  local dir fb first_home second_home first_tmp second_tmp task endpoint log composer hold first_pid second_pid key_pid first_rc second_rc key_rc i
   dir="$TMP_ROOT/concurrent-sends"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); first_home=$(setup_home concurrent-first); second_home=$(setup_home concurrent-second)
   first_tmp="$dir/tmp-first"; second_tmp="$dir/tmp-second"; mkdir -p "$first_tmp" "$second_tmp"
@@ -310,12 +313,17 @@ test_concurrent_sends_serialize_per_endpoint() {
       _ "$ROOT" "$endpoint" >/dev/null 2>"$dir/second.err" &
   second_pid=$!
   /bin/sleep 0.1
+  PATH="$fb:$PATH" TMPDIR="$second_tmp" FM_HOME="$second_home" FM_ROOT_OVERRIDE="$second_home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMPOSER="$composer" "$SEND" "$endpoint" --key C-c >/dev/null 2>"$dir/key.err" &
+  key_pid=$!
   : > "$hold.release"
   wait "$first_pid"; first_rc=$?
   wait "$second_pid"; second_rc=$?
+  wait "$key_pid"; key_rc=$?
 
   expect_code 0 "$first_rc" "the first serialized send should succeed"
   expect_code 0 "$second_rc" "the second serialized send should succeed"
+  expect_code 0 "$key_rc" "the serialized composer-mutating key should succeed"
   [ ! -e "$hold.overlap" ] || fail "two sends entered the shared endpoint type boundary concurrently"
   [ "$(grep -c 'literal=1 arg=.* intended steer' "$log")" -eq 2 ] \
     || fail "serialized sends did not each type exactly once: $(cat "$log")"

@@ -707,7 +707,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 # fm_backend_send_key: one backend-supported named special key.
-fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
+fm_backend_send_key_unlocked() {  # <backend> <target> <key> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
@@ -719,6 +719,16 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     cmux) fm_backend_cmux_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
+}
+
+fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
+  if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    . "$FM_BACKEND_LIB_DIR/fm-wake-lib.sh"
+  fi
+  if ! command -v fm_backend_serialized_send_key >/dev/null 2>&1; then
+    . "$FM_BACKEND_LIB_DIR/fm-checked-submit-lib.sh"
+  fi
+  fm_backend_serialized_send_key "$@"
 }
 
 # fm_backend_send_text_submit: type text once, then submit and verify,

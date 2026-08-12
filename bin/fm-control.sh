@@ -134,6 +134,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-checked-submit-lib.sh
+. "$SCRIPT_DIR/fm-checked-submit-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -349,14 +351,21 @@ send_interrupt_keys() {
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
+  fm_backend_endpoint_lock_acquire "$BACKEND" "$T" \
+    || die "could not acquire the endpoint lock before interrupting task $ID on $BACKEND"
   while [ "$i" -lt "$repeat" ]; do
-    fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
-      || die "interrupt key $key was not delivered to task $ID on $BACKEND"
+    if ! fm_backend_send_key_unlocked "$BACKEND" "$T" "$key" "$LABEL"; then
+      fm_backend_endpoint_lock_release
+      die "interrupt key $key was not delivered to task $ID on $BACKEND"
+    fi
     i=$((i + 1))
     [ "$i" -ge "$repeat" ] || sleep 0.2
   done
-  [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
-    || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
+  if [ -n "$clear" ] && ! fm_backend_send_key_unlocked "$BACKEND" "$T" "$clear" "$LABEL"; then
+    fm_backend_endpoint_lock_release
+    die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
+  fi
+  fm_backend_endpoint_lock_release
 }
 
 prepare_interrupt_ack() {

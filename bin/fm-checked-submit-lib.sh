@@ -40,6 +40,24 @@ EOF
   printf '%s/endpoint-%s-%s.lock' "$namespace" "$sum" "$size"
 }
 
+fm_backend_endpoint_lock_acquire() {
+  FM_BACKEND_ENDPOINT_LOCK=$(fm_checked_submit_lock_path "$1" "$2") || return 2
+  fm_lock_acquire_wait "$FM_BACKEND_ENDPOINT_LOCK" || return 2
+}
+
+fm_backend_endpoint_lock_release() {
+  fm_lock_release "$FM_BACKEND_ENDPOINT_LOCK"
+  FM_BACKEND_ENDPOINT_LOCK=
+}
+
+fm_backend_serialized_send_key() {
+  local backend=$1 target=$2 rc=0
+  fm_backend_endpoint_lock_acquire "$backend" "$target" || return 2
+  fm_backend_send_key_unlocked "$@" || rc=$?
+  fm_backend_endpoint_lock_release
+  return "$rc"
+}
+
 fm_backend_serialized_send_text_submit() {
   local backend=$1 target=$2 lock verdict rc=0
   lock=$(fm_checked_submit_lock_path "$backend" "$target") || return 2

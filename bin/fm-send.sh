@@ -136,7 +136,7 @@ fm_send_clear_after_interrupt() {  # <key>
   clear=$(fm_control_interrupt_clear_key "$family") || return 0
   [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
+  if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
     echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
@@ -423,11 +423,22 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
-    echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
-    exit 1
+  else
+    fm_backend_endpoint_lock_acquire "$TARGET_BACKEND" "$T" || {
+      echo "error: key '$key' not sent to $T (cannot acquire endpoint lock; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+    }
+    trap 'fm_backend_endpoint_lock_release' EXIT
+    if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+      echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+    fi
   fi
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
+  if [ "$TARGET_BACKEND" != remote ]; then
+    fm_backend_endpoint_lock_release
+    trap - EXIT
+  fi
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
