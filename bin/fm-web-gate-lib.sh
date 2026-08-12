@@ -4,9 +4,8 @@ fm_web_gate_contract() {
   printf '%s\n' 'Web gate contract: custom-domain/interceptor/revision-marker/screenshot'
 }
 
-fm_web_gate_text() {
+fm_web_gate_body_text() {
   cat <<'EOF'
-
 ## Website deployment completion gate
 This is a website or web-deployment ship task, so the task is not complete until firstmate can accept all of the following evidence together:
 - Verify the deployed revision against the real custom production domain, never only on a preview or staging URL.
@@ -19,11 +18,42 @@ Do not append a done status or claim completion when any visual, marker, custom-
 EOF
 }
 
+fm_web_gate_text() {
+  printf '\n'
+  fm_web_gate_body_text
+}
+
 fm_web_gate_body_present() {
-  local brief=$1 line
-  while IFS= read -r line; do
-    [ -z "$line" ] || grep -Fqx -- "$line" "$brief" || return 1
-  done <<EOF
-$(fm_web_gate_text)
-EOF
+  local brief=$1 expected
+  expected=$(fm_web_gate_body_text)
+  awk -v expected="$expected" '
+    BEGIN {
+      wanted_count = split(expected, wanted, "\n")
+      in_fence = 0
+      matched = 0
+      wanted_index = 1
+      found = 0
+    }
+    {
+      if ($0 ~ /^[[:space:]]*```/) {
+        in_fence = !in_fence
+        matched = 0
+        wanted_index = 1
+        next
+      }
+      if (in_fence) next
+      if ($0 == wanted[wanted_index]) {
+        matched = 1
+        wanted_index++
+        if (wanted_index > wanted_count) {
+          found = 1
+          exit
+        }
+        next
+      }
+      matched = 0
+      wanted_index = ($0 == wanted[1]) ? 2 : 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$brief"
 }

@@ -159,7 +159,7 @@ test_ship_spawn_rejects_web_without_visual_gate_contract() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "web ship spawn without its visual gate contract must fail"
-  assert_contains "$out" "declares web but lacks the required Web gate contract" \
+  assert_contains "$out" "declares web but lacks the canonical Web gate body" \
     "web gate contract refusal did not explain the fail-closed boundary"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "web gate contract refusal still wrote task metadata"
@@ -167,7 +167,7 @@ test_ship_spawn_rejects_web_without_visual_gate_contract() {
 }
 
 test_ship_spawn_rejects_incomplete_web_gate_body() {
-  local rec id out status
+  local rec id out status brief
   id=profile-incomplete-web-gate-z9
   rec=$(make_spawn_case incomplete-web-gate claude "$id")
   read_case_record "$rec"
@@ -180,6 +180,27 @@ test_ship_spawn_rejects_incomplete_web_gate_body() {
     "incomplete web gate body refusal did not explain the fail-closed boundary"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "incomplete web gate body refusal still wrote task metadata"
+
+  id=profile-fenced-web-gate-z9
+  rec=$(make_spawn_case fenced-web-gate claude "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web brief scaffold for fenced-body test should succeed"
+  brief="$HOME_DIR/data/$id/brief.md"
+  awk '
+    /^## Website deployment completion gate$/ { print "```markdown"; fenced = 1 }
+    { print }
+    /^Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing\.$/ && fenced { print "```"; fenced = 0 }
+  ' "$brief" > "$brief.tmp"
+  mv "$brief.tmp" "$brief"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "ship spawn with a fenced web gate body must fail"
+  assert_contains "$out" "lacks the canonical Web gate body" \
+    "fenced web gate body refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "fenced web gate body refusal still wrote task metadata"
   pass "fm-spawn: incomplete web gate body refuses before launch"
 }
 
@@ -188,6 +209,7 @@ test_ship_spawn_accepts_compliant_web_gate() {
   id=profile-compliant-web-gate-z9
   rec=$(make_spawn_case compliant-web-gate claude "$id")
   read_case_record "$rec"
+  rm -f "$HOME_DIR/data/$id/brief.md"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
     || fail "web brief scaffold for spawn acceptance should succeed"
 

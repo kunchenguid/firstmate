@@ -254,8 +254,20 @@ test_promote_requires_and_records_the_delivery_contract() {
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-bad-d2 --mode local-only --yolo off --web 2>&1)
   status=$?
   expect_code 1 "$status" "promotion with an incomplete web gate body should fail"
-  assert_contains "$out" "lacks the canonical Web gate body" "promotion did not reject an incomplete web gate body"
+  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an incomplete web gate body"
   assert_grep 'kind=scout' "$web_bad_meta" "incomplete web promotion changed the task record"
+
+  web_contract_meta="$home/state/promote-web-contract-d2.meta"
+  printf 'window=fm-promote-web-contract-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_contract_meta"
+  mkdir -p "$home/data/promote-web-contract-d2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" promote-web-contract-d2 firstmate --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web brief scaffold for promotion contract test should succeed"
+  sed -i 's/^Web gate contract:.*/Web gate contract: wrong/' "$home/data/promote-web-contract-d2/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-contract-d2 --mode no-mistakes --yolo off --web 2>&1)
+  status=$?
+  expect_code 1 "$status" "promotion with an invalid web gate contract should fail"
+  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an invalid web gate contract"
+  assert_grep 'kind=scout' "$web_contract_meta" "invalid web contract promotion changed the task record"
 
   web_meta="$home/state/promote-web-d2.meta"
   printf 'window=fm-promote-web-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_meta"

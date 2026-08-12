@@ -144,9 +144,15 @@ if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_
   echo "error: $BRIEF has an invalid Surface contract" >&2
   exit 1
 fi
-if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ] && ! fm_web_gate_body_present "$BRIEF"; then
-  echo "error: $BRIEF declares web but lacks the canonical Web gate body; promotion refused" >&2
-  exit 1
+if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ]; then
+  existing_gate_count=$(grep -Ec '^Web gate contract:' "$BRIEF" || true)
+  existing_gate=$(sed -n 's/^Web gate contract: //p' "$BRIEF")
+  if [ "$existing_gate_count" -ne 1 ] \
+    || [ "$existing_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
+    || ! fm_web_gate_body_present "$BRIEF"; then
+    echo "error: $BRIEF declares web but lacks the canonical Web gate contract or body; promotion refused" >&2
+    exit 1
+  fi
 fi
 
 BRIEF_TMP="$STATE/.$ID.brief.promote.${BASHPID:-$$}"
@@ -174,9 +180,15 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
 }
 mv "$BRIEF_TMP" "$BRIEF"
 rm -f -- "$WEB_GATE_TMP"
-if [ "$WEB" -eq 1 ] && ! fm_web_gate_body_present "$BRIEF"; then
-  echo "error: promoted web brief lacks the canonical Web gate body; promotion refused" >&2
-  exit 1
+if [ "$WEB" -eq 1 ]; then
+  promoted_gate_count=$(grep -Ec '^Web gate contract:' "$BRIEF" || true)
+  promoted_gate=$(sed -n 's/^Web gate contract: //p' "$BRIEF")
+  if [ "$promoted_gate_count" -ne 1 ] \
+    || [ "$promoted_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
+    || ! fm_web_gate_body_present "$BRIEF"; then
+    echo "error: promoted web brief lacks the canonical Web gate contract or body; promotion refused" >&2
+    exit 1
+  fi
 fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
