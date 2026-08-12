@@ -74,6 +74,10 @@ SH
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "search" ]; then
+  if [ -f "$FM_HOME/fetch-priority-fixture" ]; then
+    printf '[{"author":{"login":"one"},"number":950,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review one","url":"https://github.com/monalee/artemis/pull/950"},{"author":{"login":"two"},"number":951,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review two","url":"https://github.com/monalee/artemis/pull/951"},{"author":{"login":"three"},"number":952,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review three","url":"https://github.com/monalee/artemis/pull/952"},{"author":{"login":"four"},"number":953,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review four","url":"https://github.com/monalee/artemis/pull/953"},{"author":{"login":"five"},"number":954,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review five","url":"https://github.com/monalee/artemis/pull/954"},{"author":{"login":"six"},"number":955,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review six","url":"https://github.com/monalee/artemis/pull/955"}]'
+    exit 0
+  fi
   if [ -f "$FM_HOME/review-history-fixture" ]; then
     printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-29T00:00:00Z","number":940,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Re-review the address refresh","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/940"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-30T00:00:00Z","number":941,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review the audit export","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/941"}]'
     exit 0
@@ -132,6 +136,12 @@ case "$url" in
     ;;
   *pull/941*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[{"login":"pedromuller-del"}],"headRefOid":"ccc333"}'
+    ;;
+  *pull/95[0-5]*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
+    ;;
+  *pull/40[1][0-6]*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"reviewRequests":[]}'
     ;;
   *pull/888*|*pull/999*)
     printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
@@ -331,7 +341,7 @@ test_cockpit_shows_action_sections_and_full_inventory() {
     "rows do not colocate their position, stable id, marker, and title"
 
   assert_contains "$out" "PR 4002" "a current ship task in the PR stage was silently dropped"
-  assert_contains "$out" "PR 4002 | local checks unknown | readiness unknown (unregistered)" \
+  assert_contains "$out" "PR 4002 | local checks unknown | unregistered" \
     "an unregistered PR row implied established checks or readiness"
   assert_contains "$out" "project artemis" "mixed-project full inventory lacks an Artemis separator"
   assert_contains "$out" "project firstmate" "mixed-project full inventory lacks an internal-project separator"
@@ -554,13 +564,13 @@ test_default_rows_are_one_line_with_a_fresh_recap() {
   title_line=$(printf '%s\n' "$out" | grep -F "PR 4003 |" | tail -1)
   assert_not_contains "$title_line" "firstmate" "default row includes project detail"
   assert_not_contains "$title_line" "for " "default row includes age detail"
-  assert_contains "$out" "PR 4003 | local checks unknown | readiness unknown (unregistered)" \
+  assert_contains "$out" "PR 4003 | local checks unknown | unregistered" \
     "actionable PR row omits established status"
   assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
     "default screen hides established PR checks and review state"
   assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
     "default screen hides a PR waiting on review"
-  assert_contains "$out" "PR 4002 | local checks unknown | readiness unknown (unregistered)" \
+  assert_contains "$out" "PR 4002 | local checks unknown | unregistered" \
     "default screen hides a PR whose state remains unknown"
   assert_not_contains "$out" "other PRs" "default screen still collapses our PR status rows"
   assert_not_contains "$out" "$OUR_PR" "default list leaked a PR link"
@@ -763,7 +773,7 @@ test_default_screen_collapses_deferred_rows_without_hiding_our_prs() {
 }
 
 test_readable_ids_survive_colliding_rows_and_support_prefix_lookup() {
-  local home fakebin out first_id with_collision survivor_id shown updated error rc
+  local home fakebin out first_id with_collision survivor_id after_removal removed_id shown updated error rc
   home=$(make_home readable-ids)
   write_live_fixture "$home"
   updated="$home/data/backlog.md.updated"
@@ -785,6 +795,13 @@ test_readable_ids_survive_colliding_rows_and_support_prefix_lookup() {
   with_collision=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "collision render failed"
   survivor_id=$(printf '%s\n' "$with_collision" | grep -F "endpoint collisions are reported" | awk '{print $2}')
   [ "$first_id" = "$survivor_id" ] || fail "another row changed a survivor id: $first_id -> $survivor_id"
+  grep -v -F 'toolsmith-endpoint-copy - Decide how endpoint copies are reported' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  after_removal=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "post-collision-removal render failed"
+  removed_id=$(printf '%s\n' "$after_removal" | grep -F "endpoint collisions are reported" | awk '{print $2}')
+  [ "$first_id" = "$removed_id" ] || fail "removing another row changed a survivor id: $first_id -> $removed_id"
   set +e
   error=$(render_terminal "$home" "$fakebin" --show "${first_id%?}" 2>&1)
   rc=$?
@@ -953,6 +970,8 @@ test_our_pr_ids_keep_the_pr_number_through_an_engineered_collision() {
     || fail "engineered two-hex collision refused the complete render"
   assert_contains "$out" "o:4001~bf59" "first engineered-collision row lost its readable PR identity"
   assert_contains "$out" "o:4001~bf3f" "second engineered-collision row lost its readable PR identity"
+  printf '%s\n' "$out" | grep -Eq '^[[:space:]]+[0-9]+[[:space:]]+o:4001~bf59[[:space:]]+[?◆×○●][[:space:]]+PR 4001' \
+    || fail "OUR PRS row lost its position number before the readable id"
   duplicates=$(printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[dorv]:/) print $i }' | sort | uniq -d)
   [ -z "$duplicates" ] || fail "dashboard emitted duplicate row identities: $duplicates"
   first_shown=$(render_terminal "$home" "$fakebin" --show o:4001~bf59) || fail "first collision row id did not resolve"
@@ -960,6 +979,35 @@ test_our_pr_ids_keep_the_pr_number_through_an_engineered_collision() {
   assert_contains "$first_shown" "Follow up on the review branch" "first collision id resolved to the wrong task"
   assert_contains "$second_shown" "Recheck the review branch" "second collision id resolved to the wrong task"
   pass "our PR ids keep the PR number and survive an engineered digest collision"
+}
+
+test_registered_ours_are_fetched_before_capped_optional_urls() {
+  local home fakebin out pr id
+  home=$(make_home github-fetch-priority)
+  write_live_fixture "$home"
+  touch "$home/fetch-priority-fixture"
+  for pr in 4010 4011 4012 4013 4014 4015 4016; do
+    id="priority-$pr"
+    mkdir -p "$home/projects/$id"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=artemis" \
+      "harness=claude" "kind=ship" "mode=ship" "yolo=off" \
+      "pr=https://github.com/monalee/artemis/pull/$pr"
+    printf 'working: PR %s is in review\n' "$pr" > "$home/state/$id.status"
+  done
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) || fail "fetch-priority render failed"
+  assert_contains "$out" "github status checked just now" "successful bounded GitHub fetch lost its freshness header"
+  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
+    "registered OURS URL was displaced from the bounded GitHub fetch set"
+  assert_not_contains "$out" "PR 4001 | checks unknown - not checked" \
+    "fresh header contradicted an unfetched registered OURS row"
+  for pr in 4010 4011 4012 4013 4014 4015 4016; do
+    assert_contains "$out" "PR $pr | checks green | waiting on human review" \
+      "registered OURS PR $pr fell outside the fetch set"
+  done
+  pass "registered OURS rows are covered before capped optional GitHub enrichment"
 }
 
 test_obligation_round_uses_viewer_review_history_or_stays_unknown() {
@@ -1019,6 +1067,7 @@ EOF
 test_shareable_html_omits_unstructured_manual_scripts_by_default
 test_obligation_round_uses_viewer_review_history_or_stays_unknown
 test_our_pr_ids_keep_the_pr_number_through_an_engineered_collision
+test_registered_ours_are_fetched_before_capped_optional_urls
 test_cockpit_shows_action_sections_and_full_inventory
 test_pr_truthfulness_regressions
 test_review_relationships_survive_completed_rounds

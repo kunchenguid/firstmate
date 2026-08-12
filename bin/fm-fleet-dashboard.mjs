@@ -47,7 +47,7 @@ const secondmatesPath = resolve(dataDirectory, "secondmates.md");
 
 const WATCH_LOCAL_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_LOCAL_SECONDS || "5", 10);
 const WATCH_GITHUB_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_GITHUB_SECONDS || "120", 10);
-const GITHUB_PR_LIMIT = 6;
+const GITHUB_OPTIONAL_PR_LIMIT = 6;
 const REVIEW_REQUEST_LIMIT = 1000;
 const REVIEW_REQUEST_TIMELINE_LIMIT = 20;
 const READABLE_ID_LIMIT = 28;
@@ -812,7 +812,7 @@ function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber, 
 function fetchGithubStatuses(urls) {
   const results = new Map();
   let error = null;
-  for (const url of urls.slice(0, GITHUB_PR_LIMIT)) {
+  for (const url of urls) {
     if (!/^https:\/\/github\.com\//.test(url)) {
       results.set(url, {
         ok: false,
@@ -1029,7 +1029,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         ...base,
         tag: "OURS",
         prNumber,
-        listLabel: `PR ${prNumber ?? "unknown"} | ${checkStatus} | ${reviewStatus}`,
+        listLabel: `PR ${prNumber ?? "unknown"} | ${checkStatus} | ${registeredPr ? reviewStatus : "unregistered"}`,
         prose: status,
         note: registeredPr ? task.pr.url : null,
         markerKey: marker.key,
@@ -1411,7 +1411,7 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
       if (group.project) lines.push(paint("dim", `   project ${group.project}`));
       for (const item of group.items) {
         const rowLabel = String(item.number).padStart(numberWidth);
-        const prefix = bucket.key === "ours-in-review" ? " " : `  ${rowLabel} `;
+        const prefix = `  ${rowLabel} `;
         const marker = paint(item.marker.color, item.marker.glyph);
         const stablePrefix = `${item.identity} `;
         const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));
@@ -1748,9 +1748,14 @@ function githubPrUrls(inputs, reviewRequests = null) {
         task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && !completed.has(task.id),
     )
     .map((task) => task.pr.url);
+  const required = [...new Set(ours)];
+  const requiredSet = new Set(required);
   const theirs = (inputs.reviews.relationships || []).map((relationship) => relationship.link).filter(Boolean);
   const requested = (reviewRequests?.items || []).map((request) => request.url).filter(Boolean);
-  return [...new Set([...requested, ...ours, ...theirs])];
+  const optional = [...new Set([...requested, ...theirs])]
+    .filter((url) => !requiredSet.has(url))
+    .slice(0, GITHUB_OPTIONAL_PR_LIMIT);
+  return [...required, ...optional];
 }
 
 function writeAtomically(outputPath, html) {
