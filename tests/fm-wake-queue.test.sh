@@ -493,7 +493,7 @@ test_legacy_generationless_wake_is_adopted() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
     || fail "unacknowledged adopted wake could not be re-drained"
-  grep -F "$row" "$dir/replay.out" >/dev/null \
+  grep -F '— check: legacy process-event' "$dir/replay.out" >/dev/null \
     || fail "unacknowledged adopted wake was lost"
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
     --recovery-generation "$generation" \
@@ -501,7 +501,7 @@ test_legacy_generationless_wake_is_adopted() {
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged legacy wake remained queued"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/after-ack.out" 2> "$dir/after-ack.err" \
     || fail "post-acknowledgement legacy drain failed"
-  ! grep -F "$row" "$dir/after-ack.out" >/dev/null \
+  ! grep -F '— check: legacy process-event' "$dir/after-ack.out" >/dev/null \
     || fail "acknowledged legacy wake was consumed more than once"
   pass "wake drain: generation-less legacy wakes are adopted and acknowledged"
 }

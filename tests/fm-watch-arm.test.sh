@@ -491,7 +491,7 @@ test_interrupted_handling_is_redrained_on_rearm() {
     || fail "expected handling successor emitted a recursive recovery wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/interrupted-drain.out" \
     2> "$dir/interrupted-drain.err" || fail "handling drain did not expose the durable wake"
-  grep -F '— signal: interrupted' "$dir/interrupted-drain.out" >/dev/null \
+  grep -F "— signal: $state/interrupted.status" "$dir/interrupted-drain.out" >/dev/null \
     || fail "handling drain did not present the durable wake"
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
     || fail "interrupted handling removed the unacknowledged durable wake"
@@ -510,7 +510,7 @@ test_interrupted_handling_is_redrained_on_rearm() {
     || fail "successor after interruption did not emit durable recovery"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay-drain.out" \
     2> "$dir/replay-drain.err" || fail "successor could not re-drain the interrupted wake"
-  grep -F '— signal: interrupted' "$dir/replay-drain.out" >/dev/null \
+  grep -F "— signal: $state/interrupted.status" "$dir/replay-drain.out" >/dev/null \
     || fail "successor did not re-drain the still-durable wake"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay-drain.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay-drain.err")
@@ -570,7 +570,7 @@ test_recovery_consumption_serializes_queue_publication() {
     || fail "publisher did not durably append its wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
     || fail "publisher recovery drain failed"
-  grep -F '— check: startup-network' "$dir/drain.out" >/dev/null \
+  grep -F '— check: concurrent startup-network' "$dir/drain.out" >/dev/null \
     || fail "publisher wake was not surfaced and drained"
   ack_wakes "$state" || fail "publisher handling acknowledgement failed"
   pass "watch-arm: publication after recovery handoff is surfaced"
