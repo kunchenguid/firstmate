@@ -23,13 +23,10 @@ Verify setup by spawning a task and confirming metadata contains `backend=paseo`
 ## Task shape and metadata
 
 Each task spawns a Paseo subagent via `paseo run --background --cwd <wt>`.
-The adapter inspects the current parent identity (`PASEO_AGENT_ID`) and passes its
-provider-qualified model with `--model`; Firstmate effort maps directly to Paseo
-`--thinking` (`max` remains `max`). If the parent cannot be inspected, spawning
-fails unless the operator explicitly supplies the documented `PASEO_MODEL_FALLBACK`.
-A requested model that differs from the resolved parent is rejected rather than
-silently substituted. The generated prompt also carries the complete Firstmate
-launch contract for operational parity.
+The adapter inspects the current parent identity (`PASEO_AGENT_ID`) and passes its provider-qualified model with `--model`; Firstmate effort maps directly to Paseo `--thinking` (`max` remains `max`).
+If the parent cannot be inspected, spawning fails unless the operator explicitly supplies the documented `PASEO_MODEL_FALLBACK`.
+A requested model that differs from the resolved parent is rejected rather than silently substituted.
+The generated prompt also carries the complete Firstmate launch contract for operational parity.
 The task metadata persisted in `state/<id>.meta` records the Paseo agent ID.
 
 ```text
