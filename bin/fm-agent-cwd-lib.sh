@@ -260,7 +260,7 @@ fm_agent_worker_home_contract_matches() {
 # Returns 2 when the process scan is incomplete; a complete scan returns 0,
 # including when no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid env task start home role proc_uid current_uid uncertain=0 rows rest
+  local entry pid env task start home role proc_uid current_uid uncertain=0 rows rest readable=0 unreadable=0
   current_uid=$(id -u 2>/dev/null) || return 2
   if [ ! -d /proc ]; then
     rows=$(ps -axo uid=,pid= 2>/dev/null) || return 2
@@ -273,9 +273,10 @@ fm_agent_task_pid_index() {
       [ "$proc_uid" = "$current_uid" ] || continue
       fm_agent_pid_is_zombie "$pid" && continue
       if ! env=$(fm_agent_environ "$pid"); then
-        fm_agent_ps_pid_exists "$pid" && uncertain=1
+        fm_agent_ps_pid_exists "$pid" && unreadable=1
         continue
       fi
+      readable=1
       task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
       [ -n "$task" ] || continue
       start=$(fm_agent_proc_start_time "$pid" 2>/dev/null || true)
@@ -283,7 +284,7 @@ fm_agent_task_pid_index() {
       role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
       printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$pid" "$start" "$home" "$role"
     done <<< "$rows"
-    [ "$uncertain" -eq 0 ] && return 0
+    [ "$uncertain" -eq 0 ] && { [ "$unreadable" -eq 0 ] || [ "$readable" -gt 0 ]; } && return 0
     return 2
   fi
   for entry in /proc/[0-9]*; do
@@ -300,9 +301,10 @@ fm_agent_task_pid_index() {
     [ "$proc_uid" = "$current_uid" ] || continue
     fm_agent_pid_is_zombie "$pid" && continue
     if ! env=$(fm_agent_environ "$pid"); then
-      [ -d "$entry" ] && uncertain=1
+      [ -d "$entry" ] && unreadable=1
       continue
     fi
+    readable=1
     task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
     [ -n "$task" ] || continue
     start=$(fm_agent_proc_start_time "$pid" 2>/dev/null || true)
@@ -310,7 +312,7 @@ fm_agent_task_pid_index() {
     role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
     printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$pid" "$start" "$home" "$role"
   done
-  [ "$uncertain" -eq 0 ] && return 0
+  [ "$uncertain" -eq 0 ] && { [ "$unreadable" -eq 0 ] || [ "$readable" -gt 0 ]; } && return 0
   return 2
 }
 
@@ -353,7 +355,7 @@ fm_agent_worktree_process_census() {
       fm_agent_pid_is_zombie "$pid" && continue
       cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
       if [ -z "$cwd" ]; then
-        [ "$foreign_uid" -eq 1 ] && fm_agent_ps_pid_exists "$pid" && uncertain=1
+        fm_agent_ps_pid_exists "$pid" && uncertain=1
         continue
       fi
       cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
@@ -392,7 +394,7 @@ fm_agent_worktree_process_census() {
     fm_agent_pid_is_zombie "$pid" && continue
     cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
     if [ -z "$cwd" ]; then
-      [ "$foreign_uid" -eq 1 ] && uncertain=1
+      [ -d "$entry" ] && uncertain=1
       continue
     fi
     cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)

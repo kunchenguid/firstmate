@@ -26,16 +26,11 @@
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
-#   config/crew-dispatch.json is absent. It also reads fm-route.sh and fills any
-#   omitted --model/--effort axes from the route when the active crew harness still
-#   matches the routed harness. When config/crew-dispatch.json exists,
+#   config/crew-dispatch.json is absent. When config/crew-dispatch.json exists,
 #   crewmate/scout spawns require an explicit harness so firstmate cannot silently
 #   skip dispatch profile consultation. A --secondmate spawn is exempt and resolves
 #   the SECONDMATE harness (config/secondmate-harness -> config/crew-harness -> own),
-#   then fills any omitted --model/--effort axes from primary-local
-#   config/secondmate-profile.json.
-#   That keeps the secondmate-vs-crewmate launch profile DURABLE across every
-#   respawn (recovery, /updatefirstmate, restart). A bare adapter name
+#   A bare adapter name
 #   (claude|codex|opencode|pi|grok) overrides the harness for this spawn (either
 #   kind). A non-flag string containing whitespace is treated as a RAW launch
 #   command - the escape hatch for verifying new adapters.
@@ -1127,153 +1122,21 @@ launch_template() {
 
 HARNESS=
 LAUNCH=
-ROUTE_PROFILE=manual
-ROUTE_HARNESS=
-ROUTE_MODEL=default
-ROUTE_EFFORT=default
-ROUTE_REASON=
-ROUTE_OVERRIDE=none
-ROUTE_RISK_FLAGS=none
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    ROUTE_HARNESS=${HARNESS:-raw}
-    ROUTE_REASON="raw launch command selected for adapter verification"
-    ROUTE_OVERRIDE='raw-launch'
     ;;
   '')
-    # Deferred until BRIEF/PROJ_ABS are known, so the route can read task text.
+    # Deferred until BRIEF/PROJ_ABS are known.
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
-    ROUTE_HARNESS=$HARNESS
-    ROUTE_REASON="manual harness override selected $HARNESS"
-    ROUTE_OVERRIDE=manual-harness
     ;;
 esac
-
-parse_route_output() {
-  local line key value
-  while IFS= read -r line; do
-    key=${line%%=*}
-    value=${line#*=}
-    [ "$key" != "$line" ] || continue
-    case "$key" in
-      profile) ROUTE_PROFILE=$value ;;
-      harness) ROUTE_HARNESS=$value ;;
-      model) ROUTE_MODEL=$value ;;
-      effort) ROUTE_EFFORT=$value ;;
-      reason) ROUTE_REASON=$value ;;
-      override) ROUTE_OVERRIDE=$value ;;
-      risk_flags) ROUTE_RISK_FLAGS=$value ;;
-    esac
-  done
-}
-
-apply_secondmate_profile_config() {
-  local file err model effort
-  [ "$KIND" = secondmate ] || return 0
-  file="$CONFIG/secondmate-profile.json"
-  [ -f "$file" ] || return 0
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "error: config/secondmate-profile.json requires jq to read model/effort defaults" >&2
-    exit 1
-  fi
-  if ! jq . "$file" >/dev/null 2>&1; then
-    echo "error: invalid config/secondmate-profile.json - malformed JSON" >&2
-    exit 1
-  fi
-  err=$(jq -r '
-    if type != "object" then "top-level value must be an object"
-    elif has("model") and ((.model | type) != "string" or (.model | length) == 0) then "model must be a non-empty string"
-    elif has("effort") and ((.effort | type) != "string") then "effort must be a string"
-    elif has("effort") and (.effort as $e | (["default","low","medium","high","xhigh","max"] | index($e) | not)) then "invalid effort: " + (.effort | tostring)
-    else empty
-    end
-  ' "$file" 2>/dev/null || true)
-  if [ -n "$err" ]; then
-    echo "error: invalid config/secondmate-profile.json - $err" >&2
-    exit 1
-  fi
-  if [ "$MODEL_SET" -eq 0 ]; then
-    model=$(jq -r '.model // "default"' "$file")
-    MODEL=$model
-  fi
-  if [ "$EFFORT_SET" -eq 0 ]; then
-    effort=$(jq -r '.effort // "default"' "$file")
-    EFFORT=$effort
-  fi
-}
-
-append_route_block() {
-  [ "$KIND" != secondmate ] || return 0
-  grep -qxF '<!-- firstmate-route -->' "$BRIEF" 2>/dev/null && return 0
-  cat >> "$BRIEF" <<EOF
-
-<!-- firstmate-route -->
-# Route
-
-route: $ROUTE_PROFILE because $ROUTE_REASON
-Harness: $ROUTE_HARNESS
-Model: $ROUTE_MODEL
-Reasoning effort: $ROUTE_EFFORT
-Override: $ROUTE_OVERRIDE
-Risk flags: $ROUTE_RISK_FLAGS
-Do not downgrade this route without an explicit firstmate override.
-EOF
-}
-
-is_jt_pr_intake_context() {
-  local lower_id lower_project
-  lower_project=$(basename "$PROJ_ABS" | tr '[:upper:]' '[:lower:]')
-  case "$lower_project" in
-    .openclaw|jt-control-room) ;;
-    *) return 1 ;;
-  esac
-
-  lower_id=$(printf '%s' "$ID" | tr '[:upper:]' '[:lower:]')
-  case "$lower_id" in
-    jt-*|*jt-control-room*|*replenishment*|*donnees*|*automation*) return 0 ;;
-  esac
-
-  if grep -Eiq 'jt control room|jt-control-room|control room|operator|routes?|replenishment|donnees|trust cockpit|automation cockpit|ppc|sellersnap|runtime|served data|refresh:doctor|replenishment-workflow-board|4187' "$BRIEF" 2>/dev/null; then
-    return 0
-  fi
-  return 1
-}
-
-append_jt_pr_intake_governor() {
-  [ "$KIND" = ship ] || return 0
-  case "$MODE" in
-    direct-PR|no-mistakes) ;;
-    *) return 0 ;;
-  esac
-  grep -qxF '<!-- firstmate:jt-pr-intake-governor:start -->' "$BRIEF" 2>/dev/null && return 0
-  is_jt_pr_intake_context || return 0
-  cat >> "$BRIEF" <<'EOF'
-
-<!-- firstmate:jt-pr-intake-governor:start -->
-# JT PR Intake Governor
-
-Before implementation, write a short intake note in your working notes or report, and carry the same answers into the PR body. Answer every field:
-
-- Problem category: Replenishment/supplier proof, Automation/PPC proof, runtime/served data, operator UX/routes, Donnees/trust cockpit, tests/contracts, docs/knowledge, OpenClaw/Firstmate tooling, or other.
-- Priority (P0-P4): classify operator impact, data-risk, money-risk, and whether the problem blocks a daily decision.
-- Affected surface: page, endpoint, script, source file, generated artifact, or runtime service.
-- Authoritative source: exact repo file, live endpoint, report, merged PR, source CSV/export, or runtime command that proves the truth.
-- Expected proof: what the operator should see after the fix, including safe_to_buy/external_action_authorized when relevant.
-- Verification gate: focused test, npm script, Python test, browser/live JSON proof, or CI check required before PR.
-- Duplicate/superseded check: name any earlier PR/report/problem this replaces, confirms, or intentionally leaves alone.
-- Runtime data policy: source-only PR, generated-data PR, runtime-local adoption, or no runtime mutation.
-
-If any field cannot be answered from the brief and live/repo evidence, append `needs-decision:` or `blocked:` and stop. Do not open a PR until this intake is answered.
-<!-- firstmate:jt-pr-intake-governor:end -->
-EOF
-}
 
 secondmate_registry_value() {
   local id=$1 key=$2 reg line value
@@ -1541,38 +1404,15 @@ fi
 if [ -z "$ARG3" ]; then
   if [ "$KIND" = secondmate ]; then
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
-    ROUTE_HARNESS=$HARNESS
-    ROUTE_REASON="secondmate launch uses config/secondmate-harness with config/crew-harness fallback"
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from config/secondmate-harness/config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
   else
     if [ -f "$CONFIG/crew-dispatch.json" ]; then
       echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules, with optional --model/--effort axes (the consultation backstop, so the rules are never silently skipped)." >&2
       exit 1
     fi
-    route_out=
-    if ! route_out=$("$FM_ROOT/bin/fm-route.sh" "$ID" "$PROJ_ABS" --kind "$KIND" --task-file "$BRIEF" 2>&1); then
-      printf '%s\n' "$route_out" >&2
-      exit 1
-    fi
-    parse_route_output <<EOF
-$route_out
-EOF
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
-    if [ "$HARNESS" != "$ROUTE_HARNESS" ]; then
-      ROUTE_OVERRIDE=config-harness
-      ROUTE_REASON="$ROUTE_REASON; launch harness overridden by config/crew-harness: $HARNESS"
-    else
-      [ "$MODEL_SET" -eq 1 ] || MODEL=$ROUTE_MODEL
-      [ "$EFFORT_SET" -eq 1 ] || EFFORT=$ROUTE_EFFORT
-    fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from route profile '$ROUTE_PROFILE'); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
   fi
-fi
-
-if [ "$KIND" = secondmate ]; then
-  apply_secondmate_profile_config
-  ROUTE_MODEL=${MODEL:-default}
-  ROUTE_EFFORT=${EFFORT:-default}
 fi
 
 herdr_meta_field_exact() {  # <meta> <key>
@@ -2242,8 +2082,6 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
-append_jt_pr_intake_governor
-append_route_block
 mkdir -p "$STATE"
 # Record current ownership in the linked worktree's private git directory.
 # Metadata is historical; teardown uses this stamp as independent evidence.
@@ -2282,13 +2120,6 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
-  echo "route_profile=$ROUTE_PROFILE"
-  echo "route_harness=$ROUTE_HARNESS"
-  echo "route_model=$ROUTE_MODEL"
-  echo "route_effort=$ROUTE_EFFORT"
-  echo "route_reason=$ROUTE_REASON"
-  echo "route_override=$ROUTE_OVERRIDE"
-  echo "route_risk_flags=$ROUTE_RISK_FLAGS"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

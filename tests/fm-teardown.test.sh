@@ -57,8 +57,8 @@ make_case() {
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
   token="teardown-$name"
   : > "$case_dir/data/backlog.md"
-  printf 'root=%s\ntoken=%s\n' "$ROOT" "$token" > "$case_dir/state/.primary-attestation"
-  chmod 600 "$case_dir/state/.primary-attestation"
+  fm_test_write_primary_attestation "$ROOT" \
+    "$case_dir/state/.primary-attestation" "$token"
   printf '%s\n' '1|codex:teardown-fixture|fallback' > "$case_dir/state/.lock"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
@@ -140,6 +140,10 @@ SH
   # Clone as the project; give it a `main` branch and an origin/HEAD.
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  printf '# agents\n' > "$case_dir/project/AGENTS.md"
+  cp -R "$ROOT/bin" "$case_dir/project/bin"
+  fm_test_write_primary_attestation "$case_dir/project" \
+    "$case_dir/state/.primary-attestation" "$token"
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
@@ -305,7 +309,7 @@ run_teardown() {
   shift
   token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
     "$case_dir/state/.primary-attestation" 2>/dev/null || true)
-  FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$ROOT}" \
+  FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$case_dir/project}" \
   FM_HOME="${FM_HOME:-$case_dir}" \
   FM_PRIMARY_ATTESTATION="${FM_PRIMARY_ATTESTATION:-$token}" \
   CODEX_THREAD_ID=teardown-fixture \
@@ -314,7 +318,7 @@ run_teardown() {
   FM_FAKE_TMUX_REPLACE_META="${FM_FAKE_TMUX_REPLACE_META:-}" \
   FM_FAKE_TMUX_PATH="${FM_FAKE_TMUX_PATH:-$case_dir/wt}" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$TEARDOWN" task-x1 "$@"
+    env -u NO_MISTAKES_GATE bash -c 'cd "$1" && exec "$2" task-x1 "${@:3}"' _ "$case_dir/project" "$case_dir/project/bin/fm-teardown.sh" "$@"
 }
 
 test_local_only_fork_remote_allows() {
@@ -868,8 +872,8 @@ test_teardown_preserves_replacement_metadata() {
   printf '%s\n' '# agents' > "$case_dir/project/AGENTS.md"
   printf '%s\n' '# secondmate registry' > "$case_dir/project/data/secondmates.md"
   token="replacement-$RANDOM"
-  printf 'root=%s\ntoken=%s\n' "$case_dir/project" "$token" > "$case_dir/project/state/.primary-attestation"
-  chmod 600 "$case_dir/project/state/.primary-attestation"
+  fm_test_write_primary_attestation "$case_dir/project" \
+    "$case_dir/project/state/.primary-attestation" "$token"
   FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/project" \
     FM_STATE_OVERRIDE="$case_dir/project/state" write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "landed work before replacement"
@@ -1508,223 +1512,6 @@ SH
   pass "failed nested teardown keeps the staged reply active"
 }
 
-make_herdr_teardown_fake() {
-  local case_dir=$1
-  printf '%s\n' '{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w9","label":"PROJECTION_LABEL","focused":false,"active_tab_id":"w9:t2"}],"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","focused":true,"label":"firstmate"},{"tab_id":"w9:t2","workspace_id":"w9","focused":false,"label":"fm-task-x1"}],"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}]}' > "$case_dir/herdr-state.json"
-  jq --arg cwd "$case_dir/wt" '.panes[0].foreground_cwd=$cwd' "$case_dir/herdr-state.json" > "$case_dir/herdr-state.tmp"
-  mv "$case_dir/herdr-state.tmp" "$case_dir/herdr-state.json"
-  cat > "$case_dir/fakebin/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-state=${FM_FAKE_HERDR_STATE:?}
-log=${FM_HERDR_LOG:?}
-printf '%s\n' "$*" >> "$log"
-cmd=${1:-}; sub=${2:-}
-workspace=
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-  if [ "${args[$i]}" = --workspace ]; then
-    workspace=${args[$((i + 1))]:-}
-  fi
-done
-case "$cmd $sub" in
-  "session list")
-    jq -n --arg socket "${FM_FAKE_HERDR_SOCKET:?}" \
-      '{sessions:[{name:"fmtest",running:true,socket_path:$socket}]}'
-    ;;
-  "workspace list") jq '{result:{workspaces:.workspaces}}' "$state" ;;
-  "tab list") jq --arg workspace "$workspace" '{result:{tabs:[.tabs[] | select(.workspace_id == $workspace)]}}' "$state" ;;
-  "tab get")
-    tab=${3:-}
-    if jq -e --arg tab "$tab" '.tabs[] | select(.tab_id == $tab)' "$state" >/dev/null; then
-      jq --arg tab "$tab" '{result:{tab:(.tabs[] | select(.tab_id == $tab))}}' "$state"
-    else
-      printf '%s\n' '{"error":{"code":"tab_not_found"}}'
-    fi
-    ;;
-  "pane get")
-    pane=${3:-}
-    if jq -e --arg pane "$pane" '.panes[] | select(.pane_id == $pane)' "$state" >/dev/null; then
-      jq --arg pane "$pane" '{result:{pane:(.panes[] | select(.pane_id == $pane))}}' "$state"
-    else
-      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
-    fi
-    ;;
-  "pane close")
-    pane=${3:-}; tmp="$state.tmp.$$"
-    jq --arg pane "$pane" '.panes |= [.[] | select(.pane_id != $pane)]' "$state" > "$tmp"
-    mv "$tmp" "$state"
-    ;;
-  "agent get")
-    if [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] \
-      && { [ -z "${FM_FAKE_HERDR_WORKER_PID:-}" ] \
-        || { kill -0 "$FM_FAKE_HERDR_WORKER_PID" 2>/dev/null \
-          && [ "$(ps -o stat= -p "$FM_FAKE_HERDR_WORKER_PID" 2>/dev/null | tr -d '[:space:]')" != Z ]; }; }; then
-      jq -n --arg status "$FM_FAKE_HERDR_AGENT_STATUS" \
-        '{result:{agent:{agent:"grok",agent_status:$status}}}'
-    else
-      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
-    fi
-    ;;
-  "pane process-info")
-    pane=${4:-${3:-}}
-    pid=${FM_FAKE_HERDR_WORKER_PID:-0}
-    jq -n --arg pane "$pane" --argjson pid "$pid" \
-      '{result:{type:"pane_process_info",process_info:{pane_id:$pane,shell_pid:$pid,foreground_process_group_id:$pid,foreground_processes:[{pid:$pid,name:"sleep",argv0:"sleep"}]}}}'
-    ;;
-  *) exit 0 ;;
-esac
-SH
-  chmod +x "$case_dir/fakebin/herdr"
-}
-
-test_projection_journal_retires_before_worktree_return() {
-  local case_dir rc journal token
-  case_dir=$(make_case projection-journal-order)
-  mkdir -p "$case_dir/data"
-  printf '%s\n' '# Backlog' > "$case_dir/data/backlog.md"
-  write_meta "$case_dir" local-only ship
-  sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
-  printf '%s\n' \
-    'backend=herdr' \
-    'herdr_session=fmtest' \
-    'herdr_workspace_id=w9' \
-    'herdr_tab_id=w9:t2' \
-    'display_label=fm-task-x1' \
-    'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
-  journal="$case_dir/state/task-x1.herdr-presentation"
-  token=$(FM_HOME="$case_dir" bash -c '
-    . "$0/bin/backends/herdr.sh"
-    token=$(fm_backend_herdr_projection_journal_create "$1" task-x1) || exit 1
-    label=$(fm_backend_herdr_projection_workspace_label task-x1 "$token")
-    fm_backend_herdr_projection_journal_bind \
-      "$1/task-x1.herdr-presentation" task-x1 "$2" fmtest w9 w9:t2 w9:p2 \
-      w1 firstmate "$label" fm-task-x1 || exit 1
-    printf "%s" "$token"
-  ' "$ROOT" "$case_dir/state" "$case_dir") || fail "could not create a valid projection journal fixture"
-  make_herdr_teardown_fake "$case_dir"
-  sed -i "s/PROJECTION_LABEL/└ task-x1 · p:$token/" "$case_dir/herdr-state.json"
-  printf '%s\n' absent > "$case_dir/treehouse-journal"
-  cat > "$case_dir/fakebin/treehouse" <<SH
-#!/usr/bin/env bash
-printf '%s\n' called > "$case_dir/treehouse-called"
-if [ -e "$journal" ] || [ -L "$journal" ]; then
-  printf '%s\n' present > "$case_dir/treehouse-journal"
-else
-  printf '%s\n' absent > "$case_dir/treehouse-journal"
-fi
-exit 1
-SH
-  chmod +x "$case_dir/fakebin/treehouse"
-  : > "$case_dir/herdr.log"
-
-  set +e
-  (
-    export FM_HERDR_LOG="$case_dir/herdr.log"
-    export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
-    export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
-    run_teardown "$case_dir" --force
-  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "projection-journal-order: a failed worktree return must fail closed"
-  assert_present "$case_dir/treehouse-called" \
-    "projection-journal-order: fake treehouse return was not invoked"
-  [ "$(cat "$case_dir/treehouse-journal")" = absent ] \
-    || fail "projection-journal-order: worktree return ran before journal retirement"
-  assert_absent "$journal" "projection-journal-order: retired projection journal survived return failure"
-  assert_present "$case_dir/state/task-x1.meta" \
-    "projection-journal-order: task metadata was lost after return failure"
-  assert_contains "$(cat "$case_dir/herdr.log")" 'pane close w9:p2' \
-    "projection-journal-order: exact Herdr endpoint was not closed before return"
-  pass "projection journal retires after endpoint close and before a failed worktree return"
-}
-
-test_projection_teardown_refuses_missing_identity() {
-  local case_dir rc
-  case_dir=$(make_case projection-missing-identity)
-  write_meta "$case_dir" local-only ship
-  sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
-  printf '%s\n' \
-    'backend=herdr' \
-    'herdr_session=fmtest' \
-    'herdr_tab_id=w9:t2' \
-    'display_label=fm-task-x1' \
-    'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
-  make_herdr_teardown_fake "$case_dir"
-  : > "$case_dir/herdr.log"
-
-  set +e
-  (
-    export FM_HERDR_LOG="$case_dir/herdr.log"
-    export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
-    export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
-    run_teardown "$case_dir" --force
-  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "projection-missing-identity: teardown must fail closed"
-  assert_present "$case_dir/state/task-x1.meta" \
-    "projection-missing-identity: task metadata was removed"
-  assert_not_contains "$(cat "$case_dir/herdr.log")" 'pane close' \
-    "projection-missing-identity: unbound pane was closed"
-  jq -e '.panes | any(.[]; .pane_id == "w9:p2")' "$case_dir/herdr-state.json" >/dev/null \
-    || fail "projection-missing-identity: pane state changed after identity refusal"
-  pass "projection teardown refuses to close a pane without bound identity"
-}
-
-test_projection_teardown_closes_owned_live_pane() {
-  local case_dir rc worker_pid
-  case_dir=$(make_case projection-live-owned)
-  write_meta "$case_dir" local-only ship
-  sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
-  printf '%s\n' \
-    'backend=herdr' \
-    'herdr_session=fmtest' \
-    'herdr_workspace_id=w9' \
-    'herdr_tab_id=w9:t2' \
-    'display_label=fm-task-x1' \
-    'harness=grok' \
-    'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
-  make_herdr_teardown_fake "$case_dir"
-  cat > "$case_dir/fakebin/herdr-bound-close" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "pane close \$3" >> "$case_dir/herdr.log"
-tmp="$case_dir/herdr-state.json.tmp"
-jq --arg pane "\$3" '.panes |= [.[] | select(.pane_id != \$pane)]' "$case_dir/herdr-state.json" > "\$tmp"
-mv "\$tmp" "$case_dir/herdr-state.json"
-SH
-  chmod +x "$case_dir/fakebin/herdr-bound-close"
-  : > "$case_dir/herdr.log"
-  env -i PATH="$PATH" FM_AGENT_TASK=task-x1 FM_AGENT_ROLE=crewmate \
-    FM_AGENT_OWNER_HOME="$case_dir" sh -c 'cd "$1" && exec sleep 30' sh "$case_dir/wt" &
-  worker_pid=$!
-  trap 'kill "$worker_pid" 2>/dev/null || true' RETURN
-  set +e
-  (
-    export FM_HERDR_LOG="$case_dir/herdr.log"
-    export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
-    export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
-    export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$case_dir/fakebin/herdr-bound-close"
-    export FM_FAKE_HERDR_AGENT_STATUS=working
-    export FM_FAKE_HERDR_WORKER_PID=$worker_pid
-    run_teardown "$case_dir" --force
-  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  kill "$worker_pid" 2>/dev/null || true
-  wait "$worker_pid" 2>/dev/null || true
-  trap - RETURN
-  expect_code 0 "$rc" "projection-live-owned: valid live task teardown should succeed"
-  assert_contains "$(cat "$case_dir/herdr.log")" 'pane close w9:p2' \
-    "projection-live-owned: valid live task pane was not closed"
-  assert_absent "$case_dir/state/task-x1.meta" \
-    "projection-live-owned: task metadata survived successful teardown"
-  pass "projection teardown closes a live pane with complete task ownership proof"
-}
-
 test_endpoint_recovery_uses_stable_window_id() {
   local case_dir rc
   case_dir=$(make_case endpoint-recovery-stable-id)
@@ -1891,9 +1678,6 @@ else
   test_nested_secondmate_late_report_handoffs_resolved_history
   test_nested_secondmate_teardown_handoffs_archived_resolution
   test_nested_secondmate_teardown_failure_keeps_active_reply
-  test_projection_journal_retires_before_worktree_return
-  test_projection_teardown_refuses_missing_identity
-  test_projection_teardown_closes_owned_live_pane
   test_endpoint_recovery_uses_stable_window_id
   test_endpoint_recovery_retains_on_tmux_query_error
   test_endpoint_recovery_pending_without_window_retires_reservation

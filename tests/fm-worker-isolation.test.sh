@@ -68,10 +68,16 @@ trap worker_isolation_cleanup EXIT
 # command substitution keeps that substitution blocked until the process exits.
 start_declared_agent() {
   local cwd=$1 id=$2 home=$3 role=${4:-crewmate} pid
-  ( cd "$cwd" \
-    && FM_AGENT_ROLE="$role" FM_AGENT_TASK="$id" FM_AGENT_OWNER_HOME="$home" \
-       FM_AGENT_TEST_RUN="$RUN_TAG" \
-       exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  (
+    cd "$cwd" || exit 1
+    export FM_AGENT_ROLE="$role" FM_AGENT_TASK="$id" FM_AGENT_OWNER_HOME="$home"
+    export FM_AGENT_TEST_RUN="$RUN_TAG"
+    if [ "$role" = secondmate ]; then
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" exec sleep 300
+    else
+      exec sleep 300
+    fi
+  ) >/dev/null 2>&1 </dev/null &
   pid=$!
   BG_PIDS+=("$pid")
   # Wait for the exec'd process to actually be in place before it is inspected.
@@ -324,12 +330,11 @@ test_reparented_markerless_worker_is_refused() {
   local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
   token="primary-$RUN_TAG"
-  printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
-  chmod 600 "$primary_home/state/.primary-attestation"
+  fm_test_write_primary_attestation "$primary_home" \
+    "$primary_home/state/.primary-attestation" "$token" "$RUN_TAG"
   (
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK="reparented-$RUN_TAG" \
     FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
-    FM_PRIMARY_ATTESTATION="$token" \
     bash -c '
       (
         sleep 0.2
@@ -338,7 +343,7 @@ test_reparented_markerless_worker_is_refused() {
           -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
           -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE \
           FM_HOME="$1" FM_ROOT_OVERRIDE="$1" FM_STATE_OVERRIDE="$1/state" \
-          bash -c '\''cd "$1" && if bash "$4" >"$3.output" 2>&1; then
+          bash -c '\''cd "$1" && token=$(grep "^token=" "$1/state/.primary-attestation") && token=${token#token=} && if FM_PRIMARY_ATTESTATION="$token" bash "$4" >"$3.output" 2>&1; then
             echo allowed > "$3"
           else
             echo refused > "$3"
@@ -378,10 +383,8 @@ test_primary_origin_requires_state_attestation() {
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = refused ] || fail "a primary without a state attestation was accepted"
   token="attested-$RUN_TAG"
-  {
-    printf 'root=%s\n' "$primary_home"
-    printf 'token=%s\n' "$token"
-  } > "$primary_home/state/.primary-attestation"
+  fm_test_write_primary_attestation "$primary_home" \
+    "$primary_home/state/.primary-attestation" "$token" "$RUN_TAG"
   ( cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     CODEX_THREAD_ID=attestation-thread FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
     FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" \
@@ -694,8 +697,8 @@ make_launch_case() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   make_primary_root "$primary"
   token="launch-$id"
-  printf 'root=%s\ntoken=%s\n' "$primary" "$token" > "$home/state/.primary-attestation"
-  chmod 600 "$home/state/.primary-attestation"
+  fm_test_write_primary_attestation "$primary" \
+    "$home/state/.primary-attestation" "$token"
   printf '%s|codex:launch-thread|fallback\n' "$$" > "$home/state/.lock"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
@@ -780,8 +783,8 @@ test_primary_scope_requires_authoritative_primary_proof() {
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a markerless process without primary proof matched primary scope"
   token="scope-$RUN_TAG"
-  printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
-  chmod 600 "$primary_home/state/.primary-attestation"
+  fm_test_write_primary_attestation "$primary_home" \
+    "$primary_home/state/.primary-attestation" "$token" "$RUN_TAG"
   ( cd "$primary_home" && CODEX_THREAD_ID=scope-thread FM_ROOT_OVERRIDE="$primary_home" \
     FM_HOME="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" \
     FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" "$LOCK" bootstrap >/dev/null ) \
@@ -1501,8 +1504,8 @@ SH
   chmod +x "$fakebin/treehouse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   token="teardown-$RUN_TAG"
-  printf 'root=%s\ntoken=%s\n' "$WORLD/primary-root" "$token" > "$WORLD/home/state/.primary-attestation"
-  chmod 600 "$WORLD/home/state/.primary-attestation"
+  fm_test_write_primary_attestation "$WORLD/primary-root" \
+    "$WORLD/home/state/.primary-attestation" "$token" "$RUN_TAG"
   printf '%s|codex:teardown-thread|harness\n' "$RUN_TAG" > "$WORLD/home/state/.lock"
   : > "$WORLD/treehouse.log"
   fm_write_meta "$WORLD/home/state/task-e6.meta" \
@@ -1646,11 +1649,11 @@ test_sweep_blocks_on_incomplete_process_scan() {
   path=$(sweep_live_tmux "$world" fm-someone-else)
   scanbin="$world/fakebin-incomplete-scan"
   mkdir -p "$scanbin"
-  cat > "$scanbin/tr" <<'SH'
+  cat > "$scanbin/stat" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-  chmod +x "$scanbin/tr"
+  chmod +x "$scanbin/stat"
   out=$(run_sweep "$world" "$scanbin:$path")
   status=$?
   expect_code 1 "$status" "an incomplete process scan must block restore-time mutation"

@@ -77,11 +77,6 @@ for meta in "$STATE"/*.meta; do
   id=$(basename "$meta" .meta)
   recorded=$(fm_meta_get "$meta" worktree)
   [ -n "$recorded" ] || continue
-  if [ "$pid_index_status" -ne 0 ]; then
-    echo "ISOLATION: task $id live process identity scan is incomplete; stop it before it acts on this home's records"
-    sweep_status=1
-    continue
-  fi
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   kind=$(fm_meta_get "$meta" kind)
@@ -92,6 +87,15 @@ for meta in "$STATE"/*.meta; do
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
   fi
 
+  if [ "$pid_index_status" -ne 0 ]; then
+    known_pids=$(fm_agent_pids_for_task "$id" "$PID_INDEX" "$expected_home" 2>/dev/null || true)
+    if [ -z "$known_pids" ]; then
+      echo "ISOLATION: task $id live process identity scan is incomplete; stop it before it acts on this home's records"
+      sweep_status=1
+      continue
+    fi
+  fi
+
   owner_conflict=$(fm_agent_task_owner_conflict "$id" "$PID_INDEX" "$expected_home" || true)
   if [ -n "$owner_conflict" ]; then
     if [ "$owner_conflict" = '<missing>' ]; then
@@ -99,6 +103,7 @@ for meta in "$STATE"/*.meta; do
     elif [ "$owner_conflict" = '<unknown>' ]; then
       echo "ISOLATION: task $id has a live process with unverified process-identity proof; stop it before it acts on this home's records"
     else
+      echo "ISOLATION: task $id is running as a worker of home $owner_conflict, not the home that owns it ($expected_home)"
       echo "ISOLATION: task $id has a live process declaring foreign owner home $owner_conflict; stop it before it acts on this home's records"
     fi
     sweep_status=1
@@ -174,6 +179,11 @@ for meta in "$STATE"/*.meta; do
 
   recorded_real=$(fm_agent_canonical_dir "$recorded") || recorded_real=$recorded
   if fm_agent_path_within "$recorded_real" "$cwd_real"; then
+    if [ "$pid_index_status" -ne 0 ]; then
+      echo "ISOLATION: task $id live process identity scan is incomplete; stop it before it acts on this home's records"
+      sweep_status=1
+      continue
+    fi
     if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
       echo "BOOTSTRAP_INFO: isolation for $id proved from agent process $pid in $cwd_real"
     fi

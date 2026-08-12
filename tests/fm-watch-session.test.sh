@@ -24,8 +24,8 @@ prepare_watch_home() {
   local home=$1 token
   mkdir -p "$home/state" "$home/data" "$home/config"
   token="watch-$(basename "$home")"
-  printf 'root=%s\ntoken=%s\n' "$FM_ROOT_OVERRIDE" "$token" > "$home/state/.primary-attestation"
-  chmod 600 "$home/state/.primary-attestation"
+  fm_test_write_primary_attestation "$FM_ROOT_OVERRIDE" \
+    "$home/state/.primary-attestation" "$token" || return 1
   printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
 }
 
@@ -376,7 +376,7 @@ test_watch_session_grok_emergency_override_allows_fallback() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
     FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 \
-    "$fakebin/grok" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; bash "$1" start; status=$?; exit "$status"' _ "$WATCH_SESSION" >"$out" 2>&1 \
+    "$fakebin/grok" -c 'rm -f "$FM_HOME/state/.primary-attestation"; printf "%s\n" "$$" > "$FM_HOME/state/.lock"; bash "$1" start; status=$?; exit "$status"' _ "$WATCH_SESSION" >"$out" 2>&1 \
     || fail "explicit Grok watch-session emergency override did not allow fallback: $(cat "$out")"
   grep -F 'watch-session: started target=' "$out" >/dev/null \
     || fail "Grok emergency override did not start the fallback runner"

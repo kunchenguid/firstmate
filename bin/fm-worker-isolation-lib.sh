@@ -172,18 +172,21 @@ fm_worker_process_ppid() {
 }
 
 fm_worker_primary_attestation_matches() {
-  local expected_root=$1 state file token content
+  local expected_root=$1 state file token content identity harness_pid harness_start
   token=${_FM_WORKER_INITIAL_PRIMARY_ATTESTATION:-}
   [ -n "$token" ] || return 1
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$expected_root}/state}
   file="$state/.primary-attestation"
   [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
   content=$(cat "$file" 2>/dev/null) || return 1
-  [ "$content" = "$(printf 'root=%s\ntoken=%s' "$expected_root" "$token")" ]
+  identity=$(fm_trusted_harness_identity) || return 1
+  harness_pid=${identity%%|*}
+  harness_start=${identity#*|}
+  [ "$content" = "$(printf 'root=%s\ntoken=%s\nharness_pid=%s\nharness_start=%s' "$expected_root" "$token" "$harness_pid" "$harness_start")" ]
 }
 
 fm_worker_primary_attestation_load() {
-  local root state file token content
+  local root state file token content identity harness_pid harness_start
   fm_worker_primary_bootstrap_proven || return 1
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
@@ -193,33 +196,31 @@ fm_worker_primary_attestation_load() {
   content=$(cat "$file" 2>/dev/null) || return 1
   token=$(printf '%s\n' "$content" | awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}')
   [ -n "$token" ] || return 1
-  [ "$content" = "$(printf 'root=%s\ntoken=%s' "$root" "$token")" ] || return 1
+  identity=$(fm_trusted_harness_identity) || return 1
+  harness_pid=${identity%%|*}
+  harness_start=${identity#*|}
+  [ "$content" = "$(printf 'root=%s\ntoken=%s\nharness_pid=%s\nharness_start=%s' "$root" "$token" "$harness_pid" "$harness_start")" ] || return 1
   FM_PRIMARY_ATTESTATION=$token
   export FM_PRIMARY_ATTESTATION
   fm_worker_primary_attestation_refresh
 }
 
 fm_worker_primary_attestation_prepare() {
-  local root state file token token_file tmp root_real lock attempts owner empty_attempts
+  local root state file token token_file tmp root_real lock attempts owner identity harness_pid harness_start
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
   root_real=$(fm_worker_canonical_path "$root") || return 1
+  identity=$(fm_trusted_harness_identity) || return 1
+  harness_pid=${identity%%|*}
+  harness_start=${identity#*|}
   mkdir -p "$state" || return 1
   file="$state/.primary-attestation"
   lock="$state/.primary-attestation.acquire"
   attempts=0
-  empty_attempts=0
   while ! mkdir "$lock" 2>/dev/null; do
     owner=$(cat "$lock/pid" 2>/dev/null || true)
     case "$owner" in
-      '')
-        empty_attempts=$((empty_attempts + 1))
-        if [ "$empty_attempts" -ge 3 ]; then
-          rmdir "$lock" 2>/dev/null || true
-          empty_attempts=0
-          continue
-        fi
-        ;;
+      '') ;;
       *[!0-9]*) ;;
       *)
         if ! kill -0 "$owner" 2>/dev/null; then
@@ -270,7 +271,8 @@ fm_worker_primary_attestation_prepare() {
       unset -f release_attestation_lock
       return 1
     fi
-    printf 'root=%s\ntoken=%s\n' "$root_real" "$token" > "$tmp" || {
+    printf 'root=%s\ntoken=%s\nharness_pid=%s\nharness_start=%s\n' \
+      "$root_real" "$token" "$harness_pid" "$harness_start" > "$tmp" || {
       rm -f "$tmp"
       release_attestation_lock
       unset -f release_attestation_lock

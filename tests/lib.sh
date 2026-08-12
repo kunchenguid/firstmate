@@ -86,6 +86,30 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+fm_test_write_primary_attestation() {
+  local root=$1 file=$2 token=$3 pid=${4:-${FM_FAKE_HARNESS_PID:-}} stat rest start identity
+  if [ -z "$pid" ]; then
+    identity=$( . "$ROOT/bin/fm-session-lock-lib.sh" && fm_trusted_harness_identity 2>/dev/null ) || identity=
+    if [ -n "$identity" ]; then
+      pid=${identity%%|*}
+      start=${identity#*|}
+    else
+      pid=$$
+    fi
+  fi
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat") || return 1
+    rest=$(printf '%s\n' "$stat" | sed -E 's/^[0-9]+ \(.*\) //')
+    start=$(printf '%s\n' "$rest" | awk '{print $20}')
+  elif [ -z "$start" ]; then
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')
+  fi
+  [ -n "$start" ] || return 1
+  printf 'root=%s\ntoken=%s\nharness_pid=%s\nharness_start=%s\n' \
+    "$root" "$token" "$pid" "$start" > "$file"
+  chmod 600 "$file"
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

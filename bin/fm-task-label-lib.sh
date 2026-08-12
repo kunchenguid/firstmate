@@ -154,17 +154,22 @@ fm_task_label_semantic_phrase() {  # <task-id>
   fi
 }
 
-# Ask the fleet snapshot's canonical backlog parser for one title. Its
-# backlog-only mode exits before endpoint or task-state inspection, so spawn
-# reuses the established parser without duplicating its rules or paying for a
-# whole fleet snapshot.
 fm_task_label_backlog_title() {  # <backlog-path> <task-id>
-  local backlog=$1 id=$2 data home
+  local backlog=$1 id=$2
   [ -f "$backlog" ] || return 0
-  data=$(cd "$(dirname "$backlog")" && pwd -P) || return 1
-  home=$(dirname "$data")
-  FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
-    "$FM_TASK_LABEL_LIB_DIR/fm-fleet-snapshot.sh" --backlog-title "$id"
+  awk -v key="$id" '
+    /^- \[[ xX]\] / {
+      rest = $0
+      sub(/^- \[[ xX]\] +/, "", rest)
+      candidate = rest
+      sub(/[[:space:]].*/, "", candidate)
+      if (candidate == key) {
+        sub(/^[^[:space:]]+[[:space:]]+/, "", rest)
+        print rest
+        exit
+      }
+    }
+  ' "$backlog"
 }
 
 fm_task_label_read_record() {  # <record> <expected-id>; echoes label<TAB>key

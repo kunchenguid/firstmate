@@ -680,7 +680,11 @@ teardown_herdr_endpoint_focus_safe() {
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-  [ "$state" = dead ] && return 0
+  case "$state" in
+    dead|no-agent) return 0 ;;
+    live) ;;
+    *) return 1 ;;
+  esac
   if [ -n "$child_id" ]; then
     if [ "$child_kind" = secondmate ]; then
       expected_home=$(meta_value "$child_meta" home)
@@ -697,7 +701,6 @@ teardown_herdr_endpoint_focus_safe() {
     return 1
   fi
   [ -n "$child_id" ] || return 1
-  [ "$state" = live ] || return 1
   fm_backend_herdr_kill "$target" "$FM_BACKEND_HERDR_BOUND_PID" \
     "$FM_BACKEND_HERDR_BOUND_PID_START"
 }
@@ -823,7 +826,7 @@ teardown_unresolved_endpoint_identity_proven() {
 
 teardown_tmux_dead_endpoint_identity_proven() {
   local id=$1 kind=$2 expected_home=$3 worktree=$4 target=$5
-  local stable stable_again path path_again command command_again marker stamp_home foreground env env_again
+  local stable stable_again path path_again command command_again marker stamp_home
   stable=$(fm_agent_tmux_window_id "$target") || return 1
   fm_backend_source tmux || return 1
   case "$target" in
@@ -858,13 +861,6 @@ teardown_tmux_dead_endpoint_identity_proven() {
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
     *) return 1 ;;
   esac
-  foreground=$(fm_backend_foreground_process_pid tmux "$stable") || return 1
-  env=$(fm_agent_environ "$foreground" 2>/dev/null) || return 1
-  fm_agent_worker_identity_matches "$foreground" "$id" "$expected_home" "$env" || return 1
-  current=$(fm_backend_foreground_process_pid tmux "$stable") || return 1
-  [ "$current" = "$foreground" ] || return 1
-  env_again=$(fm_agent_environ "$foreground" 2>/dev/null) || return 1
-  fm_agent_worker_identity_matches "$foreground" "$id" "$expected_home" "$env_again" || return 1
   teardown_backend_endpoint tmux "$stable"
 }
 
@@ -2844,7 +2840,11 @@ secondmate_registry_transaction_commit || {
   exit 1
 }
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
-  :
+  if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+    "$STATE/$ID.pi-ext.ts" "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then
+    echo "error: could not remove task records for $ID; preserving its reclaim instruction" >&2
+    exit 1
+  fi
 elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
     "$STATE/$ID.pi-ext.ts" "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then

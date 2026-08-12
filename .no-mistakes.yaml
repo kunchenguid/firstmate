@@ -8,7 +8,7 @@ disable_project_settings: true
 # of delegating to an agent.
 commands:
   lint: 'bin/fm-install-shellcheck.sh "${TMPDIR:-/tmp}/fm-shellcheck-$$/bin" && PATH="${TMPDIR:-/tmp}/fm-shellcheck-$$/bin:$PATH" bin/fm-lint.sh'
-  test: 'bash tests/fm-worker-isolation.test.sh && bash tests/fm-slot-occupant-proof.test.sh && bash tests/fm-spawn-route.test.sh && FM_TEARDOWN_TEST_FOCUS=s1 bash tests/fm-teardown.test.sh'
+  test: 'bash tests/fm-worker-isolation.test.sh && bash tests/fm-watch-session.test.sh && bash tests/fm-slot-occupant-proof.test.sh && FM_TEARDOWN_TEST_FOCUS=s1 bash tests/fm-teardown.test.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:
