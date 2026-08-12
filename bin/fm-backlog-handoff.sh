@@ -20,6 +20,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "backlog handoff" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -33,7 +36,7 @@ shift
 secondmate_home() {
   local id=$1 line
   [ -f "$REG" ] || { echo "error: no secondmate registry at $REG" >&2; return 1; }
-  line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
+  line=$(awk -v wanted="$id" '$1 == "-" && $2 == wanted { line = $0 } END { if (line != "") print line }' "$REG")
   [ -n "$line" ] || { echo "error: secondmate $id is not registered in $REG" >&2; return 1; }
   printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
 }

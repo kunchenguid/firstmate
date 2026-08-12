@@ -334,7 +334,7 @@ dirty_status() {
 secondmate_registry_field() {
   local reg=$1 id=$2 key=$3 line value
   [ -f "$reg" ] || return 1
-  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
+  line=$(awk -v wanted="$id" '$1 == "-" && $2 == wanted { line = $0 } END { if (line != "") print line }' "$reg")
   [ -n "$line" ] || return 1
   case "$key" in
     home) value=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//') ;;

@@ -211,7 +211,14 @@ test_spawn_isolation_abort() {
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
   assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
-  assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
+  # A lease WAS acquired before the isolation check failed, so the abort keeps a
+  # recoverable record instead of dropping the lease on the floor.
+  assert_present "$home/state/abort-notgit-dd4.meta" \
+    "aborted spawn dropped the recoverable record for its acquired lease"
+  assert_grep "spawn_state=aborted" "$home/state/abort-notgit-dd4.meta" \
+    "recoverable abort meta is not marked aborted"
+  assert_grep "worktree=$TMP_ROOT/spawn-notgit" "$home/state/abort-notgit-dd4.meta" \
+    "recoverable abort meta lost the leased worktree line"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
@@ -241,14 +248,20 @@ test_spawn_wrong_project_worktree_aborts() {
   expect_code 1 "$status" "spawn into an unrelated project checkout should abort"
   assert_contains "$out" "DIFFERENT repo" "wrong-project abort lacked the repo identity reason"
   assert_contains "$out" "spawn-target-project" "wrong-project abort lacked expected project identity"
-  assert_absent "$home/state/wrong-project-gg7.meta" "wrong-project abort must not record meta"
+  assert_present "$home/state/wrong-project-gg7.meta" \
+    "wrong-project abort dropped the recoverable record for its acquired lease"
+  assert_grep "spawn_state=aborted" "$home/state/wrong-project-gg7.meta" \
+    "wrong-project abort meta is not marked aborted"
   assert_grep "kill-window" "$rec" "wrong-project abort must kill the fresh window"
 
   : > "$rec"
   out=$(FM_TMUX_REC="$rec" run_spawn "$home" wrong-project-wt-hh8 "$proj" "$unrelated_wt" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into an unrelated project's linked worktree should abort"
   assert_contains "$out" "DIFFERENT repo" "wrong-project worktree abort lacked the repo identity reason"
-  assert_absent "$home/state/wrong-project-wt-hh8.meta" "wrong-project worktree abort must not record meta"
+  assert_present "$home/state/wrong-project-wt-hh8.meta" \
+    "wrong-project worktree abort dropped the recoverable record for its acquired lease"
+  assert_grep "spawn_state=aborted" "$home/state/wrong-project-wt-hh8.meta" \
+    "wrong-project worktree abort meta is not marked aborted"
   assert_grep "kill-window" "$rec" "wrong-project worktree abort must kill the fresh window"
   pass "fm-spawn: rejects unrelated project checkouts and linked worktrees"
 }

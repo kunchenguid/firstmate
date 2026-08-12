@@ -32,6 +32,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "update" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -41,7 +44,7 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-watcher-protocol-lib.sh
 . "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 
-"$SCRIPT_DIR/fm-guard.sh" || true
+"$SCRIPT_DIR/fm-guard.sh"
 
 usage() {
   echo "usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>]" >&2

@@ -18,7 +18,9 @@ export SIGNATURE_DATE_STATE SIGNATURE_GH_LOG
 
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
+[ "${GH_TOKEN:-}" = synthetic-gh-token ] || exit 91
 printf '%s\n' "$*" > "$SIGNATURE_GH_LOG"
+[ -z "${SIGNATURE_LIVE_BODY:-}" ] || printf '%s\n' "$SIGNATURE_LIVE_BODY"
 SH
 cat > "$FAKEBIN/date" <<'SH'
 #!/usr/bin/env bash
@@ -35,38 +37,107 @@ exit 0
 SH
 chmod +x "$FAKEBIN/gh" "$FAKEBIN/date" "$FAKEBIN/sleep"
 
+workflow_json() {
+  python3 "$ROOT/tests/workflow-contract.py" "$1"
+}
+
 extract_signature_script() {
-  awk '
-    /^        run: \|$/ { capture=1; next }
-    capture && /^          / { sub(/^          /, ""); print; next }
-    capture { exit }
-  ' "$WORKFLOW"
+  local workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" python3 - <<'PY'
+import json
+import os
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+for step in workflow["jobs"]["check"]["steps"]:
+    if step.get("name") == "Verify no-mistakes signature in PR body":
+        print(step["run"], end="")
+        break
+else:
+    raise SystemExit("signature step missing")
+PY
+}
+
+workflow_signature_env() {
+  local workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" python3 - <<'PY'
+import json
+import os
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+for step in workflow["jobs"]["check"]["steps"]:
+    if step.get("name") == "Verify no-mistakes signature in PR body":
+        for key, value in step.get("env", {}).items():
+            print(f"{key}\t{value}")
+        break
+else:
+    raise SystemExit("signature step missing")
+PY
+}
+
+apply_signature_env() {
+  local body=$1 key expression value
+  while IFS=$'\t' read -r key expression; do
+    case "$expression" in
+      '${{ github.event.pull_request.body }}') value=$body ;;
+      '${{ github.event.pull_request.user.login }}') value=synthetic-fork-contributor ;;
+      '${{ github.event.pull_request.number }}') value=418 ;;
+      '${{ github.token }}') value=synthetic-gh-token ;;
+      *) fail "unsupported signature-step environment expression for $key: $expression" ;;
+    esac
+    export "$key=$value"
+  done < <(workflow_signature_env)
 }
 
 signature_result() {
-  local body=$1 script
+  local body=$1 live_body=${2:-} script
   script=$(extract_signature_script)
   : > "$SIGNATURE_DATE_STATE"
   : > "$SIGNATURE_GH_LOG"
-  GITHUB_REPOSITORY=JTInventory/firstmate \
-    PR_NUMBER=418 \
-    PR_AUTHOR=synthetic-fork-contributor \
-    PR_BODY="$body" \
-    PATH="$FAKEBIN:$PATH" \
-    bash -c "$script" > "$SIGNATURE_OUTPUT" 2>&1
+  export SIGNATURE_LIVE_BODY="$live_body"
+  export GITHUB_REPOSITORY=JTInventory/firstmate
+  apply_signature_env "$body" || return 1
+  export PATH="$FAKEBIN:$PATH"
+  bash -c "$script" > "$SIGNATURE_OUTPUT" 2>&1
+}
+
+render_workflow_field() {
+  local field=$1 action=$2 run_number=$3 run_id=$4 workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" FIELD="$field" ACTION="$action" \
+    RUN_NUMBER="$run_number" RUN_ID="$run_id" python3 - <<'PY'
+import json
+import os
+import re
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+field = os.environ["FIELD"]
+value = workflow["concurrency"]["group"] if field == "concurrency.group" else workflow["run-name"]
+context = {
+    "github.event.pull_request.number": 418,
+    "github.event.action": os.environ["ACTION"],
+    "github.run_number": int(os.environ["RUN_NUMBER"]),
+    "github.run_id": os.environ["RUN_ID"],
+}
+
+def evaluate(expression):
+    expression = expression.strip()
+    for token, replacement in sorted(context.items(), key=lambda item: -len(item[0])):
+        expression = expression.replace(token, repr(replacement))
+    expression = expression.replace("||", " or ").replace("&&", " and ")
+    return eval(expression, {"__builtins__": {}}, {})
+
+print(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match.group(1))), value))
+PY
 }
 
 render_group() {
-  local action=$1 run_id=$2
-  case "$action" in
-    opened|edited) printf 'no-mistakes-required-418-%s\n' "$run_id" ;;
-    synchronize|reopened) printf 'no-mistakes-required-418-head-change\n' ;;
-  esac
+  render_workflow_field concurrency.group "$1" 1 "$2"
 }
 
 render_run_name() {
-  local action=$1 run_number=$2 run_id=$3
-  printf 'PR #418 body compliance - %s - event %s (run %s)\n' "$action" "$run_number" "$run_id"
+  render_workflow_field run-name "$1" "$2" "$3"
 }
 
 test_signature_sequence_at_fixed_head() {
@@ -78,11 +149,14 @@ test_signature_sequence_at_fixed_head() {
     "unsigned edited event did not reach the compliance rejection"
   assert_grep 'api repos/JTInventory/firstmate/pulls/418 --jq .body' "$SIGNATURE_GH_LOG" \
     "unsigned edited event did not use the controlled live-body lookup"
+  signature_result 'Synthetic unsigned edit' "$MARKER" || fail "valid live-body fallback must succeed"
+  assert_grep 'api repos/JTInventory/firstmate/pulls/418 --jq .body' "$SIGNATURE_GH_LOG" \
+    "live-body fallback did not use the controlled lookup"
   signature_result "Synthetic signed edit\n$MARKER" || fail "signed edited event must succeed"
   pass "fixed-head signed opened, unsigned edited, signed edited yields 0/1/0"
 }
 
-test_event_identity_contract() {
+test_workflow_semantics() {
   local opened edited_one edited_two synchronize reopened
   opened=$(render_group opened 9001)
   edited_one=$(render_group edited 9002)
@@ -94,40 +168,49 @@ test_event_identity_contract() {
   [ "$synchronize" = "$reopened" ] || fail "synchronize and reopened must share head-change"
   case "$opened $edited_one $edited_two" in *head-change*) fail "body event reused head-change" ;; esac
 
-  assert_grep "group: no-mistakes-required-\${{ github.event.pull_request.number }}-\${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}" "$WORKFLOW" \
-    "workflow does not implement immutable body-event groups"
-  assert_grep 'cancel-in-progress: true' "$WORKFLOW" "workflow lost cancellation for coalesced head changes"
-  pass "body event groups are distinct while head changes remain coalesced"
-}
-
-test_run_names_are_ordered_and_unique() {
-  local first second
   first=$(render_run_name edited 73 9002)
   second=$(render_run_name edited 74 9003)
   [ "$first" = 'PR #418 body compliance - edited - event 73 (run 9002)' ] || fail "first synthetic run name is incomplete"
   [ "$second" = 'PR #418 body compliance - edited - event 74 (run 9003)' ] || fail "second synthetic run name is incomplete"
   [ "$first" != "$second" ] || fail "distinct events must have unique run names"
-  assert_grep 'run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"' "$WORKFLOW" \
-    "workflow run name does not expose PR, action, monotonic run number, and immutable run ID"
-  pass "run names expose monotonic numbers and immutable IDs"
-}
+  local workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" python3 - <<'PY'
+import json
+import os
 
-test_security_and_signature_contract_is_preserved() {
-  assert_grep '  pull_request:' "$WORKFLOW" "workflow must use pull_request"
-  assert_no_grep 'pull_request_target' "$WORKFLOW" "workflow must not use pull_request_target"
-  assert_grep '  contents: read' "$WORKFLOW" "contents permission must remain read-only"
-  assert_no_grep 'contents: write' "$WORKFLOW" "workflow must not gain contents write permission"
-  assert_no_grep 'secrets.' "$WORKFLOW" "workflow must not read secrets"
-  assert_no_grep 'actions/checkout' "$WORKFLOW" "workflow must not check out fork code"
-  assert_grep 'name: PR must be raised via no-mistakes' "$WORKFLOW" "stable required check name changed"
-  assert_grep "$MARKER" "$WORKFLOW" "signature marker changed"
-  assert_grep "github.event.pull_request.user.login != 'github-actions[bot]'" "$WORKFLOW" "github-actions bot exemption changed"
-  assert_grep "github.event.pull_request.user.login != 'dependabot[bot]'" "$WORKFLOW" "dependabot bot exemption changed"
-  assert_no_grep 'release-please[bot]' "$WORKFLOW" "Firstmate must not exempt release-please"
-  pass "fork, permission, check-name, marker, and bot-exemption contracts are preserved"
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+event = workflow["on"]
+assert event["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
+assert event["pull_request"]["branches"] == ["main"]
+assert workflow["permissions"] == {"contents": "read", "pull-requests": "read"}
+assert workflow["concurrency"]["cancel-in-progress"] is True
+assert "github.event.pull_request.number" in workflow["concurrency"]["group"]
+assert "github.run_id" in workflow["concurrency"]["group"]
+assert workflow["run-name"] == "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+job = workflow["jobs"]["check"]
+assert job["name"] == "PR must be raised via no-mistakes"
+assert set(event) == {"pull_request"}
+def contains_secret(value):
+    if isinstance(value, dict):
+        return any(contains_secret(child) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_secret(child) for child in value)
+    return isinstance(value, str) and "secrets." in value
+assert all(
+    not isinstance(step.get("uses"), str)
+    or step["uses"].split("@", 1)[0] != "actions/checkout"
+    for step in job["steps"]
+)
+assert all(not contains_secret(step.get(field, {})) for step in job["steps"] for field in ("run", "env", "with"))
+condition = job["if"]
+assert "github-actions[bot]" in condition and "dependabot[bot]" in condition
+assert "release-please[bot]" not in condition
+PY
+  local status=$?
+  expect_code 0 "$status" "workflow semantic assertions must pass"
+  pass "semantic workflow identity, security, and signature contracts are preserved"
 }
 
 test_signature_sequence_at_fixed_head
-test_event_identity_contract
-test_run_names_are_ordered_and_unique
-test_security_and_signature_contract_is_preserved
+test_workflow_semantics

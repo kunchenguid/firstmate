@@ -38,19 +38,47 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
-# Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
-wait_live() {
-  local pid=$1 limit=${2:-30} i=0
-  while [ "$i" -lt "$limit" ]; do
-    kill -0 "$pid" 2>/dev/null || return 1
+# A watcher cycle is wall-clock bound (process start + FM_POLL + FM_SIGNAL_GRACE
+# plus whatever the classifier reads), so a loaded host routinely needs several
+# times the nominal ~2s. Every wait below is therefore a ceiling on an observed
+# effect, never a guess at how long the effect takes: WATCH_WAIT is generous
+# because a healthy run leaves as soon as the effect lands.
+WATCH_WAIT=${FM_TEST_WATCH_WAIT:-300}
+
+# Wait up to WATCH_WAIT 0.1s ticks for <cond ...> to hold while <pid> stays alive.
+# Echoes nothing on success, 'exited' if the watcher stopped first (the absorb
+# contract broke), 'timeout' if the effect never appeared. Waiting on the effect
+# keeps the negative assertions that follow honest - the cycle that would have
+# surfaced, queued, or exited has provably run by the time the effect lands.
+wait_live_until() {  # <pid> <cond> [args...]
+  local pid=$1 i=0
+  shift
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
+    kill -0 "$pid" 2>/dev/null || { printf 'exited\n'; return 0; }
+    "$@" && return 0
     sleep 0.1
     i=$((i + 1))
   done
-  return 0
+  kill -0 "$pid" 2>/dev/null || { printf 'exited\n'; return 0; }
+  printf 'timeout\n'
+}
+
+# Condition predicates for wait_live_until.
+file_present() { [ -e "$1" ]; }
+file_absent() { [ ! -e "$1" ]; }
+file_nonempty() { [ -s "$1" ]; }
+file_content_differs() { [ "$(cat "$1" 2>/dev/null || true)" != "$2" ]; }
+file_line_count_over() { [ "$(awk 'END { print NR + 0 }' "$1" 2>/dev/null || printf 0)" -gt "$2" ]; }
+file_line_count_at_most() { [ "$(awk 'END { print NR + 0 }' "$1" 2>/dev/null || printf 0)" -le "$2" ]; }
+file_number_at_least() {
+  local value
+  value=$(cat "$1" 2>/dev/null || true)
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$2" ]
 }
 
 wait_numeric_file() {
-  local file=$1 limit=${2:-30} i=0 value
+  local file=$1 limit=${2:-$WATCH_WAIT} i=0 value
   while [ "$i" -lt "$limit" ]; do
     value=$(cat "$file" 2>/dev/null || true)
     case "$value" in
@@ -237,9 +265,10 @@ test_provably_working_signal_absorbed() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a working: signal whose crew is provably working (should absorb): $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_nonempty "$state/.seen-task_status") in
+    exited) reap "$pid"; fail "watcher exited for a working: signal whose crew is provably working (should absorb): $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "provably-working signal did not advance its .seen-* suppressor" ;;
+  esac
   [ ! -s "$out" ] || fail "provably-working signal printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "provably-working signal enqueued a durable wake record"
   [ -s "$state/.seen-task_status" ] || fail "provably-working signal did not advance its .seen-* suppressor"
@@ -257,9 +286,10 @@ test_turn_ended_provably_working_absorbed() {
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_nonempty "$state/.seen-task_turn-ended") in
+    exited) reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "provably-working turn-end did not advance its .seen-* suppressor" ;;
+  esac
   [ ! -s "$out" ] || fail "provably-working turn-end printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "provably-working turn-end enqueued a durable wake record"
   reap "$pid"
@@ -281,7 +311,7 @@ test_turn_ended_not_working_surfaced() {
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end whose crew is not provably working"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not surface a turn-end whose crew is not provably working"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
@@ -300,7 +330,7 @@ test_working_note_not_working_surfaced() {
   export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling step 2'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not surface a working: note whose crew has no running pipeline and an idle pane"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not surface a working: note whose crew has no running pipeline and an idle pane"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the surfaced working: signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced working: note failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "surfaced working: note was not queued"
@@ -318,7 +348,7 @@ test_actionable_signal_surfaced() {
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not exit for an actionable needs-decision signal"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not exit for an actionable needs-decision signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
@@ -342,7 +372,7 @@ test_paused_secondmate_signal_surfaced() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal was absorbed indefinitely"; }
+  wait_for_exit "$pid" "$WATCH_WAIT" || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal was absorbed indefinitely"; }
   grep -F "signal: $status_file" "$out" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal did not surface"; }
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "drain after paused secondmate signal failed"; }
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal was not queued"; }
@@ -358,9 +388,10 @@ test_paused_secondmate_signal_surfaced() {
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart did not stay live for pause baseline"
-  fi
+  case $(wait_live_until "$pid" file_nonempty "$state/.hash-$key") in
+    exited) FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart did not stay live for pause baseline" ;;
+    timeout) reap "$pid"; FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart never took a pause baseline sample" ;;
+  esac
   [ -e "$state/.paused-$key" ] || { reap "$pid"; FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart cleared the pause marker during baseline"; }
   reap "$pid"
 
@@ -375,7 +406,7 @@ test_paused_secondmate_signal_surfaced() {
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate marker did not re-surface"; }
+  wait_for_exit "$pid" "$WATCH_WAIT" || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate marker did not re-surface"; }
   grep -F "paused" "$out" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate re-surface did not explain the wait"; }
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "drain after paused secondmate re-surface failed"; }
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate re-surface was not queued"; }
@@ -399,7 +430,7 @@ test_terminal_stale_surfaced() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not exit for a stale pane on a terminal status"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not exit for a stale pane on a terminal status"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
@@ -434,9 +465,10 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_nonempty "$state/.stale-since-$key") in
+    exited) reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "stale-since escalation timer was not recorded on absorb" ;;
+  esac
   [ ! -s "$out" ] || fail "fresh provably-working stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh provably-working stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
@@ -451,7 +483,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not escalate a provably-working non-terminal stale past the threshold"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not escalate a provably-working non-terminal stale past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
@@ -462,8 +494,9 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
 
 # --- declared external pause: absorb, then re-surface once per cadence --------
 test_paused_stale_absorbed_then_resurfaced() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid triage triage_before
   dir=$(make_case paused-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  triage="$state/.watch-triage.log"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-paused"
   printf 'idle external wait' > "$capture_file"
@@ -481,9 +514,10 @@ test_paused_stale_absorbed_then_resurfaced() {
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "declared pause surfaced before its cadence: $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_present "$state/.paused-$key") in
+    exited) reap "$pid"; fail "declared pause surfaced before its cadence: $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "declared pause did not create its shared watcher marker" ;;
+  esac
   [ ! -s "$out" ] || fail "declared pause emitted a wake before expiry: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "declared pause queued a wake before expiry"
   [ -e "$state/.paused-$key" ] || fail "declared pause did not create its shared watcher marker"
@@ -498,7 +532,7 @@ test_paused_stale_absorbed_then_resurfaced() {
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "expired declared pause did not re-surface"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "expired declared pause did not re-surface"
   grep -F "paused" "$out" >/dev/null || fail "pause re-surface did not explain the external wait"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after pause re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "pause re-surface was not queued"
@@ -506,14 +540,16 @@ test_paused_stale_absorbed_then_resurfaced() {
 
   : > "$state/.wake-queue"
   : > "$out"
+  triage_before=$(awk 'END { print NR + 0 }' "$triage" 2>/dev/null || printf 0)
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "pause re-surfaced repeatedly inside one cadence: $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_line_count_over "$triage" "$triage_before") in
+    exited) reap "$pid"; fail "pause re-surfaced repeatedly inside one cadence: $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "throttled pause never recorded an absorbed-stale triage line" ;;
+  esac
   [ ! -s "$out" ] || fail "pause emitted a duplicate wake inside one cadence: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "pause queued a duplicate wake inside one cadence"
   reap "$pid"
@@ -528,12 +564,15 @@ test_paused_stale_absorbed_then_resurfaced() {
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited while leaving declared pause: $(cat "$out")"
-  fi
-  [ ! -e "$state/.paused-$key" ] || fail "watcher pause marker survived leaving pause"
+  # Leaving pause drops the stale timer before clearing the pause marker, so the
+  # marker's absence means the reconciliation ran and any value left in
+  # .stale-since-* is the fresh one the resumed stale path writes.
+  case $(wait_live_until "$pid" file_absent "$state/.paused-$key") in
+    exited) reap "$pid"; fail "watcher exited while leaving declared pause: $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "watcher pause marker survived leaving pause" ;;
+  esac
+  wait_numeric_file "$state/.stale-since-$key" || { reap "$pid"; fail "watcher did not initialize a fresh stale timer after pause"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
-  case "$since" in ''|*[!0-9]*) fail "watcher did not initialize a fresh stale timer after pause" ;; esac
   [ "$since" -gt $(( $(date +%s) - 60 )) ] || fail "watcher carried an old wedge timer out of pause"
   [ ! -s "$state/.wake-queue" ] || fail "leaving pause inherited an immediate stale wake"
   reap "$pid"
@@ -566,9 +605,10 @@ test_paused_parked_run_absorbed_not_wedge() {
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "paused+parked external wait was wedge-surfaced: $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_present "$state/.paused-$key") in
+    exited) reap "$pid"; fail "paused+parked external wait was wedge-surfaced: $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "paused+parked wait did not retain pause cadence" ;;
+  esac
   [ ! -s "$out" ] || fail "paused+parked wait emitted a stale wake: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "paused+parked wait queued a stale wake"
   [ -e "$state/.paused-$key" ] || fail "paused+parked wait did not retain pause cadence"
@@ -606,7 +646,7 @@ test_nonterminal_stale_not_working_surfaced() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not surface a not-provably-working non-terminal stale at once"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not surface a not-provably-working non-terminal stale at once"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
   grep -F "possible wedge" "$out" >/dev/null && fail "an immediate stopped-crew stale was mislabeled a wedge"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on surface"
@@ -635,7 +675,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
@@ -649,7 +689,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
@@ -685,11 +725,13 @@ SH
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCH_TRIAGE_LOG_MAX_BYTES=1 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a benign signal while testing log capping: $(cat "$out")"
-  fi
-  lines=$(awk 'END { print NR + 0 }' "$state/.watch-triage.log")
-  [ "$lines" -le 2000 ] || { reap "$pid"; fail "triage log was not capped when wc emitted a spaced byte count (lines=$lines)"; }
+  case $(wait_live_until "$pid" file_line_count_at_most "$state/.watch-triage.log" 2000) in
+    exited) reap "$pid"; fail "watcher exited for a benign signal while testing log capping: $(cat "$out")" ;;
+    timeout)
+      lines=$(awk 'END { print NR + 0 }' "$state/.watch-triage.log")
+      reap "$pid"; fail "triage log was not capped when wc emitted a spaced byte count (lines=$lines)"
+      ;;
+  esac
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
   reap "$pid"
   pass "triage log capping handles wc byte counts with leading spaces"
@@ -704,9 +746,10 @@ test_heartbeat_no_change_absorbed() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a no-change heartbeat (should absorb): $(cat "$out")"
-  fi
+  case $(wait_live_until "$pid" file_number_at_least "$state/.heartbeat-streak" 1) in
+    exited) reap "$pid"; fail "watcher exited for a no-change heartbeat (should absorb): $(cat "$out")" ;;
+    timeout) reap "$pid"; fail "heartbeat backoff streak did not advance while absorbing" ;;
+  esac
   [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "no-change heartbeat enqueued a durable wake record"
   [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
@@ -727,7 +770,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
   [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/pr/5" ] \
     || fail "backstop did not record the status as surfaced (would re-fire next heartbeat)"
@@ -739,7 +782,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
-  local dir state fakebin out status_file pid m1 m2 now
+  local dir state fakebin out status_file pid m1 m2 now seen1
   dir=$(make_case beacon-fresh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/task.status"
   printf 'working: a\n' > "$status_file"
@@ -748,11 +791,18 @@ test_beacon_stays_fresh_while_absorbing() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited while absorbing the first benign signal"; }
+  case $(wait_live_until "$pid" file_nonempty "$state/.seen-task_status") in
+    exited) reap "$pid"; fail "watcher exited while absorbing the first benign signal" ;;
+    timeout) reap "$pid"; fail "watcher never absorbed the first benign signal" ;;
+  esac
   m1=$(file_mtime "$state/.last-watcher-beat")
+  seen1=$(cat "$state/.seen-task_status" 2>/dev/null || true)
   # A second benign signal keeps it absorbing; the beacon must keep advancing.
   printf 'working: b\n' >> "$status_file"
-  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
+  case $(wait_live_until "$pid" file_content_differs "$state/.seen-task_status" "$seen1") in
+    exited) reap "$pid"; fail "watcher exited while absorbing a second benign signal" ;;
+    timeout) reap "$pid"; fail "watcher never absorbed the second benign signal" ;;
+  esac
   m2=$(file_mtime "$state/.last-watcher-beat")
   now=$(date +%s)
   if [ -z "$m1" ] || [ -z "$m2" ]; then
@@ -781,7 +831,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_for_exit "$pid" 40 || fail "with .afk present the watcher did not exit one-shot for a benign signal"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "with .afk present the watcher did not exit one-shot for a benign signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal for the daemon"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the afk-mode signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \

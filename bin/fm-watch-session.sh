@@ -12,10 +12,35 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-detach-lib.sh
-. "$SCRIPT_DIR/fm-detach-lib.sh"
+FM_WATCH_SESSION_DEFAULT_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}
+FM_ROOT="${FM_ROOT_OVERRIDE:-$FM_WATCH_SESSION_DEFAULT_ROOT}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+SECOND_MATE_SESSION=0
+fm_worker_declared_secondmate_proven && SECOND_MATE_SESSION=1
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+fm_watch_require_session_lock() {
+  if fm_session_lock_owned_by_self "$STATE"; then
+    return 0
+  fi
+  if [ "$SECOND_MATE_SESSION" -eq 1 ]; then
+    echo "watch-session: FAILED - secondmate session-lock ownership is unproven" >&2
+    return 1
+  fi
+  if ! fm_worker_primary_bootstrap_proven; then
+    fm_worker_refuse_primary_operation "watch session" || return 1
+  fi
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    echo "watch-session: FAILED - session-lock ownership is unproven" >&2
+    return 1
+  fi
+}
 
 refuse_grok_primary() {
   [ "${GROK_AGENT:-}" = "1" ] || return 0
@@ -23,6 +48,40 @@ refuse_grok_primary() {
   echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
   return 1
 }
+
+if [ "$SECOND_MATE_SESSION" -eq 0 ]; then
+  fm_worker_primary_attestation_load 2>/dev/null || true
+fi
+
+write_primary_attestation() {
+  [ "$SECOND_MATE_SESSION" -eq 1 ] && return 0
+  fm_worker_primary_attestation_establish
+}
+
+case "${1:-start}" in
+  start|--start|restart|--restart)
+    refuse_grok_primary || exit 1
+    fm_watch_require_session_lock || exit 1
+    if [ "$SECOND_MATE_SESSION" -eq 0 ] && ! fm_worker_primary_bootstrap_proven; then
+      fm_worker_refuse_primary_operation "watch session" || exit 1
+      echo "watch-session: FAILED - primary bootstrap provenance is unproven" >&2
+      exit 1
+    fi
+    write_primary_attestation || {
+      echo "watch-session: FAILED - could not establish the primary launch attestation" >&2
+      exit 1
+    }
+    ;;
+esac
+case "${1:-start}" in
+  status|--status|stop|--stop)
+    fm_watch_require_session_lock || exit 1
+    ;;
+esac
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}
 HASH=$(printf '%s\n%s\n' "$FM_HOME" "$STATE" | cksum | awk '{print $1}')
@@ -59,6 +118,7 @@ write_runner_files() {
     printf 'export FM_HOME=%s\n' "$(shell_quote "$FM_HOME")"
     printf 'export FM_ROOT_OVERRIDE=%s\n' "$(shell_quote "$FM_ROOT")"
     printf 'export FM_STATE_OVERRIDE=%s\n' "$(shell_quote "$STATE")"
+    printf 'export FM_PRIMARY_ATTESTATION=%s\n' "$(shell_quote "$FM_PRIMARY_ATTESTATION")"
     printf 'export PATH=%s\n' "$(shell_quote "$PATH")"
   } > "$ENV_FILE"
   {
@@ -94,6 +154,10 @@ write_runner_files() {
 
 start_runner() {
   local command
+  write_primary_attestation || {
+    echo "watch-session: FAILED - could not establish the primary launch attestation" >&2
+    return 1
+  }
   if ! command -v tmux >/dev/null 2>&1; then
     echo "watch-session: FAILED - tmux not found" >&2
     return 1
@@ -180,12 +244,14 @@ mode=${1:-start}
 case "$mode" in
   start|--start)
     refuse_grok_primary || exit 1
+    fm_watch_require_session_lock || exit 1
     start_runner
     ;;
-  status|--status) status_runner ;;
-  stop|--stop) stop_runner ;;
+  status|--status) fm_watch_require_session_lock || exit 1; status_runner ;;
+  stop|--stop) fm_watch_require_session_lock || exit 1; stop_runner ;;
   restart|--restart)
     refuse_grok_primary || exit 1
+    fm_watch_require_session_lock || exit 1
     stop_runner >/dev/null || exit 1
     start_runner
     ;;

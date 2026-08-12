@@ -109,3 +109,4 @@ fi
 
 clear_error
 printf 'x-mention %s\n' "$REQ"
+

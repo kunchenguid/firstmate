@@ -33,6 +33,27 @@ fm_verified_harness_ancestry_pid() {
   return 1
 }
 
+fm_process_start_identity() {
+  local pid=$1 stat rest start
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    rest=$(printf '%s\n' "$stat" | sed -E 's/^[0-9]+ \(.*\) //')
+    start=$(printf '%s\n' "$rest" | awk '{print $20}')
+  else
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')
+  fi
+  [ -n "$start" ] || return 1
+  printf '%s' "$start"
+}
+
+fm_trusted_harness_identity() {
+  local pid start
+  pid=$(fm_verified_harness_ancestry_pid) || return 1
+  start=$(fm_process_start_identity "$pid") || return 1
+  printf '%s|%s' "$pid" "$start"
+}
+
 # Compatibility name for existing callers in older JT worktrees.
 fm_harness_ancestry_pid() {
   fm_verified_harness_ancestry_pid
@@ -121,10 +142,18 @@ fm_session_lock_holder_state() {
 }
 
 fm_session_lock_owned_by_self() {
-  local state=$1 owner marker my_pid
+  local state=$1 owner marker my_pid kind owner_pid
   owner=$(cat "$state/.lock" 2>/dev/null || true)
   if marker=$(fm_codex_owner_marker "$owner"); then
-    fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ]
+    fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ] || return 1
+    kind=$(fm_codex_owner_kind "$owner" 2>/dev/null || true)
+    if [ "$kind" = harness ]; then
+      owner_pid=${owner%%|*}
+      my_pid=$(fm_verified_harness_ancestry_pid) || return 1
+      [ "$my_pid" = "$owner_pid" ]
+      return $?
+    fi
+    [ "$kind" = fallback ] || [ "$kind" = legacy ]
     return $?
   fi
   case "$owner" in ''|*[!0-9]*) return 1 ;; esac

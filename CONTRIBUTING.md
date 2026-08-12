@@ -10,15 +10,13 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+Dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
 ## Workflow
 
-1. For this captain-owned delivery lane, clone `JTInventory/firstmate` or set your local delivery target to `git@github.com:JTInventory/firstmate.git`.
-   A checkout whose `origin` fetches from upstream `kunchenguid/firstmate` is accepted only when `fork/main`, no-mistakes status, the no-mistakes gate, and the resolved `origin` push target all prove delivery to `JTInventory/firstmate`.
+1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
 2. Create a branch and make your changes.
-3. Initialize the gate so its target is `JTInventory/firstmate` (firstmate expects **no-mistakes v1.31.2+** and a GitHub CLI whose `gh pr checks` supports `--json`).
+3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
 4. Commit your changes.
 5. Push through the gate instead of pushing to `origin`:
 
@@ -28,7 +26,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch and opens the PR against `JTInventory/firstmate` for you.
+7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
@@ -36,62 +34,56 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 - This repo is a template for running a firstmate orchestrator agent.
   `AGENTS.md` is the agent's main job description and names when to load bundled skills; `CLAUDE.md` is a symlink to it, and `.claude/skills` is a symlink to `.agents/skills`.
-- The authoritative shared/tracked surface is listed in `AGENTS.md`.
+- Only shared material is tracked: `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and `.agents/skills/`.
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
-  The repository-root `/config/`, `/reports/`, and `/backups/` rules are anchored, so same-named directories nested under shared surfaces such as `docs/examples/` and `tests/` remain trackable.
-  Local report or preservation folders such as `/reports/` and `/backups/` are not canonical tracked surfaces; leave them out of PRs unless a specific artifact is intentionally promoted into shared documentation.
-  The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations.
-  A local `config/backlog-backend=manual` opt-out forces hand-editing and stays gitignored.
+  The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` uses it for routine backlog mutations.
   It does not make `data/` tracked.
-- Shell entrypoints in `bin/` are Bash; runtime-specific helpers declare their runtime and purpose in a header comment.
-  Keep those headers accurate when you change behavior.
+- Helper scripts in `bin/` are plain bash.
+  Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass; it is the single owner of the ShellCheck pin and file set used by CI and no-mistakes.
-- Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
+  `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
+- Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
 ## Development
 
-Tracked changes to firstmate itself - the shared surfaces listed in `AGENTS.md` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
-Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's test command to the same bash behavior suite as CI.
-In this captain-owned delivery lane, no-mistakes PRs must target `JTInventory/firstmate`.
-`bin/fm-no-mistakes-pr-target-guard.sh` checks direct push targets, all no-mistakes fetch and push targets, and `no-mistakes status` before the test suite runs, so stale gate state cannot open or update a PR on `kunchenguid/firstmate`.
-It allows `origin` to fetch from upstream `kunchenguid/firstmate` only in a controlled-fork checkout where `fork`, branch tracking, no-mistakes status, the no-mistakes gate, and resolved `origin` push targets all prove delivery to `JTInventory/firstmate`.
-
-### Local behavior-test runner
-
-Run `FM_TEST_JOBS=1 bash bin/fm-run-behavior-tests.sh` for the serial local gate replay, or choose another positive `FM_TEST_JOBS` value for bounded local parallelism.
-See [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) for the runner's guard, isolation, failure-aggregation, and CI-boundary contract.
+Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
 
 Check and test the toolbelt before pushing:
 
 ```sh
-for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
-bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
-bin/fm-test-run.sh --family pure-contract-unit   # one declared family (serial, timed)
-bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
-bin/fm-test-run.sh --all   # intentional complete suite (optional local full run)
-bin/fm-test-isolation-proof.sh --list   # proven parallel candidate set (Phase 2; not production sharding)
-bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # concurrent isolation proof only
+bash -n bin/*.sh                          # syntax-check the toolbelt
+shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
+for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
+tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
+tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
+tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, and afk one-shot coherence
+tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
+tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
+tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands and codex $skill invocations
+tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
+tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
+tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
+tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
+tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
+tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
+tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dry-run preview, and .env-presence activation tests
+tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection and spawn/brief isolation tests
+tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
+tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
+tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests
+tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
+tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter, handoff validation, and teardown boundary tests
+tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, tasks-axi reminder, --force override
+tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
-
-`bin/fm-test-run.sh` is the single owner of serial behavior-suite selection, per-script timing markers, family totals, and the optional JSON timing artifact.
-Its header and `--help` own the flags, family labels, and changed-file map; this section only documents the entry points.
-`bin/fm-test-isolation-proof.sh` is the single owner of the Phase 2 concurrent isolation proof for a bounded, audited portable candidate set.
-It does not enable production CI sharding or general local `--jobs` on the serial runner; its `--help` output and focused tests own the candidate set and execution contract.
-Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
-CI owns the broad portable and required real-Herdr lane composition in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-Use `bin/fm-test-run.sh --help` for the exact family exclusion and required gate-skip flags when reproducing either lane locally.
-Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
-Tests that need real Herdr or another explicit opt-in (such as the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
-The [Herdr backend guide](docs/herdr-backend.md) owns the lane's safety and isolation rationale, including why live harness credential tests remain opt-in.
 
 ## Questions
 

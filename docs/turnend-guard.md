@@ -10,6 +10,8 @@ a regular file containing a safe id. That marker-aware exception matters because
 a Treehouse-leased secondmate home is itself a linked worktree. Child crew and
 scout worktrees remain out of scope: they are linked worktrees, their git-dir
 differs from git-common-dir, and they do not carry the secondmate marker.
+A declared task worker is never in scope, whatever root or state path it
+inherited. [Worker isolation](worker-isolation.md) owns that declaration.
 
 An in-scope home with no `state/*.meta` files is idle and exits silently. With
 child work in flight, the guard allows the turn only when the watcher lock names

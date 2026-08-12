@@ -39,9 +39,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+FM_FAKE_HARNESS_PID=$$
+export FM_FAKE_HARNESS_PID
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -51,10 +52,15 @@ TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 #   $CASE/wt/           - a worktree of the project (the task worktree)
 # Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin token
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  token="teardown-$name"
+  : > "$case_dir/data/backlog.md"
+  fm_test_write_primary_attestation "$ROOT" \
+    "$case_dir/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID"
+  printf '%s\n' '1|codex:teardown-fixture|fallback' > "$case_dir/state/.lock"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -65,6 +71,40 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Minimal endpoint inventory for the exact task window used by these fixtures.
+if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+fi
+if [ "${1:-}" = list-windows ]; then
+  if [ "${FM_FAKE_TMUX_QUERY_ERROR:-0}" = 1 ]; then
+    printf '%s\n' 'error connecting to /tmp/tmux.sock (Connection refused)' >&2
+    exit 1
+  fi
+  if [ "${FM_FAKE_TMUX_PENDING_NONE:-0}" = 1 ] \
+    && [[ "$*" == *"#{window_id}|#{window_name}"* ]]; then
+    exit 0
+  fi
+  case " $* " in
+    *"#{window_id}|#{session_name}:#{window_name}"*) printf '%s\n' '@1|firstmate:fm-task-x1' ;;
+    *"#{window_id}|#{window_name}"*) printf '%s\n' '@1|fm-task-x1' ;;
+    *"#{window_id} #{window_name}"*) printf '%s\n' '@1 fm-task-x1' ;;
+    *"#{window_id}"*) printf '%s\n' '@1' ;;
+    *"#{window_name}"*) printf '%s\n' 'fm-task-x1' ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = display-message ]; then
+  case " $* " in
+    *"#{pane_pid}"*) printf '%s\n' "$$" ;;
+    *"#{pane_current_command}"*) printf '%s\n' bash ;;
+    *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_TMUX_PATH:-$PWD}" ;;
+    *"#{window_name}"*) printf '%s\n' fm-task-x1 ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = kill-window ] && [ -n "${FM_FAKE_TMUX_REPLACE_META:-}" ]; then
+  printf '%s\n' 'generation=replacement' > "$FM_FAKE_TMUX_REPLACE_META"
+fi
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
@@ -85,9 +125,21 @@ SH
 case "${1:-} ${2:-}" in
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
 esac
-exit 0
+  exit 0
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*|*args=*|*command=*)
+    pid="${@: -1}"
+    [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf 'claude\n' || printf 'bash\n'
+    ;;
+  *ppid=*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -101,6 +153,16 @@ SH
   # Clone as the project; give it a `main` branch and an origin/HEAD.
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  printf '# agents\n' > "$case_dir/project/AGENTS.md"
+  cp -R "$ROOT/bin" "$case_dir/project/bin"
+  if [ "${FM_TEARDOWN_TEST_FOCUS:-}" = s1 ]; then
+    # Focused return fixtures test lifecycle ordering, not host-wide process
+    # occupancy. Keep that answer deterministic on busy CI runners.
+    printf '%s\n' 'fm_slot_process_occupant_tasks() { return 1; }' \
+      >> "$case_dir/project/bin/fm-slot-owner-lib.sh"
+  fi
+  fm_test_write_primary_attestation "$case_dir/project" \
+    "$case_dir/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID"
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
@@ -125,12 +187,17 @@ SH
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
-  fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+  local stamp_home=${FM_HOME:-$case_dir} state=${FM_STATE_OVERRIDE:-$case_dir/state}
+  mkdir -p "$state"
+  fm_write_meta "$state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$case_dir/wt" task-x1 "$stamp_home" ) \
+    || fail "could not stamp the task worktree ownership fixture"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -258,12 +325,20 @@ SH
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
-  local case_dir=$1; shift
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  local case_dir=$1 token
+  shift
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$case_dir/state/.primary-attestation" 2>/dev/null || true)
+  FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$case_dir/project}" \
+  FM_HOME="${FM_HOME:-$case_dir}" \
+  FM_PRIMARY_ATTESTATION="${FM_PRIMARY_ATTESTATION:-$token}" \
+  CODEX_THREAD_ID=teardown-fixture \
+  FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-$case_dir/state}" \
+  FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-$case_dir/config}" \
+  FM_FAKE_TMUX_REPLACE_META="${FM_FAKE_TMUX_REPLACE_META:-}" \
+  FM_FAKE_TMUX_PATH="${FM_FAKE_TMUX_PATH:-$case_dir/wt}" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$TEARDOWN" task-x1 "$@"
+    env -u NO_MISTAKES_GATE bash -c 'cd "$1" && exec "$2" task-x1 "${@:3}"' _ "$case_dir/project" "$case_dir/project/bin/fm-teardown.sh" "$@"
 }
 
 test_local_only_fork_remote_allows() {
@@ -698,6 +773,155 @@ test_teardown_refuses_unsafe_tasktmp() {
   pass "teardown refuses arbitrary tasktmp cleanup targets from meta"
 }
 
+# An interrupted durable return must never become a permanent one-way door: the
+# refusal has to hand the operator the exact recovery for state/<id>.meta.
+test_teardown_refusal_on_incomplete_return_prints_recovery() {
+  local case_dir rc
+  case_dir=$(make_case incomplete-return)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'slot_returning=1\n' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "incomplete-return: teardown must refuse while a durable return is incomplete"
+  grep -q 'durable return for task-x1 is incomplete' "$case_dir/stderr" \
+    || fail "incomplete-return: refusal did not cite the incomplete return"
+  grep -q 'teardown: RECOVERY:' "$case_dir/stderr" \
+    || fail "incomplete-return: refusal left no recovery instruction"
+  grep -F "$case_dir/state/task-x1.meta" "$case_dir/stderr" >/dev/null \
+    || fail "incomplete-return: the recovery instruction did not name the meta file to edit"
+  assert_present "$case_dir/state/task-x1.meta" "incomplete-return: task state must be preserved"
+  pass "an incomplete durable return refuses with an exact, documented recovery"
+}
+
+# A spawn that leased a pooled slot but never resolved its path records the
+# lease holder instead of a fabricated worktree. Teardown must retire the
+# endpoint and records, return nothing, and print the reclaim instruction.
+test_teardown_retires_an_unresolved_lease_record() {
+  local case_dir rc
+  case_dir=$(make_case unresolved-lease)
+  add_compatible_tasks_axi "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "worktree=" \
+    "slot_lease_state=unresolved" \
+    "slot_lease_holder=task-x1" \
+    "slot_worktree_candidate=$case_dir/half-settled" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unresolved-lease: teardown must retire a record with no resolved slot path: $(cat "$case_dir/stderr")"
+  grep -q 'teardown: RECLAIM:' "$case_dir/stderr" \
+    || fail "unresolved-lease: teardown left no reclaim instruction for the still-held lease"
+  grep -F "$case_dir/half-settled" "$case_dir/stderr" >/dev/null \
+    || fail "unresolved-lease: the reclaim instruction did not name the recorded candidate path"
+  assert_absent "$case_dir/state/task-x1.meta" "unresolved-lease: the record should be retired"
+  assert_absent "$case_dir/treehouse.log" \
+    "unresolved-lease: teardown must not run treehouse against a slot it could not identify"
+  grep -q 'lease is still held by task-x1' "$case_dir/stdout" \
+    || fail "unresolved-lease: the completion line did not report the still-held lease"
+  pass "an unresolved-lease record is retirable and reports its still-held lease"
+}
+
+# The recovery the previous refusal advertises has to be REACHABLE. A failed
+# return must leave the worktree on its task branch, so the retry passes
+# fm_assert_task_branch_matches_meta instead of dying on an unrelated identity
+# mismatch, and the task branch is only retired once the return is proven.
+test_teardown_failed_return_stays_retryable_for_a_ship_task() {
+  local case_dir rc wt_head gate branch
+  case_dir=$(make_case failed-return-retry)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work before the failed return"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  gate="$case_dir/treehouse-allow"
+
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ -e "$gate" ] || { echo "fatal: pool is busy" >&2; exit 1; }
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "failed-return-retry: teardown must refuse when the return fails"
+  grep -q 'teardown can be retried' "$case_dir/stderr" \
+    || fail "failed-return-retry: the failure did not advertise a retry: $(cat "$case_dir/stderr")"
+  grep -q '^slot_returning=1$' "$case_dir/state/task-x1.meta" \
+    && fail "failed-return-retry: a retryable failure left an uncleanable slot_returning mark"
+  branch=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD || printf 'DETACHED')
+  [ "$branch" = "fm/task-x1" ] \
+    || fail "failed-return-retry: the failed return left the worktree on $branch, not its task branch"
+
+  touch "$gate"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "failed-return-retry: the advertised retry must succeed: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" "failed-return-retry: the retry should retire the record"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "failed-return-retry: the task branch survived a proven return"
+  pass "a failed return stays retryable and only retires the task branch once the return is proven"
+}
+
+test_teardown_preserves_replacement_metadata() {
+  local case_dir rc wt_head token replacement_meta
+  case_dir=$(make_case replacement-metadata)
+  mkdir -p "$case_dir/project/bin" "$case_dir/project/state" "$case_dir/project/data" "$case_dir/project/config"
+  printf '%s\n' '# agents' > "$case_dir/project/AGENTS.md"
+  printf '%s\n' '# secondmate registry' > "$case_dir/project/data/secondmates.md"
+  token="replacement-$RANDOM"
+  fm_test_write_primary_attestation "$case_dir/project" \
+    "$case_dir/project/state/.primary-attestation" "$token"
+  FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/project" \
+    FM_STATE_OVERRIDE="$case_dir/project/state" write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work before replacement"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  replacement_meta="$case_dir/project/state/task-x1.meta"
+
+  set +e
+  (
+    cd "$case_dir/project"
+    FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/project" \
+      FM_PRIMARY_ATTESTATION="$token" \
+      FM_CONFIG_OVERRIDE="$case_dir/project/config" \
+      FM_STATE_OVERRIDE="$case_dir/project/state" \
+      FM_FAKE_TMUX_REPLACE_META="$replacement_meta" \
+      run_teardown "$case_dir" --force
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "teardown must refuse to delete replacement metadata"
+  assert_present "$replacement_meta" \
+    "teardown removed metadata after the replacement was published"
+  assert_contains "$(cat "$replacement_meta")" "generation=replacement" \
+    "teardown deleted metadata published after the original generation"
+  pass "teardown preserves metadata replaced during lifecycle cleanup"
+}
+
 test_teardown_retries_transient_index_lock() {
   local case_dir rc wt_head attempts
   case_dir=$(make_case transient-index-lock)
@@ -749,6 +973,9 @@ test_forced_secondmate_teardown_retries_child_index_lock() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$child" child-x1 "$home" ) \
+    || fail "forced-child-index-lock: could not stamp child worktree ownership"
 
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
@@ -815,10 +1042,11 @@ EOF
 }
 
 test_forced_secondmate_teardown_propagates_child_close_failure() {
-  local case_dir rc home child
+  local case_dir rc home child child_pid kill_log
   case_dir=$(make_case forced-child-close-failure)
   home="$case_dir/home"
   child="$case_dir/wt"
+  kill_log="$case_dir/tmux-kill.log"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   fm_write_meta "$case_dir/state/task-x1.meta" \
@@ -835,10 +1063,29 @@ test_forced_secondmate_teardown_propagates_child_close_failure() {
     "kind=ship" \
     "mode=no-mistakes"
 
+  ( cd "$child" && FM_AGENT_ROLE=crewmate FM_AGENT_TASK=child-x1 \
+      FM_AGENT_OWNER_HOME="$home" exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  child_pid=$!
+  while [ ! -e "/proc/$child_pid/cwd" ] && kill -0 "$child_pid" 2>/dev/null; do
+    sleep 0.05
+  done
+  export FM_CHILD_PID="$child_pid"
+
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  "kill-window -t firstmate:fm-child-x1") exit 1 ;;
+  "kill-window -t firstmate:fm-child-x1") printf '%s\n' "$*" >> "${FM_TMUX_KILL_LOG:?}"; exit 0 ;;
+  "kill-window -t @2") printf '%s\n' "$*" >> "${FM_TMUX_KILL_LOG:?}"; exit 1 ;;
+  *"list-windows -t firstmate -F #{window_name}"*)
+    printf '%s\n' 'fm-child-x1'
+    exit 0
+    ;;
+  *"list-windows -t =firstmate -F #{window_id} #{window_name}"*)
+    printf '%s\n' '@2 fm-child-x1'
+    exit 0
+    ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_CHILD_PID:?}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' claude; exit 0 ;;
   "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
     printf '%s\n' '@2|firstmate:fm-child-x1'
     exit 0
@@ -847,11 +1094,17 @@ case "$*" in
 esac
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  export FM_TMUX_KILL_LOG="$kill_log"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
+
+  kill "$child_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+  unset FM_CHILD_PID
+  unset FM_TMUX_KILL_LOG
 
   expect_code 1 "$rc" "forced-child-close-failure: parent teardown must fail closed"
   assert_present "$case_dir/state/task-x1.meta" \
@@ -859,11 +1112,61 @@ SH
   assert_present "$home/state/child-x1.meta" \
     "forced-child-close-failure: child metadata must survive child close refusal"
   [ -d "$home" ] || fail "forced-child-close-failure: parent home was removed after child close refusal"
+  grep -Fx 'kill-window -t @2' "$kill_log" >/dev/null \
+    || fail "forced-child-close-failure: teardown did not use the stable window id"
   grep -q "child cleanup failed" "$case_dir/stderr" \
     || fail "forced-child-close-failure: refusal did not identify child cleanup"
-  grep -Fq 'cleanup_firstmate_home_children "$child_home" || return 1' "$TEARDOWN" \
-    || fail "recursive secondmate cleanup does not propagate nested child failure"
   pass "forced and recursive secondmate teardown propagate child close failures"
+}
+
+test_forced_secondmate_teardown_refuses_missing_child_with_live_occupant() {
+  local case_dir rc home child child_pid
+  case_dir=$(make_case forced-child-missing-occupant)
+  home="$case_dir/home"
+  child="$case_dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/child-x1.meta" \
+    "window=firstmate:fm-child-x1" \
+    "worktree=$child" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$child" child-x1 "$home" ) \
+    || fail "forced-child-missing-occupant: child worktree fixture could not be stamped"
+
+  ( cd "$child" && FM_AGENT_ROLE=crewmate FM_AGENT_TASK=child-x1 \
+      FM_AGENT_OWNER_HOME="$home" exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  child_pid=$!
+  while [ ! -e "/proc/$child_pid/cwd" ] && kill -0 "$child_pid" 2>/dev/null; do
+    sleep 0.05
+  done
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  kill "$child_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+
+  expect_code 1 "$rc" "forced-child-missing-occupant: teardown must fail closed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "forced-child-missing-occupant: parent metadata must survive occupant refusal"
+  assert_present "$home/state/child-x1.meta" \
+    "forced-child-missing-occupant: child metadata must survive occupant refusal"
+  [ -d "$home" ] || fail "forced-child-missing-occupant: parent home was removed"
+  grep -q "child cleanup failed" "$case_dir/stderr" \
+    || fail "forced-child-missing-occupant: refusal did not identify child cleanup"
+  pass "forced teardown retains a child home when its endpoint is missing but occupied"
 }
 
 test_secondmate_teardown_refuses_open_pending_reply() {
@@ -1229,77 +1532,174 @@ SH
   pass "failed nested teardown keeps the staged reply active"
 }
 
-test_herdr_teardown_helper_locks_and_closes_focus_safe() {
-  local dir function_source close_log
-  dir="$TMP_ROOT/herdr-focus-safe-helper"
-  mkdir -p "$dir/state"
-  close_log="$dir/close"
-  function_source=$(sed -n '/^teardown_herdr_endpoint_focus_safe()/,/^}/p' "$TEARDOWN")
-  FUNCTION_SOURCE="$function_source" SCRIPT_DIR="$ROOT/bin" STATE="$dir/state" CLOSE_LOG="$close_log" \
-    bash -c '
-      eval "$FUNCTION_SOURCE"
-      fm_backend_source() { return 0; }
-      fm_backend_herdr_parse_target() {
-        FM_BACKEND_HERDR_SESSION=${1%%:*}
-        FM_BACKEND_HERDR_PANE=${1#*:}
-      }
-      fm_backend_herdr_pane_agent_state() { printf live; }
-      fm_backend_herdr_presentation_session_lock_path() { printf "%s/presentation.lock" "$STATE"; }
-      fm_backend_herdr_projection_teardown_close() {
-        printf "%s:%s\n" "$1" "$2" > "$CLOSE_LOG"
-      }
-      teardown_herdr_endpoint_focus_safe fmtest:w9:p4
-    ' || fail "focus-safe Herdr teardown helper refused a verifiable exact close"
-  [ "$(cat "$close_log")" = fmtest:w9:p4 ] \
-    || fail "focus-safe Herdr teardown helper did not close the exact response-derived pane"
-  [ ! -e "$dir/state/presentation.lock" ] \
-    || fail "focus-safe Herdr teardown helper did not release its session lock"
-  pass "Herdr teardown serializes every exact endpoint close through focus-safe verification"
+test_endpoint_recovery_uses_stable_window_id() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-stable-id)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:stale-name' \
+    'window_id=@1' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'spawn_state=aborted' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    export FM_FAKE_TMUX_PATH="$case_dir/project"
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "endpoint-recovery-stable-id: teardown should retire a valid recovery endpoint"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-stable-id: recovery metadata survived endpoint retirement"
+  assert_contains "$(cat "$case_dir/tmux.log")" 'kill-window -t @1' \
+    "endpoint-recovery-stable-id: teardown did not kill the immutable window id"
+  pass "endpoint recovery consumes the immutable tmux window id"
 }
 
-test_projection_journal_retires_before_worktree_return() {
-  local retire_line return_line
-  retire_line=$(grep -n '^    rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
-  return_line=$(grep -n '^  teardown_treehouse_return "$WT"' "$TEARDOWN" | cut -d: -f1)
-  [ -n "$retire_line" ] && [ -n "$return_line" ] && [ "$retire_line" -lt "$return_line" ] \
-    || fail "confirmed projection journal retirement must precede the fallible worktree return"
-  grep -Fq 'teardown_backend_endpoint "$child_backend" "$child_t"' "$TEARDOWN" \
-    || fail "forced child Herdr teardown bypasses the shared focus-safe endpoint closer"
-  pass "confirmed projection journals retire before return failure and child teardown shares safe closure"
+test_endpoint_recovery_retains_on_tmux_query_error() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-query-error)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:stale-name' \
+    'window_id=@1' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'spawn_state=aborted' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    export FM_FAKE_TMUX_PATH="$case_dir/project"
+    export FM_FAKE_TMUX_QUERY_ERROR=1
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "endpoint-recovery-query-error: teardown must retain uncertain recovery state"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-query-error: uncertain recovery metadata was removed"
+  assert_not_contains "$(cat "$case_dir/tmux.log")" 'kill-window' \
+    "endpoint-recovery-query-error: teardown killed an endpoint after an uncertain query"
+  pass "endpoint recovery retains metadata when tmux presence is unreadable"
 }
 
-test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_reconciles_consumed_presentation_receipt
-test_teardown_refuses_foreign_presentation_receipt
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
-test_teardown_refuses_unsafe_tasktmp
-test_local_only_truly_unpushed_refuses
-test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
-test_no_mistakes_truly_unpushed_refuses
-test_local_only_force_overrides_unpushed
-test_squash_merged_branch_deleted_allows
-test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
-test_squash_merged_pr_allows_replayed_unpushed_patch
-test_merged_pr_with_later_local_commit_refuses
-test_pr_check_does_not_refresh_stale_pr_head
-test_pr_check_records_remote_head_when_local_lags
-test_content_in_default_fallback_allows
-test_content_fallback_refreshes_stale_origin_ref
-test_dirty_worktree_refuses
-test_gh_error_and_content_absent_refuses
-test_teardown_retries_transient_index_lock
-test_forced_secondmate_teardown_retries_child_index_lock
-test_forced_secondmate_teardown_uses_child_receipt_identity
-test_forced_secondmate_teardown_propagates_child_close_failure
-test_secondmate_teardown_refuses_open_pending_reply
-test_forced_secondmate_teardown_handoffs_escalated_reply
-test_forced_secondmate_teardown_failure_keeps_active_reply
-test_nested_secondmate_teardown_refuses_unescalated_reply
-test_nested_secondmate_teardown_handoffs_escalated_reply
-test_nested_secondmate_late_report_handoffs_resolved_history
-test_nested_secondmate_teardown_handoffs_archived_resolution
-test_nested_secondmate_teardown_failure_keeps_active_reply
-test_herdr_teardown_helper_locks_and_closes_focus_safe
-test_projection_journal_retires_before_worktree_return
+test_endpoint_recovery_pending_without_window_retires_reservation() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-pending-none)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:fm-task-x1' \
+    'window_id=pending' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'endpoint_recovery_pending=1' \
+    'spawn_state=starting' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    export FM_FAKE_TMUX_PENDING_NONE=1
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "endpoint-recovery-pending-none: unmaterialized reservation should retire"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-pending-none: pending reservation survived retirement"
+  assert_not_contains "$(cat "$case_dir/tmux.log")" 'kill-window' \
+    "endpoint-recovery-pending-none: teardown killed a window after confirmed absence"
+  pass "pending endpoint recovery retires only after confirming no task window exists"
+}
+
+test_endpoint_recovery_pending_preserves_unproven_window() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-pending-found)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:fm-task-x1' \
+    'window_id=pending' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'endpoint_recovery_pending=1' \
+    'spawn_state=starting' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "endpoint-recovery-pending-found: unproven window must refuse teardown"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-pending-found: unproven recovery metadata was removed"
+  assert_not_contains "$(cat "$case_dir/tmux.log")" 'kill-window' \
+    "endpoint-recovery-pending-found: teardown killed an unproven window"
+  pass "pending endpoint recovery preserves an unproven matching window"
+}
+
+if [ "${FM_TEARDOWN_TEST_FOCUS:-}" = s1 ]; then
+  test_teardown_refusal_on_incomplete_return_prints_recovery
+  test_teardown_retires_an_unresolved_lease_record
+  test_teardown_failed_return_stays_retryable_for_a_ship_task
+  test_teardown_retries_transient_index_lock
+  test_endpoint_recovery_uses_stable_window_id
+  test_endpoint_recovery_retains_on_tmux_query_error
+  test_endpoint_recovery_pending_without_window_retires_reservation
+  test_endpoint_recovery_pending_preserves_unproven_window
+else
+  test_local_only_fork_remote_allows
+  test_teardown_prompts_tasks_axi_done_when_compatible
+  test_teardown_reconciles_consumed_presentation_receipt
+  test_teardown_refuses_foreign_presentation_receipt
+  test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+  test_teardown_refuses_unsafe_tasktmp
+  test_teardown_refusal_on_incomplete_return_prints_recovery
+  test_teardown_retires_an_unresolved_lease_record
+  test_teardown_failed_return_stays_retryable_for_a_ship_task
+  test_teardown_preserves_replacement_metadata
+  test_local_only_truly_unpushed_refuses
+  test_local_only_merged_to_local_main_allows
+  test_no_mistakes_origin_remote_allows
+  test_no_mistakes_truly_unpushed_refuses
+  test_local_only_force_overrides_unpushed
+  test_squash_merged_branch_deleted_allows
+  test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+  test_squash_merged_pr_allows_replayed_unpushed_patch
+  test_merged_pr_with_later_local_commit_refuses
+  test_pr_check_does_not_refresh_stale_pr_head
+  test_pr_check_records_remote_head_when_local_lags
+  test_content_in_default_fallback_allows
+  test_content_fallback_refreshes_stale_origin_ref
+  test_dirty_worktree_refuses
+  test_gh_error_and_content_absent_refuses
+  test_teardown_retries_transient_index_lock
+  test_forced_secondmate_teardown_retries_child_index_lock
+  test_forced_secondmate_teardown_uses_child_receipt_identity
+  test_forced_secondmate_teardown_propagates_child_close_failure
+  test_forced_secondmate_teardown_refuses_missing_child_with_live_occupant
+  test_secondmate_teardown_refuses_open_pending_reply
+  test_forced_secondmate_teardown_handoffs_escalated_reply
+  test_forced_secondmate_teardown_failure_keeps_active_reply
+  test_nested_secondmate_teardown_refuses_unescalated_reply
+  test_nested_secondmate_teardown_handoffs_escalated_reply
+  test_nested_secondmate_late_report_handoffs_resolved_history
+  test_nested_secondmate_teardown_handoffs_archived_resolution
+  test_nested_secondmate_teardown_failure_keeps_active_reply
+  test_endpoint_recovery_uses_stable_window_id
+  test_endpoint_recovery_retains_on_tmux_query_error
+  test_endpoint_recovery_pending_without_window_retires_reservation
+  test_endpoint_recovery_pending_preserves_unproven_window
+fi

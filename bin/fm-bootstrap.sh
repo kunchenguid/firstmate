@@ -12,6 +12,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "ISOLATION: task <id> <collapse or ownership finding>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -41,6 +42,10 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          An ISOLATION line means a task's live agent process is provably not
+#          in its recorded worktree, is declared for another home, or required
+#          live process evidence is unproven. It is read-only, runs in
+#          detect-only mode too, and blocks later mutation in every case.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -82,6 +87,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "bootstrap" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -841,11 +849,31 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
+# The sweep's own stderr is kept, not discarded: a sweep that could not RUN at
+# all (a missing interpreter, an unreadable library, a broken PATH) exits
+# nonzero with no findings on stdout, and that status blocks every bootstrap
+# mutation below. Without the captured diagnostic the whole home drops to a
+# read-only session with nothing to act on.
+isolation_sweep_status=0
+isolation_sweep_diag=
+isolation_sweep_err=$(mktemp "${TMPDIR:-/tmp}/fm-isolation-sweep.XXXXXX" 2>/dev/null || true)
+if [ -n "$isolation_sweep_err" ]; then
+  isolation_sweep_output=$("$SCRIPT_DIR/fm-isolation-sweep.sh" 2>"$isolation_sweep_err") \
+    || isolation_sweep_status=$?
+  isolation_sweep_diag=$(tr '\n' ' ' < "$isolation_sweep_err" 2>/dev/null | sed 's/ *$//')
+  rm -f "$isolation_sweep_err"
+else
+  isolation_sweep_output=$("$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null) \
+    || isolation_sweep_status=$?
+fi
+[ -z "$isolation_sweep_output" ] || printf '%s\n' "$isolation_sweep_output"
+
 # This is the first mutating sweep at a locked session boundary. It pauses an
 # identity-matched watcher, holds its lock, and neutralizes legacy PR checks
 # before any tool detection or later bootstrap mutation can leave old artifacts
 # runnable. Detect-only sessions never touch state.
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] \
+  && [ "$isolation_sweep_status" -eq 0 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
 fi
 
@@ -896,6 +924,13 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  if [ "$isolation_sweep_status" -ne 0 ]; then
+    if [ -z "$isolation_sweep_output" ]; then
+      echo "ISOLATION: worker isolation sweep could not run (exit $isolation_sweep_status), so isolation is unproven: ${isolation_sweep_diag:-no diagnostic was produced}; run $SCRIPT_DIR/fm-isolation-sweep.sh directly to see why"
+    fi
+    echo "ISOLATION: bootstrap mutations blocked until worker isolation is clean"
+    exit 1
+  fi
   secondmate_liveness_sweep
   secondmate_sync || exit 1
   x_mode_setup

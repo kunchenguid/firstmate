@@ -64,6 +64,23 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# make_fake_live_tmux_window <fakebin> <window-name>: a tmux stub that reports
+# exactly one live window running a harness, so the isolation gate - which only
+# blocks records whose endpoint could still be running a worker - can be
+# exercised deterministically.
+make_fake_live_tmux_window() {
+  local fakebin=$1 window=$2
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *list-windows*window_name*) printf '%s\n' '$window' ;;
+  *pane_current_command*) printf '%s\n' claude ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+}
+
 add_tasks_axi() {
   local fakebin=$1 version=$2
   cat > "$fakebin/tasks-axi" <<SH
@@ -279,7 +296,72 @@ test_bootstrap_discovers_home_nvm_tasks_axi() {
   pass "bootstrap discovers HOME NVM tasks-axi in a clean non-interactive PATH"
 }
 
+test_bootstrap_blocks_mutation_on_unproven_isolation() {
+  local case_dir fakebin out status
+  case_dir="$TMP_ROOT/bootstrap-isolation-gate"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/config"
+  cat > "$case_dir/home/state/isolation-gate.meta" <<EOF
+window=firstmate:fm-isolation-gate
+worktree=$case_dir/worktree
+project=$case_dir/project
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_tasks_axi "$fakebin" "0.1.1"
+  # The gate is scoped to records whose endpoint could still be running a
+  # worker, so the fixture window has to report itself as live.
+  make_fake_live_tmux_window "$fakebin" fm-isolation-gate
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  status=$?
+  expect_code 1 "$status" "bootstrap must refuse mutation on unproven worker isolation"
+  assert_contains "$out" "ISOLATION: bootstrap mutations blocked until worker isolation is clean" \
+    "bootstrap did not report the isolation mutation gate"
+  pass "bootstrap blocks mutating sweeps when restore-time isolation is unproven"
+}
+
+test_bootstrap_does_not_block_on_a_record_whose_endpoint_is_gone() {
+  local case_dir fakebin out status
+  case_dir="$TMP_ROOT/bootstrap-isolation-stale"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/config"
+  cat > "$case_dir/home/state/isolation-stale.meta" <<EOF
+window=firstmate:fm-isolation-stale
+worktree=$case_dir/worktree
+project=$case_dir/project
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_tasks_axi "$fakebin" "0.1.1"
+  # No window of that name exists, so the endpoint is provably gone: one stale
+  # record must not drop the whole home to read-only.
+  make_fake_live_tmux_window "$fakebin" fm-some-other-window
+  status=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh") || status=$?
+  expect_code 0 "$status" "a stale record with a dead endpoint must not block bootstrap mutation"
+  assert_not_contains "$out" "ISOLATION: bootstrap mutations blocked until worker isolation is clean" \
+    "bootstrap blocked the whole home on a record whose endpoint is gone"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: isolation for isolation-stale" \
+    "a non-actionable stale record was reported without FM_ISOLATION_VERBOSE"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_ISOLATION_VERBOSE=1 "$ROOT/bin/fm-bootstrap.sh") || status=$?
+  assert_contains "$out" "BOOTSTRAP_INFO: isolation for isolation-stale is unproven but its endpoint" \
+    "bootstrap did not report the stale unproven record as a verbose fact"
+  pass "an unproven record whose endpoint is gone is a quiet fact, not a fleet-wide block"
+}
+
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_bootstrap_discovers_home_nvm_tasks_axi
+test_bootstrap_blocks_mutation_on_unproven_isolation
+test_bootstrap_does_not_block_on_a_record_whose_endpoint_is_gone

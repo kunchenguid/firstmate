@@ -17,8 +17,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 GRACE="${FM_TURNEND_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}"
 
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 # Harness stop payloads are JSON. A direct CLI invocation has no stdin and is
 # treated as the first stop attempt.
@@ -37,33 +37,13 @@ else
   STOP_INPUT='{}'
 fi
 
-# Return 0 only for a genuine seeded secondmate marker. The marker is local and
-# gitignored, so child worktrees do not inherit it. Validate its shape to avoid
-# force-including an arbitrary linked worktree because of an empty or symlinked
-# file.
-fm_root_is_secondmate_home() {
-  local marker="$1/.fm-secondmate-home" id LC_ALL=C
-  [ -L "$marker" ] && return 1
-  [ -f "$marker" ] || return 1
-  IFS= read -r id < "$marker" 2>/dev/null || [ -n "${id:-}" ] || return 1
-  id=${id//[[:space:]]/}
-  [ -n "$id" ] || return 1
-  case "$id" in
-    *[!A-Za-z0-9._-]*) return 1 ;;
-  esac
-  return 0
-}
-
 # Only plain firstmate checkouts and marked secondmate homes are primaries.
-# Linked child worktrees stay exempt even when they contain in-flight metadata.
-if ! fm_root_is_secondmate_home "$FM_ROOT"; then
-  GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
-  GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
-  [ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0
-fi
-[ -f "$FM_ROOT/AGENTS.md" ] || exit 0
-[ -d "$FM_ROOT/bin" ] || exit 0
-[ -d "$STATE" ] || exit 0
+# Linked child worktrees and declared task workers stay exempt even when they
+# carry inherited root/state values or contain in-flight metadata.
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 in_flight=0
 for meta in "$STATE"/*.meta; do

@@ -1027,6 +1027,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "could not stamp secondmate home ownership"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
   log="$TMP_ROOT/teardown-fake/tmux.log"
   lease="$TMP_ROOT/teardown-fake/lease"
@@ -1041,6 +1044,143 @@ EOF
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
   pass "secondmate teardown retires empty homes and releases routing"
+}
+
+# A leased secondmate home sits in the same reusable pool as a task worktree, so
+# its lease is gated by the same ownership evidence (bin/fm-slot-owner-lib.sh,
+# docs/worker-isolation.md). Here the refusal is outright rather than a retired
+# lease: continuing would clear the routing entry and metadata while leaving the
+# home - and the secondmate's own state and backlog inside it - on disk unowned.
+test_secondmate_teardown_refuses_home_referenced_by_another_task() {
+  local home subhome subhome_abs fakebin log lease fmroot rc err stamp
+  home="$TMP_ROOT/teardown-contested-home"
+  subhome="$TMP_ROOT/teardown-contested-subhome"
+  fmroot="$TMP_ROOT/teardown-contested-fmroot"
+  err="$TMP_ROOT/teardown-contested.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  # A second recorded task naming the same pooled slot - the 2026-07-25 shape.
+  cat > "$home/state/paused-domain.meta" <<EOF
+window=firstmate:fm-paused-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "the contested secondmate home fixture could not be stamped"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-contested-fake")
+  log="$TMP_ROOT/teardown-contested-fake/tmux.log"
+  lease="$TMP_ROOT/teardown-contested-fake/lease"
+  printf 'domain\n' > "$lease"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-contested-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "secondmate teardown should refuse a home another task still records"
+  grep -F "lease RETAINED" "$err" >/dev/null || fail "the refusal did not report the retained lease"$'\n'"$(cat "$err")"
+  grep -F "paused-domain" "$err" >/dev/null || fail "the refusal did not name the other holder"
+  grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null \
+    && fail "a contested secondmate home lease was returned to the pool"
+  [ -d "$subhome" ] || fail "a contested secondmate home was removed"
+  [ -e "$lease" ] || fail "a contested secondmate home lease was released"
+  [ -e "$home/state/domain.meta" ] || fail "a refused secondmate teardown cleared its own metadata"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
+    || fail "a refused secondmate teardown removed the routing entry"
+  # A refused operation mutates nothing: the ownership stamp is the rule-2
+  # evidence that stops a stale sibling disposing of this still-owned home.
+  # shellcheck source=/dev/null
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$subhome" task || printf 'none' )
+  [ "$stamp" = domain ] \
+    || fail "a refused secondmate teardown erased its own ownership stamp: $stamp"
+  pass "secondmate teardown refuses a home still recorded by another task"
+}
+
+# A NESTED child secondmate home was recorded and stamped by its own parent
+# secondmate, so its ownership evidence names the parent's state directory and
+# the parent's home - never the primary's. Judging it against the primary's
+# scope compares against a home that never owned it, retains every time, and
+# blocks the whole force teardown; the child's records would then be the only
+# thing that could be cleared, stranding the home, its state, and its backlog.
+test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent() {
+  # Named primary_home, not home: bin/fm-slot-owner-lib.sh is sourced below and
+  # carries its own `home` local, which makes shellcheck read the two as one.
+  local primary_home subhome nested nested_abs fakebin log fmroot
+  primary_home="$TMP_ROOT/nested-scope-home"
+  subhome="$TMP_ROOT/nested-scope-subhome"
+  nested="$TMP_ROOT/nested-scope-child"
+  fmroot="$TMP_ROOT/nested-scope-fmroot"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  git -C "$fmroot" worktree add --quiet --detach "$nested" HEAD
+  mkdir -p "$primary_home/state" "$primary_home/data" "$subhome/state" "$nested/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'child\n' > "$nested/.fm-secondmate-home"
+  nested_abs=$(cd "$nested" && pwd -P)
+  cat > "$primary_home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$nested
+project=$nested
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$nested
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$primary_home/data/secondmates.md"
+  # Stamped the way each home's own spawn stamps it: the child by the parent
+  # secondmate's home, the parent by the primary's.
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$nested" child "$subhome" \
+    && fm_slot_stamp_write "$subhome" domain "$primary_home" ) \
+    || fail "the nested home fixture could not be stamped"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/nested-scope-fake")
+  log="$TMP_ROOT/nested-scope-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$primary_home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-scope-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    || fail "force teardown refused a nested child home its own parent owned"
+  grep -F "treehouse return --force $nested_abs" "$log" >/dev/null \
+    || fail "the nested child home lease was never returned to the pool"
+  [ ! -d "$nested" ] || fail "force teardown left the nested child home on disk"
+  [ ! -e "$subhome" ] || fail "force teardown left the parent secondmate home on disk"
+  [ ! -e "$primary_home/state/domain.meta" ] || fail "force teardown did not clear parent meta"
+  pass "a nested child secondmate home is judged against its own parent's scope, not the primary's"
 }
 
 test_secondmate_teardown_refuses_failed_leased_home_return() {
@@ -1066,6 +1206,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "the failed-return secondmate fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-return-fail-fake")
   log="$TMP_ROOT/teardown-return-fail-fake/tmux.log"
 
@@ -1082,7 +1225,104 @@ EOF
   [ -d "$subhome" ] || fail "teardown removed a leased home after return failed"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared meta after leased home return failed"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "teardown removed registry route after leased home return failed"
-  pass "secondmate teardown refuses to hide failed leased-home return"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$subhome" task || printf 'none' )
+  [ "$stamp" = domain ] || fail "teardown cleared the ownership stamp after leased home return failed: $stamp"
+  # The pending-return mark must not brick the task: the home is still a linked
+  # worktree stamped for domain, so the return provably did not take effect and
+  # the mark is cleared again. A retryable failure must stay retryable.
+  grep -q '^slot_returning=1$' "$home/state/domain.meta" \
+    && fail "a failed leased-home return left an uncleanable slot_returning mark"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-return-fail-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown could not be retried after a failed leased-home return: $(cat "$err")"
+  [ ! -e "$home/state/domain.meta" ] || fail "the retried teardown did not clear its meta"
+  pass "secondmate teardown refuses to hide failed leased-home return and stays retryable"
+}
+
+# A secondmate home that is already gone is only a lease hazard when it was a
+# pooled slot. git keeps the worktree registration of a removed slot, so that
+# registration - not the missing directory - is the evidence of record. A plain
+# clone that never drew a slot has nothing to return, and refusing it forever
+# would make such a home permanently unretirable.
+test_secondmate_teardown_retires_a_missing_plain_clone_home() {
+  local home subhome fakebin log fmroot err rc
+  home="$TMP_ROOT/teardown-missing-plain-home"
+  subhome="$TMP_ROOT/teardown-missing-plain-subhome"
+  fmroot="$TMP_ROOT/teardown-missing-plain-fmroot"
+  err="$TMP_ROOT/teardown-missing-plain.err"
+  make_firstmate_git_root "$fmroot"
+  mkdir -p "$home/state" "$home/data"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-missing-plain-fake")
+  log="$TMP_ROOT/teardown-missing-plain-fake/tmux.log"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-missing-plain-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown refused a secondmate whose plain-clone home was already gone: $(cat "$err")"
+  [ ! -e "$home/state/domain.meta" ] || fail "teardown left the meta of a retired plain-clone home"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
+    && fail "teardown left the routing entry of a retired plain-clone home"
+  grep -F 'treehouse return' "$log" >/dev/null \
+    && fail "teardown tried to return a home that never held a pooled slot"
+  pass "a missing plain-clone secondmate home is retirable rather than permanently stuck"
+}
+
+# The same missing home DOES stay refused while git still registers it as a
+# worktree of the pool, because that registration is live evidence that a lease
+# may still be held.
+test_secondmate_teardown_refuses_a_missing_registered_slot_home() {
+  local home subhome fakebin log fmroot err rc
+  home="$TMP_ROOT/teardown-missing-slot-home"
+  subhome="$TMP_ROOT/teardown-missing-slot-subhome"
+  fmroot="$TMP_ROOT/teardown-missing-slot-fmroot"
+  err="$TMP_ROOT/teardown-missing-slot.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  # The directory disappears but the pool still registers the slot.
+  rm -rf "$subhome"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-missing-slot-fake")
+  log="$TMP_ROOT/teardown-missing-slot-fake/tmux.log"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-missing-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown disposed of a still-registered pooled slot whose directory was gone"
+  [ -e "$home/state/domain.meta" ] || fail "a refused teardown cleared its own metadata"
+  pass "a missing home that the pool still registers keeps failing closed"
 }
 
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return() {
@@ -1149,6 +1389,9 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$childwt" child "$subhome" ) \
+    || fail "force teardown child worktree fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
@@ -1162,7 +1405,7 @@ EOF
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
-  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
+  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null && fail "force teardown targeted an unproven child endpoint"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
   pass "secondmate force teardown discards child work"
 }
@@ -1819,7 +2062,11 @@ test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_refuses_home_referenced_by_another_task
+test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
 test_secondmate_teardown_refuses_failed_leased_home_return
+test_secondmate_teardown_retires_a_missing_plain_clone_home
+test_secondmate_teardown_refuses_a_missing_registered_slot_home
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home

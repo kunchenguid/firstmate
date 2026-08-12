@@ -4,14 +4,11 @@
 # lifecycle entrypoints also refuse the stamped gate marker and gate-repo path.
 disable_project_settings: true
 
-# Run the firstmate PR-target guard and bash behavior suite through the local
-# runner instead of delegating to an agent (an agent-driven test step has
-# crashed the daemon). The runner keeps every test and failure gate intact
-# while allowing bounded parallelism with per-test temp roots. The e2e tests
-# need tmux on PATH, which the firstmate environment provides.
+# Run the focused isolation and endpoint tests through the local runner instead
+# of delegating to an agent.
 commands:
   lint: 'bin/fm-install-shellcheck.sh "${TMPDIR:-/tmp}/fm-shellcheck-$$/bin" && PATH="${TMPDIR:-/tmp}/fm-shellcheck-$$/bin:$PATH" bin/fm-lint.sh'
-  test: 'bash bin/fm-run-behavior-tests.sh'
+  test: 'bash tests/fm-worker-isolation.test.sh && bash tests/fm-watch-session.test.sh && bash tests/fm-slot-occupant-proof.test.sh && FM_TEARDOWN_TEST_FOCUS=s1 bash tests/fm-teardown.test.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

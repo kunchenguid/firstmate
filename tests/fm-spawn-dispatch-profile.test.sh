@@ -20,7 +20,13 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -f "${FM_FAKE_PANE_PATH_STATE:-}" ]; then
+      cat "$FM_FAKE_PANE_PATH_STATE"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message)
@@ -35,6 +41,18 @@ case "${1:-}" in
   set-window-option) exit 0 ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE"; exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        *treehouse*get*)
+          if [ -f "${FM_FAKE_PANE_PATH_STATE:-}" ]; then
+            printf '%s\n' "${FM_FAKE_SECOND_PANE_PATH:-${FM_FAKE_PANE_PATH:-}}" > "$FM_FAKE_PANE_PATH_STATE"
+          else
+            printf '%s\n' "${FM_FAKE_PANE_PATH:-}" > "$FM_FAKE_PANE_PATH_STATE"
+          fi
+          break
+          ;;
+      esac
+    done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -55,23 +73,25 @@ SH
 }
 
 make_spawn_case() {
-  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
+  local name=$1 harness=$2 case_dir home proj wt wt2 fakebin launchlog id
   shift 2
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
+  wt2="$case_dir/wt2"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  git -C "$proj" worktree add --quiet -b "wt-$name-2" "$wt2"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
     printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   done
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$wt2|$fakebin|$launchlog"
 }
 
 enable_dispatch_profile() {
@@ -96,12 +116,13 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TMUX_STATE="$home/tmux-window-name" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+  FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH_STATE="$(dirname "$launchlog")/pane-path" \
+    FM_FAKE_SECOND_PANE_PATH="$(dirname "$launchlog")/wt2" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
 read_case_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR _WT2_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
 }
@@ -126,7 +147,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="$(fm_worker_env_prefix crewmate "$id" "$(cd "$HOME_DIR" && pwd -P)")CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
@@ -212,7 +233,8 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "$(fm_worker_env_prefix crewmate "$id" "$(cd "$HOME_DIR" && pwd -P)")custom-agent --flag" ] \
+    || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

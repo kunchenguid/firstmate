@@ -587,6 +587,11 @@ fm_pr_metadata_identity_parse() {
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
+      # Teardown appends its own pooled-slot state after the PR identity. These
+      # lines carry no PR identity, so they are tolerated rather than read as
+      # tampering with the record.
+      slot_returned=*|slot_returning=*)
+        ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
         ;;

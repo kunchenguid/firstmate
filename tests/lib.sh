@@ -86,6 +86,30 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+fm_test_write_primary_attestation() {
+  local root=$1 file=$2 token=$3 pid=${4:-${FM_FAKE_HARNESS_PID:-}} stat rest start identity
+  if [ -z "$pid" ]; then
+    identity=$( . "$ROOT/bin/fm-session-lock-lib.sh" && fm_trusted_harness_identity 2>/dev/null ) || identity=
+    if [ -n "$identity" ]; then
+      pid=${identity%%|*}
+      start=${identity#*|}
+    else
+      pid=$$
+    fi
+  fi
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat") || return 1
+    rest=$(printf '%s\n' "$stat" | sed -E 's/^[0-9]+ \(.*\) //')
+    start=$(printf '%s\n' "$rest" | awk '{print $20}')
+  elif [ -z "$start" ]; then
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')
+  fi
+  [ -n "$start" ] || return 1
+  printf 'root=%s\ntoken=%s\nharness_pid=%s\nharness_start=%s\n' \
+    "$root" "$token" "$pid" "$start" > "$file"
+  chmod 600 "$file"
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
@@ -177,6 +201,17 @@ fm_write_secondmate_meta() {
     "yolo=off" \
     "home=$home" \
     "projects=$projects"
+}
+
+# --- launched-agent home declaration ----------------------------------------
+
+# fm_worker_env_prefix <role> <task-id> <home>: the exact home declaration
+# bin/fm-spawn.sh prepends to every launch command. Composed from the one owner
+# (bin/fm-worker-isolation-lib.sh) so a test pinning a HARNESS TEMPLATE does not
+# also re-pin the declaration; tests/fm-worker-isolation.test.sh pins the
+# declaration's own bytes.
+fm_worker_env_prefix() {
+  ( . "$ROOT/bin/fm-worker-isolation-lib.sh" && fm_worker_launch_env_prefix "$@" )
 }
 
 # --- common assertions ------------------------------------------------------

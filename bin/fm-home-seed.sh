@@ -27,6 +27,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "secondmate home seeding" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -792,7 +795,10 @@ write_registry() {
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
-    grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
+    awk -v wanted="$id" '!($1 == "-" && $2 == wanted)' "$REG" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
   else
     : > "$tmp"
   fi

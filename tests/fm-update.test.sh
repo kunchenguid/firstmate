@@ -48,7 +48,7 @@ trap cleanup_update_tests EXIT
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/home/state" "$w/home/data"
+  mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
   # Fresh watcher beacon keeps fm-guard quiet.
   touch "$w/home/state/.last-watcher-beat"
 
@@ -74,7 +74,7 @@ new_world() {
 new_protocol_migration_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/home/state" "$w/home/data"
+  mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
   touch "$w/home/state/.last-watcher-beat"
   git init -q --bare "$w/origin.git"
   git -C "$w/origin.git" symbolic-ref HEAD refs/heads/main
@@ -134,23 +134,23 @@ bump_origin() {
 
 run_update() {
   local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" ) 2>/dev/null
 }
 
 ack_firstmate_reread() {
   local w=$1 generation
   generation=$(fm_update_obligation_generation \
     "$w/home/state/.watch-protocol-reread-required" "$w/main")
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
-    "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null
+  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null )
 }
 
 ack_secondmate_nudge() {
   local w=$1 target=$2 generation
   generation=$(fm_update_obligation_generation \
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1")
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
-    "$UPDATE" --ack-secondmate-nudge "$target" "$generation" >/dev/null
+  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-secondmate-nudge "$target" "$generation" >/dev/null )
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -399,9 +399,9 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
 
-  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  ( cd "$w/main" && exec env PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch.sh" >/dev/null 2>&1 &
+    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch.sh" >/dev/null 2>&1 ) &
   watcher=$!
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $watcher"
   for _ in $(seq 1 60); do
@@ -413,9 +413,9 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
   [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
     || fail "migration fixture did not start the predecessor watcher"
 
-  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  ( cd "$w/main" && exec env PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch-arm.sh" >"$w/arm.out" &
+    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch-arm.sh" >"$w/arm.out" ) &
   arm=$!
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $arm"
   for _ in $(seq 1 60); do
@@ -427,15 +427,15 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
 
   rc=0
   # A v2 updater completed the install before the v3 updater learned to re-exec.
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  out=$(cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_UPDATE_REEXECED=1 \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "predecessor updater did not install the new updater"
   assert_contains "$out" "firstmate: updated " "predecessor updater installed v3"
 
   rc=0
-  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" >"$w/second-pass.out" 2>&1 || rc=$?
+  ( cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" >"$w/second-pass.out" 2>&1 ) || rc=$?
   out=$(cat "$w/second-pass.out")
   [ "$rc" -ne 0 ] || fail "installed updater accepted the predecessor watcher"
   assert_contains "$out" "watcher protocol restart could not be verified" \
@@ -460,15 +460,15 @@ test_acknowledgements_are_generation_bound() {
     || fail "new update generation was not reported"
 
   rc=0
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
-    "$UPDATE" --ack-reread-firstmate "$old_generation" >/dev/null 2>&1 || rc=$?
+  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$old_generation" >/dev/null 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || fail "stale acknowledgement cleared a newer obligation"
   [ "$(fm_update_obligation_generation \
     "$w/home/state/.watch-protocol-reread-required" "$w/main")" = "$new_generation" ] \
     || fail "newer reread generation was not preserved"
 
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
-    "$UPDATE" --ack-reread-firstmate "$new_generation" >/dev/null
+  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$new_generation" >/dev/null )
   pass "T14 stale acknowledgements cannot clear newer generations"
 }
 
@@ -483,8 +483,8 @@ test_herdr_target_acknowledges_exact_live_meta() {
   assert_contains "$out" "nudge-secondmates: default:w1:p2" "Herdr target is surfaced unchanged"
   generation=$(sed -n 's/^nudge-secondmate-generation: default:w1:p2|//p' <<< "$out")
   [ -n "$generation" ] || fail "Herdr target generation was not reported"
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
-    "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null
+  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null )
   ! fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "Herdr target acknowledgement did not clear its obligation"
   pass "T15 Herdr acknowledgements resolve exact live metadata"

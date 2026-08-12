@@ -2,6 +2,11 @@
 # Shared durable wake queue and portable lock helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-worker-isolation-lib.sh"
+if [ "${FM_SESSION_LOCK_BOOTSTRAP:-0}" != 1 ]; then
+  fm_worker_refuse_primary_operation "wake state initialization" || exit 1
+fi
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -10,6 +15,7 @@ FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
+FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}"
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -574,10 +580,32 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Waits only for CONTENTION. fm_lock_try_acquire returns 2 when the lock's
+# owner directory cannot be prepared at all - an unwritable or full filesystem -
+# which no amount of waiting resolves, so retrying there spins forever on the
+# spawn and teardown hot paths instead of letting the caller take its
+# fail-closed refusal. Returns nonzero for that case so every caller can refuse.
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc max_ticks elapsed=0 owner
+  case "$FM_LOCK_WAIT_SECS" in
+    ''|*[!0-9]*) max_ticks=300 ;;
+    *) max_ticks=$((FM_LOCK_WAIT_SECS * 10)) ;;
+  esac
+  while :; do
+    rc=0
+    fm_lock_try_acquire "$lockdir" || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      2) return 1 ;;
+    esac
+    if [ "$elapsed" -ge "$max_ticks" ]; then
+      owner=${FM_LOCK_HELD_PID:-unknown}
+      printf 'fm-wake-lib: timed out after %ss waiting for %s (owner %s)\n' \
+        "$FM_LOCK_WAIT_SECS" "$lockdir" "$owner" >&2
+      return 1
+    fi
     sleep 0.1
+    elapsed=$((elapsed + 1))
   done
 }
 
@@ -617,7 +645,10 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+    printf 'fm_wake_append: could not serialize the wake queue; refusing to append unlocked\n' >&2
+    return 1
+  }
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;

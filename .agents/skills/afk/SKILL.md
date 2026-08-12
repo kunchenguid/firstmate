@@ -1,6 +1,6 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes, re-surface declared external waits on a bounded cadence, and escalate captain-relevant events as one batched digest. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate only captain-relevant events as one batched digest, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
 user-invocable: true
 ---
 
@@ -21,16 +21,16 @@ batched digest rather than per-wake injections.
    This file survives a firstmate restart: recovery re-enters afk if the
    flag is present.
 
-2. **Ensure the sub-supervisor daemon is running.** Use the JT launcher, which
-   validates the daemon's pinned pid/start/identity record and starts it in a
-   fresh session/process group with `bin/fm-detach-lib.sh`:
+2. **Ensure the sub-supervisor daemon is running.** Check the pid file; start
+   the daemon only if it is dead or absent:
    ```sh
-   bin/fm-afk-launch.sh start
+   if [ -f state/.supervise-daemon.pid ] && kill -0 "$(cat state/.supervise-daemon.pid)" 2>/dev/null; then
+     : # daemon already alive - it picks up the flag on its next cycle
+   else
+     nohup bin/fm-supervise-daemon.sh >/dev/null 2>&1 &
+   fi
    ```
-   A plain `nohup ... &` is not a supported AFK launch because a harness may
-   reap the daemon with its process group. The launcher fails closed if neither
-   `setsid(1)` nor `perl` is available; it does not silently fall back to an
-   attached child. The daemon is **presence-gated**: it injects escalations only while
+   The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
@@ -45,8 +45,7 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk`
-  -> the captain is back. Run `bin/fm-afk-launch.sh stop` to clear
-  `state/.afk` and stop the detached daemon, then flush one
+  -> the captain is back. Clear `state/.afk`, stop the daemon, flush one
   distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize
   any pending escalations from `state/.subsuper-escalations` and any
   `state/.subsuper-inject-wedged` marker), and resume full per-wake
@@ -73,24 +72,22 @@ separator, 0x1f), invisible and untypable. This is how firstmate tells a
 daemon escalation apart from a real message in the same pane. The marker
 travels with the message text; it does not rely on harness-level
 typed-vs-injected detection (which is not portable across claude, codex,
-opencode, pi, and grok).
+opencode, and pi).
 
 ## Busy-guard and composer guard
 
 The daemon never injects into an in-use pane. Two checks run before every
-injection through the selected backend: tmux shares `bin/fm-tmux-lib.sh` with
-`fm-send.sh`, while Herdr uses its native pane reads and agent status:
+injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
 
-- **`pane_is_busy`** - the selected backend reports an active turn (a harness
-  busy footer on tmux or agent status on Herdr).
+- **`pane_is_busy`** - the harness shows a busy footer (agent mid-turn).
 - **`pane_input_pending`** - the cursor line holds real unsubmitted text (a
   human's half-typed line, or a previous injection whose Enter was swallowed).
-  Tmux **strips the harness's composer box borders first**, so an idle
+  The detector **strips the harness's composer box borders first**, so an idle
   *bordered* composer (claude draws `│ > … │`) is correctly read as empty, not
   pending. Without this, every idle claude pane looked like pending input and
-  the daemon deferred 100% of escalations (incident afk-invx-i5). Herdr reads
-  its visible composer line directly. `FM_COMPOSER_IDLE_RE` still overrides
-  tmux empty-composer matching after border stripping.
+  the daemon deferred 100% of escalations (incident afk-invx-i5).
+  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after border
+  stripping.
 
 Either condition defers the injection; the buffered escalation survives in
 `state/.subsuper-escalations` and is retried on the next housekeeping tick. In
@@ -104,38 +101,21 @@ attempts one normal flush, which still requires an idle pane and empty composer.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
-catch-up if present). Tmux also flashes the supervisor client's status line;
-Herdr has no equivalent client flash.
+catch-up if present), and a flash on the supervisor client's status line.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
 ## Submit model
 
-The selected backend sends the digest **once**, then submits with Enter and
-**verifies** the result: Enter is retried (Enter only, never a retype) until the
-composer clears. Tmux uses `send-keys -l`; Herdr uses its pane send primitives.
-A submit "landed" only when the selected backend confirms the composer empty
-afterward. Tmux uses the corrected, border-aware detector, so a bordered-empty
-claude composer is recognized as submitted rather than mistaken for a swallowed
-Enter; Herdr uses its pane composer read.
+The digest is typed **once** via `send-keys -l`, then submitted with Enter and
+**verified**: Enter is retried (Enter only, never a retype) until the composer
+clears.
+A submit "landed" only when the composer is confirmed empty afterward, using
+the same corrected, border-aware detector as the composer guard.
+A bordered-empty claude composer is recognized as submitted rather than
+mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
-
-**Busy-queued Enter exception (tmux backend, opencode 1.18.4).** While opencode
-is mid-turn, Enter is accepted and queued for after the current turn but the
-composer keeps showing the typed text the whole time, so the cleared-composer
-check alone false-positives on a swallowed Enter for every steer sent to a
-busy opencode pane. The shared `fm_tmux_submit_enter_core` falls back to
-`fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
-Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The
-strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
-and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
-verification - this exception is a busy queue treated as a delivered Enter,
-not a swallowed one. Herdr applies the same exception only after successful
-Enter transport when contemporaneous native state remains busy and the pending
-composer still contains the exact submitted text; autocomplete-expanded content
-retries.
 
 ## Classification policy
 
@@ -153,17 +133,16 @@ the two never run their triage at the same time.
 
 Classify each wake this way:
 
-- `signal` with a terminal captain verb (`done:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
-  A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
-  Other signals with no captain-relevant status -> self-handle.
-- `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
-  If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
+- `signal` whose status content has no captain-relevant verb
+  (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
+  -> self-handle. Captain-relevant verb -> escalate.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
-- `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
-  Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
-  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
-  Healthy crewmates are autonomous and do not wait on firstmate mid-task.
+- `stale` with a terminal status -> escalate. Non-terminal stale is transient:
+  record a marker and self-handle. If the pane is still idle past
+  `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a
+  possible wedge. This bounds wedge-detection latency to the threshold plus a
+  tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
+  on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
@@ -186,53 +165,37 @@ the marker lets firstmate distinguish it from a real captain message.
   mid-typing or previous injection with swallowed Enter). Either condition
   defers injection and preserves the buffer for retry. The daemon never merges
   its digest into the captain's half-typed line.
-- The selected backend owns composer detection: tmux uses the detector shared
-  with `fm-send.sh` in `bin/fm-tmux-lib.sh`, while Herdr reads the visible pane
-  line and the expected submitted text. Tmux drops dim/faint ghost text and
-  strips harness composer box borders, so a ghost-only or idle bordered
-  composer such as claude's `│ > ... │` reads as empty, not pending.
-  `FM_COMPOSER_IDLE_RE` still overrides tmux empty-composer matching, and
-  `FM_BUSY_REGEX` overrides busy footers.
+- The composer detector, shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`, drops
+  dim/faint ghost text, then strips harness composer box borders, so a ghost-only
+  or idle bordered composer such as claude's `│ > ... │` reads as empty, not
+  pending. Without these filters, idle bordered composers and dim ghost
+  suggestions can look like pending input and stall supervision. `FM_COMPOSER_IDLE_RE`
+  still overrides empty-composer matching after dim-ghost and border stripping,
+  and `FM_BUSY_REGEX` overrides busy footers.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
   normal flush, which still requires an idle pane and empty composer. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
-  durable `state/.subsuper-inject-wedged` marker, and a tmux status-line flash
-  when available. A composer false-positive surfaces as a visible stall, never
-  an unbounded silent no-op.
-- **Verified type-once submit model** - the selected backend sends the digest
-  once, then submits with Enter and verifies. Enter is retried, Enter only and
-  never a retype, until the composer is confirmed empty. Tmux uses the
+  durable `state/.subsuper-inject-wedged` marker, and a status-line flash. A
+  composer false-positive surfaces as a visible stall, never an unbounded silent
+  no-op.
+- **Verified type-once submit model** - the digest is typed once via
+  `send-keys -l`, then submitted with Enter and verified. Enter is retried,
+  Enter only and never a retype, until the composer is confirmed empty. That
+  empty composer is the acknowledgement that the submit landed, using the same
   dim-ghost-aware and border-aware detector so a ghost-only or bordered-empty
-  claude composer counts as submitted rather than a false swallowed Enter;
-  Herdr uses its pane composer read.
+  claude composer counts as submitted rather than a false swallowed Enter.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
   classification or relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
-- **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
-  The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
-- **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
-  (tmux vs herdr) and TARGET independently, mirroring
-  `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
-  override, then `$TMUX_PANE` set (tmux), then `$HERDR_ENV=1` with
-  `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
-  `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
-  `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
-  backends other than tmux and Herdr are not supported as
-  supervisor backends; the daemon refuses loudly at startup instead of
-  misapplying tmux primitives to a pane that isn't one
-  (docs/herdr-backend.md "Away-mode supervisor support").
-
-## Stale-artifact lifecycle
-
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
-Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
-Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
-This section owns the stale-artifact lifecycle contract.
+- **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale`
+  both check the seen-status marker before escalating, so a status escalated by
+  one path is not re-escalated by another in the same digest.
+- **Auto-discovered supervisor pane** - the daemon resolves its injection target
+  from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then a `firstmate:0` fallback
+  with a warning. The resolution source is logged at startup so a
+  wrong-but-resolving fallback is detectable.
 
 ## Reliability properties
 
@@ -241,7 +204,6 @@ These properties must hold:
 - Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
   or crashed injection.
 - Wedge detection is bounded-latency, not lossy.
-- Declared external waits are bounded-review, not an indefinite mute.
 - The catch-all scan backs up the keyword classifier.
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered
@@ -250,3 +212,4 @@ These properties must hold:
 `FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
 overriding classification.
 Use it sparingly.
+

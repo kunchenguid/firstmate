@@ -17,6 +17,13 @@ DETACH_LIB="$ROOT/bin/fm-detach-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 trap fm_test_watch_cleanup_exit EXIT
 
+# Ceiling, in 0.1s ticks, for the poll loops below that wait for a real watcher
+# process to start, claim its lock, or become a zombie. Each loop breaks as soon
+# as its condition holds, so this only has to outlast the slowest host: a
+# watcher's startup is real work (migration, lock acquisition, library sourcing)
+# and takes many times its idle-host cost when the gate runs jobs in parallel.
+WATCH_WAIT=${FM_TEST_WATCH_WAIT:-300}
+
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 i
@@ -28,7 +35,7 @@ test_singleton_start() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
   pid1=$!
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid1" ] \
       && [ -e "$state/.last-watcher-beat" ] \
       && is_live_non_zombie "$pid1" \
@@ -69,7 +76,7 @@ test_stale_watch_lock_reclaimed() {
   i=0
   live=0
   lock_pid=
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     live=0
     is_live_non_zombie "$pid" && live=1
     lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
@@ -331,7 +338,7 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   ' _ "$LIB" "$lockdir" "$holder_file" &
   holder=$!
   i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ] && [ ! -s "$holder_file" ]; do
     sleep 0.1
     i=$((i + 1))
   done
@@ -599,7 +606,7 @@ test_lock_reclaims_zombie_owner() {
   reaper=$!
   zombie=
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     zombie=$(cat "$lockdir/pid" 2>/dev/null || true)
     [ -n "$zombie" ] && break
     sleep 0.1
@@ -607,7 +614,7 @@ test_lock_reclaims_zombie_owner() {
   done
   stat=
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     stat=$(ps -p "$zombie" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
     case "$stat" in
       Z*) break ;;
@@ -655,7 +662,7 @@ test_lock_reclaims_legacy_zombie_owner() {
   reaper=$!
   zombie=
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     zombie=$(cat "$lockdir/pid" 2>/dev/null || true)
     [ -n "$zombie" ] && break
     sleep 0.1
@@ -664,7 +671,7 @@ test_lock_reclaims_legacy_zombie_owner() {
   rm -f "$lockdir/pid-identity" "$lockdir/pid-start"
   stat=
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     stat=$(ps -p "$zombie" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
     case "$stat" in
       Z*) break ;;
@@ -941,7 +948,7 @@ test_watcher_lock_match_rejects_zombie() {
   reaper=$!
   zombie=
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     zombie=$(cat "$lockdir/pid" 2>/dev/null || true)
     [ -n "$zombie" ] && break
     sleep 0.1
@@ -949,7 +956,7 @@ test_watcher_lock_match_rejects_zombie() {
   done
   stat=
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     stat=$(ps -p "$zombie" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
     case "$stat" in
       Z*) break ;;
@@ -1180,7 +1187,7 @@ test_watcher_self_evicts_on_lock_takeover() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 50 ]; do
+  while [ "$i" -lt "$WATCH_WAIT" ]; do
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] && break
     sleep 0.1
     i=$((i + 1))
@@ -1189,7 +1196,7 @@ test_watcher_self_evicts_on_lock_takeover() {
   # Simulate a second watcher taking over the singleton lock. $$ (the test
   # runner) is a live pid that is not the watcher.
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
-  wait_for_exit "$pid" 60 || fail "watcher did not self-evict after lock takeover"
+  wait_for_exit "$pid" "$WATCH_WAIT" || fail "watcher did not self-evict after lock takeover"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ "$lock_pid" = "$$" ] || fail "self-evicting watcher clobbered the new holder's lock (got '$lock_pid')"
   pass "watcher self-evicts when the lock pid no longer names it"
@@ -1230,7 +1237,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   # After the seed dies, the attached arm must exit 0 (cycle ended).
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   [ "$status" -eq 0 ] || fail "attached arm did not exit zero after seed died (status $status)"
   pass "arm attaches to a live fresh watcher and exits only when that cycle ends"
@@ -1285,7 +1292,7 @@ SH
   ! grep -qF 'watcher: started' "$armout" || fail "arm started a second watcher behind the migrated legacy watcher"
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   [ "$status" -eq 0 ] || fail "arm did not exit after the migrated watcher ended (status $status)"
   pass "arm migrates and attaches to a live legacy watcher lock"
@@ -1310,7 +1317,7 @@ test_arm_rejects_unverified_legacy_watcher_lock() {
   printf '%s\n' "unrelated process with $WATCH in its command" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
-  wait_for_exit "$armpid" 40
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
@@ -1381,7 +1388,7 @@ test_arm_hup_stands_down_without_killing_the_watcher() {
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   is_live_non_zombie "$lock_pid" || fail "HUP cleanup killed the detached watcher"
@@ -1415,7 +1422,7 @@ test_watcher_survives_arm_process_group_sigterm() {
   pgid=$(ps -p "$armpid" -o pgid= 2>/dev/null | tr -d '[:space:]')
   [ "$pgid" = "$armpid" ] || fail "test arm is not its own process-group leader (pid=$armpid pgid=$pgid)"
   kill -TERM -- "-$pgid" 2>/dev/null || fail "could not reap the arm process group"
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   [ "$status" -ne 124 ] || fail "arm process group did not exit after SIGTERM"
   is_live_non_zombie "$lock_pid" || fail "process-group reap killed the detached watcher"
@@ -1461,7 +1468,7 @@ test_arm_does_not_stack_attach_waiters() {
 
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$second_out" &
   second_pid=$!
-  wait_for_exit "$second_pid" 40
+  wait_for_exit "$second_pid" "$WATCH_WAIT"
   status=$?
   [ "$status" -eq 0 ] || fail "second arm stacked another attach waiter (status $status): $(cat "$second_out")"
   grep -qF "watcher: follower already waiting pid=$first_pid" "$second_out" || fail "second arm did not report the existing follower"
@@ -1469,7 +1476,7 @@ test_arm_does_not_stack_attach_waiters() {
 
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
-  wait_for_exit "$first_pid" 80
+  wait_for_exit "$first_pid" "$WATCH_WAIT"
   status=$?
   [ "$status" -eq 0 ] || fail "first arm did not finish after the watcher cycle ended (status $status)"
   pass "a healthy cycle keeps one attach waiter and duplicate arms exit without stacking"
@@ -1628,7 +1635,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   # After the peer dies, the attached arm must exit 0 (same as detached attach).
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   [ "$status" -eq 0 ] || fail "attached arm did not exit zero after peer died (status $status): $(cat "$armout")"
   pass "arm attaches to a peer watcher after child stands down and exits when peer dies"
@@ -1653,7 +1660,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   touch -t 200001010000 "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
   armpid=$!
-  wait_for_exit "$armpid" 120
+  wait_for_exit "$armpid" "$WATCH_WAIT"
   status=$?
   [ "$status" -ne 124 ] || fail "arm never returned for an unconfirmable watcher"
   [ "$status" -ne 0 ] || fail "arm exited zero when no fresh watcher could be confirmed"

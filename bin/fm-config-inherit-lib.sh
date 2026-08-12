@@ -5,8 +5,7 @@
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too, and primary config/herdr-presentation-spaces
-# enables the same default-off Herdr presentation projection). It also pushes
+# hand-edit backlog files too). It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 #
@@ -34,7 +33,7 @@
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend}"
 
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
@@ -282,7 +281,7 @@ FM_CONFIG_REREAD_MAX_SENT=16
 FM_CONFIG_REREAD_RETRY_ROOT_REL="state/.fm-inherited-config-reread-retry"
 FM_CONFIG_REREAD_MAX_PENDING=16
 FM_CONFIG_REREAD_MAX_QUARANTINE=16
-FM_CONFIG_INHERIT_LOCK_REL="state/.fm-inherited-config.lock"
+FM_CONFIG_INHERIT_LOCK_NAMESPACE="/tmp/firstmate-home-locks"
 
 # Framing lines for the config-reread instruction. Defaults/rules only - never
 # an enforcement claim, and never a parsed summary of file contents.
@@ -314,9 +313,26 @@ fm_config_reread_changed_items() {
 }
 
 fm_config_inherit_lock_path() {
-  local dest_home=$1
+  local dest_home=$1 hash dir owner mode
   [ -n "$dest_home" ] || return 1
-  printf '%s/%s\n' "$dest_home" "$FM_CONFIG_INHERIT_LOCK_REL"
+  dest_home=$(cd "$dest_home" 2>/dev/null && pwd -P) || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$dest_home" | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$dest_home" | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+  [ -n "$hash" ] || return 1
+  dir=$FM_CONFIG_INHERIT_LOCK_NAMESPACE
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir -m 700 "$dir" 2>/dev/null || true
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  owner=$(if [ "$(uname -s 2>/dev/null)" = Darwin ]; then stat -f '%u' "$dir" 2>/dev/null; else stat -c '%u' "$dir" 2>/dev/null; fi) || return 1
+  mode=$(if [ "$(uname -s 2>/dev/null)" = Darwin ]; then stat -f '%Lp' "$dir" 2>/dev/null; else stat -c '%a' "$dir" 2>/dev/null; fi) || return 1
+  [ "$owner" = "$(id -u 2>/dev/null)" ] && [ "$mode" = 700 ] || return 1
+  printf '%s/home-%s.lock\n' "$dir" "${hash:0:32}"
 }
 
 fm_config_reread_retry_dir() {

@@ -248,6 +248,54 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: warns on a missing beacon and stays silent while it is fresh"
 }
 
+# A lock whose owner directory cannot be prepared at all - an unwritable or
+# missing parent - is not contention, and waiting never resolves it. The wait
+# helper used to spin on that forever, which hangs every caller on the spawn and
+# teardown hot paths instead of letting them take their fail-closed refusal.
+test_unpreparable_lock_refuses_instead_of_spinning() {
+  local dir state absent out status
+  dir=$(make_case unpreparable-lock)
+  state="$dir/state"
+  absent="$dir/absent/wake.lock"
+
+  out=$(timeout 20 env FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait "$2"; then printf "acquired\n"; else printf "refused rc=%s\n" "$?"; fi
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$absent" 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm_lock_acquire_wait spun instead of refusing an unpreparable lock"
+  assert_contains "$out" "refused rc=1" "fm_lock_acquire_wait did not refuse an unpreparable lock: $out"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_LOCK_WAIT_SECS=0 bash -c '
+    . "$1"
+    fm_lock_try_acquire() { return 1; }
+    fm_lock_acquire_wait "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/held.lock" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a contended pooled lock must time out"
+  assert_contains "$out" "timed out after 0s" "lock timeout lost its diagnostic: $out"
+
+  out=$(timeout 20 env FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_WAKE_QUEUE_LOCK="$absent" bash -c '
+      . "$1"
+      fm_wake_append signal probe-key "signal: probe"
+      printf "append rc=%s\n" "$?"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm_wake_append spun instead of refusing an unpreparable queue lock"
+  assert_contains "$out" "append rc=1" "fm_wake_append did not refuse an unlocked append: $out"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "fm_wake_append wrote a record without holding the queue lock: $(cat "$state/.wake-queue")"
+
+  out=$(timeout 20 env FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_WAKE_QUEUE_LOCK="$absent" "$DRAIN" 2>&1)
+  status=$?
+  expect_code 1 "$status" "drain must refuse when the wake-queue lock cannot be taken"
+  assert_contains "$out" "refusing to drain" "drain refusal lost its reason: $out"
+
+  pass "a lock that can never be prepared refuses promptly instead of waiting forever"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -256,3 +304,4 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
+test_unpreparable_lock_refuses_instead_of_spinning

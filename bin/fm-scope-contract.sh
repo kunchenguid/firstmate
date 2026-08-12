@@ -374,3 +374,4 @@ case "$command" in
     ;;
   *) die "use validate-spec, append-brief, validate-brief, validate-marker, or audit-body" ;;
 esac
+
