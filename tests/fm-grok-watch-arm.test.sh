@@ -530,18 +530,18 @@ SH
 }
 
 hold_wake_queue_lock() {
-  local home=$1
+  local lock_home=$1 blocked_file="$1/state/classification-blocked"
   (
-    FM_HOME="$home"
-    STATE="$home/state"
+    FM_HOME="$lock_home"
+    STATE="$lock_home/state"
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 1
-    : > "$home/state/classification-blocked"
-    while [ ! -e "$home/state/release-classification" ]; do sleep 0.05; done
+    : > "$blocked_file"
+    while [ ! -e "$lock_home/state/release-classification" ]; do sleep 0.05; done
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   ) &
   CLASSIFICATION_LOCK_PID=$!
-  wait_for_file "$home/state/classification-blocked" || fail "could not hold wake queue lock"
+  wait_for_file "$blocked_file" || fail "could not hold wake queue lock"
 }
 
 test_away_transfer_during_actionable_classification_stays_dormant() {
