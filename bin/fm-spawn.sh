@@ -380,7 +380,7 @@ spawn_abort_recovery_meta() {
     if [ "${BACKEND:-}" = tmux ] \
       && [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] \
       && [ "${SPAWN_ENDPOINT_CLEANUP_CONFIRMED:-0}" != 1 ] \
-      && [ -n "${WID:-}" ]; then
+      && [[ "${WID:-}" =~ ^@[0-9]+$ ]]; then
       echo "window_id=$WID"
       echo "endpoint_recovery=1"
     fi
@@ -446,6 +446,50 @@ spawn_endpoint_recovery_reservation() {
   SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
   SPAWN_ENDPOINT_RECOVERY_RESERVATION=1
   SPAWN_RECOVERY_META_REPLACE_ALLOWED=1
+}
+
+spawn_reconcile_pending_endpoint_reservation() {
+  local meta=$1 target session name candidate status tmp
+  local worktree slot_state slot_holder lease_generation slot_returning
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(awk -F= '$1 == "endpoint_recovery" { print $2; exit }' "$meta")" = 1 ] || return 0
+  [ "$(awk -F= '$1 == "window_id" { print substr($0, index($0, "=") + 1); exit }' "$meta")" = pending ] || return 0
+  worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$meta")
+  slot_state=$(awk -F= '$1 == "slot_lease_state" { print $2; exit }' "$meta")
+  slot_holder=$(awk -F= '$1 == "slot_lease_holder" { print substr($0, index($0, "=") + 1); exit }' "$meta")
+  lease_generation=$(awk -F= '$1 == "slot_lease_generation" { print substr($0, index($0, "=") + 1); exit }' "$meta")
+  slot_returning=$(awk -F= '$1 == "slot_returning" { print $2; exit }' "$meta")
+  [ -z "$worktree" ] && [ -z "$slot_state" ] && [ -z "$slot_holder" ] \
+    && [ -z "$lease_generation" ] && [ -z "$slot_returning" ] || return 1
+  target=$(awk -F= '$1 == "window" { print substr($0, index($0, "=") + 1); exit }' "$meta")
+  case "$target" in
+    *:*) session=${target%%:*}; name=${target#*:} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$session" ] && [ -n "$name" ] || return 1
+  fm_backend_source tmux || return 1
+  if candidate=$(fm_backend_tmux_find_task_window_id "$session" "$name"); then
+    tmp=$(mktemp "$STATE/.$ID.spawn-reconcile.XXXXXX") || return 1
+    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+    awk -F= -v window_id="$candidate" '
+      BEGIN { found=0 }
+      $1 == "window_id" { print "window_id=" window_id; found=1; next }
+      $1 == "endpoint_recovery_pending" { next }
+      $1 == "spawn_state" { print "spawn_state=aborted"; next }
+      { print }
+      END { if (!found) print "window_id=" window_id }
+    ' "$meta" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+    return 0
+  fi
+  status=$?
+  case "$status" in
+    1)
+      rm -f -- "$meta" || return 1
+      [ ! -e "$meta" ] && [ ! -L "$meta" ]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 spawn_slot_stamp_owned() {
@@ -845,6 +889,7 @@ spawn_abort_artifacts_cleanup() {
 spawn_abort_cleanup() {
   local status=$? cleanup_session endpoint_cleanup_status=1 slot_returned=0
   [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] || endpoint_cleanup_status=0
+  [ "${SPAWN_ENDPOINT_CLEANUP_CONFIRMED:-0}" = 1 ] && endpoint_cleanup_status=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1768,6 +1813,15 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 
 W="fm-$ID"
 if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+  if [ "$(awk -F= '$1 == "endpoint_recovery" { print $2; exit }' "$STATE/$ID.meta" 2>/dev/null || true)" = 1 ] \
+    && [ "$(awk -F= '$1 == "window_id" { print substr($0, index($0, "=") + 1); exit }' "$STATE/$ID.meta" 2>/dev/null || true)" = pending ]; then
+    spawn_reconcile_pending_endpoint_reservation "$STATE/$ID.meta" || {
+      echo "error: existing task $ID has an unreconciled pending endpoint reservation; refusing duplicate launch" >&2
+      exit 1
+    }
+  fi
+fi
+if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
   if [ "$(awk -F= '$1 == "slot_returning" { print $2; exit }' "$STATE/$ID.meta" 2>/dev/null || true)" = 1 ]; then
     echo "error: existing task $ID is in the middle of a pooled-slot return; refusing duplicate launch" >&2
     exit 1
@@ -1794,7 +1848,8 @@ cleanup_spawn_window() {
 
 cleanup_unidentified_spawn_window() {
   local window_ids_after window_id candidate='' candidate_count=0
-  window_ids_after=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
+  [ "${SPAWN_ENDPOINT_DISCOVERY_READY:-0}" = 1 ] || return 1
+  window_ids_after=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null) || return 1
   while IFS= read -r window_id; do
     [ -n "$window_id" ] || continue
     if ! grep -qxF "$window_id" <<<"$WINDOW_IDS_BEFORE"; then
@@ -1802,7 +1857,11 @@ cleanup_unidentified_spawn_window() {
       candidate_count=$((candidate_count + 1))
     fi
   done <<<"$window_ids_after"
-  [ "$candidate_count" -eq 1 ] && fm_backend_kill "$BACKEND" "$candidate" >/dev/null 2>&1 || true
+  case "$candidate_count" in
+    0) return 0 ;;
+    1) fm_backend_kill "$BACKEND" "$candidate" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Spawn-time isolation guard: the resolved pane path must be the root of a real
@@ -1908,14 +1967,28 @@ case "$BACKEND" in
       echo "error: could not reserve recovery ownership for the tmux endpoint $T; refusing to continue" >&2
       exit 1
     }
-    WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
-    WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
-    if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
-      cleanup_unidentified_spawn_window
-      echo "error: tmux did not return a window id for $T" >&2
+    if WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null); then
+      SPAWN_ENDPOINT_DISCOVERY_READY=1
+    else
+      WINDOW_IDS_BEFORE=
+      SPAWN_ENDPOINT_DISCOVERY_READY=0
+    fi
+    if ! WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS"); then
+      SPAWN_ENDPOINT_CREATED=1
+      WID=
+      if cleanup_unidentified_spawn_window; then
+        SPAWN_ENDPOINT_CLEANUP_CONFIRMED=1
+      fi
       exit 1
     fi
     SPAWN_ENDPOINT_CREATED=1
+    if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
+      if cleanup_unidentified_spawn_window; then
+        SPAWN_ENDPOINT_CLEANUP_CONFIRMED=1
+      fi
+      echo "error: tmux did not return a window id for $T" >&2
+      exit 1
+    fi
     spawn_endpoint_recovery_meta || {
       echo "error: could not persist a recovery record for the tmux endpoint $T; refusing to continue" >&2
       exit 1

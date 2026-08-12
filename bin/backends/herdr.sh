@@ -617,21 +617,12 @@ fm_backend_herdr_paths_same() {
   [ "$left_real" = "$right_real" ]
 }
 
-fm_backend_herdr_projection_provider_process_matches() {
-  local session=$1 pane_id=$2 pid=$3 info
-  [ "$pid" -gt 1 ] 2>/dev/null || return 1
-  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || return 1
-  printf '%s' "$info" | jq -e --arg pane "$pane_id" --argjson pid "$pid" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-    and ((.result.process_info.foreground_processes // []) | any(.pid == $pid))
-  ' >/dev/null 2>&1
-}
-
 fm_backend_herdr_projection_provider_close_bound() {
   local session=$1 pane_id=$2 pid=$3
-  fm_backend_herdr_projection_provider_process_matches "$session" "$pane_id" "$pid" || return 1
-  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
+  local socket helper=${FM_BACKEND_HERDR_BOUND_CLOSE_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-pane-close-bound.py}
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  [ -x "$helper" ] || return 1
+  "$helper" "$socket" "$pane_id" "$pid" >/dev/null 2>&1 || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
 }
 
@@ -685,7 +676,6 @@ EOF
       FM_BACKEND_HERDR_BOUND_PID_START=$start
       current_path=$(fm_backend_herdr_current_path "$session:$pane_id") || return 1
       fm_backend_herdr_paths_same "$current_path" "$expected_path" || return 1
-      fm_backend_herdr_projection_provider_process_matches "$session" "$pane_id" "$pid" || return 1
       ;;
     *) return 1 ;;
   esac

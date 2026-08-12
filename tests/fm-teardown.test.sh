@@ -79,8 +79,13 @@ if [ "${1:-}" = list-windows ]; then
     printf '%s\n' 'error connecting to /tmp/tmux.sock (Connection refused)' >&2
     exit 1
   fi
+  if [ "${FM_FAKE_TMUX_PENDING_NONE:-0}" = 1 ] \
+    && [[ "$*" == *"#{window_id}|#{window_name}"* ]]; then
+    exit 0
+  fi
   case " $* " in
     *"#{window_id}|#{session_name}:#{window_name}"*) printf '%s\n' '@1|firstmate:fm-task-x1' ;;
+    *"#{window_id}|#{window_name}"*) printf '%s\n' '@1|fm-task-x1' ;;
     *"#{window_id} #{window_name}"*) printf '%s\n' '@1 fm-task-x1' ;;
     *"#{window_id}"*) printf '%s\n' '@1' ;;
     *"#{window_name}"*) printf '%s\n' 'fm-task-x1' ;;
@@ -1684,6 +1689,14 @@ test_projection_teardown_closes_owned_live_pane() {
     'harness=grok' \
     'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
   make_herdr_teardown_fake "$case_dir"
+  cat > "$case_dir/fakebin/herdr-bound-close" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "pane close \$2" >> "$case_dir/herdr.log"
+tmp="$case_dir/herdr-state.json.tmp"
+jq --arg pane "\$2" '.panes |= [.[] | select(.pane_id != \$pane)]' "$case_dir/herdr-state.json" > "\$tmp"
+mv "\$tmp" "$case_dir/herdr-state.json"
+SH
+  chmod +x "$case_dir/fakebin/herdr-bound-close"
   : > "$case_dir/herdr.log"
   env -i PATH="$PATH" FM_AGENT_TASK=task-x1 FM_AGENT_ROLE=crewmate \
     FM_AGENT_OWNER_HOME="$case_dir" sh -c 'cd "$1" && exec sleep 30' sh "$case_dir/wt" &
@@ -1694,6 +1707,7 @@ test_projection_teardown_closes_owned_live_pane() {
     export FM_HERDR_LOG="$case_dir/herdr.log"
     export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
     export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
+    export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$case_dir/fakebin/herdr-bound-close"
     export FM_FAKE_HERDR_AGENT_STATUS=working
     export FM_FAKE_HERDR_WORKER_PID=$worker_pid
     run_teardown "$case_dir" --force
@@ -1770,6 +1784,65 @@ test_endpoint_recovery_retains_on_tmux_query_error() {
   pass "endpoint recovery retains metadata when tmux presence is unreadable"
 }
 
+test_endpoint_recovery_pending_without_window_retires_reservation() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-pending-none)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:fm-task-x1' \
+    'window_id=pending' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'endpoint_recovery_pending=1' \
+    'spawn_state=starting' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    export FM_FAKE_TMUX_PENDING_NONE=1
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "endpoint-recovery-pending-none: unmaterialized reservation should retire"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-pending-none: pending reservation survived retirement"
+  assert_not_contains "$(cat "$case_dir/tmux.log")" 'kill-window' \
+    "endpoint-recovery-pending-none: teardown killed a window after confirmed absence"
+  pass "pending endpoint recovery retires only after confirming no task window exists"
+}
+
+test_endpoint_recovery_pending_reconciles_window() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-pending-found)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:fm-task-x1' \
+    'window_id=pending' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'endpoint_recovery_pending=1' \
+    'spawn_state=starting' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "endpoint-recovery-pending-found: pending reservation should reconcile"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-pending-found: reconciled recovery metadata survived teardown"
+  assert_contains "$(cat "$case_dir/tmux.log")" 'kill-window -t @1' \
+    "endpoint-recovery-pending-found: teardown did not use the reconciled stable window id"
+  pass "pending endpoint recovery adopts one exact task window before teardown"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_reconciles_consumed_presentation_receipt
@@ -1813,3 +1886,5 @@ test_projection_teardown_refuses_missing_identity
 test_projection_teardown_closes_owned_live_pane
 test_endpoint_recovery_uses_stable_window_id
 test_endpoint_recovery_retains_on_tmux_query_error
+test_endpoint_recovery_pending_without_window_retires_reservation
+test_endpoint_recovery_pending_reconciles_window

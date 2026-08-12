@@ -81,7 +81,7 @@ fm_backend_name() {
 fm_backend_required_tools() {  # <backend>
   case "$1" in
     tmux) printf '%s' 'tmux treehouse' ;;
-    herdr) printf '%s' 'herdr jq treehouse' ;;
+    herdr) printf '%s' 'herdr jq treehouse python3' ;;
     *) return 1 ;;
   esac
 }
@@ -500,6 +500,15 @@ fm_backend_list_task_ids() {  # <backend> <container>
     tmux) fm_backend_tmux_list_task_ids "$@" ;;
     herdr) fm_backend_herdr_list_task_ids "$@" ;;
     *) echo "error: no task-list implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_find_task_window_id() {  # <backend> <container> <window-name>
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_find_task_window_id "$@" ;;
+    *) echo "error: no task-window lookup implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 

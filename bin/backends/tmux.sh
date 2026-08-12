@@ -59,6 +59,24 @@ fm_backend_tmux_list_task_ids() {  # <session>
   tmux list-windows -t "$1" -F '#{window_id}'
 }
 
+fm_backend_tmux_find_task_window_id() {  # <session> <window-name>
+  local session=$1 expected_name=$2 windows matches count
+  if ! windows=$(tmux list-windows -t "$session" -F '#{window_id}|#{window_name}' 2>&1); then
+    case "$windows" in
+      *"can't find session:"*) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  matches=$(printf '%s\n' "$windows" | awk -F'|' -v name="$expected_name" '$2 == name { print $1 }')
+  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n + 0 }')
+  if [ "$count" = 1 ] && [[ "$matches" =~ ^@[0-9]+$ ]]; then
+    printf '%s\n' "$matches"
+    return 0
+  fi
+  [ "$count" = 0 ] && return 1
+  return 2
+}
+
 fm_backend_tmux_window_presence() {  # <session> <window-id>
   local session=$1 window_id=$2 windows
   if windows=$(tmux list-windows -t "$session" -F '#{window_id}' 2>&1); then

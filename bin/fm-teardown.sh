@@ -148,6 +148,8 @@ if [ "$ENDPOINT_RECOVERY" = 1 ]; then
   [ "$BACKEND" = tmux ] || { echo "REFUSED: unsupported endpoint recovery backend for $ID" >&2; exit 1; }
   if [[ "$ENDPOINT_RECOVERY_WINDOW_ID" =~ ^@[0-9]+$ ]]; then
     T=$ENDPOINT_RECOVERY_WINDOW_ID
+  elif [ "$ENDPOINT_RECOVERY_WINDOW_ID" = pending ]; then
+    :
   else
     echo "REFUSED: endpoint recovery for $ID has no stable tmux window id" >&2
     exit 1
@@ -178,6 +180,61 @@ teardown_meta_identity_matches() {
   [ -f "$META" ] || return 1
   [ "$(teardown_meta_identity "$META")" = "$TEARDOWN_META_IDENTITY" ]
 }
+
+teardown_reconcile_pending_endpoint_recovery() {
+  local target=$ENDPOINT_RECOVERY_WINDOW_TARGET session name candidate status tmp
+  local worktree slot_state slot_holder lease_generation slot_returning
+  worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$META")
+  slot_state=$(awk -F= '$1 == "slot_lease_state" { print $2; exit }' "$META")
+  slot_holder=$(awk -F= '$1 == "slot_lease_holder" { print substr($0, index($0, "=") + 1); exit }' "$META")
+  lease_generation=$(awk -F= '$1 == "slot_lease_generation" { print substr($0, index($0, "=") + 1); exit }' "$META")
+  slot_returning=$(awk -F= '$1 == "slot_returning" { print $2; exit }' "$META")
+  [ -z "$worktree" ] && [ -z "$slot_state" ] && [ -z "$slot_holder" ] \
+    && [ -z "$lease_generation" ] && [ -z "$slot_returning" ] || return 1
+  case "$target" in
+    *:*) session=${target%%:*}; name=${target#*:} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$session" ] && [ -n "$name" ] || return 1
+  fm_backend_source tmux || return 1
+  if candidate=$(fm_backend_tmux_find_task_window_id "$session" "$name"); then
+    tmp=$(mktemp "$STATE/.$ID.teardown-reconcile.XXXXXX") || return 1
+    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+    awk -F= -v window_id="$candidate" '
+      BEGIN { found=0 }
+      $1 == "window_id" { print "window_id=" window_id; found=1; next }
+      $1 == "endpoint_recovery_pending" { next }
+      $1 == "spawn_state" { print "spawn_state=aborted"; next }
+      { print }
+      END { if (!found) print "window_id=" window_id }
+    ' "$META" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$META" || { rm -f "$tmp"; return 1; }
+    ENDPOINT_RECOVERY_WINDOW_ID=$candidate
+    T=$candidate
+    return 0
+  fi
+  status=$?
+  case "$status" in
+    1)
+      rm -f -- "$META" || return 1
+      [ ! -e "$META" ] && [ ! -L "$META" ] || return 1
+      echo "teardown $ID retired an unmaterialized tmux endpoint reservation" >&2
+      exit 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$ENDPOINT_RECOVERY" = 1 ] && [ "$ENDPOINT_RECOVERY_WINDOW_ID" = pending ]; then
+  teardown_reconcile_pending_endpoint_recovery || {
+    echo "REFUSED: could not reconcile the pending endpoint recovery reservation for $ID; preserving its recovery record" >&2
+    exit 1
+  }
+  TEARDOWN_META_IDENTITY=$(teardown_meta_identity "$META") || {
+    echo "error: could not re-establish metadata identity for $ID" >&2
+    exit 1
+  }
+fi
 
 teardown_directory_identity() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
