@@ -52,23 +52,25 @@ test_state_creation_failure_is_read_only() {
 }
 
 test_lock_write_failure_is_read_only() {
-  local dir state fakebin out status
+  local dir state fakebin out status recorded
   dir="$TMP_ROOT/lock-write"
   state="$dir/state"
   mkdir -p "$state"
   fakebin=$(make_fake_ps "$dir")
-  chmod 0500 "$state"
+  printf '%s\n' 999999 > "$state/.lock"
+  chmod 0400 "$state/.lock"
 
   status=0
   out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK" 2>&1) || status=$?
-  chmod 0700 "$state"
+  recorded=$(cat "$state/.lock")
+  chmod 0600 "$state/.lock"
 
   [ "$status" -ne 0 ] || fail "lock write failure reported successful acquisition"
   assert_contains "$out" "cannot write session lock" \
     "lock write failure did not explain the read-only boundary"
   assert_not_contains "$out" "lock acquired" \
     "lock write failure printed a successful acquisition"
-  [ ! -e "$state/.lock" ] || fail "lock write failure left a published session lock"
+  [ "$recorded" = 999999 ] || fail "lock write failure replaced the stale lock owner"
   pass "fm-lock: lock write failure fails closed"
 }
 
