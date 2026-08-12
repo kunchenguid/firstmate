@@ -495,7 +495,7 @@ Use its scaffold as the contract, then replace every `{TASK}` placeholder with a
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must open its Definition of done with an explicit `Surface contract: web` or `Surface contract: non-web` line, retain the worktree-isolation assertion, and stop if launched in the primary checkout.
-Web ship briefs must also retain the generated website deployment completion gate directly under that declaration, including custom-production-domain visual verification, a distinguishing revision marker, and screenshot evidence.
+Web ship briefs must also retain the generated website deployment completion gate directly under that declaration, including fresh-browser custom-production-domain visual verification, a distinguishing revision marker, interaction evidence, and screenshot evidence, while rejecting HTTP-only, preview-only, or bare-reachability evidence.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
