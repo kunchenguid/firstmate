@@ -784,16 +784,48 @@ out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch
 assert_contains "$out" 'effective_effort=high' "Grok exact reuse did not compare or report its authoritative effort"
 
 set_remote_profile opencode opencode-model - "$TMP_ROOT/remote-ios-default-profile.meta"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
-assert_contains "$out" 'effective_effort=default' "remote route did not preserve OpenCode's unselected effort axis"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model - herdr)
-assert_contains "$out" 'effective_effort=default' "OpenCode exact reuse did not preserve its unselected effort axis"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-opencode.meta"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+default_opencode_route_rc=$?
+set -e
+[ "$default_opencode_route_rc" -ne 0 ] \
+  || fail "remote route published OpenCode's unselected effort axis"
+assert_contains "$out" 'unverifiable' \
+  "OpenCode default route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model - herdr \
+  > "$TMP_ROOT/remote-default-opencode.out" 2>&1
+default_opencode_launch_rc=$?
+set -e
+[ "$default_opencode_launch_rc" -ne 0 ] \
+  || fail "OpenCode exact reuse accepted an unverified default effort"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-default-opencode.out" \
+  "OpenCode default reuse did not refuse unverifiable effort"
+cmp -s "$TMP_ROOT/remote-ios-before-default-opencode.meta" "$remote_route_meta" \
+  || fail "OpenCode default refusal changed the live remote metadata"
 
 set_remote_profile kimi kimi-model - "$TMP_ROOT/remote-ios-default-profile.meta"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
-assert_contains "$out" 'effective_effort=default' "remote route did not preserve Kimi's unselected effort axis"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model - herdr)
-assert_contains "$out" 'effective_effort=default' "Kimi exact reuse did not preserve its unselected effort axis"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-kimi.meta"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+default_kimi_route_rc=$?
+set -e
+[ "$default_kimi_route_rc" -ne 0 ] \
+  || fail "remote route published Kimi's unselected effort axis"
+assert_contains "$out" 'unverifiable' \
+  "Kimi default route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model - herdr \
+  > "$TMP_ROOT/remote-default-kimi.out" 2>&1
+default_kimi_launch_rc=$?
+set -e
+[ "$default_kimi_launch_rc" -ne 0 ] \
+  || fail "Kimi exact reuse accepted an unverified default effort"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-default-kimi.out" \
+  "Kimi default reuse did not refuse unverifiable effort"
+cmp -s "$TMP_ROOT/remote-ios-before-default-kimi.meta" "$remote_route_meta" \
+  || fail "Kimi default refusal changed the live remote metadata"
 
 set_remote_profile grok grok-4 max "$TMP_ROOT/remote-ios-default-profile.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-unverifiable-grok.meta"

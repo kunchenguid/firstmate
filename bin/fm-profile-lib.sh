@@ -34,7 +34,10 @@ fm_profile_effective_effort() {
   effort=$(fm_profile_normalize_effort "$effort")
   case "$effort" in
     default)
-      printf 'default\n'
+      case "$harness" in
+        opencode|kimi) printf 'unverifiable\n'; return 1 ;;
+        *) printf 'default\n' ;;
+      esac
       ;;
     low|medium|high|xhigh|max)
       case "$harness" in
