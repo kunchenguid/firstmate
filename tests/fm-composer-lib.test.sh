@@ -264,6 +264,30 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
 }
 
+test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
+  # Herdr draws a composer's rules with half-block glyphs (▄ above, ▀ below)
+  # rather than the box-drawing family. Without treating those as edges, a bare
+  # composer's WRAP region walks through its own closing rule and swallows the
+  # footer, whose real content turns an idle pane into a false `pending`.
+  # Captured live from a herdr cursor pane.
+  local screen plain out
+  plain=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n  \u2192 Add a follow-up\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  # The closing rule must bound the region, so the footer below is not input.
+  fm_composer_row_has_edge " $(printf '\u2580\u2580\u2580')" \
+    || fail "a half-block rule row must count as a structural edge"
+  fm_composer_row_has_edge " $(printf '\u2584\u2584\u2584')" \
+    || fail "the upper half-block rule must count as a structural edge"
+  # Non-vacuousness: the footer rows really are non-blank content that would be
+  # swallowed if the rule did not bound the region.
+  case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
+  ESC_LOCAL=$(printf '\033')
+  screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  [ "$out" = empty ] \
+    || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
+  pass "matrix: herdr half-block rules bound a bare composer's wrap region"
+}
+
 test_matrix_pi_separated_needs_identity() {
   # Real idle pi: a blank row between two solid rules. The blank row alone is
   # exactly what the strict rule refuses; only structure PLUS a live
@@ -587,6 +611,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border

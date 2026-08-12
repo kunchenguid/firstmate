@@ -813,6 +813,12 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
 
 # fm_composer_row_has_edge: 0 when the trimmed row starts or ends with a
 # box-drawing/edge glyph - a structural row, never an input row.
+# The half-block glyphs are edges too. Herdr draws a composer's top and bottom
+# rules with ▄ and ▀ instead of the box-drawing family, so without them a bare
+# composer's WRAP region walks straight through its own closing rule and
+# swallows the footer below it - which reads as real typed text and turns an
+# idle pane into a false `pending`. Measured live on a herdr cursor pane, where
+# the wrap region ran from the composer row through the model and path rows.
 fm_composer_row_has_edge() {  # <trimmed-row>
   local row=$1
   fm_composer_normalize_trim_var row
@@ -820,7 +826,8 @@ fm_composer_row_has_edge() {  # <trimmed-row>
     '│'*|*'│'|'┃'*|*'┃'|'║'*|*'║'|'╭'*|*'╭'|'╮'*|*'╮'|\
     '┌'*|*'┌'|'┐'*|*'┐'|'╔'*|*'╔'|'╗'*|*'╗'|'┏'*|*'┏'|'┓'*|*'┓'|\
     '╰'*|*'╰'|'╯'*|*'╯'|'└'*|*'└'|'┘'*|*'┘'|'╚'*|*'╚'|'╝'*|*'╝'|\
-    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|'|'+'*|*'+')
+    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|'|'+'*|*'+'|\
+    '▀'*|*'▀'|'▄'*|*'▄'|'▁'*|*'▁'|'▔'*|*'▔')
       return 0
       ;;
   esac
