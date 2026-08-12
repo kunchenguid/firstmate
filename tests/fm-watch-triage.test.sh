@@ -1502,9 +1502,12 @@ test_procevent_captured_result_surfaces_proactively() {
   grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
     || fail "the captured result was never published to the durable queue"
   queue_tmp="$state/.wake-queue.test"
-  awk -F '\t' 'BEGIN { OFS="\t" } { $1=1704141000; print }' "$state/.wake-queue" > "$queue_tmp" \
-    && mv "$queue_tmp" "$state/.wake-queue" \
-    || fail "could not age the durable process-event fixture"
+  if ! awk -F '\t' 'BEGIN { OFS="\t" } { $1=1704141000; print }' "$state/.wake-queue" > "$queue_tmp"; then
+    fail "could not age the durable process-event fixture"
+  fi
+  if ! mv "$queue_tmp" "$state/.wake-queue"; then
+    fail "could not age the durable process-event fixture"
+  fi
 
   TZ=UTC procevent_watch_bg "$dir" "$out"
   pid=$!
