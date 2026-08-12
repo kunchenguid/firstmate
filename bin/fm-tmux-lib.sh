@@ -60,12 +60,26 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# The harness-less default is the UNION of the per-harness tokens below, used
+# when a caller has no recorded harness for the pane (the submit cores read the
+# baseline and the post-Enter transition this way). cursor's `ctrl+c to stop` is
+# part of that union for the same reason the others are: without it a cursor
+# submit could never be acknowledged, because cursor parks its terminal cursor
+# outside its composer and the composer verdict is therefore always `unknown`.
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+# cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
+# same version rendered both `Working` and `Running` beside its braille spinner
+# in two consecutive turns, while `ctrl+c to stop` was present for the whole
+# turn and absent the instant it ended (verified live, 2026.08.11-e8db854).
+# This is a DELIVERY guard only - it acknowledges a submit and gates away-mode
+# injection. Cursor's recorded worker state comes from its transcript fold in
+# bin/fm-busy-lib.sh, never from this row.
+FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -81,6 +95,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

@@ -665,7 +665,7 @@ fm_busy_cursor_project_dir() {  # <projects-root> <workspace-root>
 # no turn has been submitted yet and several means the pane cannot be told
 # apart, and neither proves anything about the current turn.
 fm_busy_cursor_transcript() {  # <state-dir> <id>
-  local root workspace project dir conv found= count=0 prior
+  local root workspace project dir conv found='' count=0 prior
   root=$(fm_busy_cursor_binding_field "$1" "$2" projects_root) || return 1
   workspace=$(fm_busy_cursor_binding_field "$1" "$2" workspace_root) || return 1
   project=$(fm_busy_cursor_project_dir "$root" "$workspace") || return 1

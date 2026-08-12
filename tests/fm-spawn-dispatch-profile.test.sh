@@ -502,8 +502,20 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor agent --trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
+  # literal `cursor agent` command cannot run on a machine that has only the
+  # real installed names.
+  assert_not_contains "$launch" "cursor agent --trust" \
+    "cursor launch must resolve its executable, not invoke a literal 'cursor agent'"
+  assert_contains "$launch" "cursor-agent" "cursor launch did not resolve a cursor executable"
+  # -w/--worktree would allocate a SECOND worktree under ~/.cursor/worktrees and
+  # break the isolation contract the spawn assertion depends on.
+  assert_not_contains "$launch" " --worktree" "cursor launch must never allocate a second worktree"
+  assert_not_contains "$launch" " -w " "cursor launch must never allocate a second worktree"
+  # An inherited CLAUDECODE would otherwise outrank cursor's own marker.
+  assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear foreign primary markers"
   assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
