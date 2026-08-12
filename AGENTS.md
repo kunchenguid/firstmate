@@ -304,6 +304,8 @@ Supervise all live work under section 8.
 ### Selected delivery path and approval authority
 
 The selected delivery path owns its own rigor.
+The captain-gated deliverable gate and its targeted review-readiness checks described above and owned by `captain-gated-delivery` are the standard pre-validation stage of every ship, not an independent manual review layer.
+The prohibitions below govern adding independent code-review gates on top of the selected path; they do not authorize skipping the deliverable gate or starting full validation before captain acceptance, except when `captain-gated-delivery` calls for earlier validation because risk warrants it.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
