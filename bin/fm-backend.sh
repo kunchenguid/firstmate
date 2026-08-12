@@ -723,9 +723,11 @@ fm_backend_send_key_unlocked() {  # <backend> <target> <key> [expected-label]
 
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_LIB_DIR/fm-wake-lib.sh"
   fi
   if ! command -v fm_backend_serialized_send_key >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-checked-submit-lib.sh
     . "$FM_BACKEND_LIB_DIR/fm-checked-submit-lib.sh"
   fi
   fm_backend_serialized_send_key "$@"
@@ -770,9 +772,11 @@ fm_backend_send_text_submit_unlocked() {  # <backend> <target> <text> <retries> 
 
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_LIB_DIR/fm-wake-lib.sh"
   fi
   if ! command -v fm_backend_serialized_send_text_submit >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-checked-submit-lib.sh
     . "$FM_BACKEND_LIB_DIR/fm-checked-submit-lib.sh"
   fi
   fm_backend_serialized_send_text_submit "$@"

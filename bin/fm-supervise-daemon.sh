@@ -1161,6 +1161,7 @@ inject_msg() {  # <message> [state]
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
     FM_STATE_OVERRIDE="$state" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
   fi
   verdict=$(fm_backend_checked_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")

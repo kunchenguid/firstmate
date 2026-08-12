@@ -287,7 +287,7 @@ test_busy_queue_confirmation_survives_empty_preflight() {
 }
 
 test_concurrent_sends_serialize_per_endpoint() {
-  local dir fb first_home second_home first_tmp second_tmp task endpoint log composer hold first_pid second_pid key_pid first_rc second_rc key_rc i
+  local dir fb first_home second_home first_tmp second_tmp task endpoint log composer hold first_pid second_pid key_pid first_rc second_rc key_rc
   dir="$TMP_ROOT/concurrent-sends"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); first_home=$(setup_home concurrent-first); second_home=$(setup_home concurrent-second)
   first_tmp="$dir/tmp-first"; second_tmp="$dir/tmp-second"; mkdir -p "$first_tmp" "$second_tmp"
@@ -301,7 +301,7 @@ test_concurrent_sends_serialize_per_endpoint() {
     FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_TYPE_HOLD="$hold" FM_SEND_SETTLE=0 \
     "$SEND" "$task" "first intended steer" >/dev/null 2>"$dir/first.err" &
   first_pid=$!
-  for i in $(seq 1 1000); do
+  for _ in $(seq 1 1000); do
     [ ! -e "$hold.started" ] || break
     /bin/sleep 0.01
   done
