@@ -373,11 +373,30 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
   pass "fm-guard stale banner: a no-watcher episode survives a beacon mtime change"
 }
 
+test_calm_first_alarm_is_one_line_and_keeps_every_action() {
+  local dir home out lines
+  dir=$(make_guard_case calm-first-alarm)
+  home=$(case_home "$dir")
+  printf 'on\n' > "$home/config/calm"
+  out=$(CLAUDECODE=1 run_guard_case "$dir")
+  lines=$(printf '%s\n' "$out" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$lines" -eq 1 ] || fail "calm guard alarm was not a single line: $out"
+  assert_contains "$out" "FIRSTMATE ALARM: WATCHER DOWN" "calm guard lost the unmistakable alarm"
+  assert_contains "$out" "1 task(s) in flight" "calm guard lost the supervision need"
+  assert_contains "$out" "no watcher has a fresh beacon" "calm guard lost the failing condition"
+  assert_contains "$out" "Trust the emitted supervision protocol" "calm guard lost the repair owner"
+  assert_contains "$out" "WILL still run" "calm guard lost the guarded-operation continuation"
+  assert_contains "$out" "Stop-owned automatic recovery" "calm guard lost the harness-specific repair action"
+  assert_not_contains "$out" "━━━━━━━━" "calm guard retained the loud border"
+  pass "fm-guard Calm presentation keeps the complete actionable alarm on one line"
+}
+
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
+test_calm_first_alarm_is_one_line_and_keeps_every_action
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm

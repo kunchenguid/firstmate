@@ -115,6 +115,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-calm-lib.sh" "$dir/bin/fm-calm-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1121,6 +1122,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-calm-lib.sh" "$dir/bin/fm-calm-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   ln -s /bin/bash "$dir/fake-claude"
@@ -1581,6 +1583,40 @@ test_hook_claude_mode_waits_for_late_claim() {
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
 }
 
+test_hook_claude_mode_calm_alarms_are_compact_and_complete() {
+  local blocked alarm out status lines
+  blocked=$(make_primary_dir "$TMP_ROOT/hook-claude-calm-blocked")
+  mkdir -p "$blocked/config"
+  printf 'on\n' > "$blocked/config/calm"
+  : > "$blocked/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$blocked" false); status=$?
+  expect_code 2 "$status" "Claude Calm must not weaken the blind-turn block"
+  lines=$(printf '%s\n' "$out" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$lines" -eq 1 ] || fail "Claude Calm blind-turn alarm was not one line: $out"
+  assert_contains "$out" "FIRSTMATE ALARM: TURN WOULD END BLIND" "Claude Calm block lost its alarm"
+  assert_contains "$out" "1 task(s) in flight" "Claude Calm block lost the supervision need"
+  assert_contains "$out" "no live watcher holds this home lock" "Claude Calm block lost the watcher condition"
+  assert_contains "$out" "Stop-owned auto-arm did not claim recovery" "Claude Calm block lost automatic ownership status"
+  assert_contains "$out" "$REQUIRED_REASON" "Claude Calm block lost the repair action"
+  assert_not_contains "$out" "━━━━━━━━" "Claude Calm block retained the loud border"
+
+  alarm=$(make_primary_dir "$TMP_ROOT/hook-claude-calm-alarm")
+  mkdir -p "$alarm/config"
+  printf 'on\n' > "$alarm/config/calm"
+  : > "$alarm/state/task1.meta"
+  seed_claude_failure "$alarm"
+  seed_claude_budget "$alarm" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$alarm" true); status=$?
+  expect_code 0 "$status" "Claude Calm must preserve the bounded attended fail-open"
+  lines=$(printf '%s\n' "$out" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$lines" -eq 1 ] || fail "Claude Calm terminal alarm was not one line: $out"
+  assert_contains "$out" "FIRSTMATE ALARM: SUPERVISION IS GENUINELY DOWN" "Claude Calm terminal path lost its alarm"
+  assert_contains "$out" "automatic retries and the block budget are exhausted" "Claude Calm terminal path lost failure evidence"
+  assert_contains "$out" "Keep this session attended" "Claude Calm terminal path lost the attended action"
+  assert_contains "$out" "diagnose the Stop hook and watcher startup" "Claude Calm terminal path lost diagnosis"
+  pass "fm-turnend-guard Claude Calm alarms are compact without changing block or fail-open semantics"
+}
+
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
   local dir pid out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
@@ -1657,6 +1693,7 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
+test_hook_claude_mode_calm_alarms_are_compact_and_complete
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget

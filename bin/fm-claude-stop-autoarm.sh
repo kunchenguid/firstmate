@@ -29,7 +29,7 @@
 #     group, so its timeout/session teardown kills arm and watcher together.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
-#     rewake banner to stderr and exits 2, which wakes Claude even while idle
+#     rewake notification to stderr and exits 2, which wakes Claude even while idle
 #     ("Stop hook feedback"). A close that reports no actionable reason is
 #     benign when a live identity-matched watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
@@ -48,7 +48,7 @@
 # suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# exit 0 is always silent, and exit 2 carries the rewake notification on stderr.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
@@ -78,6 +78,11 @@ esac
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-calm-lib.sh
+. "$SCRIPT_DIR/fm-calm-lib.sh"
+
+CALM=false
+fm_calm_enabled "$CONFIG" && CALM=true
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe.
@@ -227,11 +232,17 @@ fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
   write_epoch rewake
-  {
-    printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
-    [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
-  } >&2
+  if [ "$CALM" = true ]; then
+    REASONS=
+    [ -n "$OUT" ] && REASONS=$(grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8 | awk 'BEGIN { first=1 } { if (!first) printf " | "; printf "%s", $0; first=0 } END { print "" }')
+    printf 'FIRSTMATE WAKE: %s Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command; the Stop hook re-arms automatically, so do not run bin/fm-watch-arm.sh after this ordinary wake.\n' "$REASONS" >&2
+  else
+    {
+      printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
+      [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+      printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+    } >&2
+  fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2
 fi
@@ -241,11 +252,18 @@ fi
 # creating a repeated operator notice or manual-arm loop.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   write_epoch failed
-  {
-    printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
-    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
-  } >&2
+  if [ "$CALM" = true ]; then
+    FAILURE_LINES=
+    [ -n "$OUT" ] && FAILURE_LINES=$(grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8 | awk 'BEGIN { first=1 } { if (!first) printf " | "; printf "%s", $0; first=0 } END { print "" }')
+    printf 'FIRSTMATE ALARM: watcher auto-arm FAILED after %s bounded attempts with no verified live watcher or fresh beacon. %s Do not launch a manual arm; diagnose the Stop hook and watcher startup before ending blind.\n' \
+      "$attempt" "$FAILURE_LINES" >&2
+  else
+    {
+      printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
+      [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+      printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
+    } >&2
+  fi
   : > "$FAILURE_NOTICE" 2>/dev/null || true
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2

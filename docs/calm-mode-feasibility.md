@@ -182,7 +182,7 @@ Compaction and retry loaders remain stock because Pi exposes no supported replac
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
 Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
-The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#pi-calm-preference-configcalm).
+The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#calm-preference-configcalm).
 
 Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs retain their versioned U+2063 static envelopes.
 The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current so running secondmate charters remain compatible.
@@ -230,6 +230,7 @@ General component replacement, ANSI cursor erasure, provider-context mutation, a
 ## Cross-harness verification record
 
 The original five-harness inspection was performed on 2026-07-22, with every integration surface rechecked and Pi reverified at 0.81.1 on 2026-07-23 for the latest Calm presentation change.
+Claude Code was rechecked on 2026-08-05 at 2.1.220 after its fullscreen focus view and `MessageDisplay` hook became available.
 
 ```text
 $ claude --version
@@ -246,7 +247,7 @@ grok 0.2.106 (bde89716f679)
 
 | Harness | Conclusion | Evidence |
 | --- | --- | --- |
-| Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
+| Claude Code 2.1.220 | Not feasible through the inspected supported project surface. | `MessageDisplay` can replace only streaming assistant-text batches, while tool results and user input remain unchanged and existing rows cannot be redrawn; fullscreen `/focus` is a built-in whole-view filter that retains the last prompt and can hide genuine intermediate assistant text, not a selective project renderer. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
 | Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
@@ -254,12 +255,58 @@ grok 0.2.106 (bde89716f679)
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
 They do not claim that a harness can never add the missing renderer API.
-For the duplicate-turn fix and the latest presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
-The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
-Only Pi's Calm presentation implementation changed; every producer and non-Pi transport remains unchanged.
+For the 2026-07-23 duplicate-turn fix and Pi presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
+The canonical encoder and every non-Pi delivery path were unchanged in that Pi-only round, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continued to transport the same input selected by the harness adapter.
+Only Pi's Calm presentation implementation changed in that round; every producer and non-Pi transport remained unchanged.
+
+## 2026-08-05 Claude Code 2.1.220 recheck
+
+The currently installed Claude Code version was:
+
+```text
+$ claude --version
+2.1.220 (Claude Code)
+```
+
+The supported hooks, plugins, output styles, status line, and fullscreen renderer were checked against the installed CLI help and the current official reference pages at `code.claude.com/docs/en/hooks`, `plugins-reference`, `output-styles`, `statusline`, `settings`, and `fullscreen`.
+The plugin inventory remains skills, agents, workflows, hooks, MCP servers, LSP servers, output styles, themes, monitors, channels, and settings; it exposes no transcript component or redraw registration.
+Output styles still modify the model's system prompt, and status lines still render only their own row above the footer.
+
+Claude Code 2.1.220 does expose two newer presentation controls, but neither satisfies the required boundary.
+The `MessageDisplay` hook can replace batches of assistant text while they stream, but the official contract says user input and tool results render unchanged, verbose mode shows the original, and the hook offers no transcript-wide redraw.
+Fullscreen `/focus`, also selectable through the `viewMode: "focus"` setting, shows the last prompt, one-line tool summaries, and the final response.
+That whole-view filter therefore leaves a watcher injection visible while it is the last prompt, can suppress genuine assistant text emitted between tool calls, and gives a project no selective row-classification or redraw API.
+
+A true Pi-style Claude Calm remains infeasible on supported surfaces at 2.1.220.
+Firstmate therefore keeps Claude's renderer and transcript data untouched and applies the home-local `config/calm` preference only to its own printed operational presentation: terse Stop-hook notifications and safety alarms plus batched wake-drain digests.
+
+The bounded CLI surface check was:
+
+```text
+$ claude plugin --help
+Usage: claude plugin|plugins [options] [command]
+...
+Commands:
+  details [options] <name>
+  disable [options] [plugin]
+  enable [options] <plugin>
+  eval [options] [target]
+  init|new [options] <name>
+  install|i [options] <plugin>
+  list [options]
+  marketplace
+  prune|autoremove [options]
+  tag [options] [path]
+  uninstall|remove [options] <plugin>
+  update [options] <plugin>
+  validate [options] <path>
+```
 
 ## Regression coverage
 
+`tests/fm-calm-pi-extension.test.sh` verifies that Pi and the shell helper make identical decisions for canonical, whitespace-padded, absent, malformed, and disabled preference values.
+`tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-turnend-guard.test.sh` prove Claude Calm keeps each wake, watcher-down alarm, blind-turn block, and terminal supervision alarm actionable on one line without changing exit or fail-open semantics.
+`tests/fm-wake-queue.test.sh` proves Claude Calm batches authoritative wake rows, bounded status context, and fleet-wide open decisions without changing queue consumption, and that the effective config override and default-off cases keep ordinary output.
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
 It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
@@ -273,6 +320,10 @@ The relevant commands are:
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-guard-stale-banner.test.sh
+tests/fm-turnend-guard.test.sh
+tests/fm-wake-queue.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```

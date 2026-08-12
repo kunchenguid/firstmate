@@ -13,6 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-calm-lib.sh
+. "$SCRIPT_DIR/fm-calm-lib.sh"
+
+CONFIG="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}/config}"
+CALM=false
+fm_claude_calm_enabled "$CONFIG" && CALM=true
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -121,16 +127,62 @@ $open
 EOF
 
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n'
-  printf '%s' "$output"
-  if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted"
+  if [ "$CALM" = true ]; then
+    printf 'FIRSTMATE OPEN DECISIONS (%d shown' "$shown"
+    [ "$omitted" -eq 0 ] || printf ', %d omitted by byte cap' "$omitted"
+    printf '):'
+    while IFS= read -r line; do
+      [ -n "$line" ] && printf ' [%s]' "$line"
+    done <<EOF
+$output
+EOF
+    printf '\n'
+  else
+    printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n'
+    printf '%s' "$output"
+    if [ "$omitted" -gt 0 ]; then
+      printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted"
+    fi
   fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+}
+
+print_calm_wake_digest() {
+  local rows=$1 _epoch _sequence kind key payload count=0
+  while IFS=$(printf '\t') read -r _epoch _sequence kind key payload; do
+    [ -n "$kind" ] && count=$((count + 1))
+  done <<EOF
+$rows
+EOF
+  printf 'FIRSTMATE WAKE DIGEST (%d):' "$count"
+  while IFS=$(printf '\t') read -r _epoch _sequence kind key payload; do
+    [ -n "$kind" ] || continue
+    printf ' [%s %s: %s]' "$kind" "$key" "$payload"
+  done <<EOF
+$rows
+EOF
+  printf '\n'
+}
+
+print_calm_annotations() {
+  local annotations=$1 line count=0
+  [ -n "$annotations" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] && count=$((count + 1))
+  done <<EOF
+$annotations
+EOF
+  printf 'FIRSTMATE WAKE CONTEXT (%d):' "$count"
+  while IFS= read -r line; do
+    [ -n "$line" ] && printf ' [%s]' "$line"
+  done <<EOF
+$annotations
+EOF
+  printf '\n'
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -255,7 +307,11 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
-  printf '%s\n' "$RAW_ROWS" || exit "$?"
+  if [ "$CALM" = true ]; then
+    print_calm_wake_digest "$RAW_ROWS" || exit "$?"
+  else
+    printf '%s\n' "$RAW_ROWS" || exit "$?"
+  fi
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
@@ -268,7 +324,12 @@ DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(fm_wake_print_annotations "$RAW_ROWS") || true
+if [ "$CALM" = true ]; then
+  ANNOTATIONS=$(fm_wake_print_annotations "$RAW_ROWS" || true)
+  (print_calm_annotations "$ANNOTATIONS") || true
+else
+  (fm_wake_print_annotations "$RAW_ROWS") || true
+fi
 (print_open_decisions_section) || true
 assert_watcher_liveness
 exit 0
