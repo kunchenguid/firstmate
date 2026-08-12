@@ -558,6 +558,7 @@ test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan() {
 
 test_task_pid_index_ignores_foreign_uid_processes() {
   local status foreign_uid
+  require_procfs || { pass "skip: this host has no procfs uid model for process-index proof"; return 0; }
   foreign_uid=$(( $(id -u) + 1 ))
   if bash -c '
     . "$1"
@@ -1187,6 +1188,7 @@ EOF
 
 slot_verdict() {  # <state> <id> <wt> <home>
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_process_occupant_tasks() { return 1; } \
     && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "$4" crewmate closed "" "" )
 }
 
