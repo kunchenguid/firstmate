@@ -265,6 +265,9 @@ routine_ack_publication_exists() {
     "$FM_WAKE_QUEUE"; then
     found=0
   fi
+  if [ "$found" -eq 0 ] && ! routine_ack_publication_covers_pending; then
+    found=1
+  fi
   [ "$queue_lock_held" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   [ "$found" -eq 0 ] \
     || { routine_error "routine acknowledgement has no durable wake: $ROUTINE_ACK_GENERATION"; return 1; }
@@ -276,6 +279,28 @@ routine_ack_generation_published() {
     && awk -F '\t' -v key="$wake_key" \
       '$3 == "check" && $4 == key && index($5, "routine-due: ") > 0 { found = 1; exit } END { exit(found ? 0 : 1) }' \
       "$FM_WAKE_QUEUE"
+}
+
+routine_ack_publication_covers_pending() {
+  local pending_id pending_cadence pending_date pending_owner pending_action pending_generation pending_extra expected
+  [ -f "$PENDING" ] || return 0
+  while IFS='|' read -r pending_id pending_cadence pending_date pending_owner pending_action pending_generation pending_extra \
+    || [ -n "${pending_id:-}${pending_cadence:-}${pending_date:-}${pending_owner:-}${pending_action:-}${pending_generation:-}${pending_extra:-}" ]; do
+    if [ -n "$ROUTINE_ACK_GENERATION" ] && [ "$pending_generation" != "$ROUTINE_ACK_GENERATION" ] \
+      && { [ "$pending_generation" -gt "$ROUTINE_ACK_GENERATION" ] \
+        || routine_ack_generation_published "$pending_generation"; }; then
+      continue
+    fi
+    expected=$(printf 'routine-due: %s | %s | %s' "$pending_id" "$pending_owner" "$pending_action" \
+      | fm_wake_clean_field)
+    if ! awk -F '\t' -v key="$STATE/routine-scan.check.sh:routine-generation:$ROUTINE_ACK_GENERATION" \
+      -v expected="$expected" \
+      '$3 == "check" && $4 == key && index($5, expected) > 0 { found = 1; exit } END { exit(found ? 0 : 1) }' \
+      "$FM_WAKE_QUEUE"; then
+      routine_error "routine acknowledgement wake omitted pending routine: $pending_id"
+      return 1
+    fi
+  done < "$PENDING"
 }
 
 routine_ack_pending() {

@@ -335,6 +335,43 @@ test_ack_requires_durable_generation_wake() {
     || fail "the published generation did not commit fire state"
   pass "routine acknowledgement requires durable wake publication"
 }
+test_ack_rejects_partial_generation_wake() {
+  local home check first generation partial out rc expected_fired
+  home=$(make_home partial-publication)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the partial-publication fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- item-a | daily | captain | first published item' \
+    '- item-b | daily | captain | second published item'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  partial='routine-due: item-a | captain | first published item'
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$partial" \
+    || fail "the partial wake could not be published"
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "partial generation wake acknowledged all pending routines"
+  case "$out" in
+    *'routine acknowledgement wake omitted pending routine: item-b'*) ;;
+    *) fail "partial wake lacked an actionable diagnostic: $out" ;;
+  esac
+  [ ! -e "$home/state/.routine-fired" ] || fail "partial wake committed fire state"
+  [ -f "$home/state/.routine-pending" ] || fail "partial wake discarded pending state"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
+    || fail "the complete wake could not be published"
+  "$check" --ack --generation "$generation" \
+    || fail "complete generation wake did not acknowledge pending routines"
+  expected_fired=$(printf '%s\n' 'item-a|daily|2026-08-10' 'item-b|daily|2026-08-10')
+  [ "$(cat "$home/state/.routine-fired")" = "$expected_fired" ] \
+    || fail "complete wake did not commit the full fire state"
+  pass "routine acknowledgement requires complete generation publication"
+}
 test_unpublished_pending_binds_to_first_successful_wake() {
   local home check first second generation retry
   home=$(make_home unpublished-pending)
@@ -721,6 +758,7 @@ test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
 test_ack_requires_durable_generation_wake
+test_ack_rejects_partial_generation_wake
 test_unpublished_pending_binds_to_first_successful_wake
 test_fired_pending_replay_is_suppressed
 test_pending_generation_stays_bound_after_rescan
