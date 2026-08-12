@@ -254,7 +254,14 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # successful session inventory before its foreground command can be trusted.
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate.
+# transient tmux problem never licenses a duplicate. The session axis carries
+# tmux's `=` exact-match prefix, because a plain `-t` resolves a session name by
+# fnmatch and by prefix, so a recorded sess:fm-x otherwise binds a live
+# sess2:fm-x's same-named window. An exact-absent session and a truly absent one
+# answer identically, so when the exact probe fails the fuzzy form is tried once:
+# if it succeeds a prefix-matching session is live and the verdict is
+# `unreadable`, never `missing`, since only `dead` and `missing` license
+# recovery.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -272,14 +279,21 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?
   fi
   if [ "$inventory_status" -ne 0 ]; then
     case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+      *"can't find session:"*)
+        if LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' >/dev/null 2>&1; then
+          printf 'unreadable'
+        else
+          printf 'missing'
+        fi
+        ;;
+      *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
         printf 'missing'
         ;;
       *)

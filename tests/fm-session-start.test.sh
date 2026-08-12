@@ -326,13 +326,19 @@ case "\${1:-}" in
     exit 0
     ;;
   list-windows)
-    [ "\$target" = "\$live_session" ] || { echo "can't find session: \$target" >&2; exit 1; }
+    # A session-only target resolves by PREFIX unless it carries tmux's \`=\`
+    # prefix, so this arm models both forms rather than only the exact one.
+    if [ "\${target#=}" != "\$target" ]; then
+      [ "\${target#=}" = "\$live_session" ] || { echo "can't find session: \${target#=}" >&2; exit 1; }
+    else
+      case "\$live_session" in "\$target"*) ;; *) echo "can't find session: \$target" >&2; exit 1 ;; esac
+    fi
     printf '%s\n' "\$live_window"
     exit 0
     ;;
   list-panes)
     # Each axis resolves by PREFIX on its own, and only an axis carrying tmux's
-    # `=` prefix demands an exact match. Answers describe the window actually
+    # \`=\` prefix demands an exact match. Answers describe the window actually
     # resolved. A fixture that matched exactly on either axis regardless could
     # not tell a fuzzy implementation from an exact one.
     ts="\${target%%:*}"

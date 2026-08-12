@@ -97,6 +97,32 @@ can't find window: %0 (exit 1)
 Both prefix matches became failures, so the exit status is the whole answer and no output has to be parsed.
 Exact matching applies to NAMES only, so the shapes that are not names survive it: a window index, an `@window-id`, and a legal pane suffix all still resolved, while a pane index that does not exist failed.
 The last two rows are why a colonless target keeps the plain form: `=` is rejected in front of a `%pane` id, which already resolves exactly without it.
+The plain form is exact for that id shape only; a colonless bare NAME still resolves by fnmatch and by prefix, as the session-only rows below show.
+
+The recovery-grade classifier reads a session-only target (`list-windows -t <session>`), so `=` was reverified on that shape against the same session on 2026-08-12.
+
+```sh
+tmux list-windows -t fmtest -F '#{window_name}'
+tmux list-windows -t fmtes -F '#{window_name}'
+tmux list-windows -t '=fmtest' -F '#{window_name}'
+tmux list-windows -t '=fmtes' -F '#{window_name}'
+tmux list-windows -t '=nosuch' -F '#{window_name}'
+tmux list-windows -t nosuch -F '#{window_name}'
+```
+
+Observed output:
+
+```text
+fm-live (exit 0)
+fm-live (exit 0)
+fm-live (exit 0)
+can't find session: fmtes (exit 1)
+can't find session: nosuch (exit 1)
+can't find session: nosuch (exit 1)
+```
+
+Row 2 is the same prefix bug on a session-only target, and row 4 shows `=` removes it there too.
+Rows 4 to 6 are also why the exit status and the message alone cannot classify the failure: an exact-absent session that a prefix still binds and a wholly absent session answer identically, so the classifier re-probes once with the plain form and treats a success there as `unreadable` rather than `missing`.
 
 ### Agent liveness name sources
 

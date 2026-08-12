@@ -845,8 +845,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       # verified against tmux 3.7b for a window name, a window index, an
       # @window-id, and a pane-qualified name (see
       # docs/verification/runtime-backends.md "Target resolution"). A bare pane
-      # id rejects `=`, so colonless shapes (%pane, @window) keep the plain form,
-      # under which they already resolve exactly. A target naming no window at
+      # id rejects `=`, so colonless shapes keep the plain form. That is exact
+      # only for the `%pane` and `@window` id shapes recorded metadata actually
+      # produces, not for a bare name, which still resolves by fnmatch and by
+      # prefix under the plain form. A target naming no window at
       # all (empty, or "session:") is refused outright because tmux answers
       # those from whatever window is current.
       case "$target" in

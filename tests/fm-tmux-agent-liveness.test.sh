@@ -355,6 +355,29 @@ fi
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
 
+# --- a session name that only PREFIXES a live one never reads alive ----------
+# tmux resolves the SESSION axis by prefix as well, so the recorded session of a
+# torn-down endpoint can bind a live session whose name merely starts with it,
+# and that session's same-named window then carries a foreground harness. The raw
+# read below is the fuzziness under test, so this case cannot go vacuous. The
+# verdict must be unreadable: `missing` would authorize a relaunch onto the live
+# worktree, which is the failure direction this classifier exists to refuse.
+
+LIVE_PREFIX=${SESSION%?}
+[ -n "$(tmux list-windows -t "$LIVE_PREFIX" -F '#{window_name}' 2>/dev/null)" ] \
+  || fail "tmux no longer resolves a session name by prefix, so this case proves nothing"
+[ "$(fm_backend_agent_state tmux "$LIVE_PREFIX:agent")" = unreadable ] \
+  || fail "a recorded session that only prefixes a live session must classify unreadable, never alive or missing"
+pass "tmux liveness: a session name that only prefixes a live session classifies unreadable"
+
+[ "$(fm_backend_agent_state tmux "no-such-session:agent")" = missing ] \
+  || fail "a recorded session matching nothing at all must still classify missing"
+pass "tmux liveness: a session matching nothing at all still classifies missing"
+
+[ "$(fm_backend_agent_state tmux "$SESSION:agent")" = alive ] \
+  || fail "the exact live session and window running a harness must still classify alive"
+pass "tmux liveness: exact session and window naming a running harness still classifies alive"
+
 # --- the cheap presence check must not inherit that fallback either ---------
 # fm_backend_target_exists (bin/fm-backend.sh) is the fast alive/dead read the
 # session-start fleet digest, fm-crew-state.sh's pane_readable, and the away-mode
