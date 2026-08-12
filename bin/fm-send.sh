@@ -204,8 +204,7 @@ fm_send_lock_namespace_uid() {
 fm_send_lock_namespace() {
   local uid dir owner mode
   uid=$(id -u 2>/dev/null) || return 1
-  dir=${FM_SEND_LOCK_NAMESPACE:-${TMPDIR:-/tmp}/firstmate-send-$uid}
-  case "$dir" in /*) ;; *) return 1 ;; esac
+  dir="/tmp/firstmate-send-$uid"
   if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
     mkdir -m 700 "$dir" 2>/dev/null || true
   fi
