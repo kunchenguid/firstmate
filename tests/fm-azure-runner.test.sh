@@ -115,11 +115,23 @@ linux_systemd_drop_integration() {
   if ! command -v systemd-run >/dev/null || ! sudo -n true >/dev/null 2>&1; then
     fail "Linux systemd integration requires passwordless sudo"
   fi
-  local tmp repo request output uid gid
+  local tmp repo controller_base work_base request output uid gid tracked_digest staged_digest systemd_rc
   fm_test_tmproot_into tmp fm-azure-systemd-drop
-  repo="$tmp/repo"; make_repo "$repo"; request="$tmp/request.json"; output="$tmp/output"
+  repo="$tmp/repo"; make_repo "$repo"
+  controller_base=$(sudo -n mktemp -d /var/lib/fm-azure-runner-test.XXXXXXXX)
+  work_base=$(sudo -n mktemp -d /var/lib/fm-azure-runner-work.XXXXXXXX)
+  request="$controller_base/request.json"; output="$controller_base/output"
   uid=$(id -u nobody); gid=$(id -g nobody)
-  python3 - "$request" "$uid" "$gid" <<'PY'
+  sudo -n install -d -m 0700 -o root -g root "$controller_base"
+  sudo -n chmod 0755 "$work_base"
+  sudo -n install -d -m 0755 -o "$uid" -g "$gid" "$work_base/repo"
+  sudo -n cp -R "$repo/." "$work_base/repo/"
+  sudo -n chown -R "$uid:$gid" "$work_base/repo"
+  sudo -n install -m 0600 -o root -g root "$EXECUTOR" "$controller_base/runner-exec.py"
+  tracked_digest=$(sha256sum "$EXECUTOR" | awk '{print $1}')
+  staged_digest=$(sudo -n sha256sum "$controller_base/runner-exec.py" | awk '{print $1}')
+  [ "$tracked_digest" = "$staged_digest" ] || fail "root-staged executor digest differs from tracked executor"
+  python3 - "$tmp/request.json" "$uid" "$gid" <<'PY'
 import hashlib,json,sys
 uid=int(sys.argv[2]); gid=int(sys.argv[3])
 code="""import os,pathlib
@@ -136,15 +148,27 @@ r={"invocation":"azr-aaaaaaaaaaaa","attempt":1,"fence":"sha256:"+"1"*64,"reposit
 canon=lambda v:json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(); r["command_digest"]="sha256:"+hashlib.sha256(canon(command)).hexdigest(); r["request_digest"]="sha256:"+hashlib.sha256(canon(r)).hexdigest(); open(sys.argv[1],"wb").write(canon(r)+b"\n")
 PY
   printf '44444444-4444-4444-8444-444444444444\n' >"$tmp/boot"
-  chmod 0755 "$tmp" "$repo"; chmod 0644 "$request" "$tmp/boot"
+  sudo -n install -m 0600 -o root -g root "$tmp/request.json" "$request"
+  sudo -n install -m 0600 -o root -g root "$tmp/boot" "$controller_base/boot"
+  chmod 0755 "$tmp" "$repo"
+  # The broker intentionally lacks CAP_DAC_OVERRIDE. Pinned Python reads the
+  # staged executor and request as root inside the root-traversable BASE; only
+  # the child needs access to the repository and its already-open log pipes.
+  systemd_rc=0
   sudo -n systemd-run --quiet --wait --collect --pipe \
     --property=NoNewPrivileges=yes --property=PrivateNetwork=yes --property=RestrictAddressFamilies=AF_UNIX \
     --property=IPAddressDeny=any --property='CapabilityBoundingSet=CAP_SETUID CAP_SETGID' \
     --property=AmbientCapabilities= --property=RestrictSUIDSGID=yes \
-    env FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" /usr/bin/python3 "$EXECUTOR" \
-    "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || \
-    fail "actual Linux/systemd broker could not drop to an empty-cap networkless child"
-  [ "$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["exit_code"])' "$output/result.json")" = 0 ] || fail "Linux child security proof failed"
+    env FM_AZURE_RUNNER_BOOT_ID_PATH="$controller_base/boot" /usr/bin/python3 "$controller_base/runner-exec.py" \
+    "$request" "$work_base/repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || systemd_rc=$?
+  [ "$systemd_rc" -eq 0 ] && \
+    [ "$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["exit_code"])' "$output/result.json")" = 0 ] || \
+    systemd_rc=1
+  sudo -n find "$controller_base" -xdev -mindepth 1 -delete
+  sudo -n rmdir "$controller_base"
+  sudo -n find "$work_base" -xdev -mindepth 1 -delete
+  sudo -n rmdir "$work_base"
+  [ "$systemd_rc" -eq 0 ] || fail "actual Linux/systemd broker could not run the secured child"
   pass "actual Linux/systemd broker drops uid/gid/groups and repository child has empty capabilities/no-new-privileges/networkless"
 }
 
