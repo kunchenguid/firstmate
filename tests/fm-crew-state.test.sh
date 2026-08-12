@@ -25,6 +25,8 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) the pipeline pushed the run past this worktree (the normal steady state
+#       of a run, and the 2026-08-12 false-`failed` incident) -> run-step
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1309,6 +1311,314 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# ---------------------------------------------------------------------------
+# (l) the pipeline pushed ahead of the crew's worktree - the NORMAL steady
+# state of a no-mistakes run, and the shape that reported a healthy crew as
+# `failed` on 2026-08-12 (observed on two live crews).
+#
+# While a run is under way the pipeline rebases and commits its fixes in its
+# own gate repo, so the run head becomes a commit the crew's worktree has never
+# fetched: `git rev-parse` cannot resolve it, head matching fails for the LIVE
+# run, and an older TERMINAL run left at the untouched worktree head matches
+# and wins. Two independent bindings must survive that, so each is pinned on
+# its own below:
+#   1. `axi status`'s branch_sync block - no-mistakes' own record of which run
+#      owns this worktree's branch, whose pipeline.submitted_head is the head
+#      the crew handed to the run (real shape, installed v1.46.0).
+#   2. the coarse `no-mistakes runs` listing - a newer ACTIVE row on the same
+#      branch supersedes an older matched terminal row.
+
+# The branch_sync block `axi status` emits whenever the invoking worktree's
+# branch is bound to a pipeline run.
+branch_sync_block() {  # <branch> <run-id> <pipeline-status> <local-head> <submitted-head> <current-head>
+  cat <<EOF
+branch_sync:
+  state: behind
+  changed: false
+  local:
+    branch: $1
+    head: $4
+    clean: true
+  pipeline:
+    run: "$2"
+    status: $3
+    phase: ""
+    submitted_head: $5
+    current_head: $6
+    pushed_head: $6
+    pushed_at: 1786564076
+    push_generation: 2
+  target:
+    kind: fork
+    remote: fork
+    url: "https://github.com/o/r.git"
+    ref: refs/heads/$1
+  remote:
+    observed_head: $6
+    freshness: pipeline_push
+    observed_at: 1786564076
+  relation: behind
+  safety: refresh_required
+  pr_state: open
+  next_action:
+    code: sync
+    command: no-mistakes axi sync
+EOF
+}
+
+# A live run monitoring CI, reporting a head this worktree never fetched.
+run_running_ci_ahead() {  # <branch> <run-id> <advanced-head>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: running
+  head: "$3"
+  pr: "https://github.com/o/r/pull/1315"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,0
+    review,completed,0,0
+    test,completed,0,0
+    document,completed,0,0
+    lint,completed,0,0
+    push,completed,0,0
+    pr,completed,0,0
+    ci,running,0,0
+EOF
+}
+
+# A terminal run whose head the worktree never fetched either.
+run_failed_ahead() {  # <branch> <run-id> <advanced-head>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: completed
+  head: "$3"
+  pr: ""
+  findings: none
+outcome: failed
+EOF
+}
+
+# A sha no fixture repo can resolve: the pipeline pushed it, this worktree
+# never fetched it. Asserted unresolvable so the case cannot go vacuous.
+AHEAD_SHA=f92b7b2c48f1658ca2893e3b38aa72a561d381b8
+assert_unfetched() {  # <worktree>
+  git -C "$1" rev-parse --verify "${AHEAD_SHA}^{commit}" >/dev/null 2>&1 \
+    && fail "fixture sha must be unresolvable in the crew worktree"
+  return 0
+}
+
+# The reported incident, end to end: a live run advanced past the worktree and
+# an older failed run sitting exactly at the worktree head.
+test_pipeline_ahead_live_run_beats_terminal_run_at_worktree_head() {
+  reset_fakes
+  local d head short out
+  d=$(new_case pipeline-ahead-incident)
+  make_repo_on_branch "$d/wt" fm/sh-1308
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  assert_unfetched "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/sh-1308.meta" "window=fm:fm-sh-1308" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation committed, validating\n' > "$d/state/sh-1308.status"
+  FM_FAKE_AXI_STATUS="$(run_running_ci_ahead fm/sh-1308 01LIVE "${AHEAD_SHA:0:8}"
+    branch_sync_block fm/sh-1308 01LIVE running "$head" "$head" "$AHEAD_SHA")"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running   fm/sh-1308 ${AHEAD_SHA:0:8}  2026-08-12 16:29  https://github.com/o/r/pull/1315
+  failed    fm/sh-1308 ${short}  2026-08-12 15:23
+EOF
+)"
+  FM_FAKE_CI_LOGS="no CI checks reported yet, waiting for checks to register..."
+  out=$(run_crew_state "$d" sh-1308)
+  assert_not_contains "$out" "state: failed" "a superseded terminal run must never be the current state"
+  assert_contains "$out" "state: working" "the live run the pipeline advanced is current"
+  assert_contains "$out" "source: run-step" "the live run is authoritative"
+  pass "pipeline-advanced live run beats a terminal run at the worktree head"
+}
+
+# Binding 1 alone: the coarse listing offers ONLY the terminal row, so the
+# branch_sync binding is the single thing that can report the live run.
+test_pipeline_ahead_branch_sync_binds_live_run() {
+  reset_fakes
+  local d head short out
+  d=$(new_case pipeline-ahead-branchsync)
+  make_repo_on_branch "$d/wt" fm/feat-bs
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  assert_unfetched "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/bs.meta" "window=fm:fm-bs" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running_ci_ahead fm/feat-bs 01LIVE "${AHEAD_SHA:0:8}"
+    branch_sync_block fm/feat-bs 01LIVE running "$head" "$head" "$AHEAD_SHA")"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed    fm/feat-bs ${short}  2026-08-12 15:23
+EOF
+)"
+  FM_FAKE_CI_LOGS="no CI checks reported yet, waiting for checks to register..."
+  out=$(run_crew_state "$d" bs)
+  assert_contains "$out" "state: working" "branch_sync binds the advanced run to this worktree"
+  assert_contains "$out" "source: run-step" "bound run is authoritative"
+  pass "branch_sync binds a run whose head this worktree never fetched"
+}
+
+# A crew that committed on top of what it submitted is still that run's crew:
+# submitted_head is then a strict ancestor of the worktree head.
+test_pipeline_ahead_binds_when_submitted_head_is_ancestor() {
+  reset_fakes
+  local d submitted head out
+  d=$(new_case pipeline-ahead-ancestor)
+  make_repo_on_branch "$d/wt" fm/feat-anc
+  submitted=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'merged main into the branch'
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  assert_unfetched "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/anc.meta" "window=fm:fm-anc" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running_ci_ahead fm/feat-anc 01LIVE "${AHEAD_SHA:0:8}"
+    branch_sync_block fm/feat-anc 01LIVE running "$head" "$submitted" "$AHEAD_SHA")"
+  FM_FAKE_CI_LOGS="no CI checks reported yet, waiting for checks to register..."
+  out=$(run_crew_state "$d" anc)
+  assert_contains "$out" "state: working" "submitted head as an ancestor still binds the run"
+  assert_contains "$out" "source: run-step" "bound run is authoritative"
+  pass "branch_sync binds when the submitted head is an ancestor of the worktree head"
+}
+
+# Not everything becomes active: a crew whose bound run is genuinely terminal
+# still reports that terminal state.
+test_pipeline_ahead_terminal_bound_run_stays_failed() {
+  reset_fakes
+  local d head out
+  d=$(new_case pipeline-ahead-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-term
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  assert_unfetched "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/term.meta" "window=fm:fm-term" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_failed_ahead fm/feat-term 01TERM "${AHEAD_SHA:0:8}"
+    branch_sync_block fm/feat-term 01TERM failed "$head" "$head" "$AHEAD_SHA")"
+  out=$(run_crew_state "$d" term)
+  assert_contains "$out" "state: failed" "a genuinely terminal bound run stays failed"
+  assert_contains "$out" "source: run-step" "terminal bound run is authoritative"
+  pass "a bound run that genuinely failed still reports failed"
+}
+
+# Cross-branch stays blocked: this worktree's own binding names a DIFFERENT run
+# than the one `axi status` reported, so the other branch's run is not
+# inherited.
+test_branch_sync_does_not_bind_another_branchs_run() {
+  reset_fakes
+  local d head out
+  d=$(new_case branchsync-crossbranch)
+  make_repo_on_branch "$d/wt" fm/feat-mine
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mine.meta" "window=fm:fm-mine" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented, ready to validate\n' > "$d/state/mine.status"
+  FM_FAKE_AXI_STATUS="$(run_running_ci_ahead fm/other-crew 01OTHER "${AHEAD_SHA:0:8}"
+    branch_sync_block fm/feat-mine 01MINE running "$head" "$head" "$head")"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" mine
+  out=$(run_crew_state "$d" mine)
+  assert_not_contains "$out" "source: run-step" "another branch's run must not be attributed"
+  assert_contains "$out" "source: status-log" "falls back with no run of its own"
+  pass "branch_sync never binds another branch's run"
+}
+
+# A stale branch_sync snapshot (its local head is not what is checked out now)
+# proves nothing about the current code, so it must not bind.
+test_branch_sync_stale_local_head_does_not_bind() {
+  reset_fakes
+  local d stale out
+  d=$(new_case branchsync-stale-local)
+  make_repo_on_branch "$d/wt" fm/feat-stale
+  stale=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after that snapshot'
+  assert_unfetched "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stale.meta" "window=fm:fm-stale" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/stale.status"
+  FM_FAKE_AXI_STATUS="$(run_running_ci_ahead fm/feat-stale 01LIVE "${AHEAD_SHA:0:8}"
+    branch_sync_block fm/feat-stale 01LIVE running "$stale" "$stale" "$AHEAD_SHA")"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" stale
+  out=$(run_crew_state "$d" stale)
+  assert_not_contains "$out" "source: run-step" "a stale binding snapshot must not attribute a run"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources"
+  pass "a stale branch_sync snapshot does not bind"
+}
+
+# Binding 2 alone: `axi status` answers for another branch (no binding for this
+# worktree at all), so only the coarse listing is left - and its newer ACTIVE
+# row on this branch must win over the terminal row at the worktree head.
+test_coarse_newer_active_row_supersedes_terminal_row_at_head() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-supersede)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-sup
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/csup.meta" "window=fm:fm-csup" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running   fm/feat-coarse-sup ${AHEAD_SHA:0:8}  2026-08-12 16:29  https://github.com/o/r/pull/1315
+  failed    fm/feat-coarse-sup ${short}  2026-08-12 15:23
+EOF
+)"
+  out=$(run_crew_state "$d" csup)
+  assert_not_contains "$out" "state: failed" "the superseded terminal row must not be reported"
+  assert_contains "$out" "state: working" "the newer active run on this branch is current"
+  assert_contains "$out" "source: run-step" "coarse-resolved run stays run-step sourced"
+  pass "a newer active row supersedes a terminal row at the worktree head"
+}
+
+# Supersession is same-branch only: another branch's newer active run must
+# never displace this branch's own matched row.
+test_coarse_other_branch_active_row_does_not_supersede() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-supersede-otherbranch)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-own
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cown.meta" "window=fm:fm-cown" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running   fm/other-crew ${AHEAD_SHA:0:8}  2026-08-12 16:29
+  failed    fm/feat-coarse-own ${short}  2026-08-12 15:23
+EOF
+)"
+  out=$(run_crew_state "$d" cown)
+  assert_contains "$out" "state: failed" "this branch's own terminal run remains current"
+  assert_contains "$out" "source: run-step" "terminal coarse row stays run-step sourced"
+  pass "another branch's active row does not supersede this branch's run"
+}
+
+# A crew whose only run is genuinely terminal still reports it.
+test_coarse_terminal_only_still_reports_terminal() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-terminal-only)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-term
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cterm.meta" "window=fm:fm-cterm" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed    fm/feat-coarse-term ${short}  2026-08-12 15:23
+EOF
+)"
+  out=$(run_crew_state "$d" cterm)
+  assert_contains "$out" "state: failed" "a genuinely terminal-only branch still reports failed"
+  assert_contains "$out" "source: run-step" "terminal coarse row stays run-step sourced"
+  pass "a terminal-only coarse listing still reports the terminal state"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1668,14 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_pipeline_ahead_live_run_beats_terminal_run_at_worktree_head
+test_pipeline_ahead_branch_sync_binds_live_run
+test_pipeline_ahead_binds_when_submitted_head_is_ancestor
+test_pipeline_ahead_terminal_bound_run_stays_failed
+test_branch_sync_does_not_bind_another_branchs_run
+test_branch_sync_stale_local_head_does_not_bind
+test_coarse_newer_active_row_supersedes_terminal_row_at_head
+test_coarse_other_branch_active_row_does_not_supersede
+test_coarse_terminal_only_still_reports_terminal
 
 echo "all fm-crew-state tests passed"

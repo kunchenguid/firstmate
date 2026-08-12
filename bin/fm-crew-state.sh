@@ -26,8 +26,11 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history), or no-mistakes' own branch_sync record binds
+#      that run to this worktree (the pipeline pushed a head this worktree never
+#      fetched, so the head alone is unresolvable - bin/fm-nm-run-lib.sh owns
+#      both rules). Local work that advanced past the run head, or diverged from
+#      it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -332,10 +335,13 @@ nm_ci_checks_state() {
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# matching row's status word (running/completed/cancelled/failed), or the status
+# of a NEWER active row on the same branch when one supersedes that match (the
+# rows carry only the run's current head, which the pipeline advances out of
+# this worktree's reach), or empty when the branch has no run within
+# FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha newer_active=""
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -351,8 +357,22 @@ nm_runs_status_for_branch() {  # <branch>
     if [ "$br" = "$branch" ]; then
       # Same code-identity rule as axi status: skip a same-branch row whose
       # short-sha does not match this worktree (rewritten or advanced tip).
+      # A run the pipeline has advanced looks exactly like that from here (its
+      # head is a commit this worktree never fetched), so remember an
+      # unmatched ACTIVE row instead of forgetting it - see below.
       if ! nm_coarse_head_matches_worktree "$sha"; then
+        [ -z "$newer_active" ] && [ "$st" = running ] && newer_active=$st
         continue
+      fi
+      # Rows are newest-first, so anything remembered above this one is a NEWER
+      # run of this same branch. A newer active run supersedes the matched row:
+      # the matched row is how this branch's history got to the current
+      # worktree HEAD, and the crew then handed that head to the newer run.
+      # Reporting the superseded row's terminal status here is what turned a
+      # healthy crew into a false `failed` (2026-08-12).
+      if [ -n "$newer_active" ]; then
+        printf '%s' "$newer_active"
+        return 0
       fi
       printf '%s' "$st"
       return 0
@@ -365,13 +385,13 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
-  run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+# 0 if the active axi-status run is attributable to this worktree - by its head
+# field, or by the branch_sync binding no-mistakes reports for this worktree
+# once the pipeline advanced the run past the crew's local HEAD. Branch match is
+# a precondition (caller). Rule owned by fm_nm_status_matches_worktree in
+# bin/fm-nm-run-lib.sh.
+nm_run_matches_worktree() {
+  fm_nm_status_matches_worktree "$WT" "$RUN_OUT"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
@@ -394,7 +414,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_matches_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
