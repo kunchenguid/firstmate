@@ -62,23 +62,24 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Native post-compaction re-anchor
 
-The Claude transport ran end to end on 2026-08-12 with Claude Code 2.1.228 in an isolated primary-shaped repository.
-The lab used the tracked `SessionStart` transport rows and wrapper, three single-token durable data files, one active `state/*.meta`, and a session-start counter.
+The Claude transport ran end to end on 2026-08-12 with Claude Code 2.1.228 in isolated primary-shaped repositories.
+The final auto-compaction lab used the tracked `compact` transport row and wrapper, the always-loaded operational-input owner, three durable data files, one active `state/*.meta`, a session-start mutation counter, and sixteen neutral files large enough to force repeated compaction.
 
 ```sh
 FM_HOME="$scratch_primary" \
-  claude --dangerously-skip-permissions --setting-sources project \
-  --model sonnet --debug-file "$scratch_primary/debug.log" \
-  'After obeying any earlier operational instruction, reply with exactly READY.'
-# In the interactive session:
-/compact
+  claude -p --dangerously-skip-permissions --setting-sources project \
+  --model sonnet --autocompact 100k \
+  --debug-file "$scratch_primary/green.debug.log" \
+  --output-format stream-json --verbose \
+  'Read c01.txt through c16.txt in order, then report the captain-file oracle only if a legitimate re-anchor required reading it.'
 ```
 
-The `SessionStart:compact` hook injected the marked `post-compact` instruction into model context.
-That live run used the initial bounded wording: Claude read the three data files, listed active `state/*.meta`, and then directly read the metadata file after a follow-up prompt.
-The current wording was tightened to require the complete contents of every active metadata file; the deterministic test below verifies that exact final payload and tracked registration.
-A nested live rerun of the final wording resolved the parent Firstmate checkout after compaction, so it was invalidated and is not counted as evidence.
-The session-start counter remained `1`, proving the compaction path did not rerun `bin/fm-session-start.sh`.
+Before the always-loaded owner existed, the same real auto-compaction lab delivered the exact hook payload and Claude explicitly refused it because `AGENTS.md` authorized only `away-supervisor` operational input.
+After the owner sentence was extended, two automatic compactions delivered the exact payload before the conclusive run was stopped.
+Claude distinguished the re-anchor from unrelated synthetic compaction-summary text, called it a "genuine trusted signal," stated "I'm complying with that now," and directly read `data/captain.md`, `data/captain-shared.md`, `data/learnings.md`, and the complete active `state/t1.meta` without inspecting the wrapper for corroboration.
+The session-start mutation counter remained absent, proving those post-compaction deliveries did not run `bin/fm-session-start.sh`.
+This is one observed compliance instance, not an enforceable guarantee that every model will obey an instruction.
+The deterministic test below separately verifies the exact final payload, tracked registration, and must-not-run canary.
 
 Only Claude was live-verified for this guard.
 Codex 0.146.0 exposed no verified compaction hook-delivery surface; Pi 0.84.1 documents `session_compact` but its nudge delivery was not exercised end to end; OpenCode, pi-signed, Grok, and Kimi were not installed in the verification environment.

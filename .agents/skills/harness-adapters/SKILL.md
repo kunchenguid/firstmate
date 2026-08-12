@@ -83,13 +83,13 @@ The subagent tool presents to the model as `Agent`, and on Claude Code 2.1.217 b
 
 ## Primary session-start and post-compaction nudges
 
-AGENTS.md section 3 remains the behavioral owner for session start, while tracked native adapters invoke `bin/fm-sessionstart-nudge.sh` as an idempotent enforcement layer.
+AGENTS.md section 3 remains the behavioral owner for session start, while AGENTS.md section 8's existing always-loaded operational-input sentence owns trust and required handling for the `post-compact` kind; tracked native adapters invoke `bin/fm-sessionstart-nudge.sh` as an idempotent enforcement layer.
 The wrapper prints one canonically typed `session-start` instruction to run `bin/fm-session-start.sh`; it never runs the digest, wake drain, bootstrap sweeps, lock, or supervision arm itself.
 The same wrapper's exact `post-compact` mode prints a separately typed, bounded instruction to re-read the durable captain, learnings, and active-task metadata without running `bin/fm-session-start.sh`.
 Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge.md`.
-`docs/verification/supervision.md` "Native session-start delivery" owns active dated commands, payloads, and evidence.
+`docs/verification/supervision.md` "Native session-start delivery" and "Native post-compaction re-anchor" own active dated commands, payloads, and evidence.
 
-- `claude`: verified native `SessionStart` stdout injection; `.claude/settings.json` matches `startup`, `resume`, and `clear`, plus `compact` through the same wrapper's `post-compact` mode.
+- `claude`: verified native `SessionStart` stdout injection; `.claude/settings.json` matches `startup`, `resume`, and `clear`, plus `compact` through the same wrapper's `post-compact` mode; one owner-anchored auto-compaction lab observed the agent accept the signal and re-read every named record, but that observation is not an enforcement guarantee.
 - `codex`: verified session-start delivery, but no compaction lifecycle event with hook-context delivery; post-compaction remains fail-open.
 - `opencode`: verified interactive session-start delivery, but no compaction lifecycle event and delivery path; post-compaction remains fail-open.
 - `pi` and `pi-signed`: verified native session-start delivery; Pi exposes `session_compact`, but post-compaction nudge delivery is not end-to-end verified for either identity and remains fail-open.

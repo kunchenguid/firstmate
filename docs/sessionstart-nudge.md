@@ -8,6 +8,7 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 The same wrapper also accepts `post-compact` and emits one `post-compact` instruction after a supported harness compacts context.
 That instruction tells the agent to re-read `data/captain.md`, `data/captain-shared.md`, `data/learnings.md`, and active `state/*.meta` files before further action.
 It explicitly forbids running `bin/fm-session-start.sh`, and the wrapper itself performs no fleet mutation.
+The existing operational-input sentence in AGENTS.md section 8 is the always-loaded trust and required-handling owner for this kind, while this document owns its transport mechanics and compatibility limits.
 
 ## Shared wrapper and safety
 
@@ -26,7 +27,7 @@ Every path exits 0, including malformed state and adapter errors, because a Clau
 
 | Harness | Tracked transport | Session-start compatibility | Post-compaction compatibility |
 | --- | --- | --- | --- |
-| Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, plus a separate `compact` entry that calls the same wrapper with `post-compact`, all through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is supported. | Supported and live-verified: `compact` injects the bounded re-anchor and the agent re-reads the durable files without rerunning session start. |
+| Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, plus a separate `compact` entry that calls the same wrapper with `post-compact`, all through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is supported. | Delivery is live-verified for automatic compaction; after the always-loaded trust owner was added, one live run observed the agent accept the signal and directly re-read every named record without rerunning session start, but that compliance observation is not an enforcement guarantee. |
 | Codex | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and executes the wrapper. | Native stdout context injection is supported. | Fail-open: no compaction lifecycle event with hook-context delivery is verified, so no post-compaction registration is claimed. |
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. | Fail-open: no compaction lifecycle event and delivery path is verified for this adapter. |
 | Pi / pi-signed | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. | Fail-open: Pi exposes `session_compact`, but post-compaction nudge delivery has not been verified end to end for either Pi identity, so the extension does not claim the guard. |
