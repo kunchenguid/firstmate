@@ -58,11 +58,11 @@ Write the completed packet to `data/<task-id>/harness-handoff.md` so another col
 task_id=<task-id>
 fm_home=<absolute-firstmate-home>
 meta="$fm_home/state/$task_id.meta"
-worktree=$(sed -n 's/^worktree=//p' "$meta" | head -1)
+worktree=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
 [ -n "$worktree" ] || { echo "no recorded worktree for $task_id; stop and escalate" >&2; exit 1; }
 
-sed -n '1,240p' "$meta"
-sed -n '1,260p' "$fm_home/state/$task_id.status"
+tail -n 240 "$meta"
+tail -n 260 "$fm_home/state/$task_id.status"
 FM_HOME="$fm_home" bin/fm-crew-state.sh "$task_id"
 ```
 
