@@ -15,6 +15,9 @@ make_world() { # <name>
   project="$home/projects/alpha"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$project"
+  # The assertions below name the default branch explicitly, so pin it instead
+  # of inheriting the machine's init.defaultBranch (CI runners still say master).
+  git -C "$project" branch -M main
   printf '%s\n' '- alpha [local-only] - sensitive local project (added 2026-08-10)' > "$home/data/projects.md"
   mark_firstmate_home "$sub"
   FM_SECONDMATE_SCOPE='sensitive local operations' \

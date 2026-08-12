@@ -319,11 +319,11 @@ fm_local_route_validate_bound_copy() { # <capability> <id> <project> <main-home>
       return 1
     }
   anchor=$FM_LOCAL_ROUTE_ANCHOR_OID
-  git -C "$main_project" cat-file -e "$anchor^{commit}" 2>/dev/null \
-    && git -C "$canonical_project" cat-file -e "$anchor^{commit}" 2>/dev/null || {
+  if ! git -C "$main_project" cat-file -e "$anchor^{commit}" 2>/dev/null \
+    || ! git -C "$canonical_project" cat-file -e "$anchor^{commit}" 2>/dev/null; then
       FM_LOCAL_ROUTE_ERROR="local-project repository ancestry drifted"
       return 1
-    }
+  fi
   fm_local_route_all_remotes_local "$main_project" "main local-only project" || return 1
   fm_local_route_all_remotes_local "$canonical_project" "secondmate local-only project" || return 1
   fm_local_route_exact_origin "$canonical_project" "$main_project" || return 1

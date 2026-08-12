@@ -32,7 +32,8 @@ die() { printf 'REFUSED: %s\n' "$1" >&2; exit 1; }
 [ "$#" -eq 2 ] || { echo "usage: fm-local-branch-return.sh <secondmate-id> <task-id>" >&2; exit 2; }
 ID=$1
 TASK=$2
-fm_local_route_safe_id "$ID" && fm_local_route_safe_id "$TASK" || die "unsafe secondmate or task identity"
+fm_local_route_safe_id "$ID" || die "unsafe secondmate or task identity"
+fm_local_route_safe_id "$TASK" || die "unsafe secondmate or task identity"
 BRANCH="fm/$TASK"
 
 MAIN_HOME=$(fm_local_route_canonical_dir "$FM_HOME") \
@@ -121,7 +122,8 @@ WORKTREE_GIT=$(fm_local_route_git_common_dir "$WORKTREE") \
 CURRENT_BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 [ "$CURRENT_BRANCH" = "$BRANCH" ] || die "source worktree is not on the canonical task branch $BRANCH"
 SOURCE_HEAD=$(git -C "$SOURCE_PROJECT" rev-parse --verify "refs/heads/$BRANCH" 2>/dev/null || true)
-[ -n "$SOURCE_HEAD" ] && git -C "$SOURCE_PROJECT" cat-file -e "$SOURCE_HEAD^{commit}" 2>/dev/null \
+[ -n "$SOURCE_HEAD" ] || die "source branch commit is missing"
+git -C "$SOURCE_PROJECT" cat-file -e "$SOURCE_HEAD^{commit}" 2>/dev/null \
   || die "source branch commit is missing"
 [ "$(git -C "$WORKTREE" rev-parse --verify HEAD 2>/dev/null || true)" = "$SOURCE_HEAD" ] \
   || die "source worktree and task branch identities differ"
@@ -186,7 +188,9 @@ fi
 git -C "$MAIN_PROJECT" fetch --quiet --no-tags "$SOURCE_PROJECT" "refs/heads/$BRANCH" \
   || die "local branch object transfer failed; source work was preserved"
 FETCHED_HEAD=$(awk 'NR == 1 { print $1 }' "$MAIN_GIT/FETCH_HEAD" 2>/dev/null || true)
-[ "$FETCHED_HEAD" = "$SOURCE_HEAD" ] && git -C "$MAIN_PROJECT" cat-file -e "$FETCHED_HEAD^{commit}" 2>/dev/null \
+[ "$FETCHED_HEAD" = "$SOURCE_HEAD" ] \
+  || die "fetched branch identity or objects do not match the guarded source"
+git -C "$MAIN_PROJECT" cat-file -e "$FETCHED_HEAD^{commit}" 2>/dev/null \
   || die "fetched branch identity or objects do not match the guarded source"
 git -C "$MAIN_PROJECT" merge-base --is-ancestor "$BASE_OID" "$FETCHED_HEAD" 2>/dev/null \
   || die "$BRANCH is not a fast-forward of the current destination $DEFAULT"
