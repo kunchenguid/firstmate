@@ -27,6 +27,8 @@ set -u
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$ROOT/bin/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$ROOT/bin/fm-busy-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-cursor-harness)
@@ -191,9 +193,129 @@ test_cursor_marker_outranks_inherited_claudecode() {
   pass "fm-harness.sh: cursor's marker outranks an inherited CLAUDECODE"
 }
 
+# --- 4. The transcript busy fold --------------------------------------------
+
+# Build a bound cursor workspace: a project dir keyed by .workspace-trusted, a
+# conversation transcript, and the per-task sidecar fm-spawn writes.
+make_cursor_binding() {  # <case> <conversation-id> <transcript-body> -> echoes <state-dir>
+  local case_name=$1 conv=$2 body=$3 root ws proj state
+  root="$TMP_ROOT/$case_name/projects"
+  ws="$TMP_ROOT/$case_name/worktree"
+  proj="$root/some-opaque-slug-$case_name"
+  state="$TMP_ROOT/$case_name/state"
+  mkdir -p "$proj/agent-transcripts/$conv" "$ws" "$state"
+  printf '{\n  "workspacePath": "%s",\n  "trustMethod": "cli-flag"\n}\n' "$ws" \
+    > "$proj/.workspace-trusted"
+  printf '%s' "$body" > "$proj/agent-transcripts/$conv/$conv.jsonl"
+  printf 'projects_root=%s\nworkspace_root=%s\n' "$root" "$ws" > "$state/task.cursor-session"
+  printf '%s' "$state"
+}
+
+test_transcript_fold_brackets_a_turn() {
+  local state out
+  # Open turn: a role:user record with no close after it.
+  state=$(make_cursor_binding open conv-a '{"role":"user"}
+{"role":"assistant"}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "busy cursor-transcript" ] || fail "an open turn must be busy, got '$out'"
+
+  # Closed turn.
+  state=$(make_cursor_binding closed conv-b '{"role":"user"}
+{"role":"assistant"}
+{"type":"turn_ended","status":"success"}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "idle cursor-transcript" ] || fail "a closed turn must be idle, got '$out'"
+
+  # An ABORTED close is still a close. This is the case Claude's Stop hook
+  # misses, and it is why this source is preferred over a rendered footer.
+  state=$(make_cursor_binding aborted conv-c '{"role":"user"}
+{"type":"turn_ended","status":"aborted","error":"User aborted/interrupted manually."}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "idle cursor-transcript" ] || fail "an aborted close must be idle, got '$out'"
+
+  # A NEW turn opened after a close reopens it.
+  state=$(make_cursor_binding reopened conv-d '{"role":"user"}
+{"type":"turn_ended","status":"success"}
+{"role":"user"}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "busy cursor-transcript" ] || fail "a turn reopened after a close must be busy, got '$out'"
+  pass "cursor transcript fold: role:user opens a turn, turn_ended closes it, aborts included"
+}
+
+test_transcript_fold_is_unknown_never_idle_when_unresolvable() {
+  local state out empty_state
+  # A record-free transcript proves nothing either way.
+  state=$(make_cursor_binding norecords conv-e '{"type":"session_meta"}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "unknown cursor-transcript" ] || fail "a record-free transcript must be unknown, got '$out'"
+
+  # No sidecar at all.
+  empty_state="$TMP_ROOT/nosidecar"; mkdir -p "$empty_state"
+  out=$(fm_busy_classify tmux none cursor task "$empty_state")
+  [ "$out" = "unknown cursor-transcript" ] || fail "a missing sidecar must be unknown, got '$out'"
+
+  # A sidecar pointing at a workspace no project directory claims.
+  mkdir -p "$TMP_ROOT/unclaimed/state" "$TMP_ROOT/unclaimed/projects"
+  printf 'projects_root=%s\nworkspace_root=%s\n' \
+    "$TMP_ROOT/unclaimed/projects" "$TMP_ROOT/unclaimed/nowhere" \
+    > "$TMP_ROOT/unclaimed/state/task.cursor-session"
+  out=$(fm_busy_classify tmux none cursor task "$TMP_ROOT/unclaimed/state")
+  [ "$out" = "unknown cursor-transcript" ] || fail "an unclaimed workspace must be unknown, got '$out'"
+  pass "cursor transcript fold: an unresolvable binding is unknown, never idle"
+}
+
+test_transcript_binding_matches_workspace_exactly() {
+  # The binding matches the recorded absolute workspacePath, NOT a reconstructed
+  # slug and NOT a prefix - otherwise a nested worktree would fold its parent's
+  # transcript. The fixture slug is deliberately opaque so a slug-rebuilding
+  # implementation cannot pass this.
+  local state out proj
+  state=$(make_cursor_binding nested conv-f '{"role":"user"}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "busy cursor-transcript" ] || fail "exact workspace match must resolve, got '$out'"
+  # Point the project at a PREFIX of the bound workspace: must no longer match.
+  proj=$(dirname "$state")/projects/some-opaque-slug-nested
+  printf '{\n  "workspacePath": "%s"\n}\n' "$(dirname "$state")/worktre" > "$proj/.workspace-trusted"
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "a prefix of the workspace path must NOT bind, got '$out'"
+  pass "cursor transcript binding: exact recorded workspacePath only, never a prefix or rebuilt slug"
+}
+
+test_transcript_fold_excludes_prior_conversations() {
+  # A relaunch in a reused worktree must fold ITS turn, not its predecessor's.
+  local state proj out
+  state=$(make_cursor_binding prior conv-old '{"role":"user"}
+')
+  proj="$TMP_ROOT/prior/projects/some-opaque-slug-prior"
+  printf 'prior_conversation=conv-old\n' >> "$state/task.cursor-session"
+  # Only the retired conversation exists, so nothing new resolves.
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "a retired conversation must not be folded, got '$out'"
+  # The relaunched pane's own conversation resolves and wins.
+  mkdir -p "$proj/agent-transcripts/conv-new"
+  printf '{"role":"user"}\n{"type":"turn_ended","status":"success"}\n' \
+    > "$proj/agent-transcripts/conv-new/conv-new.jsonl"
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "idle cursor-transcript" ] \
+    || fail "the relaunched pane's own conversation must resolve, got '$out'"
+  pass "cursor transcript fold: a prior conversation is excluded so a relaunch folds its own turn"
+}
+
 test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode
+test_transcript_fold_brackets_a_turn
+test_transcript_fold_is_unknown_never_idle_when_unresolvable
+test_transcript_binding_matches_workspace_exactly
+test_transcript_fold_excludes_prior_conversations

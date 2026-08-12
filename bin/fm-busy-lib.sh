@@ -39,20 +39,20 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
-#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
-#   codex-unverified, cursor-unverified, capture-failed, no-target
+#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
+#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
+#   kimi-unverified, codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   2a. Cursor before semantic verification       -> unknown cursor-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log pull source, then the Grok-only temporary regex fallback
-#      classifies a grok task from its rendered tail, then unknown missing
+#      muse session-log and cursor transcript pull sources, then the Grok-only
+#      temporary regex fallback classifies a grok task from its rendered tail,
+#      then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
@@ -68,6 +68,13 @@
 # MUSE_EXPERIMENTAL_PLUGINS). Nothing is armed for muse for the same reason
 # standalone Kimi is not: a seeded record with no writer could never be
 # cleared. See fm_busy_muse_run_state for the fold.
+#
+# The cursor pull source works the same way and for the same reason: it folds
+# cursor's own durable per-conversation transcript, which brackets each turn
+# with a role:user open and a typed turn_ended close that covers aborts. It has
+# no writer, no arm, and no gen, so nothing is seeded that could never be
+# cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
+# `ctrl+c to stop` footer is deliberately not a state source here.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -596,6 +603,102 @@ fm_busy_muse_run_terminal() {  # <session-log> <run-id>
   '
 }
 
+# cursor conversation-transcript busy source
+#
+# cursor-agent persists an append-only JSONL transcript per conversation at
+# <projects-root>/<workspace-slug>/agent-transcripts/<conversation-id>/<id>.jsonl
+# and brackets every submitted turn. Verified live on cursor-agent
+# 2026.08.11-e8db854:
+#   {"role":"user", ...}                                    <- turn opens
+#   {"role":"assistant", ...}                               <- work
+#   {"type":"turn_ended","status":"success"}                <- turn closes
+# An Escape interrupt closes the turn with status "aborted", so like muse's
+# session log - and unlike Claude's Stop hook - this source covers the manual
+# interrupt path. Nothing is installed and no trust grant is needed: cursor
+# writes this transcript on its own.
+#
+# Resolution deliberately does NOT reconstruct cursor's workspace-slug directory
+# name. That slug is a lossy transformation of the workspace path (separators
+# collapse), so rebuilding it would be a guess that silently binds the wrong
+# pane. cursor writes the exact absolute path into each project directory's
+# .workspace-trusted, so the binding matches on that recorded value instead.
+#
+# fm_busy_cursor_binding_path: the per-task sidecar fm-spawn writes. It records
+# projects_root=<abs>, workspace_root=<abs>, and one prior_conversation=<id> for
+# each conversation that already existed for that workspace when this pane
+# launched, so a relaunched task cannot fold its predecessor's transcript.
+fm_busy_cursor_binding_path() {  # <state-dir> <id>
+  printf '%s/%s.cursor-session' "$1" "$2"
+}
+
+fm_busy_cursor_binding_field() {  # <state-dir> <id> <key>
+  local path value
+  path=$(fm_busy_cursor_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  value=$(LC_ALL=C awk -F= -v k="$3" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$path")
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# fm_busy_cursor_project_dir: the project directory whose recorded
+# .workspace-trusted workspacePath is exactly <workspace-root>. Exact-match
+# only: a prefix or slug comparison would bind a nested worktree to its parent.
+fm_busy_cursor_project_dir() {  # <projects-root> <workspace-root>
+  local root=$1 want=$2 marker dir path
+  [ -d "$root" ] || return 1
+  for marker in "$root"/*/.workspace-trusted; do
+    [ -f "$marker" ] || continue
+    path=$(LC_ALL=C sed -n 's/.*"workspacePath"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' "$marker" | head -1)
+    [ -n "$path" ] || continue
+    [ "$path" = "$want" ] || continue
+    dir=${marker%/.workspace-trusted}
+    printf '%s' "$dir"
+    return 0
+  done
+  return 1
+}
+
+# fm_busy_cursor_transcript: the ONE transcript this pane owns, or failure.
+# A conversation recorded as prior_conversation is excluded, so a relaunch in a
+# reused worktree folds its own turn rather than the previous pane's. Requiring
+# a UNIQUE remaining conversation is what keeps the binding honest: zero means
+# no turn has been submitted yet and several means the pane cannot be told
+# apart, and neither proves anything about the current turn.
+fm_busy_cursor_transcript() {  # <state-dir> <id>
+  local root workspace project dir conv found= count=0 prior
+  root=$(fm_busy_cursor_binding_field "$1" "$2" projects_root) || return 1
+  workspace=$(fm_busy_cursor_binding_field "$1" "$2" workspace_root) || return 1
+  project=$(fm_busy_cursor_project_dir "$root" "$workspace") || return 1
+  prior=$(LC_ALL=C awk -F= '$1 == "prior_conversation" { sub(/^[^=]*=/, ""); print }' \
+    "$(fm_busy_cursor_binding_path "$1" "$2")" 2>/dev/null)
+  for dir in "$project"/agent-transcripts/*/; do
+    [ -d "$dir" ] || continue
+    conv=$(basename -- "${dir%/}")
+    printf '%s\n' "$prior" | grep -Fqx "$conv" && continue
+    [ -f "$dir$conv.jsonl" ] || continue
+    found="$dir$conv.jsonl"
+    count=$((count + 1))
+  done
+  [ "$count" = 1 ] && [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# fm_busy_cursor_turn_state: fold the transcript into busy | settled | none.
+# The close record is matched on its structural `type` field rather than a
+# search for the token anywhere in the line, so a turn whose own text mentions
+# turn_ended cannot close it.
+fm_busy_cursor_turn_state() {  # <transcript>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk '
+    /"type"[[:space:]]*:[[:space:]]*"turn_ended"/ { open = 0; seen = 1; next }
+    /"role"[[:space:]]*:[[:space:]]*"user"/ { open = 1; seen = 1 }
+    END {
+      if (!seen) { print "none"; exit }
+      print (open ? "busy" : "settled")
+    }
+  ' "$1"
+}
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
@@ -628,11 +731,21 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       ;;
     cursor*)
-      # The observed TUI exposes a rendered "Working" footer, but no stable
-      # semantic lifecycle source or idle complement has been verified yet.
-      # Keep both rendered text and Herdr's narrower streaming state out of the
-      # verdict until a real Cursor source brackets complete turns.
-      printf 'unknown cursor-unverified'
+      # Semantic, on demand: fold this task's bound conversation transcript. A
+      # turn open past its last close is positive proof of a turn in flight and
+      # a trailing turn_ended is a finished turn. Every other outcome - no
+      # sidecar, no resolvable transcript, an unreadable or record-free file -
+      # is unknown, never idle. The rendered `ctrl+c to stop` footer is
+      # deliberately NOT consulted here; see the source note above.
+      if ! log=$(fm_busy_cursor_transcript "$state" "$id"); then
+        printf 'unknown cursor-transcript'
+        return 0
+      fi
+      case "$(fm_busy_cursor_turn_state "$log" 2>/dev/null)" in
+        busy) printf 'busy cursor-transcript' ;;
+        settled) printf 'idle cursor-transcript' ;;
+        *) printf 'unknown cursor-transcript' ;;
+      esac
       return 0
       ;;
   esac
