@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--web]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--web|--no-web]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -24,11 +24,10 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
-#   --web is mandatory for website or web-deployment ship briefs.
-#   It adds the custom-domain, Interceptor, revision-marker, and screenshot gate.
-#   The flag must be explicit because {TASK} is filled after scaffolding and the
-#   caller-supplied repo string cannot reliably identify this repo. Briefs made
-#   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --web or --no-web is mandatory for every ship brief.
+#   --web adds the custom-domain, Interceptor, revision-marker, and screenshot gate.
+#   The declaration must be explicit because {TASK} is filled after scaffolding and
+#   the caller-supplied repo string cannot reliably identify this repo.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -106,6 +105,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 WEB=0
+WEB_SET=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -127,7 +127,8 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
-    --web) WEB=1 ;;
+    --web) WEB=1; WEB_SET=1 ;;
+    --no-web) WEB=0; WEB_SET=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -154,13 +155,17 @@ if [ "$KIND" = ship ]; then
       exit 1 ;;
     *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
   esac
+  [ "$WEB_SET" -eq 1 ] || {
+    echo "error: ship briefs require an explicit web-surface declaration: pass --web or --no-web" >&2
+    exit 1
+  }
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
 
-if [ "$WEB" -eq 1 ] && [ "$KIND" != ship ]; then
-  echo "error: --web applies only to website or web-deployment ship briefs" >&2
+if [ "$WEB_SET" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --web and --no-web apply only to website or web-deployment ship briefs" >&2
   exit 1
 fi
 ID=${POS[0]}
