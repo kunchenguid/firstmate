@@ -88,6 +88,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-moshi-notify.sh
+. "$SCRIPT_DIR/fm-moshi-notify.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -602,6 +604,39 @@ run_check_capture() {
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
+notify_attention_for_status_file() {
+  local path=$1 task line verb note
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  task=$(basename "$path" .status)
+  line=$(last_status_line "$path")
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    needs-decision|blocked)
+      note=$(status_line_note "$line")
+      fm_moshi_notify_attention "$task" "$verb" "$note" || true
+      ;;
+  esac
+}
+
+notify_attention_for_signal_files() {
+  local files=$1 f
+  # shellcheck disable=SC2086 # Task status paths contain no whitespace.
+  for f in $files; do
+    case "$f" in
+      *.status) notify_attention_for_status_file "$f" ;;
+    esac
+  done
+}
+
+notify_attention_for_fleet_statuses() {
+  local record f
+  while IFS= read -r record; do
+    f=${record%%$'\t'*}
+    [ -n "$f" ] || continue
+    notify_attention_for_status_file "$f"
+  done < <(scan_captain_relevant_statuses "$STATE")
+}
+
 mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
@@ -920,6 +955,7 @@ while :; do
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          fm_moshi_notify_pr_merged "$id" "$url" || true
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
@@ -985,6 +1021,7 @@ EOF
       done <<EOF
 $pending
 EOF
+      notify_attention_for_signal_files "$files"
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -1190,6 +1227,7 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
+      notify_attention_for_fleet_statuses
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"

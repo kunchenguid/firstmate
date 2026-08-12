@@ -18,6 +18,16 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+## Moshi webhook notifications
+
+Local Moshi notifications are opt-in through the private file `config/moshi-webhook-token` under the effective home.
+The file must be a non-symlink regular file that is readable by the owner and not group- or world-readable.
+The notification owner posts concise JSON to `https://api.getmoshi.app/api/v1/events` with a bounded timeout and an idempotency key.
+It covers PR-ready, merged-PR, blocker or captain-decision, and successful-cleanup milestones only.
+An absent or unsafe token file, an unavailable dependency, or a failed request is a silent no-op.
+The token is used only for request authorization and never enters the JSON payload or durable notification markers.
+See [`bin/fm-moshi-notify.sh`](../bin/fm-moshi-notify.sh) for the exact interface and mechanics.
+
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `bin/fm-startup-network.sh`'s header owns the deferred network stage that keeps every external-network call off that digest's blocking path, including its state files and the safety argument for running them later.
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
