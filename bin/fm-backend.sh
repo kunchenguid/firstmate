@@ -731,6 +731,22 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   fm_backend_serialized_send_key "$@"
 }
 
+fm_backend_endpoint_identity() {  # <backend> <target>
+  local backend=$1 target=$2 identity
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux)
+      identity=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
+      case "$identity" in %*) printf '%s:%s' "$backend" "$identity" ;; *) return 1 ;; esac
+      ;;
+    herdr|zellij|orca|cmux)
+      fm_backend_target_exists "$backend" "$target" || return 1
+      printf '%s:%s' "$backend" "$target"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.

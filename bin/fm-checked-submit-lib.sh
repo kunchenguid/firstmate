@@ -32,7 +32,7 @@ fm_checked_submit_namespace() {
 
 fm_checked_submit_lock_path() {
   local backend=$1 target=$2 identity sum size namespace
-  identity="$backend"$'\t'"$target"
+  identity=$(fm_backend_endpoint_identity "$backend" "$target") || return 1
   read -r sum size _ <<EOF
 $(printf '%s' "$identity" | cksum)
 EOF
