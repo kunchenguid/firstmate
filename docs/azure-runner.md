@@ -35,7 +35,7 @@ The canonical `fm.azure-command/v1` request binds these fields:
 - Declared repository-relative result artifact paths.
 - Trusted guest-bootstrap and executor digests.
 
-The input object contains only `request.json`, `snapshot.bundle`, and the trusted executor.
+The input object contains `request.json`, `snapshot.bundle`, the trusted executor, the pinned ShellCheck and uv archives, and the digest-bound locked Linux wheelhouse.
 The private `validation-shards` container stores it under a prefix bound to home, task, generation, invocation, and attempt.
 The host stages with Entra authentication and gives the VM root bootstrap one short-lived read SAS for the exact input blob and one create/write SAS for the exact output blob.
 The repository command never receives either capability.
@@ -121,12 +121,22 @@ The software cap is four active runner VMs and may be configured only from one t
 The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
 A short renewable Azure Blob lease serializes count-and-create admission across controllers without a machine-wide singleton daemon.
 Lease loss stops before repository execution and retains exact state for reconciliation.
+Under that same lease, the controller stores a subscription/resource-group/storage/generation-bound reservation ledger in the private control container.
+Each invocation reserves its complete first-day worst-case dollar bound before staging or compute creation, and admission adds every non-reconciled reservation to the greater of actual or forecast cost.
+The reservation survives controller restart and fenced retry lineage.
+It is marked cleanup-verified only after exact compute and staging absence, and is released only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
 
 The normal budget limit is the active $1,000 target.
 An operator may select the commissioning ceiling of $1,500 through `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500` only during the approved commissioning window.
 Admission emits separate first-hour and first-day bounds itemized as VM compute, OS-disk capacity, NAT Gateway, public IP, private endpoints, private DNS, monitoring, boot diagnostics, storage capacity, storage operations, control operations, provisioning/control interval, NAT data processing, Internet egress, trusted bootstrap traffic, the conservative $210 foundation reserve, and zero repository-command egress.
 The VM's complete bootstrap/output channel is shaped to one megabit per second, the trusted bootstrap terminates its exact network process group at an aggregate byte ceiling, staging input and result output have explicit byte ceilings, trusted curl has connection/elapsed/size bounds, and Azure control operations have a fixed count ceiling.
-The invocation template independently installs a 24-hour self-shutdown timer before repository execution, and every host subprocess and Azure CLI call has a five-minute deadline.
+The invocation template independently installs an Azure-native `ComputeVmShutdownTask` schedule before repository execution.
+Its deterministic identity, complete ownership tags, exact VM target, UTC recurrence, enabled state, and fixed preparation-time deadline are immediately adopted and rechecked at both cleanup boundaries.
+Azure auto-shutdown deallocates the VM no later than 24 hours after preparation even if the host controller and guest are both lost.
+The guest shutdown Run Command remains defense in depth, while itemized OS-disk, storage, NAT, public-IP, private-endpoint, private-DNS, and monitoring floors remain visible after compute deallocation.
+Every host subprocess and Azure CLI call has a five-minute deadline.
+Before every Azure call, an atomic home-scoped ledger durably increments either the control or storage category under the state lock.
+The ledger is bound to the home/deployment generation and to each invocation, fence, parent, and retry-lineage root, never decrements on failure or timeout, and enforces independent 2,000-operation lineage ceilings that process restart cannot reset.
 Repository-controlled execution is networkless, so untrusted code cannot create an unbounded egress charge.
 An unreadable actual cost, forecast, retail rate, quota, or active inventory fails closed.
 Budget pressure blocks new invocations only.
@@ -136,7 +146,8 @@ It never deletes an active VM, an uncollected result, an unfinished snapshot, or
 
 Local state lives under `$FM_HOME/state/azure-runner` by default and is written mode 0600 through an atomic replace plus directory `fsync` under a per-home file lock.
 The state record never stores a SAS value.
-It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, both Managed Run Commands, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, both Run Command provisioning identities, boot, result, and cleanup identities.
+It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, both Managed Run Commands, the control-plane TTL schedule, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, Run Command and schedule identities, durable cost reservation, boot, result, and cleanup identities.
+The separate atomic operation ledger is retained at home scope so deleting or recreating a controller process cannot restore its Azure-call allowance.
 
 A controller restart runs `resume --invocation <id>`.
 Resume may poll the existing Managed Run Command, collect an already published output, or continue exact cleanup.
@@ -156,12 +167,13 @@ A missing, foreign, replaced, or unreadable resource retains everything and repo
 
 Cleanup removes resources in this exact scope and order:
 
-1. The invocation's `execute` and `safety-shutdown` Managed Run Command child resources.
-2. The exact invocation VM, whose NIC and OS disk delete options are both `Detach`.
-3. The exact recorded NIC, after a stable-identity detached transition is recorded.
-4. The exact recorded OS disk, after a stable-identity detached transition is recorded.
-5. The exact input and output staging blobs.
-6. The local transient input payload, while retaining local verified result and state.
+1. The exact Azure-native TTL schedule.
+2. The invocation's `execute` and `safety-shutdown` Managed Run Command child resources.
+3. The exact invocation VM, whose NIC and OS disk delete options are both `Detach`.
+4. The exact recorded NIC, after a stable-identity detached transition is recorded.
+5. The exact recorded OS disk, after a stable-identity detached transition is recorded.
+6. The exact input and output staging blobs.
+7. The local transient input payload, while retaining local verified result and state.
 
 No resource-group, subnet, storage account, container, another VM, another NIC, another disk, another task prefix, or durable foundation resource is deleted.
 A failed absence proof or partial delete records `cleanup-retained` and stops.

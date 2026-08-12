@@ -80,6 +80,8 @@ NSGs explicitly deny Internet inbound.
 The elastic validation, policy-review, and browser subnets also deny cross-compartment VNet inbound by default.
 
 Storage and Key Vault disable public network access and use blob/vault private endpoints, private DNS zones, and VNet links.
+The blob endpoint uses the deterministic `nic-<prefix>-pe-blob` network-interface name.
+The foundation deployment outputs both that exact NIC resource ID and its Azure `resourceGuid`, and the runner proves those recorded values, the endpoint's forward reference, the NIC's reverse endpoint relation, its exact private subnet configuration, its tags/generation, and absence of any VM relation at every foundation gate.
 The private-endpoint subnet disables private-endpoint network policies; compute subnets do not.
 
 Private overlay enrollment is an explicit post-deploy acceptance step.

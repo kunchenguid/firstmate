@@ -107,6 +107,14 @@ assert props["allowSharedKeyAccess"] is False
 assert props["supportsHttpsTrafficOnly"] is True
 assert props["publicNetworkAccess"] == "Disabled"
 
+blob_endpoint = next(resource for resource in resources if resource["type"] == "Microsoft.Network/privateEndpoints")
+assert blob_endpoint["properties"]["customNetworkInterfaceName"] == "[variables('blobPrivateEndpointNicName')]"
+nested_outputs = nested["properties"]["template"]["outputs"]
+assert "blobPrivateEndpointNicId" in nested_outputs
+assert "blobPrivateEndpointNicResourceGuid" in nested_outputs
+assert data["outputs"]["blobPrivateEndpointNicId"]["value"].endswith(".value]")
+assert data["outputs"]["blobPrivateEndpointNicResourceGuid"]["value"].endswith(".value]")
+
 vms = [resource for resource in resources if resource["type"] == "Microsoft.Compute/virtualMachines"]
 assert len(vms) == 2  # supervisor plus one copied worker declaration
 for vm in vms:

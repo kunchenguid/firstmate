@@ -62,6 +62,7 @@ METER_RATE_CEILINGS_USD = {
     "provisioning_control_interval": 0.01,
 }
 RUNNER_CONTROL_OPERATION_CEILING = 2_000
+RUNNER_STORAGE_OPERATION_CEILING = 2_000
 STORAGE_OPERATION_RESERVE_USD = 5.0
 CONTROL_OPERATION_RESERVE_USD = 20.0
 BOOTSTRAP_GIB_RATE_CEILING_USD = 0.25
@@ -72,6 +73,7 @@ RESOURCE_API_VERSIONS = {
     "nic": "2023-09-01",
     "disk": "2023-10-02",
     "run-command": "2024-03-01",
+    "ttl-schedule": "2018-09-15",
 }
 
 RESOURCE_CLASSES = {
@@ -248,6 +250,7 @@ def environment():
         "elastic_nsg": "nsg-{}-elastic-isolated".format(prefix),
         "nat": "nat-{}-eus".format(prefix),
         "blob_private_endpoint": "pe-{}-blob".format(prefix),
+        "blob_private_endpoint_nic": "nic-{}-pe-blob".format(prefix),
         "blob_private_dns_zone": "privatelink.blob.core.windows.net",
     }
 
@@ -322,6 +325,101 @@ def save_state(env, state, create=False):
     finally:
         with contextlib.suppress(FileNotFoundError):
             temp.unlink()
+
+
+def save_private_json_atomic(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(".{}.{}.tmp".format(path.name, uuid.uuid4().hex))
+    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temp), str(path))
+        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+
+
+def bind_operation_context(env, state):
+    request = state["request"]
+    env["operation_context"] = {
+        "invocation": state["invocation"],
+        "fence": request["fence"],
+        "parent_invocation": state.get("parent_invocation"),
+        "lineage_root": request.get("lineage_root_invocation", state["invocation"]),
+    }
+
+
+def operation_category(args):
+    return "storage" if args and args[0] == "storage" else "control"
+
+
+def record_azure_operation(env, args):
+    category = operation_category(args)
+    ceilings = {
+        "control": RUNNER_CONTROL_OPERATION_CEILING,
+        "storage": RUNNER_STORAGE_OPERATION_CEILING,
+    }
+    path = env["state_dir"] / "operation-ledger.json"
+    with state_lock(env):
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            ledger = {
+                "schema": "fm.azure-operation-ledger/v1",
+                "home_binding": env["home_binding"],
+                "deployment_generation": env["deployment_generation"],
+                "bootstrap": {"control": 0, "storage": 0},
+                "invocations": {},
+            }
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunnerError("Azure operation ledger is unreadable: {}".format(exc))
+        if (
+            ledger.get("schema") != "fm.azure-operation-ledger/v1"
+            or ledger.get("home_binding") != env["home_binding"]
+            or ledger.get("deployment_generation") != env["deployment_generation"]
+        ):
+            raise RunnerError("Azure operation ledger binding is not exact")
+        context = env.get("operation_context")
+        if context is None:
+            counts = ledger["bootstrap"]
+            scope = "admission/bootstrap"
+        else:
+            invocation = require_invocation(context["invocation"])
+            entry = ledger["invocations"].setdefault(invocation, {
+                "fence": context["fence"],
+                "parent_invocation": context.get("parent_invocation"),
+                "lineage_root": context["lineage_root"],
+                "counts": {"control": 0, "storage": 0},
+            })
+            if (
+                entry.get("fence") != context["fence"]
+                or entry.get("parent_invocation") != context.get("parent_invocation")
+                or entry.get("lineage_root") != context["lineage_root"]
+            ):
+                raise RunnerError("Azure operation ledger invocation/fence lineage is not exact")
+            counts = entry["counts"]
+            scope = "attempt lineage {}".format(context["lineage_root"])
+        used = int(counts.get(category, 0))
+        if context is not None:
+            used = sum(
+                int(item.get("counts", {}).get(category, 0))
+                for item in ledger["invocations"].values()
+                if item.get("lineage_root") == context["lineage_root"]
+            )
+        if used >= ceilings[category]:
+            raise RunnerError("Azure {} operation ceiling exhausted for {}; exact state is retained".format(category, scope))
+        counts[category] = int(counts.get(category, 0)) + 1
+        ledger["updated_at"] = iso_utc()
+        save_private_json_atomic(path, ledger)
 
 
 def transition(env, state, phase, note=None, **updates):
@@ -559,6 +657,8 @@ def prepare(env, args, parent_state=None):
         raise RunnerError("command argv contains NUL")
     command_digest = "sha256:" + sha256_bytes(canonical_bytes(command))
     locked_python_path, locked_python = prepare_locked_python_closure(repo, payload_dir)
+    prepared_at = now_utc()
+    expires_at = prepared_at + dt.timedelta(hours=MAX_BILLABLE_LIFETIME_HOURS)
     request = {
         "schema": SCHEMA,
         "home_binding": env["home_binding"],
@@ -568,6 +668,10 @@ def prepare(env, args, parent_state=None):
         "invocation": invocation,
         "attempt": attempt,
         "parent_invocation": parent_state["invocation"] if parent_state else None,
+        "lineage_root_invocation": (
+            parent_state["request"].get("lineage_root_invocation", parent_state["invocation"])
+            if parent_state else invocation
+        ),
         "fence": fence,
         "repository": {
             "commit": commit,
@@ -588,7 +692,8 @@ def prepare(env, args, parent_state=None):
             "uv_archive_digest": "sha256:440c4215b171e64061d65d16a23753dd25c29a7f7b1b0446c9e9aed0fa372f27",
             "agent_fleet_python": locked_python,
         },
-        "created_at": iso_utc(),
+        "created_at": iso_utc(prepared_at),
+        "compute_deallocation_deadline": iso_utc(expires_at),
     }
     request_digest = "sha256:" + sha256_bytes(canonical_bytes(request))
     request["request_digest"] = request_digest
@@ -645,6 +750,7 @@ def prepare(env, args, parent_state=None):
             "input_blob": staging_prefix + "/input.tar.gz",
             "output_blob": staging_prefix + "/result.tar.gz",
             "admission_blob": "runner-control/admission.lock",
+            "reservation_blob": "runner-control/reservations.json",
         },
         "resources": {
             "deployment": "fm-run-{}".format(token),
@@ -656,6 +762,10 @@ def prepare(env, args, parent_state=None):
             "os_disk_id": "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/disks/{}".format(env["subscription"], env["resource_group"], disk_name),
             "run_command_name": "execute",
             "safety_run_command_name": "safety-shutdown",
+            "ttl_schedule_name": "shutdown-{}".format(vm_name),
+            "ttl_schedule_id": "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.DevTestLab/schedules/shutdown-{}".format(
+                env["subscription"], env["resource_group"], vm_name
+            ),
             "identities": {},
         },
         "events": [{"at": iso_utc(), "phase": "prepared", "note": "clean snapshot and digest-bound request created"}],
@@ -665,9 +775,7 @@ def prepare(env, args, parent_state=None):
 
 
 def az_command(env, args, check=True, parse_json=True):
-    env["azure_operation_count"] = int(env.get("azure_operation_count", 0)) + 1
-    if env["azure_operation_count"] > RUNNER_CONTROL_OPERATION_CEILING:
-        raise RunnerError("Azure control-operation ceiling exceeded; exact state is retained")
+    record_azure_operation(env, args)
     command = ["az"] + list(args) + ["--subscription", env["subscription"], "--only-show-errors"]
     if parse_json and "--output" not in command and "-o" not in command:
         command += ["--output", "json"]
@@ -708,6 +816,7 @@ def foundation_gate(env):
     nat_id = exact_id(env, "Microsoft.Network", "natGateways", env["nat"])
     public_ip_id = exact_id(env, "Microsoft.Network", "publicIPAddresses", "pip-{}-nat-eus".format(env["prefix"]))
     endpoint_id = exact_id(env, "Microsoft.Network", "privateEndpoints", env["blob_private_endpoint"])
+    endpoint_nic_id = exact_id(env, "Microsoft.Network", "networkInterfaces", env["blob_private_endpoint_nic"])
     private_subnet_id = vnet_id + "/subnets/snet-private-endpoints"
     dns_zone_id = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Network/privateDnsZones/{}".format(
         env["subscription"], env["resource_group"], env["blob_private_dns_zone"]
@@ -835,13 +944,26 @@ def foundation_gate(env):
     ):
         raise RunnerError("foundation blob private endpoint identity/approval is not exact")
 
-    endpoint_nic_id = endpoint_properties["networkInterfaces"][0].get("id", "")
+    deployment, _, _ = az_command(env, [
+        "deployment", "sub", "show", "--name", "fm-azure-pilot-{}".format(env["deployment_generation"]),
+    ])
+    outputs = deployment.get("properties", {}).get("outputs") or deployment.get("outputs") or {}
+    recorded_nic_id = (outputs.get("blobPrivateEndpointNicId") or {}).get("value")
+    recorded_nic_guid = (outputs.get("blobPrivateEndpointNicResourceGuid") or {}).get("value")
+    if (
+        str(recorded_nic_id).lower() != endpoint_nic_id.lower()
+        or not recorded_nic_guid
+        or [str(item.get("id", "")).lower() for item in endpoint_properties["networkInterfaces"]]
+        != [endpoint_nic_id.lower()]
+    ):
+        raise RunnerError("foundation deployment output does not bind the exact blob private-endpoint NIC")
     endpoint_nic, _, _ = az_command(env, ["resource", "show", "--ids", endpoint_nic_id, "--api-version", "2023-09-01"])
+    verify_foundation_tags(env, endpoint_nic, "private-endpoint NIC")
     endpoint_nic_properties = endpoint_nic.get("properties", endpoint_nic)
     endpoint_ip_configs = endpoint_nic_properties.get("ipConfigurations", [])
     if (
         str(endpoint_nic.get("id", "")).lower() != endpoint_nic_id.lower()
-        or not endpoint_nic_properties.get("resourceGuid")
+        or endpoint_nic_properties.get("resourceGuid") != recorded_nic_guid
         or str((endpoint_nic_properties.get("privateEndpoint") or {}).get("id", "")).lower() != endpoint_id.lower()
         or endpoint_nic_properties.get("virtualMachine")
         or len(endpoint_ip_configs) != 1
@@ -917,7 +1039,7 @@ def write_private_json(env, prefix, value):
     return Path(name)
 
 
-def cost_query(env, forecast=False):
+def cost_query(env, forecast=False, invocation=None, reserved_at=None):
     endpoint = "forecast" if forecast else "query"
     url = "https://management.azure.com/subscriptions/{}/providers/Microsoft.CostManagement/{}?api-version=2023-11-01".format(
         env["subscription"], endpoint
@@ -931,6 +1053,19 @@ def cost_query(env, forecast=False):
             "filter": {"dimensions": {"name": "ResourceGroupName", "operator": "In", "values": [env["resource_group"]]}},
         },
     }
+    if invocation is not None:
+        body["timeframe"] = "Custom"
+        start = dt.datetime.fromisoformat(reserved_at.replace("Z", "+00:00"))
+        body["timePeriod"] = {
+            "from": start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z"),
+            "to": (now_utc() + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z"),
+        }
+        body["dataset"]["filter"] = {
+            "and": [
+                {"dimensions": {"name": "ResourceGroupName", "operator": "In", "values": [env["resource_group"]]}},
+                {"tags": {"name": "invocation-binding", "operator": "In", "values": [invocation]}},
+            ]
+        }
     if forecast:
         today = now_utc().date()
         month_start = today.replace(day=1)
@@ -1013,25 +1148,35 @@ def itemized_cost_bound(rate, hours, limits):
         "vm_network_bytes": vm_network_bytes,
         "bootstrap_rate_bits_per_second": BOOTSTRAP_RATE_BITS_PER_SECOND,
         "control_operation_ceiling": RUNNER_CONTROL_OPERATION_CEILING,
+        "storage_operation_ceiling": RUNNER_STORAGE_OPERATION_CEILING,
         "input_bytes": MAX_STAGING_INPUT_BYTES,
         "output_bytes": MAX_RESULT_UPLOAD_BYTES,
         "repository_command_network_bytes": limits["network_bytes"],
         "categories": categories,
+        "post_deallocation_daily_floor": {
+            "os_disk_storage_capacity": METER_RATE_CEILINGS_USD["os_disk_storage_capacity"] * 24,
+            "storage_capacity": METER_RATE_CEILINGS_USD["storage_capacity"] * 24,
+            "nat_gateway": METER_RATE_CEILINGS_USD["nat_gateway"] * 24,
+            "public_ip": METER_RATE_CEILINGS_USD["public_ip"] * 24,
+            "private_endpoints": METER_RATE_CEILINGS_USD["private_endpoints"] * 24,
+            "private_dns": METER_RATE_CEILINGS_USD["private_dns"] * 24,
+            "monitoring": METER_RATE_CEILINGS_USD["monitoring"] * 24,
+        },
         "total": round(sum(categories.values()), 6),
     }
 
 
-def budget_gate(env, limits):
+def budget_gate(env, limits, outstanding_reservations=0.0):
     actual = cost_query(env, forecast=False)
     forecast = cost_query(env, forecast=True)
     rate = retail_rate(env, limits["sku"])
     first_hour = itemized_cost_bound(rate, 1, limits)
     first_day = itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits)
     maximum_increment = first_day["total"]
-    pressure = max(actual + maximum_increment, forecast + maximum_increment)
+    pressure = max(actual, forecast) + outstanding_reservations + maximum_increment
     if pressure >= env["budget_limit"]:
-        raise RunnerError("budget pressure stops new invocations (actual {:.2f}, forecast {:.2f}, first-hour {:.2f}, first-day {:.2f}, admitted ceiling {})".format(
-            actual, forecast, first_hour["total"], first_day["total"], env["budget_limit"]
+        raise RunnerError("budget pressure stops new invocations (actual {:.2f}, forecast {:.2f}, outstanding reservations {:.2f}, first-hour {:.2f}, first-day {:.2f}, admitted ceiling {})".format(
+            actual, forecast, outstanding_reservations, first_hour["total"], first_day["total"], env["budget_limit"]
         ))
     return {
         "actual": actual,
@@ -1042,7 +1187,149 @@ def budget_gate(env, limits):
         "max_network_bytes": limits["network_bytes"],
         "max_billable_lifetime_hours": MAX_BILLABLE_LIFETIME_HOURS,
         "max_increment": maximum_increment,
+        "outstanding_reservations": outstanding_reservations,
+        "admission_pressure": pressure,
     }
+
+
+def empty_reservation_ledger(env):
+    return {
+        "schema": "fm.azure-cost-reservations/v1",
+        "subscription": env["subscription"],
+        "resource_group": env["resource_group"],
+        "storage": env["storage"],
+        "container": CONTAINER,
+        "deployment_generation": env["deployment_generation"],
+        "reservations": {},
+    }
+
+
+def verify_reservation_ledger(env, ledger):
+    expected = empty_reservation_ledger(env)
+    for field in ("schema", "subscription", "resource_group", "storage", "container", "deployment_generation"):
+        if ledger.get(field) != expected[field]:
+            raise RunnerError("cost reservation ledger {} binding is not exact".format(field))
+    if not isinstance(ledger.get("reservations"), dict):
+        raise RunnerError("cost reservation ledger entries are malformed")
+
+
+def load_reservation_ledger(env, state):
+    path = write_private_json(env, ".reservations-empty-", empty_reservation_ledger(env))
+    try:
+        _, rc, _ = az_command(env, [
+            "storage", "blob", "download", "--auth-mode", "login", "--account-name", env["storage"],
+            "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
+            "--file", str(path), "--overwrite", "true",
+        ], check=False)
+        if rc != 0:
+            _, create_rc, _ = az_command(env, [
+                "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
+                "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
+                "--file", str(path), "--overwrite", "false",
+            ], check=False)
+            if create_rc != 0:
+                _, retry_rc, retry_stderr = az_command(env, [
+                    "storage", "blob", "download", "--auth-mode", "login", "--account-name", env["storage"],
+                    "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
+                    "--file", str(path), "--overwrite", "true",
+                ], check=False)
+                if retry_rc != 0:
+                    raise RunnerError("cost reservation ledger is unavailable: {}".format(retry_stderr))
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunnerError("cost reservation ledger is unreadable: {}".format(exc))
+        verify_reservation_ledger(env, ledger)
+        return ledger
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def save_reservation_ledger(env, state, ledger, lease):
+    lease.assert_held()
+    verify_reservation_ledger(env, ledger)
+    path = write_private_json(env, ".reservations-", ledger)
+    try:
+        az_command(env, [
+            "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
+            "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
+            "--file", str(path), "--overwrite", "true",
+        ])
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def reservation_is_reconciled(env, entry, actual, forecast):
+    invocation = entry.get("invocation")
+    if not invocation or entry.get("cleanup_verified_at") is None:
+        return False
+    try:
+        cleanup_at = dt.datetime.fromisoformat(entry["cleanup_verified_at"].replace("Z", "+00:00"))
+        state = load_state(env, invocation)
+    except (RunnerError, TypeError, ValueError):
+        return False
+    if state.get("phase") not in ("complete", "absent-fenced") or now_utc() < cleanup_at + dt.timedelta(hours=72):
+        return False
+    invocation_cost = cost_query(
+        env, forecast=False, invocation=invocation, reserved_at=entry["reserved_at"]
+    )
+    entry.update({
+        "status": "reconciled",
+        "reconciled_at": iso_utc(),
+        "reconciled_actual": actual,
+        "reconciled_forecast": forecast,
+        "reconciled_invocation_cost": invocation_cost,
+    })
+    return True
+
+
+def reserve_budget(env, state, lease, limits):
+    ledger = load_reservation_ledger(env, state)
+    preliminary = budget_gate(env, limits)
+    for entry in ledger["reservations"].values():
+        if entry.get("status") == "reserved":
+            reservation_is_reconciled(env, entry, preliminary["actual"], preliminary["forecast"])
+    existing = ledger["reservations"].get(state["invocation"])
+    if existing is not None:
+        if (
+            existing.get("fence") != state["request"]["fence"]
+            or existing.get("lineage_root") != state["request"]["lineage_root_invocation"]
+        ):
+            raise RunnerError("cost reservation invocation/fence lineage is not exact")
+        return existing["cost_bound"]
+    outstanding = sum(
+        float(entry["amount_usd"])
+        for entry in ledger["reservations"].values()
+        if entry.get("status") == "reserved"
+    )
+    cost = budget_gate(env, limits, outstanding_reservations=outstanding)
+    ledger["reservations"][state["invocation"]] = {
+        "invocation": state["invocation"],
+        "fence": state["request"]["fence"],
+        "parent_invocation": state.get("parent_invocation"),
+        "lineage_root": state["request"]["lineage_root_invocation"],
+        "amount_usd": cost["max_increment"],
+        "status": "reserved",
+        "reserved_at": iso_utc(),
+        "compute_deallocation_deadline": state["request"]["compute_deallocation_deadline"],
+        "cost_bound": cost,
+    }
+    ledger["updated_at"] = iso_utc()
+    save_reservation_ledger(env, state, ledger, lease)
+    return cost
+
+
+def mark_reservation_cleanup_verified(env, state):
+    with AdmissionLease(env, state) as lease:
+        ledger = load_reservation_ledger(env, state)
+        entry = ledger["reservations"].get(state["invocation"])
+        if entry is None:
+            raise RunnerError("cost reservation is absent after compute cleanup")
+        if entry.get("fence") != state["request"]["fence"] or entry.get("status") != "reserved":
+            raise RunnerError("cost reservation cleanup binding is not exact")
+        entry["cleanup_verified_at"] = iso_utc()
+        ledger["updated_at"] = iso_utc()
+        save_reservation_ledger(env, state, ledger, lease)
 
 
 def active_runner_vms(env):
@@ -1180,7 +1467,6 @@ def blob_sas(env, blob, permissions, expiry):
 def ownership_tags(env, state):
     request = state["request"]
     token = state["invocation"].split("-")[1]
-    expiry = now_utc() + dt.timedelta(hours=MAX_BILLABLE_LIFETIME_HOURS)
     return {
         "workload": "firstmate",
         "firstmate-role": "validation-shard",
@@ -1199,7 +1485,7 @@ def ownership_tags(env, state):
         "selected-sku": request["limits"]["sku"],
         "sku-family": request["limits"]["sku_family"],
         "cost-attribution": "validation-shard",
-        "expiry-utc": iso_utc(expiry),
+        "expiry-utc": request["compute_deallocation_deadline"],
         "cleanup-token": token,
     }
 
@@ -1207,7 +1493,7 @@ def ownership_tags(env, state):
 def deployment_parameters(env, state):
     request = state["request"]
     resources = state["resources"]
-    expiry = now_utc() + dt.timedelta(hours=MAX_BILLABLE_LIFETIME_HOURS)
+    expiry = dt.datetime.fromisoformat(request["compute_deallocation_deadline"].replace("Z", "+00:00"))
     subnet_id = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Network/virtualNetworks/{}/subnets/{}".format(
         env["subscription"], env["resource_group"], env["vnet"], env["subnet"]
     )
@@ -1223,6 +1509,7 @@ def deployment_parameters(env, state):
             "subnetId": {"value": subnet_id},
             "vmSize": {"value": request["limits"]["sku"]},
             "expiryUtc": {"value": iso_utc(expiry)},
+            "expiryTimeOfDay": {"value": expiry.strftime("%H%M")},
             "tags": {"value": tags},
         },
     }
@@ -1263,11 +1550,14 @@ def immutable_identity(resource, label):
         identity["unique_id"] = properties.get("uniqueId") or resource.get("uniqueId")
     elif label == "run-command":
         identity["provisioning_state"] = properties.get("provisioningState")
+    elif label == "ttl-schedule":
+        identity["task_type"] = properties.get("taskType")
     required = {
         "vm": "instance_id",
         "nic": "resource_guid",
         "disk": "unique_id",
         "run-command": "provisioning_state",
+        "ttl-schedule": "task_type",
     }[label]
     if not identity["id"] or not identity["etag"] or not identity.get(required):
         raise RunnerError("created {} immutable identity is incomplete".format(label))
@@ -1314,6 +1604,14 @@ def adopt_vm_identity(env, state, vm):
     verify_resource_tags(env, state, safety, "safety Run Command")
     identities["run-command-safety"] = immutable_identity(safety, "run-command")
     resources["safety_run_command_id"] = safety_id
+    ttl_id = exact_id(env, "Microsoft.DevTestLab", "schedules", resources["ttl_schedule_name"])
+    exists, ttl = read_exact_resource(env, ttl_id, "ttl-schedule")
+    if not exists:
+        raise RunnerError("control-plane TTL schedule disappeared before immutable identity adoption")
+    verify_resource_tags(env, state, ttl, "TTL schedule")
+    verify_ttl_schedule(state, ttl)
+    identities["ttl-schedule"] = immutable_identity(ttl, "ttl-schedule")
+    resources["ttl_schedule_id"] = ttl_id
     resources["vm_instance_id"] = instance_id
     resources["identities"] = identities
     save_state(env, state)
@@ -1344,6 +1642,29 @@ def safety_run_command_id(state):
     return state["resources"]["vm_id"] + "/runCommands/" + state["resources"].get(
         "safety_run_command_name", "safety-shutdown"
     )
+
+
+def ttl_schedule_id(env, state):
+    return state["resources"].get("ttl_schedule_id") or exact_id(
+        env, "Microsoft.DevTestLab", "schedules", state["resources"]["ttl_schedule_name"]
+    )
+
+
+def verify_ttl_schedule(state, resource):
+    properties = resource.get("properties", resource)
+    deadline = dt.datetime.fromisoformat(
+        state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
+    )
+    if (
+        resource.get("location") != "eastus"
+        or properties.get("status") != "Enabled"
+        or properties.get("taskType") != "ComputeVmShutdownTask"
+        or properties.get("dailyRecurrence", {}).get("time") != deadline.strftime("%H%M")
+        or properties.get("timeZoneId") != "UTC"
+        or str(properties.get("targetResourceId", "")).lower() != state["resources"]["vm_id"].lower()
+        or properties.get("notificationSettings", {}).get("status") != "Disabled"
+    ):
+        raise RunnerError("control-plane TTL schedule binding is not exact")
 
 
 def create_run_command(env, state, input_url, output_url):
@@ -1567,11 +1888,14 @@ def verify_live_resource_identity(env, state, kind, resource_id, identity_key=No
         raise RunnerError("live NIC is not managed by the exact runner VM")
     if require_vm_relation and kind == "disk" and str(resource.get("managedBy") or resource.get("properties", {}).get("managedBy") or "").lower() != state["resources"]["vm_id"].lower():
         raise RunnerError("live OS disk is not managed by the exact runner VM")
+    if kind == "ttl-schedule":
+        verify_ttl_schedule(state, resource)
     return True, resource
 
 
 def disposable_plan(state, include_vm=True):
     planned = [
+        ("ttl-schedule", "ttl-schedule", state["resources"]["ttl_schedule_id"]),
         ("run-command", "run-command-execute", state["resources"].get("run_command_id") or managed_run_command_id(state)),
         ("run-command", "run-command-safety", state["resources"].get("safety_run_command_id") or safety_run_command_id(state)),
     ]
@@ -1666,7 +1990,7 @@ def cleanup(env, state):
     try:
         classified = classify_disposable_resources(env, state, include_vm=True)
         by_key = {identity_key: (kind, resource_id, resource) for kind, identity_key, resource_id, resource in classified}
-        for identity_key in ("run-command-execute", "run-command-safety"):
+        for identity_key in ("ttl-schedule", "run-command-execute", "run-command-safety"):
             if identity_key in by_key:
                 kind, resource_id, resource = by_key[identity_key]
                 delete_classified_resource(env, state, resource_id, kind, identity_key, resource)
@@ -1693,13 +2017,25 @@ def cleanup(env, state):
     payload_dir = Path(state["input_path"]).parent
     if payload_dir.parent == env["state_dir"] / "payloads":
         shutil.rmtree(payload_dir, ignore_errors=False)
+    if state.get("reservation_recorded"):
+        try:
+            mark_reservation_cleanup_verified(env, state)
+        except RunnerError:
+            transition(env, state, "cleanup-retained", "cost reservation reconciliation marker is ambiguous")
+            raise
     transition(env, state, "complete", "verified result retained locally; invocation compute and staging are zero")
 
 
 def dispatch_prepared(env, state, confirm_subscription):
+    bind_operation_context(env, state)
     if confirm_subscription != env["subscription"]:
         raise RunnerError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     try:
+        deadline = dt.datetime.fromisoformat(
+            state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
+        )
+        if deadline <= now_utc() + dt.timedelta(minutes=10):
+            raise RunnerError("prepared invocation has insufficient time remaining before its control-plane deallocation deadline")
         scope_gate(env)
         limits = state["request"]["limits"]
         sku_quota_gate(env, limits)
@@ -1712,6 +2048,12 @@ def dispatch_prepared(env, state, confirm_subscription):
             active = active_runner_vms(env)
             if len(active) >= env["max_concurrency"]:
                 raise RunnerError("runner queue is at its bounded concurrency limit ({})".format(env["max_concurrency"]))
+            cost = reserve_budget(env, state, lease, limits)
+            transition(
+                env, state, "cost-reserved",
+                "durable worst-case cost reserved under the admission lease",
+                cost=cost, reservation_recorded=True,
+            )
             foundation_gate(env)
             storage_upload(env, state["input_path"], state["staging"]["input_blob"], overwrite=False)
             transition(env, state, "input-staged", "exact private input object uploaded")
@@ -1757,6 +2099,7 @@ def print_logs_and_summary(state, result):
 
 
 def resume(env, state):
+    bind_operation_context(env, state)
     phase = state.get("phase")
     if phase == "complete":
         print_logs_and_summary(state, state["result"])
@@ -1772,7 +2115,7 @@ def resume(env, state):
         print_logs_and_summary(state, state["result"])
         return int(state["result"]["exit_code"])
     if phase in (
-        "prepared", "admission-checked", "input-staged", "vm-created", "command-submitted", "failed-retained"
+        "prepared", "admission-checked", "cost-reserved", "input-staged", "vm-created", "command-submitted", "failed-retained"
     ):
         output_exists, _, _ = az_command(env, [
             "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
@@ -1820,11 +2163,14 @@ def resume(env, state):
         if input_exists.get("exists"):
             storage_delete(env, state["staging"]["input_blob"])
         transition(env, state, "absent-fenced", "VM and invocation staging absence proven; same invocation will never be rerun", old_lease_absent=True)
+        if state.get("reservation_recorded"):
+            mark_reservation_cleanup_verified(env, state)
         raise RunnerError("runner VM is absent without a verified result; retry requires a new fenced attempt")
     raise RunnerError("invocation phase {} cannot be resumed automatically".format(phase))
 
 
 def retry(env, old_state, args):
+    bind_operation_context(env, old_state)
     if old_state.get("phase") != "absent-fenced" or old_state.get("old_lease_absent") is not True:
         raise RunnerError("retry requires old invocation absence to be proven by resume/reconcile")
     scope_gate(env)
@@ -1853,6 +2199,7 @@ def retry(env, old_state, args):
     args.invocation = None
     with state_lock(env):
         state = prepare(env, args, parent_state=old_state)
+    bind_operation_context(env, state)
     with invocation_lock(env, state["invocation"]):
         return dispatch_prepared(env, state, args.confirm_subscription)
 

@@ -510,6 +510,7 @@
             "actionGroupName": "[format('ag-{0}-ops', parameters('namingPrefix'))]",
             "dcrName": "[format('dcr-{0}-linux', parameters('namingPrefix'))]",
             "blobPrivateEndpointName": "[format('pe-{0}-blob', parameters('namingPrefix'))]",
+            "blobPrivateEndpointNicName": "[format('nic-{0}-pe-blob', parameters('namingPrefix'))]",
             "vaultPrivateEndpointName": "[format('pe-{0}-vault', parameters('namingPrefix'))]",
             "blobPrivateDnsZone": "privatelink.blob.core.windows.net",
             "vaultPrivateDnsZone": "privatelink.vaultcore.azure.net",
@@ -1052,6 +1053,7 @@
                 "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
               ],
               "properties": {
+                "customNetworkInterfaceName": "[variables('blobPrivateEndpointNicName')]",
                 "subnet": {
                   "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'snet-private-endpoints')]"
                 },
@@ -2020,6 +2022,14 @@
             "reservedLandingWorkerHours": {
               "type": "int",
               "value": "[parameters('reservedLandingWorkerHours')]"
+            },
+            "blobPrivateEndpointNicId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/networkInterfaces', variables('blobPrivateEndpointNicName'))]"
+            },
+            "blobPrivateEndpointNicResourceGuid": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/networkInterfaces', variables('blobPrivateEndpointNicName')), '2023-09-01', 'Full').properties.resourceGuid]"
             }
           }
         }
@@ -2166,6 +2176,14 @@
     "workerHourPlanningThreshold": {
       "type": "int",
       "value": "[parameters('workerHourPlanningThreshold')]"
+    },
+    "blobPrivateEndpointNicId": {
+      "type": "string",
+      "value": "[reference('firstmate-pilot-resources').outputs.blobPrivateEndpointNicId.value]"
+    },
+    "blobPrivateEndpointNicResourceGuid": {
+      "type": "string",
+      "value": "[reference('firstmate-pilot-resources').outputs.blobPrivateEndpointNicResourceGuid.value]"
     }
   }
 }

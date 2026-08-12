@@ -50,6 +50,14 @@
         "description": "Exact UTC shutdown deadline formatted as YYYY-MM-DDTHH:MM:SSZ."
       }
     },
+    "expiryTimeOfDay": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 4,
+      "metadata": {
+        "description": "Exact UTC deallocation time formatted as HHmm."
+      }
+    },
     "tags": {
       "type": "object"
     },
@@ -165,6 +173,28 @@
         "timeoutInSeconds": 300,
         "treatFailureAsDeploymentFailure": true
       }
+    },
+    {
+      "type": "Microsoft.DevTestLab/schedules",
+      "apiVersion": "2018-09-15",
+      "name": "[format('shutdown-{0}', parameters('vmName'))]",
+      "location": "[parameters('region')]",
+      "tags": "[parameters('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "status": "Enabled",
+        "taskType": "ComputeVmShutdownTask",
+        "dailyRecurrence": {
+          "time": "[parameters('expiryTimeOfDay')]"
+        },
+        "timeZoneId": "UTC",
+        "targetResourceId": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+        "notificationSettings": {
+          "status": "Disabled"
+        }
+      }
     }
   ],
   "outputs": {
@@ -179,6 +209,10 @@
     "osDiskId": {
       "type": "string",
       "value": "[resourceId('Microsoft.Compute/disks', parameters('osDiskName'))]"
+    },
+    "ttlScheduleId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.DevTestLab/schedules', format('shutdown-{0}', parameters('vmName')))]"
     }
   }
 }

@@ -60,10 +60,11 @@ import sys
 template = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 text = Path(sys.argv[1]).read_text(encoding="utf-8").lower()
 resources = template["resources"]
-assert len(resources) == 3
+assert len(resources) == 4
 nic = next(item for item in resources if item["type"] == "Microsoft.Network/networkInterfaces")
 vm = next(item for item in resources if item["type"] == "Microsoft.Compute/virtualMachines")
 safety_shutdown = next(item for item in resources if item["type"] == "Microsoft.Compute/virtualMachines/runCommands")
+ttl_schedule = next(item for item in resources if item["type"] == "Microsoft.DevTestLab/schedules")
 assert "publicipaddress" not in json.dumps(nic).lower()
 assert "identity" not in vm
 assert "ssh" not in json.dumps(vm["properties"]["osProfile"]).lower()
@@ -75,6 +76,10 @@ assert vm["properties"]["storageProfile"]["osDisk"]["deleteOption"] == "Detach"
 assert vm["properties"]["networkProfile"]["networkInterfaces"][0]["properties"]["deleteOption"] == "Detach"
 assert "shutdown -h now" in safety_shutdown["properties"]["source"]["script"]
 assert "expiryUtc" in template["parameters"]
+assert "expiryTimeOfDay" in template["parameters"]
+assert ttl_schedule["properties"]["taskType"] == "ComputeVmShutdownTask"
+assert ttl_schedule["properties"]["timeZoneId"] == "UTC"
+assert ttl_schedule["properties"]["targetResourceId"] == "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
 host = Path(sys.argv[2]).read_text(encoding="utf-8")
 guest = Path(sys.argv[3]).read_text(encoding="utf-8")
 executor = Path(sys.argv[4]).read_text(encoding="utf-8")
@@ -84,7 +89,7 @@ for required in ("MemoryMax", "MemorySwapMax=0", "TasksMax", "CPUQuota", "Runtim
     assert required in guest
 assert "bootstrapEgressRateBitsPerSecond" in template["parameters"]
 assert "python3 -m pip" not in guest and "run_bootstrap_network pip" not in guest
-for required in ("timeout=timeout_seconds", "foundation_gate", "If-Match", "identities", "max_billable_lifetime_hours"):
+for required in ("timeout=timeout_seconds", "foundation_gate", "If-Match", "identities", "max_billable_lifetime_hours", "operation-ledger.json", "reservations.json"):
     assert required in host
 for forbidden in ("GITHUB_TOKEN", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "AZURE_CLIENT_SECRET", "SSH_AUTH_SOCK"):
     assert forbidden not in executor
@@ -121,7 +126,7 @@ dispatch_contract() {
 }
 
 prepare_contract() {
-  local tmp repo home fakebin out invocation state
+  local tmp repo home fakebin out invocation state staged_uv
   fm_test_tmproot_into tmp fm-azure-prepare
   repo="$tmp/repo"
   home="$tmp/home"
@@ -138,6 +143,7 @@ prepare_contract() {
   python3 - "$state" "$repo" <<'PY' || fail "prepared request identity assertions failed"
 import hashlib
 import json
+import datetime as dt
 from pathlib import Path
 import subprocess
 import sys
@@ -159,10 +165,15 @@ assert request["limits"]["memory_bytes"] == 14 * 1024**3
 assert request["limits"]["network_bytes"] == 0
 assert request["limits"]["sku"] == "Standard_D4as_v6"
 assert request["limits"]["sku_family"] == "standardDav6Family"
+assert request["lineage_root_invocation"] == state["invocation"]
+created = dt.datetime.fromisoformat(request["created_at"].replace("Z", "+00:00"))
+deadline = dt.datetime.fromisoformat(request["compute_deallocation_deadline"].replace("Z", "+00:00"))
+assert deadline - created == dt.timedelta(hours=24)
 assert "FM_AZURE_SUBSCRIPTION_ID" not in json.dumps(request)
 assert state["resources"]["vm_id"].endswith("/" + state["resources"]["vm_name"])
 assert state["resources"]["nic_id"].endswith("/" + state["resources"]["nic_name"])
 assert state["resources"]["os_disk_id"].endswith("/" + state["resources"]["os_disk_name"])
+assert state["resources"]["ttl_schedule_id"].endswith("/" + state["resources"]["ttl_schedule_name"])
 input_path = Path(state["input_path"])
 assert state["input_digest"] == "sha256:" + hashlib.sha256(input_path.read_bytes()).hexdigest()
 with tarfile.open(input_path, "r:gz") as archive:
@@ -170,15 +181,36 @@ with tarfile.open(input_path, "r:gz") as archive:
 assert request["protocol"]["agent_fleet_python"]["lock_digest"].startswith("sha256:")
 assert {item["name"] for item in request["protocol"]["agent_fleet_python"]["wheels"]} == {"iniconfig", "packaging", "pluggy", "pygments", "pytest", "ruff"}
 PY
-  mkdir -p "$tmp/offline-wheelhouse" "$tmp/offline-target"
+  mkdir -p "$tmp/offline-wheelhouse" "$tmp/offline-target" "$tmp/staged-uv"
   tar -xOf "$home/state/azure-runner/payloads/$invocation/input.tar.gz" agent-fleet-wheelhouse.tar >"$tmp/wheelhouse.tar"
   tar -xf "$tmp/wheelhouse.tar" -C "$tmp/offline-wheelhouse"
-  UV_CACHE_DIR="$tmp/empty-uv-cache" UV_OFFLINE=1 uv pip install \
-    --target "$tmp/offline-target" --python-platform x86_64-manylinux_2_17 \
-    --offline --no-index --find-links "$tmp/offline-wheelhouse" pytest==9.1.1 ruff==0.15.21 >/dev/null || \
-    fail "fresh empty-cache Linux target could not resolve the staged locked wheel closure offline"
-  [ -f "$tmp/offline-target/pytest/__init__.py" ] && [ -d "$tmp/offline-target/ruff-0.15.21.dist-info" ] || \
-    fail "fresh offline wheel closure did not install the locked pytest/ruff environment"
+  tar -xOf "$home/state/azure-runner/payloads/$invocation/input.tar.gz" uv.tar.gz >"$tmp/uv.tar.gz"
+  tar -xf "$tmp/uv.tar.gz" -C "$tmp/staged-uv"
+  if [ "$(uname -s)" = Linux ]; then
+    staged_uv=$(find "$tmp/staged-uv" -type f -name uv -print -quit)
+    [ -n "$staged_uv" ] || fail "pinned staged uv executable was absent"
+    chmod +x "$staged_uv"
+    UV_CACHE_DIR="$tmp/empty-uv-cache" UV_OFFLINE=1 "$staged_uv" pip install \
+      --target "$tmp/offline-target" --python-platform x86_64-manylinux_2_17 \
+      --offline --no-index --find-links "$tmp/offline-wheelhouse" pytest==9.1.1 ruff==0.15.21 >/dev/null || \
+      fail "fresh empty-cache Linux target could not resolve the staged locked wheel closure offline"
+    [ -f "$tmp/offline-target/pytest/__init__.py" ] && [ -d "$tmp/offline-target/ruff-0.15.21.dist-info" ] || \
+      fail "fresh offline wheel closure did not install the locked pytest/ruff environment"
+  else
+    python3 - "$tmp/offline-wheelhouse" <<'PY' || fail "staged Linux wheel closure was malformed"
+from pathlib import Path
+import sys
+import zipfile
+wheels = sorted(Path(sys.argv[1]).glob("*.whl"))
+assert len(wheels) == 6
+assert {path.name.split("-", 1)[0].replace("_", "-") for path in wheels} == {
+    "iniconfig", "packaging", "pluggy", "pygments", "pytest", "ruff",
+}
+for wheel in wheels:
+    with zipfile.ZipFile(wheel) as archive:
+        assert any(name.endswith(".dist-info/METADATA") for name in archive.namelist())
+PY
+  fi
   printf 'dirty\n' >"$repo/untracked"
   if (cd "$repo" && runner "$home" "$fakebin" prepare --task task-two --generation generation-two -- echo no) >/dev/null 2>&1; then
     fail "prepare accepted an untracked file"
@@ -455,7 +487,8 @@ spec.loader.exec_module(module)
 env = {
     "subscription": "sub", "resource_group": "rg", "prefix": "prefix", "storage": "store", "vnet": "vnet-prefix-eus",
     "subnet": "snet-validation-shards", "elastic_nsg": "nsg-prefix-elastic-isolated", "nat": "nat-prefix-eus",
-    "blob_private_endpoint": "pe-prefix-blob", "blob_private_dns_zone": "privatelink.blob.core.windows.net",
+    "blob_private_endpoint": "pe-prefix-blob", "blob_private_endpoint_nic": "nic-prefix-pe-blob",
+    "blob_private_dns_zone": "privatelink.blob.core.windows.net",
     "deployment_generation": "gen-one", "owner": "owner", "azure_operation_count": 0,
 }
 def rid(provider, kind, name):
@@ -470,7 +503,7 @@ pip_id = rid("Microsoft.Network", "publicIPAddresses", "pip-prefix-nat-eus")
 pe_id = rid("Microsoft.Network", "privateEndpoints", "pe-prefix-blob")
 dns_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
 dns_link_id = dns_id + "/virtualNetworkLinks/firstmate-vnet"
-pe_nic_id = rid("Microsoft.Network", "networkInterfaces", "pe-prefix-blob.nic")
+pe_nic_id = rid("Microsoft.Network", "networkInterfaces", "nic-prefix-pe-blob")
 resources = {
     store_id.lower(): {"id": store_id, "location": "eastus", "kind": "StorageV2", "sku": {"name": "Standard_ZRS"}, "tags": common, "properties": {"accessTier": "Hot", "defaultToOAuthAuthentication": True, "publicNetworkAccess": "Disabled", "allowSharedKeyAccess": False, "allowBlobPublicAccess": False, "supportsHttpsTrafficOnly": True, "minimumTlsVersion": "TLS1_2", "networkAcls": {"defaultAction": "Deny", "bypass": "None"}}},
     vnet_id.lower(): {"id": vnet_id, "location": "eastus", "tags": common, "properties": {"addressSpace": {"addressPrefixes": ["10.42.0.0/16"]}}},
@@ -480,13 +513,18 @@ resources = {
     pip_id.lower(): {"id": pip_id, "location": "eastus", "sku": {"name": "Standard"}, "tags": common, "properties": {"publicIPAllocationMethod": "Static", "publicIPAddressVersion": "IPv4", "idleTimeoutInMinutes": 4}},
     nat_id.lower(): {"id": nat_id, "location": "eastus", "sku": {"name": "Standard"}, "tags": common, "properties": {"idleTimeoutInMinutes": 10, "publicIpAddresses": [{"id": pip_id}]}},
     pe_id.lower(): {"id": pe_id, "location": "eastus", "tags": common, "properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}, "networkInterfaces": [{"id": pe_nic_id}], "privateLinkServiceConnections": [{"name": "blob", "properties": {"privateLinkServiceId": store_id, "groupIds": ["blob"], "privateLinkServiceConnectionState": {"status": "Approved"}}}]}},
-    pe_nic_id.lower(): {"id": pe_nic_id, "properties": {"resourceGuid": "pe-nic-guid", "privateEndpoint": {"id": pe_id}, "ipConfigurations": [{"properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}}}]}},
+    pe_nic_id.lower(): {"id": pe_nic_id, "tags": common, "properties": {"resourceGuid": "pe-nic-guid", "privateEndpoint": {"id": pe_id}, "ipConfigurations": [{"properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}}}]}},
     dns_id.lower(): {"id": dns_id, "location": "global", "tags": common},
     dns_link_id.lower(): {"id": dns_link_id, "location": "global", "properties": {"registrationEnabled": False, "virtualNetwork": {"id": vnet_id}}},
     (pe_id + "/privateDnsZoneGroups/default").lower(): {"id": pe_id + "/privateDnsZoneGroups/default", "properties": {"privateDnsZoneConfigs": [{"name": "blob", "properties": {"privateDnsZoneId": dns_id}}]}},
 }
-def run_gate(values):
+def run_gate(values, output_id=pe_nic_id, output_guid="pe-nic-guid"):
     def fake_az(env_arg, args, **kwargs):
+        if args[0:3] == ["deployment", "sub", "show"]:
+            return {"properties": {"outputs": {
+                "blobPrivateEndpointNicId": {"value": output_id},
+                "blobPrivateEndpointNicResourceGuid": {"value": output_guid},
+            }}}, 0, ""
         resource_id = args[args.index("--ids") + 1].lower()
         return json.loads(json.dumps(values[resource_id])), 0, ""
     module.az_command = fake_az
@@ -509,6 +547,9 @@ for resource_id, mutation in (
     (pe_id, lambda r: r["properties"]["privateLinkServiceConnections"][0].update({"name": "foreign"})),
     (pe_id, lambda r: r["properties"]["privateLinkServiceConnections"][0]["properties"]["privateLinkServiceConnectionState"].update({"status": "Rejected"})),
     (pe_id, lambda r: r["properties"].update({"networkInterfaces": []})),
+    (pe_id, lambda r: r["properties"]["networkInterfaces"][0].update({"id": "/foreign"})),
+    (pe_nic_id, lambda r: r["tags"].update({"deployment-generation": "foreign"})),
+    (pe_nic_id, lambda r: r["properties"].update({"resourceGuid": "foreign-guid"})),
     (pe_nic_id, lambda r: r["properties"]["privateEndpoint"].update({"id": "/foreign"})),
     (dns_id, lambda r: r.update({"id": dns_id + "-foreign"})),
     (dns_link_id, lambda r: r["properties"]["virtualNetwork"].update({"id": "/foreign"})),
@@ -523,6 +564,13 @@ for resource_id, mutation in (
         pass
     else:
         raise AssertionError("foreign foundation binding accepted: {}".format(resource_id))
+for output_id, output_guid in (("/foreign", "pe-nic-guid"), (pe_nic_id, "foreign-guid")):
+    try:
+        run_gate(resources, output_id=output_id, output_guid=output_guid)
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("foreign deployment-output NIC binding was accepted")
 
 # Dispatch proves immediately before staging and again immediately before compute create.
 sequence = []
@@ -531,6 +579,7 @@ module.sku_quota_gate = lambda e, limits: None
 module.budget_gate = lambda e, limits: {"max_increment": 1}
 module.foundation_gate = lambda e: sequence.append("foundation")
 module.active_runner_vms = lambda e: []
+module.reserve_budget = lambda e, s, lease, limits: {"max_increment": 1}
 module.storage_upload = lambda *args, **kwargs: sequence.append("stage")
 module.blob_sas = lambda *args, **kwargs: "https://capability"
 module.create_vm = lambda e, s: sequence.append("create-vm")
@@ -542,7 +591,16 @@ class FakeLease:
     def __exit__(self, *args): pass
     def assert_held(self): pass
 module.AdmissionLease = FakeLease
-state = {"request": {"limits": {"wall_seconds": 3600}}, "phase": "prepared", "input_path": "/input", "staging": {"input_blob": "in", "output_blob": "out"}}
+state = {
+    "invocation": "azr-aaaaaaaaaaaa", "parent_invocation": None,
+    "request": {
+        "limits": {"wall_seconds": 3600}, "fence": "sha256:fence",
+        "lineage_root_invocation": "azr-aaaaaaaaaaaa",
+        "compute_deallocation_deadline": "2099-01-01T00:00:00Z",
+    },
+    "phase": "prepared", "input_path": "/input",
+    "staging": {"input_blob": "in", "output_blob": "out"},
+}
 try:
     module.dispatch_prepared({"subscription": "sub", "max_concurrency": 1}, state, "sub")
 except module.RunnerError as exc:
@@ -560,6 +618,9 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
+import threading
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("runner_host", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -579,6 +640,8 @@ state = {
         "task": "task-one",
         "generation": "gen-one",
         "fence": "sha256:" + "1" * 64,
+        "lineage_root_invocation": "azr-aaaaaaaaaaaa",
+        "compute_deallocation_deadline": "2099-01-01T00:00:00Z",
         "repository": {"snapshot_digest": "sha256:" + "2" * 64},
         "command_digest": "sha256:" + "3" * 64,
         "resource_class": "behavior-heavy",
@@ -590,6 +653,8 @@ state = {
         "os_disk_id": "/disk/exact",
         "run_command_name": "execute",
         "safety_run_command_name": "safety-shutdown",
+        "ttl_schedule_name": "shutdown-vm-exact",
+        "ttl_schedule_id": "/ttl/exact",
         "identities": {},
     },
     "attempt": 1,
@@ -631,9 +696,104 @@ assert cost["first_day"]["total"] > cost["first_hour"]["total"]
 assert cost["first_day"]["vm_network_bytes"] <= module.MAX_BOOTSTRAP_NETWORK_BYTES
 assert cost["first_hour"]["vm_network_bytes"] < cost["first_day"]["vm_network_bytes"]
 assert cost["first_day"]["control_operation_ceiling"] == module.RUNNER_CONTROL_OPERATION_CEILING
+assert cost["first_day"]["storage_operation_ceiling"] == module.RUNNER_STORAGE_OPERATION_CEILING
+
+# Azure operation accounting is increment-before-call, durable across process
+# recreation, category-specific, and shared across an attempt lineage.
+original_control_ceiling = module.RUNNER_CONTROL_OPERATION_CEILING
+original_storage_ceiling = module.RUNNER_STORAGE_OPERATION_CEILING
+module.RUNNER_CONTROL_OPERATION_CEILING = 2
+module.RUNNER_STORAGE_OPERATION_CEILING = 1
+with tempfile.TemporaryDirectory() as tmp:
+    ledger_env = {
+        "state_dir": Path(tmp), "home_binding": "sha256:home", "deployment_generation": "gen-one",
+    }
+    module.bind_operation_context(ledger_env, state)
+    module.record_azure_operation(ledger_env, ["account", "show"])
+    module.record_azure_operation(ledger_env, ["rest", "--method", "get"])
+    recreated = dict(ledger_env)
+    recreated.pop("operation_context", None)
+    module.bind_operation_context(recreated, state)
+    try:
+        module.record_azure_operation(recreated, ["account", "show"])
+    except module.RunnerError as exc:
+        assert "exhausted" in str(exc)
+    else:
+        raise AssertionError("process recreation reset the durable control-operation ceiling")
+    retry_state = json.loads(json.dumps(state))
+    retry_state["invocation"] = "azr-bbbbbbbbbbbb-a2"
+    retry_state["parent_invocation"] = state["invocation"]
+    retry_state["request"]["fence"] = "sha256:" + "9" * 64
+    retry_state["request"]["lineage_root_invocation"] = state["invocation"]
+    module.bind_operation_context(recreated, retry_state)
+    try:
+        module.record_azure_operation(recreated, ["account", "show"])
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("new attempt reset its old-attempt lineage operation ceiling")
+    module.record_azure_operation(recreated, ["storage", "blob", "exists"])
+    try:
+        module.record_azure_operation(recreated, ["storage", "blob", "exists"])
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("storage-operation ceiling was not enforced independently")
+module.RUNNER_CONTROL_OPERATION_CEILING = original_control_ceiling
+module.RUNNER_STORAGE_OPERATION_CEILING = original_storage_ceiling
+
+# A leased, durable worst-case reservation blocks both concurrent and later
+# stale-cost admissions even while Cost Management still reports zero.
+reservation_env = {
+    "subscription": "sub", "resource_group": "rg", "storage": "store",
+    "deployment_generation": "gen-one", "budget_limit": 400,
+}
+reservation_ledger = module.empty_reservation_ledger(reservation_env)
+reservation_lock = threading.Lock()
+class ReservationLease:
+    def assert_held(self): pass
+def load_ledger(*args):
+    return reservation_ledger
+def save_ledger(*args):
+    return None
+module.load_reservation_ledger = load_ledger
+module.save_reservation_ledger = save_ledger
+states = []
+for invocation, fence in (("azr-bbbbbbbbbbbb", "sha256:b"), ("azr-cccccccccccc", "sha256:c")):
+    candidate = json.loads(json.dumps(state))
+    candidate["invocation"] = invocation
+    candidate["parent_invocation"] = None
+    candidate["request"]["fence"] = fence
+    candidate["request"]["lineage_root_invocation"] = invocation
+    candidate["staging"] = {"reservation_blob": "runner-control/reservations.json"}
+    states.append(candidate)
+outcomes = []
+def contend(candidate):
+    with reservation_lock:
+        try:
+            module.reserve_budget(reservation_env, candidate, ReservationLease(), limits)
+            outcomes.append("reserved")
+        except module.RunnerError:
+            outcomes.append("refused")
+threads = [threading.Thread(target=contend, args=(candidate,)) for candidate in states]
+for thread in threads: thread.start()
+for thread in threads: thread.join()
+assert sorted(outcomes) == ["refused", "reserved"]
+third = json.loads(json.dumps(states[1]))
+third["invocation"] = "azr-dddddddddddd"
+third["request"]["fence"] = "sha256:d"
+third["request"]["lineage_root_invocation"] = third["invocation"]
+try:
+    module.reserve_budget(reservation_env, third, ReservationLease(), limits)
+except module.RunnerError as exc:
+    assert "outstanding reservations" in str(exc)
+else:
+    raise AssertionError("sequential stale-cost admission ignored the durable reservation")
 
 # Complete one-property-at-a-time disposable-resource identity matrix.
 env = {"deployment_generation": "gen-one", "owner": "owner", "resource_group": "rg"}
+env["subscription"] = "sub"
+state["resources"]["ttl_schedule_id"] = module.exact_id(env, "Microsoft.DevTestLab", "schedules", state["resources"]["ttl_schedule_name"])
 expected_tags = module.ownership_tags(env, state)
 resources = {
     "vm": {"id": "/vm/exact", "etag": '"vm-etag"', "tags": dict(expected_tags), "properties": {"vmId": "vm-instance"}},
@@ -641,6 +801,7 @@ resources = {
     "disk": {"id": "/disk/exact", "etag": '"disk-etag"', "tags": dict(expected_tags), "managedBy": "/vm/exact", "properties": {"uniqueId": "disk-unique"}},
     "run-command": {"id": "/vm/exact/runCommands/execute", "etag": '"run-etag"', "tags": dict(expected_tags), "properties": {"provisioningState": "Succeeded"}},
     "run-command-safety": {"id": "/vm/exact/runCommands/safety-shutdown", "etag": '"safety-etag"', "tags": dict(expected_tags), "properties": {"provisioningState": "Succeeded"}},
+    "ttl-schedule": {"id": state["resources"]["ttl_schedule_id"], "etag": '"ttl-etag"', "location": "eastus", "tags": dict(expected_tags), "properties": {"status": "Enabled", "taskType": "ComputeVmShutdownTask", "dailyRecurrence": {"time": "0000"}, "timeZoneId": "UTC", "targetResourceId": "/vm/exact", "notificationSettings": {"status": "Disabled"}}},
 }
 state["resources"].update({
     "vm_instance_id": "vm-instance",
@@ -653,6 +814,7 @@ state["resources"].update({
         "run-command": module.immutable_identity(resources["run-command"], "run-command"),
         "run-command-execute": module.immutable_identity(resources["run-command"], "run-command"),
         "run-command-safety": module.immutable_identity(resources["run-command-safety"], "run-command"),
+        "ttl-schedule": module.immutable_identity(resources["ttl-schedule"], "ttl-schedule"),
     },
 })
 original_reader = module.read_exact_resource
@@ -678,6 +840,7 @@ for kind, field, container in (
     ("nic", "resourceGuid", "properties"),
     ("disk", "uniqueId", "properties"),
     ("run-command", "provisioningState", "properties"),
+    ("ttl-schedule", "taskType", "properties"),
 ):
     changed = json.loads(json.dumps(resources[kind]))
     changed[container][field] = "foreign"
@@ -704,6 +867,22 @@ for kind, changed in (
         pass
     else:
         raise AssertionError("foreign {} VM ownership was accepted".format(kind))
+for field, value in (
+    ("status", "Disabled"),
+    ("timeZoneId", "Pacific Standard Time"),
+    ("targetResourceId", "/vm/foreign"),
+    ("dailyRecurrence", {"time": "2359"}),
+    ("notificationSettings", {"status": "Enabled"}),
+):
+    changed = json.loads(json.dumps(resources["ttl-schedule"]))
+    changed["properties"][field] = value
+    module.read_exact_resource = lambda env_arg, id_arg, kind_arg, changed=changed: (True, changed)
+    try:
+        module.verify_live_resource_identity(env, state, "ttl-schedule", resources["ttl-schedule"]["id"])
+    except module.RunnerError:
+        pass
+    else:
+        raise AssertionError("foreign TTL schedule {} was accepted".format(field))
 module.read_exact_resource = original_reader
 
 # VM-absent cleanup inventories residual Run Commands and refuses an unplanned one.
@@ -718,6 +897,7 @@ else:
 # A complete classify-before-delete pass must discover a later foreign NIC
 # before deleting either exact Run Command, both with and without a live VM.
 exact_by_id = {
+    resources["ttl-schedule"]["id"].lower(): resources["ttl-schedule"],
     resources["run-command"]["id"].lower(): resources["run-command"],
     resources["run-command-safety"]["id"].lower(): resources["run-command-safety"],
     resources["vm"]["id"].lower(): resources["vm"],
@@ -752,12 +932,11 @@ for operation, listing in (
 
 # Exact positive cleanup deletes both commands before the VM and records the
 # only allowed NIC/disk ETag transition after Azure detaches them.
-import tempfile
-from pathlib import Path
 positive = json.loads(json.dumps(state))
 positive["phase"] = "result-collected"
 positive["staging"] = {"input_blob": "input", "output_blob": "output"}
 live = {
+    resources["ttl-schedule"]["id"].lower(): json.loads(json.dumps(resources["ttl-schedule"])),
     resources["run-command"]["id"].lower(): json.loads(json.dumps(resources["run-command"])),
     resources["run-command-safety"]["id"].lower(): json.loads(json.dumps(resources["run-command-safety"])),
     resources["vm"]["id"].lower(): json.loads(json.dumps(resources["vm"])),
@@ -794,7 +973,7 @@ with tempfile.TemporaryDirectory() as tmp:
     module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
     module.cleanup(positive_env, positive)
 assert deleted == [
-    resources["run-command"]["id"], resources["run-command-safety"]["id"], resources["vm"]["id"],
+    resources["ttl-schedule"]["id"], resources["run-command"]["id"], resources["run-command-safety"]["id"], resources["vm"]["id"],
     resources["nic"]["id"], resources["disk"]["id"],
 ]
 assert positive["phase"] == "complete"
@@ -818,10 +997,12 @@ with tempfile.TemporaryDirectory() as tmp:
         resources["nic"]["id"].lower(): resources["nic"],
         resources["disk"]["id"].lower(): resources["disk"],
         resources["run-command-safety"]["id"].lower(): resources["run-command-safety"],
+        resources["ttl-schedule"]["id"].lower(): resources["ttl-schedule"],
     }
     module.read_exact_resource = lambda env_arg, resource_id, kind: (True, adoption[resource_id.lower()])
     module.adopt_vm_identity(create_env, create_state, vm_for_adoption)
     assert create_state["resources"]["identities"]["run-command-safety"]["provisioning_state"] == "Succeeded"
+    assert create_state["resources"]["identities"]["ttl-schedule"]["task_type"] == "ComputeVmShutdownTask"
     captured = {}
     def fake_az(env_arg, args, **kwargs):
         if args[0:3] == ["rest", "--method", "put"]:
