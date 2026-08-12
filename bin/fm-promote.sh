@@ -12,7 +12,7 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--web|--no-web]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,11 +24,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-web-gate-lib.sh
+. "$SCRIPT_DIR/fm-web-gate-lib.sh"
 
 MODE=
 YOLO=
 MODE_SET=0
 YOLO_SET=0
+WEB=0
+WEB_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -48,11 +52,19 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --web)
+      [ "$WEB_SET" -eq 0 ] || { echo "error: --web and --no-web may be supplied only once" >&2; exit 1; }
+      WEB=1; WEB_SET=1
+      ;;
+    --no-web)
+      [ "$WEB_SET" -eq 0 ] || { echo "error: --web and --no-web may be supplied only once" >&2; exit 1; }
+      WEB=0; WEB_SET=1
+      ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--web|--no-web]" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
@@ -72,6 +84,10 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+[ "$WEB_SET" -eq 1 ] || {
+  echo "error: promotion requires an explicit web-surface declaration: pass --web or --no-web" >&2
+  exit 1
+}
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -108,6 +124,53 @@ META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+BRIEF="$DATA/$ID/brief.md"
+[ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+SURFACE=non-web
+[ "$WEB" -eq 1 ] && SURFACE=web
+surface_count=$(grep -Ec '^Surface contract:' "$BRIEF" || true)
+if [ "$surface_count" -gt 1 ]; then
+  echo "error: $BRIEF contains more than one Surface contract line" >&2
+  exit 1
+fi
+existing_surface=$(sed -n 's/^Surface contract: //p' "$BRIEF")
+if [ -n "$existing_surface" ] && [ "$existing_surface" != "$SURFACE" ]; then
+  echo "error: promotion surface $SURFACE disagrees with the brief's Surface contract: $existing_surface" >&2
+  exit 1
+fi
+if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_surface" != non-web ]; then
+  echo "error: $BRIEF has an invalid Surface contract" >&2
+  exit 1
+fi
+
+BRIEF_TMP="$STATE/.$ID.brief.promote.${BASHPID:-$$}"
+WEB_GATE_TMP="$STATE/.$ID.web-gate.promote.${BASHPID:-$$}"
+if [ "$WEB" -eq 1 ]; then
+  fm_web_gate_text > "$WEB_GATE_TMP"
+fi
+awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
+  BEGIN { inserted_surface = 0; inserted_gate = 0 }
+  /^# Definition of done$/ && !inserted_surface {
+    if (surface_line_count == 0) print "Surface contract: " surface
+    if (web == 1 && gate_line_count == 0) {
+      print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
+      while ((getline line < gate) > 0) print line
+      close(gate)
+    }
+    inserted_surface = 1
+  }
+  { print }
+  END { exit inserted_surface ? 0 : 1 }
+' surface_line_count="$surface_count" gate_line_count="$(grep -Ec '^Web gate contract:' "$BRIEF" || true)" "$BRIEF" > "$BRIEF_TMP" || {
+  rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
+  echo "error: $BRIEF has no Definition of done section; promotion refused" >&2
+  exit 1
+}
+mv "$BRIEF_TMP" "$BRIEF"
+rm -f -- "$WEB_GATE_TMP"
+
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
 {
@@ -121,5 +184,5 @@ fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
+echo "promoted $ID to ship mode=$MODE yolo=$YOLO surface=$SURFACE (teardown protection restored)"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
