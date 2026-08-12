@@ -192,9 +192,17 @@ start_daemon() {
 }
 
 stop_daemon() {
+  local i=0
   [ -n "${DAEMON_PID:-}" ] || return 0
   afk_exit "$STATE_DIR" 2>/dev/null || true
   kill "$DAEMON_PID" 2>/dev/null || true
+  while kill -0 "$DAEMON_PID" 2>/dev/null && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    kill -KILL "$DAEMON_PID" 2>/dev/null || true
+  fi
   wait "$DAEMON_PID" 2>/dev/null || true
   DAEMON_PID=""
   sleep 1
