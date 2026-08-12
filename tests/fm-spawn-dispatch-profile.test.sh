@@ -734,8 +734,8 @@ test_launch_omits_ssh_auth_sock_when_unset() {
   expect_code 0 "$status" "codex spawn without SSH_AUTH_SOCK should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "SSH_AUTH_SOCK=" \
-    "launch must remain unchanged when firstmate has no SSH_AUTH_SOCK set"
-  pass "launch remains unchanged when firstmate has no SSH_AUTH_SOCK"
+    "crewmate launch must not add an SSH_AUTH_SOCK prefix when firstmate has none set"
+  pass "launch preserves the unset SSH_AUTH_SOCK default"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
