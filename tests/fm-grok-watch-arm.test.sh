@@ -322,6 +322,80 @@ SH
   pass "an actionable close stays dormant after session-lock ownership transfers"
 }
 
+hold_wake_queue_lock() {
+  local home=$1
+  (
+    FM_HOME="$home"
+    STATE="$home/state"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 1
+    : > "$home/state/classification-blocked"
+    while [ ! -e "$home/state/release-classification" ]; do sleep 0.05; done
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  ) &
+  CLASSIFICATION_LOCK_PID=$!
+  wait_for_file "$home/state/classification-blocked" || fail "could not hold wake queue lock"
+}
+
+test_away_transfer_during_actionable_classification_stays_dormant() {
+  local home arm out pid
+  home=$(make_home classification-away-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '1\t1\tsignal\ttask\tsignal: classified away action\n' > "$FM_HOME/state/.wake-queue"
+: > "$FM_HOME/state/arm-closed"
+printf 'signal: classified away action\n'
+SH
+  chmod +x "$arm"
+  hold_wake_queue_lock "$home"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/arm-closed" || fail "classification away-transfer arm did not close"
+  sleep 0.1
+  : > "$home/state/.afk"
+  : > "$home/state/release-classification"
+  wait "$CLASSIFICATION_LOCK_PID" || fail "wake queue lock holder failed"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "actionable classification completed after away mode took supervision"
+  [ -s "$home/state/.wake-queue" ] || fail "old Grok owner consumed away mode's classified wake"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "away transfer during actionable classification keeps the old owner dormant"
+}
+
+test_session_transfer_during_actionable_classification_stays_dormant() {
+  local home arm out pid replacement
+  home=$(make_home classification-session-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  replacement=$$
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '1\t1\tsignal\ttask\tsignal: classified successor action\n' > "$FM_HOME/state/.wake-queue"
+: > "$FM_HOME/state/arm-closed"
+printf 'signal: classified successor action\n'
+SH
+  chmod +x "$arm"
+  hold_wake_queue_lock "$home"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/arm-closed" || fail "classification session-transfer arm did not close"
+  sleep 0.1
+  printf '%s\n' "$replacement" > "$home/state/.lock"
+  : > "$home/state/release-classification"
+  wait "$CLASSIFICATION_LOCK_PID" || fail "wake queue lock holder failed"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "actionable classification completed after session ownership transferred"
+  [ -s "$home/state/.wake-queue" ] || fail "old Grok owner consumed the successor's classified wake"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "session transfer during actionable classification keeps the old owner dormant"
+}
+
 test_owner_signal_retires_arm_child() {
   local home arm out pid child status
   home=$(make_home signal-cleanup)
@@ -357,4 +431,6 @@ test_away_mode_stays_dormant_until_normal_supervision_returns
 test_changed_session_owner_stays_dormant
 test_actionable_close_after_away_transfer_stays_dormant
 test_actionable_close_after_session_transfer_stays_dormant
+test_away_transfer_during_actionable_classification_stays_dormant
+test_session_transfer_during_actionable_classification_stays_dormant
 test_owner_signal_retires_arm_child
