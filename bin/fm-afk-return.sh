@@ -141,11 +141,20 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
+  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations keep_awake_result lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
   preserve_evidence "$evidence"
+
+  # A return-bound idle-sleep assertion belongs to the same first-genuine-return
+  # boundary as this catch-up owner. Manual assertions deliberately survive it.
+  if [ -e "$STATE/.keep-awake" ] || [ -L "$STATE/.keep-awake" ]; then
+    keep_awake_result=$("$SCRIPT_DIR/fm-keep-awake.sh" stop-return-bound 2>&1) || {
+      lifecycle_ok=0
+      append_evidence lifecycle "keep-awake cleanup failed: $keep_awake_result" "$evidence"
+    }
+  fi
 
   if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ]; then
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then

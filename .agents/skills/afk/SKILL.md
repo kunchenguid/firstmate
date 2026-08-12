@@ -16,6 +16,15 @@ sub-supervisor may triage routine wakes in bash instead of waking firstmate's
 LLM for each one. Escalations still reach the captain, but as one pre-read,
 batched digest rather than per-wake injections.
 
+## Optional keep-awake composition
+
+Ordinary `/afk` never changes power behavior.
+Only an explicit `/afk keep-awake` request loads `/keep-awake` and runs `bin/fm-keep-awake.sh start --until-return` before this lifecycle begins.
+If that command fails, report the concrete limitation and do not claim the away session is sleep-protected.
+On the first genuine return, `bin/fm-afk-return.sh` stops only that return-bound assertion before normal catch-up.
+A separately manual keep-awake assertion remains manual and is not stopped by `/afk` return.
+The keep-awake command is independent of supervisor terminal transport and never changes watcher ownership.
+
 ## What it does
 
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**

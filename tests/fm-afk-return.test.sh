@@ -30,6 +30,16 @@ if [ -e "$FM_HOME/state/.fail-terminal-stop-once" ]; then
 fi
 rm -f "$FM_HOME/state/.afk-daemon-terminal"
 SH
+  cat > "$dir/bin/fm-keep-awake.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = stop-return-bound ] || exit 2
+printf 'stop-return-bound\n' >> "$FM_HOME/keep-awake.log"
+case "$(awk -F= '$1 == "mode" { print $2; exit }' "$FM_HOME/state/.keep-awake" 2>/dev/null)" in
+  return) rm -f "$FM_HOME/state/.keep-awake"; printf 'keep-awake: stopped\n' ;;
+  manual) printf 'keep-awake: active (manual; return does not stop it)\n' ;;
+  *) exit 1 ;;
+esac
+SH
   cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 file="$FM_HOME/state/.fake-drain"
@@ -247,6 +257,26 @@ test_away_reentry_refuses_pending_return_gate() {
   pass "away-mode re-entry fails closed while the prior return catch-up is pending"
 }
 
+test_return_stops_only_return_bound_keep_awake() {
+  local dir out
+  dir="$TMP_ROOT/keep-awake-return"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  printf 'mode=return\n' > "$dir/home/state/.keep-awake"
+
+  out=$(run_return "$dir" begin) || fail "return-bound keep-awake cleanup blocked normal catch-up: $out"
+  [ ! -e "$dir/home/state/.keep-awake" ] || fail "first genuine return left a return-bound assertion record"
+  [ "$(wc -l < "$dir/home/keep-awake.log" | tr -d ' ')" -eq 1 ] \
+    || fail "return did not request return-bound keep-awake cleanup exactly once"
+
+  printf 'mode=manual\n' > "$dir/home/state/.keep-awake"
+  out=$(run_return "$dir" begin) || fail "manual keep-awake return check blocked normal catch-up: $out"
+  [ -e "$dir/home/state/.keep-awake" ] || fail "return cleanup removed a manual keep-awake record"
+  [ "$(wc -l < "$dir/home/keep-awake.log" | tr -d ' ')" -eq 2 ] \
+    || fail "manual assertion was not checked through the return owner"
+  pass "the AFK return lifecycle stops only return-bound keep-awake assertions"
+}
+
 test_check_retries_recorded_terminal_teardown() {
   local dir gate out rc
   dir="$TMP_ROOT/terminal-teardown"
@@ -277,4 +307,5 @@ test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
+test_return_stops_only_return_bound_keep_awake
 test_check_retries_recorded_terminal_teardown

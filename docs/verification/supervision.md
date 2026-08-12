@@ -359,6 +359,12 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+Captain's Inbox capture was verified on 2026-08-12 with Pi 0.84.1 through `tests/fm-captain-inbox.test.sh`.
+The deterministic fixture proved opt-in and opt-out behavior, finalized-primary-response filtering, substantive response inclusion after operational inputs, exact routine no-action acknowledgement exclusion, worker exclusion, private mode where portable, duplicate suppression, 100-message retention, malformed-record preservation, and concurrent read-state updates.
+It reproduces Pi's queued operational follow-up input that has no matching `before_agent_start` event, followed by the two substantive operational outcomes and a later direct Captain's Log response, so the old input FIFO's stale entry and the repaired response-only boundary are both covered.
+The same suite invokes the supported dashboard command interface rather than reaching into arbitrary files.
+The fixture also proved crash-safe lock recovery: a stale lock is reclaimed only once its owner PID is confirmed dead or its owner record is unverifiable, a stale lock with a live owner PID is left alone, and release removes a lock only when the caller's ownership token still matches the on-disk owner.
+
 Deterministic entry points:
 
 ```sh

@@ -59,6 +59,10 @@
       "target": "docs/calm-mode-feasibility.md"
     },
     {
+      "source": "docs/captain-inbox.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
       "source": "docs/calm-mode-feasibility.md",
       "target": "docs/calm.md"
     },
@@ -145,6 +149,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/keep-awake/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -219,6 +227,10 @@
     {
       "path": "docs/calm-mode-feasibility.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/captain-inbox.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/calm.md",
@@ -330,6 +342,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/keep-awake.md",
       "audience": "maintainer-verification"
     },
     {
