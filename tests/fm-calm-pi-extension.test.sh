@@ -816,6 +816,14 @@ const watcherBody =
   "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
 const watcherMessage = operationalInput.encodeFirstmateOperationalInput("watcher", watcherBody);
 const legacyAwayMessage = "\u2063Supervisor escalate (legacy presentation compatibility)";
+const markdownTransformers = [
+  (markdown, context) => {
+    if (context.messageType !== "user" || context.isStreaming) {
+      throw new Error("operational Markdown transformer received the wrong render context");
+    }
+    return markdown.replace("signal: /tmp/probe.status", "signal: /tmp/transformed-probe.status");
+  },
+];
 const operationalHistory = [];
 const operationalChat = {
   children: [new Text("VISIBLE_PREDECESSOR", 0, 0)],
@@ -827,7 +835,7 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
-  getMarkdownTransformers: () => [],
+  getMarkdownTransformers: () => markdownTransformers,
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -860,10 +868,18 @@ InteractiveMode.prototype.addMessageToChat.call(
 );
 const operationalComponent = operationalChat.children[1];
 const legacyOperationalComponent = operationalChat.children[2];
-const stockOperationalComponent = new UserMessageComponent(watcherMessage, undefined, 1);
+const stockOperationalComponent = new UserMessageComponent(
+  watcherMessage,
+  undefined,
+  1,
+  markdownTransformers,
+);
 const expectedCalmOffOperationalRows = ["", ...stockOperationalComponent.render(100)];
 if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expectedCalmOffOperationalRows)) {
   throw new Error("Calm-off operational user rendering changed from Pi stock rows");
+}
+if (!operationalComponent.render(100).join("\n").includes("/tmp/transformed-probe.status")) {
+  throw new Error("Pi Markdown transformer output did not reach the Calm operational user row");
 }
 if (operationalHistory.length !== 1 || operationalHistory[0] !== watcherMessage) {
   throw new Error("operational user presentation changed Pi input history behavior");
@@ -2871,7 +2887,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot hidden_viewport_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2888,6 +2904,7 @@ test_interactive_terminal_e2e() {
   default_snapshot="$TMP_ROOT/default.txt"
   expanded_snapshot="$TMP_ROOT/expanded.txt"
   hidden_snapshot="$TMP_ROOT/hidden.txt"
+  hidden_viewport_snapshot="$TMP_ROOT/hidden-viewport.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
@@ -3087,7 +3104,7 @@ export default function (pi: ExtensionAPI): void {
 }
 TS
   printf '%s\n' '{}' >"$config/keybindings.json"
-  printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
+  printf '%s\n' '{"hideThinkingBlock":false}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
@@ -3116,7 +3133,8 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
   assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
-  assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
+  assert_contains "$(cat "$default_snapshot")" "first internal reasoning block" \
+    "reasoning fixture did not render Pi's default-visible reasoning"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
@@ -3138,6 +3156,7 @@ JSON
     # (see below) lengthen the transcript enough to push earlier genuine content, such
     # as the original user prompt, above the plain viewport.
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$hidden_snapshot"
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$hidden_viewport_snapshot"
     # Wait for the redraw this block actually asserts: the collapsed-thinking adapter
     # (unconditional, unaffected by the built-in tool gate below) hides, and the
     # retained genuine rows are back on screen. Built-in tool rows from before this
@@ -3145,7 +3164,10 @@ JSON
     # file header and docs/calm.md): Pi gives no way to re-point an already-rendered
     # tool row at a definition registered later, so CALM_E2E_OUTPUT and friends stay
     # on screen through this whole redraw rather than disappearing with it.
-    if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
+    if ! grep -Fq "Thinking..." "$hidden_viewport_snapshot" &&
+      ! grep -Fq "fm_watch_arm_pi" "$hidden_viewport_snapshot" &&
+      ! grep -Fq "watcher: started Pi extension arm child" "$hidden_viewport_snapshot" &&
+      ! grep -Fq "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "$hidden_viewport_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
       grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
@@ -3168,11 +3190,19 @@ JSON
   [ "$(cat "$home/config/calm")" = on ] || fail "/calm did not persist its active choice"
   assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "a pre-activation grep row unexpectedly hid; the documented bound regressed"
   assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "a pre-activation find row unexpectedly hid; the documented bound regressed"
-  assert_not_contains "$(cat "$hidden_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
-  assert_not_contains "$(cat "$hidden_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
-  assert_not_contains "$(cat "$hidden_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
-  assert_not_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "/calm left a synthetic Firstmate user-role presentation in the transcript"
-  assert_not_contains "$(cat "$hidden_snapshot")" "Tool activity is hidden where supported" "/calm appended its own command-status row"
+  assert_not_contains "$(cat "$hidden_viewport_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
+  for hidden_reasoning in \
+    "first internal reasoning block" \
+    "second internal reasoning block" \
+    "third internal reasoning block"
+  do
+    assert_not_contains "$(cat "$hidden_viewport_snapshot")" "$hidden_reasoning" \
+      "/calm left default-visible reasoning in the transcript"
+  done
+  assert_not_contains "$(cat "$hidden_viewport_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
+  assert_not_contains "$(cat "$hidden_viewport_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
+  assert_not_contains "$(cat "$hidden_viewport_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "/calm left a synthetic Firstmate user-role presentation in the transcript"
+  assert_not_contains "$(cat "$hidden_viewport_snapshot")" "Tool activity is hidden where supported" "/calm appended its own command-status row"
   assert_contains "$(cat "$hidden_snapshot")" "Show a deterministic tool example." "/calm removed a genuine user prompt"
   assert_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "/calm hid a genuine near-miss user prompt"
   for near_miss in \
@@ -3370,7 +3400,8 @@ JS
   assert_contains "$(cat "$restored_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "second /calm dropped a transient diagnostic"
   assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
-  assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
+  assert_contains "$(cat "$restored_snapshot")" "first internal reasoning block" \
+    "second /calm did not restore Pi's default-visible reasoning"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
