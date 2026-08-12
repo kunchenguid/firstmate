@@ -1572,7 +1572,7 @@ EOF
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
+  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
   assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
     "the composed listing dropped a real signal from the dispatchable set"

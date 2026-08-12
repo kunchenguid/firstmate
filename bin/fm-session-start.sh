@@ -149,7 +149,7 @@
 # stay out of the startup digest; the same never-bound-a-held-or-blocked-row
 # rule applies, recognized there from the title line's own hold/blocked-by
 # markers.
-# Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
+# Full bodies are targeted follow-up only: `bin/fm-tasks-axi.sh show <id> --full` when
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
@@ -376,7 +376,7 @@ print_file_or_absent() {
 }
 
 print_backlog_pointer() {
-  printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -792,7 +792,7 @@ Go to a source directly only when:
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
     printed with its tail),
-  - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
+  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),

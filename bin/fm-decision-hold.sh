@@ -110,7 +110,7 @@ hold_id() {  # <origin-id> <decision-key>
 }
 
 tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  fm_tasks_axi_run "$FM_HOME" "$@"
 }
 
 require_tasks_axi() {

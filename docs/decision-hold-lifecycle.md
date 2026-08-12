@@ -10,7 +10,7 @@ The command runs tasks-axi in the active `FM_HOME`, so the existing backlog rema
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
-It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
+It creates a kind `captain` backlog item when absent and invokes tasks-axi's `hold <id> --reason <reason> --kind captain` operation on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
