@@ -245,24 +245,26 @@ Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committe
 
 ## Optional Relay
 
-Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.
+Relay is an opt-in request channel whose default service provides the shared `@myfirstmate` bot on X and Discord, while an explicitly configured loopback adapter may provide a private one-to-one audience.
 A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitignored `.env`; `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`.
-That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
-Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation instead of being executed from a public mention.
+That token is standing authorization for firstmate to reply under the resolved audience and act autonomously on normal reversible mention requests.
+Destructive, irreversible, or security-sensitive asks require confirmation under the resolved channel contract instead of being executed from an unconfirmed mention.
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while its surrounding conversation context may still include other public accounts.
 On the locked session-start bootstrap step, that token creates the local polling and watcher-cadence artifacts described in the [Relay configuration reference](configuration.md#relay-env).
 Without the token, the locked session-start bootstrap step removes those artifacts on opt-out and otherwise stays silent, so non-Relay users see no behavior change.
 Newly offered mentions are stored as `state/x-inbox/<request_id>.json` and wake firstmate once per retained request ID; the [Relay configuration reference](configuration.md#relay-env) owns the durable offer-marker and re-offer contract.
-The `fmx-respond` agent-only skill drains that inbox, uses the preserved Relay conversation context for continuity under the wire contract owned by the [Relay configuration reference](configuration.md#relay-env), classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
+The `fmx-respond` agent-only skill drains that inbox, resolves its fail-closed audience stamp, uses the preserved Relay conversation context for continuity under the wire contract owned by the [Relay configuration reference](configuration.md#relay-env), classifies each mention as an actionable request, question, or pure acknowledgment, and submits audience-safe replies through `bin/fm-x-reply.sh`.
 When a reply has a real visual artifact, `--image <path>` attaches one local PNG, JPEG, GIF, WebP, BMP, or TIFF to the relay's optional `{media_type,data_base64}` image object.
 Actionable reversible requests run through firstmate's normal intake, backlog, dispatch, investigation, or ship lifecycle.
 Work that completes in the answering turn gets one outcome reply.
-Work that spawns a longer-running task gets an acknowledgement reply first; `bin/fm-x-link.sh` records `x_request=`, `x_request_ts=`, `x_followups=0`, and optional reply-platform context in that task's `state/<id>.meta`, while durable per-request context preserves the original platform and budget independently of task links and inbox cleanup.
-Later milestone wakes use `bin/fm-x-followup.sh` to post up to three public-safe follow-ups through the relay's `connector/followup` endpoint, ending with a `--final` one for ordinary Relay-linked work. A typed promised-final commitment owns its terminal reply through `bin/fm-public-followup.sh`; after its receipt is validated, `bin/fm-x-followup.sh --clear <task-id>` removes any legacy link without posting another reply.
+Work that spawns a longer-running task is linked before acknowledgement; `bin/fm-x-link.sh` records the request, timestamp, follow-up count, reply-platform context, and fail-closed audience in that task's metadata, while durable per-request context preserves the original values independently of task links and inbox cleanup.
+The acknowledgement path verifies that exact link before it can claim the work was registered.
+Later milestone wakes use `bin/fm-x-followup.sh` to post no more than two non-final updates and reserve the third slot for the `--final` outcome of ordinary Relay-linked work.
+A typed promised-final commitment owns its terminal public reply through `bin/fm-public-followup.sh`; after its receipt is validated, `bin/fm-x-followup.sh --clear <task-id>` removes any legacy link without posting another reply.
 The [Relay configuration reference](configuration.md#relay-env) owns the exact context retention, platform-resolution, and fail-safe posting contract.
-If recovery relinks the same relay request onto a successor task, `fm-x-link.sh --carry-count <n> --carry-ts <epoch> --carry-platform <x|discord> --carry-max <n>` preserves the consumed follow-up count, original 7-day window, and reply split budget instead of granting a fresh local budget or falling back to the wrong platform.
+If recovery relinks the same relay request onto a successor task, the carry flags preserve the consumed follow-up count, original 7-day window, reply split budget, and audience instead of granting a fresh local budget or falling back to the wrong channel contract; the [Relay configuration reference](configuration.md#relay-env) owns the exact flags.
 The follow-up helper forwards `--image <path>` to the same reply client when a follow-up needs an image.
-Each follow-up is bounded by a local 7-day window and a 3-post cap; a successful non-final post increments the counter and keeps the link, while `--final`, reaching the cap, the window lapsing, or the relay itself rejecting an exhausted binding all clear it, and the helper is skipped for tasks that did not originate from a Relay mention.
+Each follow-up is bounded by a local 7-day window and a 3-post cap; a successful non-final post increments the counter and keeps the link, a third non-final post is refused so the final slot remains available, and a successful `--final`, window expiry, or relay rejection of an exhausted binding clears the link.
 Pure acknowledgments or mentions with nothing to answer are dismissed through `bin/fm-x-dismiss.sh`, which calls the relay's `connector/dismiss` endpoint and posts no text, then the local inbox file is cleared.
 Concise replies stay single unnumbered messages; genuinely long replies are split by the client into bounded, numbered threads using the target platform's reply budget, with `texts` carrying the ordered chunks for the relay.
 Splitting preserves fenced-code, paragraph, line, and word boundaries when possible.
