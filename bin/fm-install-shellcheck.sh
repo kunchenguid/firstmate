@@ -14,7 +14,12 @@ DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-DOWNLOAD_ATTEMPTS=3
+# CI runners occasionally hit a several-second connectivity blip to GitHub's
+# release CDN (curl exit 56, "Connection died") that a short 1s+2s backoff
+# does not survive. Five attempts with a 3s-stepped backoff (3/6/9/12s, ~30s
+# worst case) stays well inside the job timeout while giving a transient blip
+# room to clear.
+DOWNLOAD_ATTEMPTS=5
 download_attempt=1
 while ! curl -fsSL "$URL" -o "$TMP/$ARCHIVE"; do
   [ "$download_attempt" -lt "$DOWNLOAD_ATTEMPTS" ] || {
@@ -22,7 +27,7 @@ while ! curl -fsSL "$URL" -o "$TMP/$ARCHIVE"; do
     exit 1
   }
   printf 'fm-install-shellcheck.sh: download attempt %s failed; retrying\n' "$download_attempt" >&2
-  sleep "$download_attempt"
+  sleep "$((download_attempt * 3))"
   download_attempt=$((download_attempt + 1))
 done
 ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
