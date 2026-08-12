@@ -13,6 +13,7 @@
 #     watcher ownership
 #   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
 #   - orphan status logs whose task meta has already disappeared
+#   - contradictions across backlog, metadata, status, endpoint, and PR reality
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -239,6 +240,62 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+}
+
+make_fake_tmux_set() {
+  local fakebin=$1 live_targets=$2
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    target=""
+    prev=""
+    for arg in "$@"; do
+      [ "$prev" = -t ] && target=$arg
+      prev=$arg
+    done
+    case ":${FM_FAKE_LIVE_TARGETS:-}:" in
+      *":$target:"*) printf '%%1\n'; exit 0 ;;
+    esac
+    exit 1
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$live_targets" > "$fakebin/.live-targets"
+}
+
+make_fake_contradiction_gh_axi() {
+  local fakebin=$1
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version) printf '%s\n' '0.1.29'; exit 0 ;;
+  api)
+    case "${2:-}" in
+      /repos/example/repo/pulls/7)
+        printf '%s\n' 'api_response:' '  body: "OPEN:MERGEABLE"' '  truncated: false'
+        ;;
+      /repos/example/repo/pulls/8)
+        printf '%s\n' 'api_response:' '  body: "OPEN:CONFLICTING"' '  truncated: false'
+        ;;
+      /repos/example/repo/pulls/9)
+        printf '%s\n' 'api_response:' '  body: "MERGED:UNKNOWN"' '  truncated: false'
+        ;;
+      /repos/example/repo/pulls/10)
+        printf '%s\n' 'api_response:' '  body: "OPEN:MERGEABLE"' '  truncated: false'
+        ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
 }
 
 # make_fake_tmux_secondmate_recovery <fakebin>: a stateful tmux boundary
@@ -957,6 +1014,114 @@ EOF
   pass "orphan status logs are printed once with bounded tails"
 }
 
+contradiction_section() {
+  awk '
+    /^RECORD CONTRADICTIONS$/ { found=1 }
+    found && /^AFK$/ { exit }
+    found { print }
+  '
+}
+
+test_record_contradictions_are_bounded_and_silent_when_consistent() {
+  local rec root home fakebin out contradictions consistent_rec consistent_root consistent_home consistent_fakebin consistent_out
+  rec=$(new_world record-contradictions)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux_set "$fakebin" "fm-sess:healthy:fm-sess:done"
+  make_fake_contradiction_gh_axi "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] healthy-live - Healthy live task (repo: firstmate) (kind: ship)
+- [ ] dead-working - Dead working task (repo: firstmate) (kind: ship)
+- [ ] done-live - Done task with a live endpoint (repo: firstmate) (kind: ship)
+- [ ] conflicted-pr - Conflicted pull request (repo: firstmate) (kind: ship)
+- [ ] merged-pr - Merged pull request (repo: firstmate) (kind: ship)
+- [ ] done-open-pr - Done task with an open pull request (repo: firstmate) (kind: ship)
+- [ ] held-flight - Held task (repo: firstmate) (kind: ship) (hold: wait) (hold-kind: future)
+- [ ] missing-meta - Missing runtime record (repo: firstmate) (kind: ship)
+
+## Queued
+- [ ] queued-healthy - Queued work needs no runtime record (repo: firstmate) (kind: ship)
+
+## Done
+- [x] completed-healthy - Completed work needs no runtime record (repo: firstmate) (kind: ship)
+EOF
+  printf 'window=fm-sess:healthy\nkind=ship\npr=https://github.com/example/repo/pull/7\n' > "$home/state/healthy-live.meta"
+  printf 'working: current work\n' > "$home/state/healthy-live.status"
+  printf 'window=fm-sess:dead\nkind=ship\n' > "$home/state/dead-working.meta"
+  printf 'working: stale event\n' > "$home/state/dead-working.status"
+  printf 'window=fm-sess:done\nkind=ship\n' > "$home/state/done-live.meta"
+  printf 'done: stale completion\n' > "$home/state/done-live.status"
+  printf 'window=fm-sess:conflict\nkind=ship\npr=https://github.com/example/repo/pull/8\n' > "$home/state/conflicted-pr.meta"
+  printf 'window=fm-sess:merged\nkind=ship\npr=https://github.com/example/repo/pull/9\n' > "$home/state/merged-pr.meta"
+  printf 'window=fm-sess:done-open\nkind=ship\npr=https://github.com/example/repo/pull/10\n' > "$home/state/done-open-pr.meta"
+  printf 'done: falsely claimed landed\n' > "$home/state/done-open-pr.status"
+  printf 'window=fm-sess:held\nkind=ship\n' > "$home/state/held-flight.meta"
+  printf 'window=fm-sess:meta-only\nkind=ship\n' > "$home/state/meta-only.meta"
+  printf 'window=fm-sess:secondmate\nkind=secondmate\n' > "$home/state/fleet-mate.meta"
+  printf 'resolved: archival candidate\n' > "$home/state/stale-orphan.status"
+  touch -t 202608010000 "$home/state/stale-orphan.status"
+  printf 'resolved: recent orphan\n' > "$home/state/recent-orphan.status"
+
+  out=$(FM_FAKE_LIVE_TARGETS="fm-sess:healthy:fm-sess:done" \
+    FM_RECORD_CONTRADICTION_LIMIT=20 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  contradictions=$(printf '%s\n' "$out" | contradiction_section)
+
+  assert_contains "$contradictions" "RECORD CONTRADICTIONS" "startup digest omitted the contradiction section"
+  assert_contains "$contradictions" "meta-without-backlog (1): meta-only" "startup digest missed metadata without a backlog row"
+  assert_contains "$contradictions" "backlog-without-meta (1): missing-meta(state=in_flight)" "startup digest missed an in-flight row without metadata"
+  assert_contains "$contradictions" "dead-working(status=working,endpoint=dead)" "startup digest trusted working status on a dead endpoint"
+  assert_contains "$contradictions" "done-live(status=done,endpoint=alive)" "startup digest trusted done status on a live endpoint"
+  assert_contains "$contradictions" "conflicted-pr(mergeable=CONFLICTING)" "startup digest missed a conflicted recorded PR"
+  assert_contains "$contradictions" "merged-pr(state=MERGED)" "startup digest missed a merged PR with live metadata"
+  assert_contains "$contradictions" "done-open-pr(status=done,state=OPEN)" "startup digest trusted done status while its PR remained open"
+  assert_contains "$contradictions" "held-in-flight (1): held-flight(hold-kind=future)" "startup digest missed a held in-flight row"
+  assert_contains "$contradictions" "stale-orphan-status (1): stale-orphan(age=" "startup digest missed an old status log without metadata"
+  assert_not_contains "$contradictions" "healthy-live" "startup contradiction section listed a consistent live task"
+  assert_not_contains "$contradictions" "queued-healthy" "startup contradiction section treated queued work as live"
+  assert_not_contains "$contradictions" "completed-healthy" "startup contradiction section treated completed work as live"
+  assert_not_contains "$contradictions" "fleet-mate" "startup contradiction section required a secondmate backlog row"
+  assert_not_contains "$contradictions" "recent-orphan" "startup contradiction section flagged a fresh orphan status"
+
+  out=$(FM_FAKE_LIVE_TARGETS="fm-sess:healthy:fm-sess:done" \
+    FM_RECORD_CONTRADICTION_LIMIT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  contradictions=$(printf '%s\n' "$out" | contradiction_section)
+  [ "$(printf '%s\n' "$contradictions" | awk '/^- / { count++ } END { print count + 0 }')" -le 6 ] \
+    || fail "bounded contradiction section exceeded one line per contradiction class: $contradictions"
+  assert_contains "$contradictions" "+1 more" "bounded contradiction section omitted its hidden-finding count"
+
+  consistent_rec=$(new_world record-consistent)
+  IFS='|' read -r consistent_root consistent_home consistent_fakebin <<EOF
+$consistent_rec
+EOF
+  make_fake_toolchain "$consistent_fakebin"
+  make_fake_ps_claude "$consistent_fakebin"
+  make_fake_tmux "$consistent_fakebin" "fm-sess:healthy"
+  printf '%s\n' manual > "$consistent_home/config/backlog-backend"
+  cat > "$consistent_home/data/backlog.md" <<'EOF'
+# Backlog
+## In flight
+- [ ] healthy-live - Healthy live task (repo: firstmate) (kind: ship)
+## Queued
+- [ ] queued-healthy - Queued work (repo: firstmate) (kind: ship)
+## Done
+EOF
+  printf 'window=fm-sess:healthy\nkind=ship\n' > "$consistent_home/state/healthy-live.meta"
+  printf 'working: current work\n' > "$consistent_home/state/healthy-live.status"
+  consistent_out=$(run_session_start "$consistent_home" "$consistent_root" "$consistent_fakebin:$BASE_PATH")
+  assert_not_contains "$consistent_out" "RECORD CONTRADICTIONS" "consistent startup records emitted a contradiction section"
+
+  pass "session start prints only bounded contradictions and stays silent when records agree"
+}
+
 # --- session-start secondmate recovery boundary -----------------------------
 
 test_session_start_relaunches_missing_pi_secondmate() {
@@ -1517,6 +1682,7 @@ test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_orphan_status_logs_are_printed
+test_record_contradictions_are_bounded_and_silent_when_consistent
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

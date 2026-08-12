@@ -42,8 +42,9 @@
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail, one
 #                       bounded line of checks without matching task metadata,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       a bounded contradiction-only comparison of those same
+#                       records plus recorded PR reality: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -114,6 +115,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-record-contradictions-lib.sh
+. "$SCRIPT_DIR/fm-record-contradictions-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -411,6 +414,7 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
+fm_record_contradictions_init "$DATA"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"
@@ -424,12 +428,15 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
+  endpoint=unknown
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint=alive
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint=dead
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
@@ -441,6 +448,7 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
+  fm_record_contradictions_observe_meta "$meta" "$id" "$endpoint" "$STATE"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
@@ -455,8 +463,15 @@ for status in "$STATE"/*.status; do
   ORPHAN_STATUS_FOUND=1
   printf '\n--- %s ---\n' "$id"
   print_status_tail "$status"
+  fm_record_contradictions_observe_orphan "$status" "$id"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+
+fm_record_contradictions_observe_backlog "$STATE"
+RECORD_CONTRADICTIONS=$(fm_record_contradictions_format 2>/dev/null) || RECORD_CONTRADICTIONS=
+if [ -n "$RECORD_CONTRADICTIONS" ]; then
+  printf '\n%s\n' "$RECORD_CONTRADICTIONS"
+fi
 
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then

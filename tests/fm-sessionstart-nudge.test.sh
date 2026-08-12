@@ -22,7 +22,7 @@ fm_git_identity fmtest fmtest@example.invalid
 
 make_primary() {
   local dir=$1
-  mkdir -p "$dir/bin" "$dir/state"
+  mkdir -p "$dir/bin" "$dir/state" "$dir/data"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
@@ -115,7 +115,7 @@ test_owned_lock_is_silent() {
 }
 
 test_owned_primary_post_compact_reanchors_read_only() {
-  local root="$TMP_ROOT/post-compact" out status=0
+  local root="$TMP_ROOT/post-compact" out status=0 before after contradictions
   make_primary "$root"
   printf '%s\n' "$$" > "$root/state/.lock"
   cat > "$root/bin/fm-session-start.sh" <<'EOF'
@@ -123,13 +123,31 @@ test_owned_primary_post_compact_reanchors_read_only() {
 touch "${FM_HOME:?}/state/session-start-ran"
 EOF
   chmod +x "$root/bin/fm-session-start.sh"
+  cat > "$root/data/backlog.md" <<'EOF'
+# Backlog
+## In flight
+- [ ] missing-meta - Missing runtime record (repo: firstmate) (kind: ship)
+## Queued
+## Done
+EOF
+  before=$(find "$root" -type f -print0 | sort -z | xargs -0 shasum -a 256)
   out=$(run_nudge "$root" post-compact) || status=$?
   expect_code 0 "$status" "owned primary post-compact nudge"
-  [ "$out" = "$POST_COMPACT_LINE" ] \
-    || fail "owned primary printed unexpected post-compact output: $out"
+  contradictions=$(printf '%s\n' "$out" | awk '/^RECORD CONTRADICTIONS$/ { found=1 } found { print }')
+  assert_contains "$out" "$POST_COMPACT_LINE" "owned primary omitted the post-compact instruction"
+  assert_contains "$contradictions" "backlog-without-meta (1): missing-meta(state=in_flight)" \
+    "post-compact re-anchor omitted the contradiction section"
   [ ! -e "$root/state/session-start-ran" ] \
     || fail "post-compact nudge ran fm-session-start.sh instead of staying read-only"
-  pass "fm-sessionstart-nudge: an owned primary gets the bounded read-only post-compact re-anchor"
+  after=$(find "$root" -type f -print0 | sort -z | xargs -0 shasum -a 256)
+  [ "$before" = "$after" ] || fail "post-compact contradiction refresh mutated the primary home"
+
+  rm -f "$root/data/backlog.md"
+  out=$(run_nudge "$root" post-compact) || status=$?
+  expect_code 0 "$status" "consistent owned primary post-compact nudge"
+  [ "$out" = "$POST_COMPACT_LINE" ] \
+    || fail "consistent post-compact records must keep the contradiction section silent: $out"
+  pass "fm-sessionstart-nudge: post-compact prints only contradictions without mutating the home"
 }
 
 test_unknown_mode_is_silent() {
@@ -144,7 +162,9 @@ test_claude_compact_hook_delivers_post_compact_reanchor() {
   make_primary "$root"
   mkdir -p "$root/.claude"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-pr-lib.sh" \
+    "$ROOT/bin/fm-record-contradictions-lib.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   printf '%s\n' "$$" > "$root/state/.lock"
   command=$(jq -r \
@@ -153,8 +173,7 @@ test_claude_compact_hook_delivers_post_compact_reanchor() {
   [ -n "$command" ] || fail "Claude compact SessionStart hook is not registered"
   out=$(CLAUDE_PROJECT_DIR="$root" sh -c "$command") || status=$?
   expect_code 0 "$status" "Claude compact hook"
-  [ "$out" = "$POST_COMPACT_LINE" ] \
-    || fail "Claude compact hook printed unexpected output: $out"
+  assert_contains "$out" "$POST_COMPACT_LINE" "Claude compact hook omitted the post-compact re-anchor"
   pass "Claude compact SessionStart hook delivers the exact post-compact re-anchor"
 }
 
@@ -162,7 +181,9 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-pr-lib.sh" \
+    "$ROOT/bin/fm-record-contradictions-lib.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'

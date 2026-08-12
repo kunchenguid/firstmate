@@ -7,6 +7,8 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 
 The same wrapper also accepts `post-compact` and emits one `post-compact` instruction after a supported harness compacts context.
 That instruction tells the agent to re-read `data/captain.md`, `data/captain-shared.md`, `data/learnings.md`, and active `state/*.meta` files before further action.
+The wrapper also appends the same bounded `RECORD CONTRADICTIONS` section as session start when backlog, metadata, last status events, endpoint liveness, recorded pull-request reality, or old orphan status logs disagree.
+It prints no contradiction heading or healthy row when those records agree.
 It explicitly forbids running `bin/fm-session-start.sh`, and the wrapper itself performs no fleet mutation.
 The existing operational-input sentence in AGENTS.md section 8 is the always-loaded trust and required-handling owner for this kind, while this document owns its transport mechanics and compatibility limits.
 
@@ -44,7 +46,7 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
-It also executes the tracked Claude `compact` hook command and proves exact `post-compact` output, read-only behavior, owned-lock delivery, and fail-open handling of an unknown wrapper mode.
+It also executes the tracked Claude `compact` hook command and proves `post-compact` contradiction output, consistent-record silence, mutation-free behavior, owned-lock delivery, and fail-open handling of an unknown wrapper mode.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
 
