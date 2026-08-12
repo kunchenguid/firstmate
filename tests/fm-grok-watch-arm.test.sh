@@ -112,6 +112,62 @@ SH
   pass "arm failure completes the Grok task loudly"
 }
 
+test_output_overflow_retires_child_and_fails_once() {
+  local home arm out status child failure
+  home=$(make_home output-overflow)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/overflow-child-pid"
+trap 'exit 143' TERM
+while :; do printf '0123456789abcdef0123456789abcdef\n'; done
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 "$OWNER" > "$out" 2>&1
+  status=$?
+  expect_code 1 "$status" "output overflow must fail the Grok tracked task"
+  child=$(cat "$home/state/overflow-child-pid")
+  kill -0 "$child" 2>/dev/null && fail "output overflow left the arm child alive"
+  failure='watcher: FAILED - Grok continuity arm output exceeded 128 bytes'
+  [ "$(grep -cF "$failure" "$out")" -eq 1 ] || fail "same-owner overflow failure was not emitted exactly once"
+  pass "bounded output overflow retires the child and fails once"
+}
+
+test_transferred_output_overflow_queues_once() {
+  local home arm out pid child failure
+  home=$(make_home transferred-output-overflow)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/overflow-child-pid"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "$FM_HOME/state/release-overflow" ]; do sleep 0.05; done
+trap 'exit 143' TERM
+while :; do printf '0123456789abcdef0123456789abcdef\n'; done
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/overflow-child-pid" || fail "transferred overflow child did not start"
+  : > "$home/state/.afk"
+  : > "$home/state/release-overflow"
+  wait_for_file "$home/state/.wake-queue" || fail "transferred overflow failure was not queued"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "transferred overflow completed the old Grok task"
+  child=$(cat "$home/state/overflow-child-pid")
+  kill -0 "$child" 2>/dev/null && fail "transferred overflow left the arm child alive"
+  failure='watcher: FAILED - Grok continuity arm output exceeded 128 bytes'
+  [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "transferred overflow failure was not queued exactly once"
+  assert_not_contains "$(cat "$out")" "$failure" "old owner emitted transferred overflow failure"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "transferred bounded overflow queues once without completing"
+}
+
 test_open_decision_completes_without_queue_row() {
   local home arm out
   home=$(make_home open-decision)
@@ -574,6 +630,8 @@ SH
 
 test_empty_close_rearms_without_completing_grok_task
 test_failure_completes_loudly
+test_output_overflow_retires_child_and_fails_once
+test_transferred_output_overflow_queues_once
 test_open_decision_completes_without_queue_row
 test_pending_recovery_completes_without_queue_row
 test_malformed_recovery_fails_closed

@@ -17,8 +17,9 @@
 # Losing any of those conditions leaves this tracked task dormant instead of
 # mutating fleet state or completing an empty task.
 #
-# FM_GROK_WATCH_ARM_SCRIPT and FM_GROK_WATCH_IDLE_POLL are deterministic test
-# seams. Production uses the sibling fm-watch-arm.sh and a one-second idle poll.
+# FM_GROK_WATCH_ARM_SCRIPT, FM_GROK_WATCH_IDLE_POLL, and
+# FM_GROK_WATCH_OUTPUT_MAX_BYTES are deterministic test seams. Production uses
+# the sibling fm-watch-arm.sh, a one-second idle poll, and a 65536-byte cap.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +28,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ARM="${FM_GROK_WATCH_ARM_SCRIPT:-$SCRIPT_DIR/fm-watch-arm.sh}"
 IDLE_POLL=${FM_GROK_WATCH_IDLE_POLL:-1}
+OUTPUT_MAX_BYTES=${FM_GROK_WATCH_OUTPUT_MAX_BYTES:-65536}
 RECOVERY_MARKER="$STATE/.watcher-down"
+
+case "$OUTPUT_MAX_BYTES" in
+  ''|*[!0-9]*|0)
+    echo 'watcher: FAILED - Grok continuity output cap must be a positive integer'
+    exit 1
+    ;;
+esac
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -163,28 +172,45 @@ while :; do
     echo 'watcher: FAILED - Grok continuity could not create its arm output stream'
     exit 1
   }
-  : > "$stream_dir/output"
   : > "$stream_dir/terminal"
+  : > "$stream_dir/overflow"
 
-  while IFS= read -r line; do
-    printf '%s\n' "$line" >> "$stream_dir/output"
-    case "$line" in
-      'watcher: started '*|'watcher: attached '*) printf '%s\n' "$line" ;;
-      *) printf '%s\n' "$line" >> "$stream_dir/terminal" ;;
-    esac
-  done < "$stream_dir/stream" &
-  reader=$!
   "$ARM" > "$stream_dir/stream" 2>&1 &
   child=$!
+  (
+    LC_ALL=C
+    captured=0
+    overflowed=0
+    while IFS= read -r line; do
+      bytes=$((${#line} + 1))
+      if [ "$overflowed" -eq 0 ] && [ $((captured + bytes)) -gt "$OUTPUT_MAX_BYTES" ]; then
+        overflowed=1
+        printf 'watcher: FAILED - Grok continuity arm output exceeded %s bytes\n' "$OUTPUT_MAX_BYTES" > "$stream_dir/overflow"
+        kill -TERM "$child" 2>/dev/null || true
+        continue
+      fi
+      [ "$overflowed" -eq 0 ] || continue
+      captured=$((captured + bytes))
+      case "$line" in
+        'watcher: started '*|'watcher: attached '*) printf '%s\n' "$line" ;;
+        *) printf '%s\n' "$line" >> "$stream_dir/terminal" ;;
+      esac
+    done < "$stream_dir/stream"
+  ) &
+  reader=$!
   wait "$child"
   rc=$?
   child=
   wait "$reader" 2>/dev/null || true
   reader=
 
-  if [ "$rc" -ne 0 ] || grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
+  if [ -s "$stream_dir/overflow" ]; then
+    rc=1
+    completion_failure=$(cat "$stream_dir/overflow")
+    completion_rc=1
+  elif [ "$rc" -ne 0 ] || grep -q '^watcher: FAILED' "$stream_dir/terminal" 2>/dev/null; then
     if [ "$rc" -eq 0 ]; then rc=1; fi
-    completion_failure=$(grep -m 1 '^watcher: FAILED' "$stream_dir/output" 2>/dev/null || true)
+    completion_failure=$(grep -m 1 '^watcher: FAILED' "$stream_dir/terminal" 2>/dev/null || true)
     if [ -z "$completion_failure" ]; then
       completion_failure="watcher: FAILED - Grok continuity arm exited $rc"
     fi
