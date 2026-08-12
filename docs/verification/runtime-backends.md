@@ -16,9 +16,12 @@ readlink .claude/skills
 codex exec --ephemeral -C "$PWD" -s read-only -m gpt-5.6-luna \
   '$harness-handoff Do not use tools or inspect the filesystem. Return exactly INVOKED followed by the first two sentences in the skill body under its title.'
 claude -p --model haiku --effort low --no-session-persistence \
-  --disallowedTools 'Bash,Read,Glob,Grep' -- \
-  'Use the harness-handoff skill. Do not use tools or inspect the filesystem. Return exactly INVOKED followed by the first two sentences in the skill body under its title.'
+  --disallowedTools 'Bash,Read,Glob,Grep,WebFetch,WebSearch' -- \
+  'Invoke the harness-handoff skill with the Skill tool. Use no other tool and do not inspect the filesystem. Then return exactly INVOKED followed by the first two sentences in the skill body under its title.'
 ```
+
+Name the Skill tool explicitly in the Claude probe.
+A prompt that says "use the skill" while forbidding all tools reads as self-contradictory, and Claude answers by asking which constraint wins instead of resolving the skill, so that phrasing does not reproduce.
 
 Observed output:
 
