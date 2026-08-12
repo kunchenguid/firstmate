@@ -40,7 +40,8 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
+#                       every state/*.meta, a bounded state/*.status tail, one
+#                       bounded line of checks without matching task metadata,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
@@ -109,11 +110,16 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
 case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
+STANDING_CHECK_LIMIT=20
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -223,6 +229,57 @@ print_status_tail() {
   local status=$1
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
   tail -n "$STATUS_TAIL" "$status"
+}
+
+file_mtime_epoch() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+compact_age() {
+  local path=$1 now mtime seconds
+  now=$(date +%s)
+  mtime=$(file_mtime_epoch "$path") || { printf 'unknown'; return; }
+  seconds=$((now - mtime))
+  [ "$seconds" -ge 0 ] || seconds=0
+  if [ "$seconds" -ge 86400 ]; then
+    printf '%sd' "$((seconds / 86400))"
+  elif [ "$seconds" -ge 3600 ]; then
+    printf '%sh' "$((seconds / 3600))"
+  elif [ "$seconds" -ge 60 ]; then
+    printf '%sm' "$((seconds / 60))"
+  else
+    printf '%ss' "$seconds"
+  fi
+}
+
+first_check_comment() {
+  local check=$1 comment
+  comment=$(LC_ALL=C awk '/^#[[:space:]]/ { sub(/^#[[:space:]]*/, ""); print; exit }' "$check" 2>/dev/null)
+  [ -n "$comment" ] || comment='no comment'
+  printf '%s' "$comment" | LC_ALL=C cut -c 1-80
+}
+
+print_standing_check_inventory() {
+  local check id age comment shown=0 total=0 entries=''
+  for check in "$STATE"/*.check.sh; do
+    [ -f "$check" ] && [ ! -L "$check" ] || continue
+    id=$(basename "$check" .check.sh)
+    [ "$id" != x-watch ] || continue
+    [ ! -f "$STATE/$id.meta" ] || continue
+    fm_custom_check_registered "$STATE" "$id" || continue
+    total=$((total + 1))
+    [ "$shown" -lt "$STANDING_CHECK_LIMIT" ] || continue
+    age=$(compact_age "$check")
+    comment=$(first_check_comment "$check")
+    [ -z "$entries" ] || entries="$entries; "
+    entries="$entries$id [age=$age; comment=$comment]"
+    shown=$((shown + 1))
+  done
+  [ "$total" -gt 0 ] || return 0
+  if [ "$total" -gt "$shown" ]; then
+    entries="$entries; +$((total - shown)) more"
+  fi
+  printf 'Standing checks without task metadata: %s\n' "$entries"
 }
 
 hash_file() {
@@ -386,6 +443,8 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+
+print_standing_check_inventory
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0

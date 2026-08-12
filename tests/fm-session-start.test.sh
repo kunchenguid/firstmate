@@ -624,6 +624,8 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  printf '#!/usr/bin/env bash\n# Unbound checks are not armed.\n' > "$home/state/unbound.check.sh"
+  chmod 0700 "$home/state/unbound.check.sh"
 
   # A live secondmate meta with a window pointed at nothing real - if the
   # bootstrap sweep's secondmate_sync ran (a MUTATING step), it would try to
@@ -640,11 +642,13 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
 
   status=0
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2> "$home/session.err") || status=$?
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
+  assert_not_contains "$(cat "$home/session.err")" "command not found" \
+    "standing-check validation loaded without its PR-validation dependency"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
@@ -672,6 +676,8 @@ EOF
 
   # The rest of the digest (read-only-safe) still completed.
   assert_contains "$out" "FLEET STATE" "fleet-state digest section missing on the read-only path"
+  assert_not_contains "$out" "Standing checks without task metadata:" \
+    "read-only inventory included an unarmed check"
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
@@ -1247,6 +1253,60 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_fleet_digest_lists_bounded_standing_checks() {
+  local rec root home fakebin out line count id
+  rec=$(new_world standing-checks)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  id=1
+  while [ "$id" -le 22 ]; do
+    printf -v monitor 'standing-%02d' "$id"
+    cat > "$home/state/$monitor.check.sh" <<'SH'
+#!/usr/bin/env bash
+# Watch a finite subject whose terminal state retires this monitor.
+exit 0
+SH
+    chmod 0700 "$home/state/$monitor.check.sh"
+    FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" "$monitor" >/dev/null \
+      || fail "could not register standing-check fixture $monitor"
+    id=$((id + 1))
+  done
+  perl -e 'my $t = time() - 172800; utime $t, $t, @ARGV' "$home/state/standing-01.check.sh"
+
+  cat > "$home/state/task-bound.check.sh" <<'SH'
+#!/usr/bin/env bash
+# A task-bound monitor must stay out of the standing inventory.
+exit 0
+SH
+  chmod 0700 "$home/state/task-bound.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" task-bound >/dev/null \
+    || fail "could not register task-bound fixture"
+  printf 'kind=ship\n' > "$home/state/task-bound.meta"
+  printf '#!/usr/bin/env bash\n# Relay-owned shim.\n' > "$home/state/x-watch.check.sh"
+  chmod 0700 "$home/state/x-watch.check.sh"
+  printf '#!/usr/bin/env bash\n# Unbound checks are not armed.\n' > "$home/state/unbound.check.sh"
+  chmod 0700 "$home/state/unbound.check.sh"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  line=$(printf '%s\n' "$out" | sed -n '/^Standing checks without task metadata:/p')
+  count=$(printf '%s\n' "$line" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$count" -eq 1 ] || fail "standing-check inventory was not exactly one line: $out"
+  assert_contains "$line" 'standing-01 [age=2d; comment=Watch a finite subject whose terminal state retires this monitor.]' \
+    "standing-check inventory omitted id, age, or first comment"
+  assert_contains "$line" 'standing-20 [' "standing-check inventory truncated before its declared bound"
+  assert_contains "$line" '+2 more' "standing-check inventory did not report entries beyond its bound"
+  assert_not_contains "$line" 'standing-21 [' "standing-check inventory exceeded its entry bound"
+  assert_not_contains "$line" 'task-bound' "standing-check inventory included a task-backed check"
+  assert_not_contains "$line" 'x-watch' "standing-check inventory included the relay-owned shim"
+  assert_not_contains "$line" 'unbound' "standing-check inventory included an unarmed check"
+
+  pass "fleet digest lists standing checks once with bounded id, age, and comment detail"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -1464,6 +1524,7 @@ test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_fleet_digest_lists_bounded_standing_checks
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
