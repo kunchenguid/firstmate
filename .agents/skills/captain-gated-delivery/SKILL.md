@@ -11,10 +11,10 @@ metadata:
 # captain-gated-delivery
 
 This skill is the single owner of the captain-gated delivery workflow: its default sequence, the review-lens definitions, validation timing, and the simple-ship acceleration this workflow nests inside it.
-`AGENTS.md` section 7 carries only the always-loaded one-paragraph summary and this skill's trigger; every procedural detail lives here.
+`AGENTS.md` section 7 carries the always-loaded synopsis and validation-timing handoff, while section 13 carries this skill's trigger; this skill owns the complete procedure.
 Origin and rationale: `data/fm-simple-ship-velocity/captain-gated-delivery-and-simple-ship-2026-08-11.md` and `data/bp-wireframe-speed-postmortem/` - historical record, not a second copy of the current contract.
 
-The goal is captain judgment without captain supervision: firstmate owns routing, implementation, routine decisions, evidence production, and validation, while the captain participates at exactly two judgment gates.
+The goal is captain judgment without captain supervision: firstmate owns routing, implementation, routine decisions, evidence production, and validation, while captain product judgment occurs at the applicable plan and deliverable gates and the existing merge authority stays unchanged.
 
 ## Default workflow
 
@@ -70,7 +70,7 @@ Validation has two stages:
 - **Ship readiness** - the selected delivery mode's full readiness stage, normally run after the captain accepts the deliverable (step 6).
 
 This ordering avoids repeatedly paying for full validation while product feedback is still changing the work.
-It does not weaken safety requirements, CI, external review, or merge authority: the bars that stay untouched are full review for product-facing UI, browser or equivalent regressions with evidence for visual changes, never merging red, and captain ownership of the merge.
+It does not weaken safety requirements, CI, external review, or merge authority: the bars that stay untouched are full review for product-facing UI, browser or equivalent regressions with evidence for visual changes, never merging red, and the configured merge authority.
 Start the selected readiness stage earlier than step 6 when risk warrants it - this ordering is a default, not a rule that overrides judgment about genuine risk.
 
 ## Simple-ship acceleration
@@ -94,8 +94,7 @@ This workflow is what makes that authority standing rather than a per-project op
 CI and external review remain independent backstops.
 Use this operating pattern before adding deeper no-mistakes automation; change the pipeline only when repeated use demonstrates a specific gap.
 
-**Decision-key grammar** - workers open decisions as `needs-decision [key=<slug>]: <summary>` and close them as `resolved [key=<slug>]: <how>`, key before the colon.
-`bin/fm-brief.sh` emits this form and `bin/fm-classify-lib.sh` owns extraction (including tolerating a mis-ordered legacy key found in the note); this skill only points at that contract, it does not restate it.
+**Decision-key grammar** - `bin/fm-brief.sh` owns the worker-facing instructions and emitted examples, while `bin/fm-classify-lib.sh` owns extraction, including tolerance for a mis-ordered legacy key found in the note.
 
 **Scan-complete briefs** - parity briefs define the remedy family with a scan instruction instead of treating an enumerated site list as the scope boundary: what pattern or language to search for, what treatment to apply, and the exhaustive done condition.
 Known sites may be included as examples, but they do not limit the scan.

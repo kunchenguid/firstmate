@@ -317,7 +317,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
-With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.
+With `yolo` off, the captain owns ask-user findings except where the standing simple-ship parity authority in `ask-user-authority` applies, and owns PR merges and local-only merge approval.
 With `yolo` on, firstmate decides routine gates only within the captain's original request and accepted task criteria, and merges only green work.
 Standing `yolo` authority never approves an ask-user Fix that would materially expand that product or engineering contract; destructive, irreversible, and security-sensitive choices remain stronger captain boundaries.
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
@@ -341,7 +341,7 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
-An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
+An ask-user finding returns as `needs-decision`; firstmate decides only when the applicable configured or standing authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
