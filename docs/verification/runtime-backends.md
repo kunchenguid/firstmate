@@ -732,3 +732,114 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Cursor Agent CLI
+
+Cursor is a crewmate/scout adapter only; a `--secondmate` launch is refused.
+The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`.
+
+- Binary: `~/.local/bin/cursor-agent`, canonicalizing into `~/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent`.
+- Version: `cursor-agent --version` reported `2026.08.11-e8db854`, and `cursor-agent status` reported a logged-in account.
+- Both installed names, `cursor-agent` and the legacy alias `agent`, resolve into that same versioned install tree.
+
+Resolution prints the STABLE launcher rather than the canonical target, because the canonical path carries a version the CLI replaces on its own auto-update.
+
+### Process identity
+
+`#{pane_current_command}` and `ps -o comm=` disagree for cursor, which is why identity reads both:
+
+| Source | Observed value |
+| --- | --- |
+| `#{pane_current_command}` | `node` |
+| `ps -o comm=` | `/Users/<user>/.local/bin/cursor-agent` |
+| child argv | `.../bin/cursor-agent --use-system-ca .../versions/2026.08.11-e8db854/index.js --trust --yolo` |
+
+`node` matches no harness name pattern, so a cursor pane is identified from Cursor's own name or install tree in the path or argv[0].
+An unrelated `node` or `agent` matches neither and classifies `other`, which the liveness callers fold into `ambiguous` rather than `dead`.
+A live cursor pane returned `alive`; a plain shell pane in the same run returned `dead`.
+
+### Environment markers and detection ordering
+
+Read from the live agent process and from a tool subprocess it spawned:
+
+| Marker | Where observed |
+| --- | --- |
+| `CURSOR_INVOKED_AS=cursor-agent` | the agent process itself, and its children |
+| `CURSOR_AGENT=1` | child/tool processes only |
+| `CURSOR_CONVERSATION_ID=<uuid>` | child/tool processes |
+| `AGENT_TRANSCRIPTS=<projects-root>/<slug>/agent-transcripts` | child/tool processes |
+
+Cursor does not clear an inherited `CLAUDECODE`, so ordering decides the verdict.
+With both markers set, `bin/fm-harness.sh` reports `cursor`; with `CLAUDECODE` alone it still reports `claude`.
+
+### Composer
+
+Cursor's composer is a BARE row whose prompt glyph is `→` (U+2192); there is no border.
+Its idle placeholder is `Plan, search, build anything` in a fresh session and `Add a follow-up` after a completed turn.
+
+The styled capture of an idle composer row was:
+
+```
+ESC[48;2;21;21;21m ESC[2m→ ESC[0;7mESC[48;2;21;21;21mPESC[0;2mESC[48;2;21;21;21mlan, search, build anythingESC[0m
+```
+
+The glyph and the placeholder tail are dim (SGR 2), but the cell under the terminal cursor is reverse video (SGR 0;7).
+Reverse video is neither dim nor a dark foreground, so ghost stripping leaves a lone `P` and an idle composer read `pending` before the fix.
+After teaching the shared classifier the glyph, both placeholders, and the plain-row remnant rule, the same captures read `empty` on the styled cursorless backends, while real typed text - including text typed to exactly match the placeholder - still read `pending`.
+An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
+
+**Cursor parks its terminal cursor outside its composer.**
+With the composer on row 12 (zero-based), `#{cursor_y}` reported 17 both when idle and with real text typed, and `#{cursor_flag}` reported 0.
+The tmux composer verdict for a cursor pane is therefore `unknown` in every state, and submission is acknowledged from the busy transition instead.
+Claude and Codex were checked in the same run and are unaffected: their settled composers report `cursor_flag=1` and classify `empty`.
+
+### Busy state
+
+Cursor writes a per-conversation transcript at `<projects-root>/<workspace-slug>/agent-transcripts/<conversation-id>/<conversation-id>.jsonl`.
+Each turn is bracketed by a `role:user` open and a typed `{"type":"turn_ended","status":...}` close.
+Observed closes: `success` for a completed turn, and `aborted` with `"error":"User aborted/interrupted manually."` after a single Escape.
+
+The trailing close landed 0 seconds after the pane's busy footer cleared on a normal turn.
+The transcript does NOT accumulate one close per turn, so a count of closes is not a progress signal; only the trailing record is.
+After an interrupt the aborted close was observed within seconds in some runs and not within twenty seconds in others, so `bin/fm-control-lib.sh` deliberately claims no cancellation acknowledgement for cursor.
+
+Binding never reconstructs cursor's workspace-slug directory name, which collapses path separators.
+Cursor records the exact absolute workspace path in each project directory's `.workspace-trusted`, and the binding matches on that value.
+
+### Rendered busy token, delivery only
+
+Mid-turn the pane showed a braille spinner plus a verb, and `ctrl+c to stop` on the composer row; both the verb line and that token were absent the instant the turn ended.
+The same version rendered `Working` in one turn and `Running` in the next, so the TOKEN is matched and the verb is not.
+This row is a delivery guard for submit acknowledgement only; recorded worker state comes from the transcript fold.
+
+### Launch, lifecycle, and skills
+
+| Fact | Observed |
+| --- | --- |
+| Workspace trust | `--trust` suppressed the prompt; `--yolo` alone did NOT, and the prompt blocks a fresh worktree |
+| Autonomy | `--yolo` (alias of `--force`); the footer renders `Run Everything` |
+| Worktree | `-w/--worktree` allocates a SECOND worktree under `~/.cursor/worktrees` and is never passed |
+| Effort | no effort flag exists; requested effort stays in task metadata |
+| Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
+| Exit | `/exit` |
+| Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
+| Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
+
+### End-to-end
+
+A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
+
+1. the launch delivered its brief positionally and the agent executed it;
+2. `state/<id>.cursor-session` was written with the task worktree;
+3. the transcript fold read `busy` mid-turn and `idle` after it;
+4. `bin/fm-send.sh` delivered a steer and exited 0;
+5. `bin/fm-control.sh <id> interrupt` cancelled a running turn;
+6. `bin/fm-control.sh <id> exit` stopped the agent;
+7. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record.
+
+The portable regression is `tests/fm-cursor-harness.test.sh`, and the composer captures are pinned in `tests/fm-composer-lib.test.sh`.
+Refresh this harness-dependent proof before accepting a cursor upgrade:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT_LIVE=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
