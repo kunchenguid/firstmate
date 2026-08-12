@@ -435,6 +435,15 @@ fm_worker_primary_origin_proven() {
   fm_worker_primary_attestation_matches "$root_real"
 }
 
+fm_worker_primary_session_entry_proven() {
+  local root root_real
+  fm_worker_primary_bootstrap_proven || return 1
+  root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  root_real=$(fm_worker_canonical_path "$root") || return 1
+  fm_worker_primary_attestation_matches "$root_real" && return 0
+  fm_verified_harness_ancestry_pid >/dev/null 2>&1
+}
+
 fm_worker_identity_is_complete() {
   local effective_home owner var value expected
   case "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" in
@@ -524,7 +533,7 @@ fm_worker_refuse_unproven_session_entry() {
     fm_worker_refuse_declared_task_worker "$operation"
     return $?
   fi
-  fm_worker_primary_bootstrap_proven && return 0
+  fm_worker_primary_session_entry_proven && return 0
   echo "error: $operation refused: this process is task worker '${_FM_WORKER_INITIAL_AGENT_TASK:-unnamed}' launched by ${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
   return 1
 }

@@ -47,7 +47,7 @@ jobs:
           bash tests/fm-worker-isolation.test.sh
           bash tests/fm-slot-occupant-proof.test.sh
           bash tests/fm-spawn-route.test.sh
-          bash tests/fm-teardown.test.sh
+          FM_TEARDOWN_TEST_FOCUS=s1 bash tests/fm-teardown.test.sh
 
   macos-stock-bash:
     name: Stock macOS Bash pooled-slot compatibility

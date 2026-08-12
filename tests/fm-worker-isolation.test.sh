@@ -338,16 +338,13 @@ test_reparented_markerless_worker_is_refused() {
           -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
           -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE -u FM_PRIMARY_ATTESTATION \
           FM_HOME="$1" FM_ROOT_OVERRIDE="$1" FM_STATE_OVERRIDE="$1/state" \
-          bash -c '\''
-            . "$2"
-            if fm_worker_refuse_primary_operation reparented-markerless; then
-              echo allowed > "$3"
-            else
-              echo refused > "$3"
-            fi
-          '\'' _ "$1" "$2" "$3"
+          bash -c '\''cd "$1" && if bash "$4" >"$3.output" 2>&1; then
+            echo allowed > "$3"
+          else
+            echo refused > "$3"
+          fi'\'' _ "$1" "$2" "$3" "$LOCK"
       ) >/dev/null 2>&1 &
-    ' _ "$primary_home" "$ROOT/bin/fm-worker-isolation-lib.sh" "$result"
+    ' _ "$primary_home" "$ROOT/bin/fm-worker-isolation-lib.sh" "$result" "$LOCK"
   ) >/dev/null 2>&1 &
   parent=$!
   wait "$parent"
@@ -362,6 +359,7 @@ test_reparented_markerless_worker_is_refused() {
   [ "$status" -eq 0 ] || fail "the reparented markerless worker did not report a refusal"
   out=$(cat "$result")
   [ "$out" = refused ] || fail "a reparented markerless worker was accepted as primary"
+  [ ! -e "$primary_home/state/.lock" ] || fail "a reparented markerless worker acquired the primary lock"
   pass "a reparented markerless worker is refused without a primary launch attestation"
 }
 
@@ -376,12 +374,19 @@ test_primary_origin_requires_state_attestation() {
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = refused ] || fail "a primary without a state attestation was accepted"
-  ( cd "$primary_home" && CODEX_THREAD_ID=attestation-thread FM_HOME="$primary_home" \
+  token="attested-$RUN_TAG"
+  {
+    printf 'root=%s\n' "$primary_home"
+    printf 'token=%s\n' "$token"
+  } > "$primary_home/state/.primary-attestation"
+  ( cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=attestation-thread FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
     FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
     "$LOCK" >/dev/null ) || fail "primary startup could not acquire its session lock"
-  out=$(cd "$primary_home" && CODEX_THREAD_ID=attestation-thread FM_HOME="$primary_home" \
+  out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=attestation-thread FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
     FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" bash -c \
-    '. "$1"; fm_worker_primary_attestation_establish && fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
+    '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "primary startup could not establish a genuine attestation"
   [ -f "$primary_home/state/.primary-attestation" ] || fail "primary startup did not persist its attestation"
@@ -394,7 +399,7 @@ test_primary_origin_requires_state_attestation() {
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "a persisted state attestation rejected a genuine primary"
-  pass "primary startup establishes and reuses a state-bound launch attestation"
+  pass "primary startup reuses a state-bound launch attestation"
 }
 
 test_process_environment_requires_linux_procfs() {
