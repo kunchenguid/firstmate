@@ -419,21 +419,56 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
+test_codex_threads_max_reasoning_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with max effort should pass the reasoning effort config"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread model_reasoning_effort=max"
+  pass "codex threads max via model_reasoning_effort when explicitly requested"
+}
+
+test_codex_scout_keeps_luna_low_reasoning_effort() {
+  local rec id out status launch
+  id=profile-codex-scout-low-z4a
+  rec=$(make_spawn_case profile-codex-scout-low codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --scout --harness codex --model gpt-5.6-luna --effort low)
+  status=$?
+  expect_code 0 "$status" "codex scout with Luna low effort should succeed"
+  assert_contains "$out" "spawned $id harness=codex kind=scout" "scout spawn did not preserve kind=scout"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna low
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "scout metadata omitted kind=scout"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"low\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex scout did not emit Luna low reasoning effort"
+  pass "codex scouts keep the explicit gpt-5.6-luna low reasoning profile"
+}
+
+test_codex_omits_unverified_max_reasoning_effort() {
+  local rec id out status launch
+  id=profile-codex-max-unverified-z4b
+  rec=$(make_spawn_case profile-codex-max-unverified codex "$id")
+  read_case_record "$rec"
+
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
+  expect_code 0 "$status" "codex spawn with unverified max effort should omit the reasoning effort config"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+    "codex launch did not preserve the model flag when unverified max was omitted"
+  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unverified max reasoning effort"
+  pass "codex omits max for models without verified support"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -736,7 +771,9 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_reasoning_effort
+test_codex_scout_keeps_luna_low_reasoning_effort
+test_codex_omits_unverified_max_reasoning_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
