@@ -56,7 +56,7 @@ SH
 set -u
 case "${1:-}" in
   list-windows)
-    printf '%s\n' fm-decision-task fm-review-task fm-stuck-pr
+    printf '%s\n' fm-decision-task fm-review-task fm-stuck-pr fm-mm-alpha fm-zz-zulu
     ;;
   display-message)
     case "$*" in
@@ -73,16 +73,40 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = "search" ]; then
+  printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-20T00:00:00Z","number":930,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Tile cache manual validation required and outstanding","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/930"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-31T00:00:00Z","number":912,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Payment refactor","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/912"}]'
+  exit 0
+fi
+if [ "${1:-}" = "api" ]; then
+  case " $* " in
+    *" user "*)
+      printf 'pedromuller-del\n'
+      ;;
+    *" repos/monalee/artemis/issues/930/timeline "*)
+      printf '[{"event":"review_requested","created_at":"2026-07-20T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      ;;
+    *" repos/monalee/artemis/issues/912/timeline "*)
+      printf '[{"event":"review_requested","created_at":"2026-07-31T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      ;;
+    *)
+      printf '[]'
+      ;;
+  esac
+  exit 0
+fi
 url=${3:-}
 case "$url" in
   *pull/4001*)
-    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"reviewer-one"},"state":"CHANGES_REQUESTED"}],"reviewRequests":[]}'
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"reviewer-one"},"state":"CHANGES_REQUESTED","submittedAt":"2026-08-01T01:00:00Z"},{"author":{"login":"reviewer-two"},"state":"CHANGES_REQUESTED","submittedAt":"2026-08-01T02:00:00Z"},{"author":{"login":"reviewer-one"},"state":"APPROVED","submittedAt":"2026-08-01T03:00:00Z"}],"reviewRequests":[]}'
     ;;
   *pull/4004*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}],"reviews":[],"reviewRequests":[{"login":"local-reviewer"}]}'
     ;;
-  *pull/912*|*pull/930*|*pull/4188*)
-    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
+  *pull/930*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[{"login":"pedromuller-del"}],"headRefOid":"d4d4d4d"}'
+    ;;
+  *pull/912*|*pull/4188*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
     ;;
   *pull/888*|*pull/999*)
     printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
@@ -93,7 +117,11 @@ case "$url" in
     ;;
 esac
 SH
-  chmod +x "$fakebin/no-mistakes" "$fakebin/tmux" "$fakebin/gh"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '{"generatedAt":"2026-08-02T00:05:01Z","providers":[{"provider":"codex","label":"Codex","windows":[{"id":"weekly","label":"week","percentRemaining":73,"resetsAt":"2026-08-09T00:00:00Z"}],"state":{"status":"fresh"}}]}'
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/tmux" "$fakebin/gh" "$fakebin/quota-axi"
   printf '%s\n' "$fakebin"
 }
 
@@ -150,7 +178,7 @@ EOF
   fm_write_meta "$home/state/decision-task.meta" \
     "window=firstmate:fm-decision-task" \
     "worktree=$home/projects/decision" \
-    "project=firstmate" \
+    "project=$home/projects/firstmate" \
     "harness=claude" \
     "kind=ship" \
     "mode=ship" \
@@ -240,22 +268,28 @@ line_number_of() {  # <haystack> <needle>
   printf '%s\n' "$1" | grep -n -F "$2" | head -1 | cut -d: -f1
 }
 
-test_cockpit_shows_exactly_three_sections() {
-  local home fakebin out decisions ours theirs decide hold_blocking hold_oldest total_lines pr_num pr_shown review_num review_shown
+test_cockpit_shows_action_sections_and_full_inventory() {
+  local home fakebin out decisions ours obligations theirs decide hold_blocking hold_oldest total_lines pr_num pr_shown review_num review_shown
   home=$(make_home three)
   write_live_fixture "$home"
+  awk -v repo="(repo: $home/projects/firstmate)" \
+    'NR == 2 { sub(/\(repo: firstmate\)/, repo) } { print }' \
+    "$home/data/backlog.md" > "$home/data/backlog.md.tmp"
+  mv "$home/data/backlog.md.tmp" "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home")
 
-  out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
+  out=$(render_terminal "$home" "$fakebin" --width 100 --all) || fail "terminal render failed"
 
   decisions=$(line_number_of "$out" "DECISIONS (6)")
   ours=$(line_number_of "$out" "OUR PRS IN REVIEW (4)")
+  obligations=$(line_number_of "$out" "REVIEWS WAITING ON PEDRO (2)")
   theirs=$(line_number_of "$out" "REVIEWING (3)")
   [ -n "$decisions" ] || fail "no DECISIONS section counting all three items"
   [ -n "$ours" ] || fail "no OUR PRS IN REVIEW section"
+  [ -n "$obligations" ] || fail "no requested-review obligation section"
   [ -n "$theirs" ] || fail "no REVIEWING section"
-  { [ "$decisions" -lt "$ours" ] && [ "$ours" -lt "$theirs" ]; } \
-    || fail "sections are not ordered decisions, ours, reviewing"
+  { [ "$decisions" -lt "$ours" ] && [ "$ours" -lt "$obligations" ] && [ "$obligations" -lt "$theirs" ]; } \
+    || fail "sections are not ordered decisions, ours, obligations, reviewing"
   assert_not_contains "$out" "UNDERWAY (" "a retired section is still rendered"
   assert_not_contains "$out" "UNHEALTHY (" "a retired section is still rendered"
   assert_not_contains "$out" "QUEUED (" "a retired section is still rendered"
@@ -268,19 +302,23 @@ test_cockpit_shows_exactly_three_sections() {
     || fail "a decision item is missing from the section"
   { [ "$decide" -lt "$hold_blocking" ] && [ "$hold_blocking" -lt "$hold_oldest" ]; } \
     || fail "importance order is broken: live ask, then delivery-blocking hold, then oldest"
-  assert_contains "$out" " 1 d:api-shape ◆ Decide the public API" \
+  assert_contains "$out" " 1 d:decision-task-api~" \
     "rows do not colocate their position, stable id, marker, and title"
 
   assert_contains "$out" "PR 4002" "a current ship task in the PR stage was silently dropped"
   assert_contains "$out" "PR 4002 | local checks unknown | readiness unknown (unregistered)" \
     "an unregistered PR row implied established checks or readiness"
+  assert_contains "$out" "project artemis" "mixed-project full inventory lacks an Artemis separator"
+  assert_contains "$out" "project firstmate" "mixed-project full inventory lacks an internal-project separator"
+  assert_not_contains "$out" "$home/projects/firstmate" \
+    "an absolute project path leaked into the shareable cockpit"
   assert_contains "$out" "github status checked just now" "github data age is not printed"
   assert_not_contains "$out" "pull/3972" "a landed PR still renders as in review"
 
   pr_num=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1 | awk '{print $1}')
   pr_shown=$(render_terminal "$home" "$fakebin" --show "$pr_num") || fail "our PR expansion failed"
   assert_contains "$pr_shown" "checks green" "green checks are missing from expanded status"
-  assert_contains "$pr_shown" "changes requested by reviewer-one" \
+  assert_contains "$pr_shown" "changes requested by reviewer-two" \
     "review readiness is missing from expanded status"
   assert_contains "$pr_shown" "$OUR_PR" "expanded PR row lost its full link"
 
@@ -292,21 +330,21 @@ test_cockpit_shows_exactly_three_sections() {
   assert_contains "$review_shown" "waiting on their fixes" "expanded review lost its recorded status"
   assert_contains "$review_shown" "$THEIR_PR" "expanded review lost its full link"
 
-  assert_contains "$out" "4 need Pedro - 3 now, 1 aged over 7d | 1 stuck" \
-    "fresh recap did not separate current from aged captain holds"
+  assert_contains "$out" "3 need Pedro | 1 stuck | 2 reviews waiting" \
+    "fresh recap did not report only next-hour attention"
   assert_contains "$out" "? Pick the flake-fix destination" \
     "an answered-looking open hold was not marked uncertain"
 
-  assert_contains "$out" "token spend not measured" "unreported spend was not explicit"
+  assert_not_contains "$out" "token spend not measured" "measurement inventory leaked onto the list surface"
   assert_not_contains "$out" "truncated, 90 chars" "CLI truncation artifact leaked into the cockpit"
 
   total_lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
-  [ "$total_lines" -le 40 ] || fail "cockpit does not fit a 40-row terminal: $total_lines lines"
-  pass "cockpit renders exactly three sections, importance-ranked with live PR status"
+  [ "$total_lines" -le 45 ] || fail "full inventory does not fit a 45-row terminal: $total_lines lines"
+  pass "cockpit renders action sections and a reachable full inventory"
 }
 
 test_pr_truthfulness_regressions() {
-  local home fakebin out registered_num registered_shown unknown_num unknown_shown
+  local home fakebin out registered_num registered_shown unknown_num unknown_shown local_ci_num local_ci_shown
   home=$(make_home pr-truth)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -320,14 +358,18 @@ test_pr_truthfulness_regressions() {
   registered_num=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1 | awk '{print $1}')
   registered_shown=$(render_terminal "$home" "$fakebin" --show "$registered_num") \
     || fail "registered PR expansion failed"
-  assert_contains "$registered_shown" "checks green · changes requested by reviewer-one" \
+  assert_contains "$registered_shown" "checks green · changes requested by reviewer-two" \
     "CI and review readiness are not independent dimensions"
-  assert_contains "$registered_shown" "review: reviews recorded: reviewer-one (changes requested)" \
+  assert_contains "$registered_shown" "review: reviews recorded: reviewer-two (changes requested), reviewer-one (approved)" \
     "expanded PR does not say who reviewed it"
-  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-one" \
+  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
     "our PR line omits established check and review status"
+  assert_not_contains "$out" "changes requested by reviewer-one" \
+    "a superseded changes-requested review still names its author"
   assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
     "Firstmate PR line treated GitHub checks as local CI evidence"
+  assert_contains "$out" "○ PR 4004 | local checks unknown | waiting on local-reviewer" \
+    "structured waiting-review state became unknown after presentation rewriting"
   assert_not_contains "$out" "PR 4004 | checks red" \
     "Firstmate PR line reported a GitHub check as a signal"
   unknown_num=$(printf '%s\n' "$out" | grep -F "PR 4002" | tail -1 | awk '{print $1}')
@@ -336,6 +378,11 @@ test_pr_truthfulness_regressions() {
   assert_contains "$unknown_shown" "local checks unknown · readiness unknown (unregistered)" \
     "missing registration was rendered as a false CI state"
   assert_contains "$unknown_shown" "was never registered" "missing registration has no visible reason"
+  local_ci_num=$(printf '%s\n' "$out" | grep -F "PR 4004 |" | tail -1 | awk '{print $1}')
+  local_ci_shown=$(render_terminal "$home" "$fakebin" --show "$local_ci_num") \
+    || fail "registered Firstmate PR expansion failed"
+  assert_contains "$local_ci_shown" "exact local-suite evidence" \
+    "registered Firstmate PR recommendation dead-ends on another GitHub check"
   pass "PR rows preserve unknown registration and independent CI/readiness truth"
 }
 
@@ -394,8 +441,8 @@ EOF
   fakebin=$(make_fakebin "$home")
 
   out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "numberless review render failed"
-  assert_contains "$out" "? PR unknown | state done; PR unknown" \
-    "numberless review record inferred that it was waiting on an author"
+  assert_contains "$out" "? PR unknown: Refresh the review checklist" \
+    "numberless review record lost its identity"
   assert_not_contains "$out" "PR unknown: Refresh the review checklist | waiting on author" \
     "numberless review record invented a waiting party"
   pass "numberless review records state only their known workflow and PR identity"
@@ -409,8 +456,8 @@ test_decision_projection_labels_answered_and_aged_open_holds() {
 
   out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "decision truth render failed"
   assert_contains "$out" "DECISIONS (6)" "an open hold or blocker was silently removed"
-  assert_contains "$out" "4 need Pedro - 3 now, 1 aged over 7d | 1 stuck" \
-    "decision recap did not separate current from aged captain holds"
+  assert_contains "$out" "3 need Pedro | 1 stuck | 2 reviews waiting" \
+    "decision recap included deferred holds"
   assert_contains "$out" "? Pick the flake-fix destination" \
     "explicit answer text was reported as needing a new answer"
   answered_num=$(printf '%s\n' "$out" | grep -F "Pick the flake-fix destination" | tail -1 | awk '{print $1}')
@@ -453,7 +500,7 @@ test_clean_list_uses_truthful_markers_and_priority_order() {
   red_line=$(line_number_of "$out" "$red PR 4003: Ship the stuck review branch")
   unknown_line=$(line_number_of "$out" "$unknown PR 4002")
   [ "$red_line" -lt "$unknown_line" ] || fail "unknown sorted ahead of stuck"
-  assert_contains "$out" "$unknown PR 4001 | checks green | changes requested by reviewer-one" \
+  assert_contains "$out" "$unknown PR 4001 | checks green | changes requested by reviewer-two" \
     "changes requested without fresh local stuck evidence was overreported as red"
   blue_line=$(line_number_of "$out" "$blue PR 912")
   green_line=$(line_number_of "$out" "$green PR 930")
@@ -472,18 +519,21 @@ test_default_rows_are_one_line_with_a_fresh_recap() {
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
 
-  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 130 --all) \
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 130) \
     || fail "clean-list render failed"
   assert_contains "$out" "ATTENTION NOW" "fresh recap band is absent"
-  assert_contains "$out" "4 need Pedro - 3 now, 1 aged over 7d | 1 stuck" \
-    "recap did not separate current from aged captain holds"
+  assert_contains "$out" "3 need Pedro | 1 stuck | 2 reviews waiting" \
+    "recap included deferred holds or omitted a review obligation"
   assert_contains "$out" "Decide the public API" "recap did not name a current need"
-  assert_contains "$out" "+3 more below" "recap truncation hid its remaining-attention count"
-  title_line=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1)
+  assert_contains "$out" "+4 more below" "recap truncation hid its remaining-attention count"
+  title_line=$(printf '%s\n' "$out" | grep -F "PR 4003 |" | tail -1)
   assert_not_contains "$title_line" "firstmate" "default row includes project detail"
   assert_not_contains "$title_line" "for " "default row includes age detail"
-  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-one" \
-    "default PR row omits established status"
+  assert_contains "$out" "PR 4003 | local checks unknown | readiness unknown (unregistered)" \
+    "actionable PR row omits established status"
+  assert_not_contains "$out" "PR 4001 | checks green" \
+    "non-actionable unknown PR stayed on the default screen"
+  assert_contains "$out" "3 other PRs" "collapsed PRs are not counted and reachable"
   assert_not_contains "$out" "$OUR_PR" "default list leaked a PR link"
   assert_contains "$out" "github status checked just now" "cached forge facts lost their explicit age"
   [ "${#title_line}" -le 80 ] || fail "fixed terminal measure exceeded 80 columns"
@@ -500,24 +550,24 @@ test_expansion_includes_evidence_derived_recommendation() {
     || fail "expansion list render failed"
   num=$(printf '%s\n' "$out" | grep -F "Decide the public API" | tail -1 | awk '{print $1}')
   shown=$(render_terminal "$home" "$fakebin" --show "$num") || fail "decision expansion failed"
-  assert_contains "$shown" "row id: d:api-shape" \
+  assert_contains "$shown" "row id: d:decision-task-api~" \
     "expanded row omitted its stable quotable id"
   assert_contains "$shown" "current state:" "expanded row omitted current state"
   assert_contains "$shown" "age:" "expanded row omitted age"
-  assert_contains "$shown" "blocker/status:" "expanded row omitted concrete blocker or status"
-  assert_contains "$shown" "recommendation: Answer the recorded decision" \
+  assert_contains "$shown" "blockers:" "expanded row omitted concrete blocker or status"
+  assert_contains "$shown" "context and recommendation: Answer the recorded decision" \
     "expanded decision omitted its evidence-derived recommendation"
 
   unknown_num=$(printf '%s\n' "$out" | grep -F "PR 4002" | tail -1 | awk '{print $1}')
   unknown_shown=$(render_terminal "$home" "$fakebin" --show "$unknown_num") \
     || fail "unknown PR expansion failed"
-  assert_contains "$unknown_shown" "recommendation: Register PR 4002" \
+  assert_contains "$unknown_shown" "context and recommendation: Register PR 4002" \
     "unknown PR expansion invented a recommendation instead of naming missing registration"
   pass "expanded rows carry full context and evidence-derived recommendations"
 }
 
 test_show_expands_rows_with_full_context() {
-  local home fakebin out before num shown id_shown pr_num pr_shown error rc
+  local home fakebin out all before num shown row_id id_shown pr_num pr_shown error rc
   home=$(make_home show)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -532,19 +582,21 @@ test_show_expands_rows_with_full_context() {
     "expanded row does not explain its routing"
   assert_contains "$shown" "recent events" "expanded row does not show its status events"
 
-  id_shown=$(render_terminal "$home" "$fakebin" --show d:api-shape) \
+  row_id=$(printf '%s\n' "$out" | grep -F "Decide the public API" | awk '{print $2}')
+  id_shown=$(render_terminal "$home" "$fakebin" --show "$row_id") \
     || fail "stable row id did not resolve"
-  assert_contains "$id_shown" "row id: d:api-shape" \
+  assert_contains "$id_shown" "row id: $row_id" \
     "expanded row does not preserve its quotable id"
 
   before=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-26T00:00:00Z \
     "$DASHBOARD" --width 80 --all) || fail "pre-aging render failed"
   assert_contains "$before" "d:hold-oldest ◆ Renew the signing certificate" \
     "hold id before aging is missing"
-  assert_contains "$out" "d:hold-oldest ◆ Renew the signing certificate" \
+  all=$(render_terminal "$home" "$fakebin" --width 80 --all) || fail "full render failed"
+  assert_contains "$all" "d:hold-oldest ◆ Renew the signing certificate" \
     "hold id changed when its attention class aged"
 
-  pr_num=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | head -1 | awk '{print $1}')
+  pr_num=$(printf '%s\n' "$all" | grep -F "PR 4001 |" | head -1 | awk '{print $1}')
   [ -n "$pr_num" ] || fail "could not read our PR row's number"
   pr_shown=$(render_terminal "$home" "$fakebin" --show "$pr_num") || fail "--show $pr_num failed"
   assert_contains "$pr_shown" "$OUR_PR" "expanded PR row lost its link"
@@ -567,8 +619,8 @@ test_absent_sources_and_unreachable_reviews_stay_honest() {
   out=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z "$DASHBOARD" --width 80) \
     || fail "absent-source terminal render failed"
   assert_contains "$out" "backlog absent" "missing backlog was not disclosed"
-  assert_contains "$out" "telemetry absent" "missing telemetry was not disclosed"
-  assert_contains "$out" "token spend not measured" "missing telemetry implied zero spend"
+  assert_not_contains "$out" "telemetry absent" "source inventory leaked onto the default screen"
+  assert_not_contains "$out" "token spend not measured" "measurement inventory leaked onto the default screen"
   assert_contains "$out" "captain holds unknown" "absent backlog rendered as an empty decisions list"
   assert_contains "$out" "unavailable - no secondmates registered" \
     "an unreachable reviews domain was not disclosed with its reason"
@@ -583,7 +635,7 @@ test_absent_sources_and_unreachable_reviews_stay_honest() {
   pass "missing sources and the unreachable reviews domain render as absent with reasons"
 }
 
-test_html_page_renders_three_sections() {
+test_html_page_renders_minimal_sections_with_reachable_detail() {
   local home fakebin output html
   home=$(make_home html)
   write_live_fixture "$home"
@@ -597,16 +649,17 @@ test_html_page_renders_three_sections() {
   assert_contains "$html" 'id="decisions"' "page omitted the decisions section"
   assert_contains "$html" 'id="ours-in-review"' "page omitted our PRs section"
   assert_contains "$html" 'id="reviewing"' "page omitted the reviewing section"
+  assert_contains "$html" 'id="review-obligations"' "page omitted requested-review obligations"
   assert_contains "$html" 'aria-label="needs Pedro"' "page omitted marker semantics"
   assert_contains "$html" 'aria-label="unknown"' "page omitted the unknown marker"
   assert_contains "$html" "Attention now" "page omitted the recap band"
   assert_contains "$html" "github status checked" "github data age missing from the page"
-  assert_contains "$html" "PR 4001 | checks green | changes requested by reviewer-one" \
+  assert_contains "$html" "PR 4001 | checks green | changes requested by reviewer-two" \
     "HTML PR row omits established status"
   assert_contains "$html" 'class="row row-aged"' "HTML list does not distinguish aged holds"
   assert_not_contains "$html" "truncated, 90 chars" "CLI truncation artifact leaked into the page"
   assert_not_contains "$html" "https://cdn" "dashboard depends on a CDN"
-  pass "HTML page renders the same three sections with gh status and its age"
+  pass "HTML page renders minimal sections with gh status and reachable detail"
 }
 
 test_help_describes_the_fixed_terminal_measure() {
@@ -655,7 +708,195 @@ test_ignored_operational_directories_are_never_output_targets() {
   pass "dashboard refuses data, state, and config output roots"
 }
 
-test_cockpit_shows_exactly_three_sections
+test_default_screen_collapses_every_non_actionable_row_without_dropping_it() {
+  local home fakebin out all
+  home=$(make_home minimal-default)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) || fail "minimal render failed"
+  assert_contains "$out" "2 deferred decisions" "aged and answered-looking holds have no counted affordance"
+  assert_contains "$out" "3 other PRs" "non-actionable PR rows have no counted affordance"
+  assert_contains "$out" "3 review relationships" "review work in progress has no counted affordance"
+  assert_not_contains "$out" "Renew the signing certificate" "aged hold stayed on the default screen"
+  assert_not_contains "$out" "Pick the flake-fix destination" "answered-looking hold stayed on the default screen"
+  assert_not_contains "$out" "sources backlog" "non-actionable source inventory stayed on the default screen"
+
+  all=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "expanded list render failed"
+  assert_contains "$all" "Renew the signing certificate" "--all cannot reach an aged hold"
+  assert_contains "$all" "Pick the flake-fix destination" "--all cannot reach an answered-looking hold"
+  assert_contains "$all" "PR 4188" "--all cannot reach a collapsed review relationship"
+  pass "default screen is minimal and every collapsed row remains counted and reachable"
+}
+
+test_readable_ids_survive_colliding_rows_and_support_prefix_lookup() {
+  local home fakebin out first_id with_collision survivor_id shown updated error rc
+  home=$(make_home readable-ids)
+  write_live_fixture "$home"
+  updated="$home/data/backlog.md.updated"
+  awk '/^## Queued$/ { print "- [ ] toolsmith-endpoint-collision - Decide how endpoint collisions are reported (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: Pedro must choose the collision wording.) (hold-kind: captain)" } { print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "readable-id render failed"
+  first_id=$(printf '%s\n' "$out" | grep -F "endpoint collisions are reported" | awk '{print $2}')
+  case "$first_id" in
+    d:toolsmith-endpoint*) ;;
+    *) fail "long record id became opaque: $first_id" ;;
+  esac
+
+  awk '/^## Queued$/ { print "- [ ] toolsmith-endpoint-copy - Decide how endpoint copies are reported (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: Pedro must choose the copy wording.) (hold-kind: captain)" } { print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  with_collision=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "collision render failed"
+  survivor_id=$(printf '%s\n' "$with_collision" | grep -F "endpoint collisions are reported" | awk '{print $2}')
+  [ "$first_id" = "$survivor_id" ] || fail "another row changed a survivor id: $first_id -> $survivor_id"
+  set +e
+  error=$(render_terminal "$home" "$fakebin" --show "${first_id%?}" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an implicit prefix could make a stale id resolve to another row"
+  assert_contains "$error" "no row has that id" "stale exact-id refusal is not explicit"
+  shown=$(render_terminal "$home" "$fakebin" --show "${first_id%?}*") || fail "explicit unambiguous id prefix did not resolve"
+  assert_contains "$shown" "endpoint collisions are reported" "prefix lookup resolved the wrong row"
+  pass "readable row ids depend only on their own stable record identity"
+}
+
+test_detail_contract_uses_report_evidence_and_slow_quota_without_fabrication() {
+  local home fakebin out id shown output html
+  home=$(make_home detail-contract)
+  write_live_fixture "$home"
+  mkdir -p "$home/data/decision-task"
+  cat > "$home/data/decision-task/report.md" <<'EOF'
+# Decision task report
+
+## What this affects
+
+People choosing the API will see one stable method instead of two competing entry points.
+
+## Manual test script
+
+1. Open the API preview.
+2. Call the documented method.
+Expected: the documented method succeeds.
+Failure: either competing entry point remains visible.
+
+### Credentials
+
+Login: `captain@example.test` / `secret-test-password`
+EOF
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "detail list render failed"
+  id=$(printf '%s\n' "$out" | grep -F "Decide the public API" | awk '{print $2}')
+  shown=$(render_terminal "$home" "$fakebin" --show "$id") || fail "detail expansion failed"
+  assert_contains "$shown" "token usage: not measured" "detail implied per-task token usage exists"
+  assert_contains "$shown" "quota: Codex week 73% remaining; resets in 6d 23h" "quota and reset are absent from detail"
+  assert_contains "$shown" "quota data: checked just now" "freshly fetched quota was rendered with an impossible age"
+  assert_contains "$shown" "what this affects: People choosing the API" "report-backed impact is absent"
+  assert_contains "$shown" "manual test script (task report):" "manual script source is not identified"
+  assert_contains "$shown" "secret-test-password" "interactive detail omitted recorded credentials"
+
+  output="$home/cockpit.html"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" --output "$output" >/dev/null || fail "HTML detail render failed"
+  html=$(<"$output")
+  assert_contains "$html" "manual test script" "HTML detail omitted the recorded script"
+  assert_contains "$html" "Credentials are omitted" "HTML does not explain credential omission"
+  assert_not_contains "$html" "secret-test-password" "shareable HTML leaked credentials"
+  pass "detail carries sourced impact, manual validation, honest token status, and quota"
+}
+
+test_review_obligations_are_distinct_and_oldest_first() {
+  local home fakebin out obligation reviewing oldest newer id shown
+  home=$(make_home review-obligations)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) || fail "review-obligation render failed"
+  obligation=$(line_number_of "$out" "REVIEWS WAITING ON PEDRO")
+  reviewing=$(line_number_of "$out" "REVIEWING")
+  [ -n "$obligation" ] || fail "requested-review obligation section is absent"
+  [ -n "$reviewing" ] || fail "review work-in-progress affordance is absent"
+  [ "$obligation" -lt "$reviewing" ] || fail "obligations are buried under our review process"
+  oldest=$(line_number_of "$out" "PR 930 [artemis] | waiting 13d")
+  newer=$(line_number_of "$out" "PR 912 [artemis] | waiting 2d")
+  [ -n "$oldest" ] && [ -n "$newer" ] && [ "$oldest" -lt "$newer" ] \
+    || fail "requested reviews are not sorted by longest wait"
+  assert_contains "$out" "PR 930 [artemis] | waiting 13d" "waiting time is not prominent"
+  assert_contains "$out" "re-review 2" "review round is absent"
+  id=$(printf '%s\n' "$out" | grep -F "PR 930 [artemis] | waiting 13d" | awk '{print $2}')
+  shown=$(render_terminal "$home" "$fakebin" --show "$id") || fail "review obligation expansion failed"
+  assert_contains "$shown" "author pushed since review" "head change did not reuse recorded review heads"
+  assert_contains "$shown" "manual validation outstanding" "manual validation obligation is absent"
+  pass "review obligations are a distinct longest-wait-first action queue"
+}
+
+test_decision_ids_bind_task_key_and_verb_across_membership_changes() {
+  local home fakebin updated before alpha_id after alpha_after zulu_id shown generation
+  home=$(make_home decision-id-membership)
+  write_live_fixture "$home"
+  updated="$home/data/backlog.md.updated"
+  awk '/^## Queued$/ { print "- [ ] mm-alpha - Fix the alpha ingest (repo: firstmate) (kind: ship) (since 2026-08-02)" } { print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  fm_write_meta "$home/state/mm-alpha.meta" \
+    "window=firstmate:fm-mm-alpha" "worktree=$home/projects/mm-alpha" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
+  mkdir -p "$home/projects/mm-alpha"
+  printf 'needs-decision [key=rotate-cert]: Choose alpha rotation.\n' > "$home/state/mm-alpha.status"
+  generation=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" mm-alpha)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" mm-alpha idle \
+    --gen "$generation" --source claude-hook --event stop
+  fakebin=$(make_fakebin "$home")
+
+  before=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "single-key render failed"
+  alpha_id=$(printf '%s\n' "$before" | grep -F "Fix the alpha ingest" | awk '{print $2}')
+  case "$alpha_id" in
+    d:mm-alpha-rotate-cert-ask*) ;;
+    *) fail "decision id omits task, key, or verb: $alpha_id" ;;
+  esac
+
+  awk '/^## Queued$/ { print "- [ ] zz-zulu - Fix the zulu exporter (repo: firstmate) (kind: ship) (since 2026-08-02)" } { print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  fm_write_meta "$home/state/zz-zulu.meta" \
+    "window=firstmate:fm-zz-zulu" "worktree=$home/projects/zz-zulu" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
+  mkdir -p "$home/projects/zz-zulu"
+  printf 'needs-decision [key=rotate-cert]: Choose zulu rotation.\n' > "$home/state/zz-zulu.status"
+  generation=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" zz-zulu)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" zz-zulu idle \
+    --gen "$generation" --source claude-hook --event stop
+
+  after=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "colliding-key render failed"
+  alpha_after=$(printf '%s\n' "$after" | grep -F "Fix the alpha ingest" | awk '{print $2}')
+  zulu_id=$(printf '%s\n' "$after" | grep -F "Fix the zulu exporter" | awk '{print $2}')
+  [ "$alpha_id" = "$alpha_after" ] || fail "unrelated membership changed an existing decision id"
+  [ "$alpha_id" != "$zulu_id" ] || fail "two tasks sharing a decision key received one id"
+  shown=$(render_terminal "$home" "$fakebin" --show "$alpha_id") || fail "stale decision id stopped resolving"
+  assert_contains "$shown" "Fix the alpha ingest" "stale decision id silently resolved to a different row"
+  pass "decision ids bind task, key, and verb independently of list membership"
+}
+
+test_registered_pr_number_comes_from_registered_url() {
+  local home fakebin updated out
+  home=$(make_home registered-pr-number)
+  write_live_fixture "$home"
+  updated="$home/data/backlog.md.updated"
+  awk '{ gsub("review-task - Ship the review branch", "review-task - PR 4999: Ship the review branch"); print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "registered-number render failed"
+  assert_contains "$out" "PR 4001 | checks green" "registered URL number was not rendered"
+  assert_not_contains "$out" "PR 4999 | checks green" "title number mislabeled status fetched for another PR"
+  pass "registered PR URL outranks a conflicting title number"
+}
+
+test_cockpit_shows_action_sections_and_full_inventory
 test_pr_truthfulness_regressions
 test_review_relationships_survive_completed_rounds
 test_followup_review_without_round_history_stays_unknown
@@ -666,7 +907,13 @@ test_default_rows_are_one_line_with_a_fresh_recap
 test_expansion_includes_evidence_derived_recommendation
 test_show_expands_rows_with_full_context
 test_absent_sources_and_unreachable_reviews_stay_honest
-test_html_page_renders_three_sections
+test_html_page_renders_minimal_sections_with_reachable_detail
 test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
 test_ignored_operational_directories_are_never_output_targets
+test_default_screen_collapses_every_non_actionable_row_without_dropping_it
+test_readable_ids_survive_colliding_rows_and_support_prefix_lookup
+test_detail_contract_uses_report_evidence_and_slow_quota_without_fabrication
+test_review_obligations_are_distinct_and_oldest_first
+test_decision_ids_bind_task_key_and_verb_across_membership_changes
+test_registered_pr_number_comes_from_registered_url

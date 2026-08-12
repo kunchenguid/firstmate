@@ -32,7 +32,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -48,6 +48,9 @@ const secondmatesPath = resolve(dataDirectory, "secondmates.md");
 const WATCH_LOCAL_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_LOCAL_SECONDS || "5", 10);
 const WATCH_GITHUB_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_GITHUB_SECONDS || "120", 10);
 const GITHUB_PR_LIMIT = 6;
+const REVIEW_REQUEST_LIMIT = 1000;
+const REVIEW_REQUEST_TIMELINE_LIMIT = 20;
+const READABLE_ID_LIMIT = 28;
 const MARKERS = Object.freeze({
   yellow: { glyph: "◆", label: "needs Pedro", color: "yellow" },
   red: { glyph: "×", label: "stuck", color: "red" },
@@ -64,7 +67,8 @@ Render the fleet cockpit: decisions ranked by importance, our PRs in
 review with actionable status, and the reviews domain's PR relationships.
 --width <columns>  terminal frame width request (minimum 40; output capped at 80)
 --all              compatibility flag; the compact default already lists every item
---show <row|id>    print one row's full context by position number or stable row id
+--show <row|id>    print one row's full context by position or exact stable id;
+                   append * to request an unambiguous id-prefix match
 --watch            live redraw: local state every ${WATCH_LOCAL_SECONDS}s, GitHub state every
                    ${WATCH_GITHUB_SECONDS}s; type a row number and Enter to expand, b goes back
 --output <path>    write the self-contained HTML page to <path> instead
@@ -148,18 +152,133 @@ function assertSafeOutput(outputPath) {
   }
 }
 
-function run(command, argumentsList, environment = process.env) {
+function run(command, argumentsList, environment = process.env, timeout = 60000) {
   try {
     return execFileSync(command, argumentsList, {
       encoding: "utf8",
       env: environment,
       maxBuffer: 16 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 60000,
+      timeout,
     });
   } catch (error) {
     const diagnostic = error.stderr?.toString().trim() || error.message;
     throw new Error(`${command} failed: ${diagnostic}`);
+  }
+}
+
+function markdownSection(text, names) {
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  const lines = String(text ?? "").split(/\r?\n/);
+  let headingLevel = null;
+  const section = [];
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (headingLevel === null) {
+      if (heading && wanted.has(heading[2].toLowerCase())) {
+        headingLevel = heading[1].length;
+      }
+      continue;
+    }
+    if (heading && heading[1].length <= headingLevel) break;
+    section.push(line);
+  }
+  const value = section.join("\n").trim();
+  return value || null;
+}
+
+function stripCredentialSubsection(text) {
+  if (!text) return { text: null, omitted: false };
+  const lines = text.split(/\r?\n/);
+  const kept = [];
+  let credentialLevel = null;
+  let omitted = false;
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (credentialLevel === null && heading && /credentials?|login/i.test(heading[2])) {
+      credentialLevel = heading[1].length;
+      omitted = true;
+      continue;
+    }
+    if (credentialLevel !== null) {
+      if (!heading || heading[1].length > credentialLevel) continue;
+      credentialLevel = null;
+    }
+    kept.push(line);
+  }
+  return { text: kept.join("\n").trim() || null, omitted };
+}
+
+function reportEvidence(reportPath) {
+  if (!reportPath || !existsSync(reportPath)) {
+    return { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false };
+  }
+  let text;
+  try {
+    text = readFileSync(reportPath, "utf8");
+  } catch {
+    return { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false };
+  }
+  const manualScript = markdownSection(text, ["Manual test script", "Manual validation script"]);
+  const safeScript = stripCredentialSubsection(manualScript);
+  return {
+    impact: markdownSection(text, ["What this affects", "User impact"]),
+    manualScript,
+    htmlManualScript: safeScript.text,
+    credentialsOmitted: safeScript.omitted,
+  };
+}
+
+function fetchQuota() {
+  const fetchedAtMs = Date.now();
+  try {
+    const data = JSON.parse(run("quota-axi", ["--json"], process.env, 10000));
+    return {
+      available: true,
+      fetchedAtMs,
+      generatedAt: data.generatedAt ?? null,
+      providers: Array.isArray(data.providers) ? data.providers : [],
+      reason: null,
+    };
+  } catch (error) {
+    return { available: false, fetchedAtMs, generatedAt: null, providers: [], reason: error.message.split("\n")[0] };
+  }
+}
+
+function fetchReviewRequests() {
+  const fetchedAtMs = Date.now();
+  try {
+    const viewer = run("gh", ["api", "user", "--jq", ".login"]).trim();
+    if (!viewer) throw new Error("authenticated GitHub login is unknown");
+    const found = JSON.parse(run("gh", [
+      "search", "prs", "--review-requested=@me", "--state=open", "--limit", String(REVIEW_REQUEST_LIMIT),
+      "--json", "author,createdAt,number,repository,title,updatedAt,url",
+    ]));
+    const items = [];
+    for (let index = 0; index < (Array.isArray(found) ? found.length : 0); index += 1) {
+      const result = found[index];
+      const repository = result.repository?.nameWithOwner ?? null;
+      let requestedAt = null;
+      if (repository && result.number && index < REVIEW_REQUEST_TIMELINE_LIMIT) {
+        try {
+          const timeline = JSON.parse(run("gh", [
+            "api", "--method", "GET", `repos/${repository}/issues/${result.number}/timeline`, "-f", "per_page=100",
+          ]));
+          const events = (Array.isArray(timeline) ? timeline : [])
+            .filter((event) =>
+              event.event === "review_requested" && event.requested_reviewer?.login === viewer && event.created_at,
+            )
+            .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+          requestedAt = events[0]?.created_at ?? null;
+        } catch {
+          requestedAt = null;
+        }
+      }
+      items.push({ ...result, repositoryName: repository, requestedAt });
+    }
+    return { available: true, fetchedAtMs, viewer, items, reason: null };
+  } catch (error) {
+    return { available: false, fetchedAtMs, viewer: null, items: [], reason: error.message.split("\n")[0] };
   }
 }
 
@@ -188,6 +307,39 @@ function cleanProse(value) {
     .replaceAll(/\s*\(truncated,[^)]*\)/g, "…")
     .replaceAll(/\s+/g, " ")
     .trim();
+}
+
+function projectLabel(value) {
+  const label = cleanProse(value);
+  if (!label) return null;
+  return isAbsolute(label) ? basename(label) : label;
+}
+
+function readableRowId(prefix, stableValue, canonical, title, forceDiscriminator = false) {
+  const normalize = (value) => String(value ?? "")
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "");
+  let source = normalize(stableValue);
+  let weak = false;
+  if (!source || /^[0-9a-f]{12,}$/i.test(source)) {
+    source = normalize(title) || "row";
+    weak = true;
+  }
+  const natural = `${prefix}:${source}`;
+  if (!forceDiscriminator && !weak && natural.length <= READABLE_ID_LIMIT) return natural;
+
+  const discriminator = createHash("sha256").update(canonical).digest("hex").slice(0, 4);
+  const available = Math.max(4, READABLE_ID_LIMIT - prefix.length - discriminator.length - 3);
+  const parts = source.split("-").filter(Boolean);
+  let readable = "";
+  for (const part of parts) {
+    const candidate = readable ? `${readable}-${part}` : part;
+    if (candidate.length > available) break;
+    readable = candidate;
+  }
+  if (!readable) readable = source.slice(0, available);
+  return `${prefix}:${readable}~${discriminator}`;
 }
 
 function formatDuration(seconds) {
@@ -446,13 +598,14 @@ function collectReviewRelationships() {
       id: group.number ? `pr-${group.number}` : current.id,
       number: group.number,
       name: group.number ? `PR ${group.number}` : `PR unknown: ${cleanProse(current.title) || current.id}`,
-      project: current.repo ?? null,
+      project: projectLabel(current.repo),
       link: recordedLink ?? derivedLink,
       linkSource: recordedLink ? "record" : derivedLink ? "verified_project_remote" : "absent",
       status,
       raw: records.map((record) => record.raw).filter(Boolean).join("\n"),
       since: recordActivityDate(records[0]),
       roundCount,
+      heads: [...group.heads],
       workflowState: current.state ?? "unknown",
       holdReason: current.hold_reason ? cleanProse(current.hold_reason) : null,
     });
@@ -463,18 +616,32 @@ function collectReviewRelationships() {
 function githubStatus(data) {
   const checks = Array.isArray(data.statusCheckRollup) ? data.statusCheckRollup : [];
   const reviews = Array.isArray(data.reviews) ? data.reviews : null;
-  const recordedReviews = new Set();
-  for (const review of reviews ?? []) {
+  const latestStateByAuthor = new Map();
+  for (let index = 0; index < (reviews ?? []).length; index += 1) {
+    const review = reviews[index];
     const author = review.author?.login ?? null;
-    if (author) {
-      recordedReviews.add(`${author} (${String(review.state ?? "unknown").toLowerCase().replaceAll("_", " ")})`);
+    if (!author || !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
+    const submittedAtMs = Date.parse(review.submittedAt || "");
+    const previous = latestStateByAuthor.get(author);
+    const laterThanPrevious = previous && Number.isFinite(submittedAtMs) && Number.isFinite(previous.submittedAtMs)
+      ? submittedAtMs >= previous.submittedAtMs
+      : previous && index > previous.index;
+    if (
+      !previous ||
+      laterThanPrevious
+    ) {
+      latestStateByAuthor.set(author, { review, submittedAtMs, index });
     }
   }
-  const reviewerParts = [...recordedReviews];
-  const changeRequesters = [...new Set((reviews ?? [])
+  const latestReviews = [...latestStateByAuthor.values()]
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.review);
+  const reviewerParts = latestReviews.map((review) =>
+    `${review.author.login} (${String(review.state).toLowerCase().replaceAll("_", " ")})`,
+  );
+  const changeRequesters = latestReviews
     .filter((review) => review.state === "CHANGES_REQUESTED")
-    .map((review) => review.author?.login)
-    .filter(Boolean))];
+    .map((review) => review.author.login);
   const requestedReviewers = Array.isArray(data.reviewRequests)
     ? [...new Set(data.reviewRequests
         .map((reviewer) => reviewer.login ?? reviewer.slug ?? reviewer.name)
@@ -485,6 +652,12 @@ function githubStatus(data) {
     : reviewerParts.length === 0
       ? "no reviews reported"
       : `reviews recorded: ${reviewerParts.join(", ")}`;
+  const reviewRecords = latestReviews.map((review) => ({
+    author: review.author?.login ?? null,
+    state: review.state ?? null,
+    submittedAt: review.submittedAt ?? null,
+    commitOid: review.commit?.oid ?? null,
+  }));
   const conclusions = checks.map((check) => check.conclusion ?? check.state ?? null);
   const ciRed = conclusions.some((conclusion) =>
     ["ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE", "TIMED_OUT"].includes(conclusion),
@@ -525,8 +698,10 @@ function githubStatus(data) {
       : "unknown",
     terminal: data.state === "MERGED" || data.state === "CLOSED",
     reviewSummary,
+    reviewRecords,
     changeRequesters,
     requestedReviewers,
+    headRefOid: data.headRefOid ?? null,
   };
 }
 
@@ -582,7 +757,11 @@ function ourPrMarker(state, registeredPr, githubResult) {
   if (!registeredPr) return { key: "unknown", source: "local" };
   if (!githubResult?.ok) return { key: "unknown", source: "forge" };
   if (githubResult.terminal) return { key: "green", source: "forge" };
-  if (githubResult.readiness === "approved and ready to merge") return { key: "yellow", source: "forge" };
+  if (githubResult.readiness === "approved and ready to merge") {
+    return githubResult.localChecksRequired
+      ? { key: "unknown", source: "local" }
+      : { key: "yellow", source: "forge" };
+  }
   if (githubResult.ci === "CI running" || githubResult.readiness === "waiting on human review") {
     return { key: "blue", source: "forge" };
   }
@@ -598,6 +777,15 @@ function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber, 
   }
   if (!githubResult?.ok) {
     return "GitHub state is unavailable; a successful status check is required before recommending an action.";
+  }
+  if (firstmatePr) {
+    if (githubResult.readiness === "waiting on human review") {
+      return "Wait for the requested reviewer, then record exact local-suite evidence before merge readiness is claimed.";
+    }
+    if (githubResult.readiness === "changes requested") {
+      return "Address the current requested changes and record exact local-suite evidence before merge readiness is claimed.";
+    }
+    return "Record exact local-suite evidence; GitHub checks do not establish Firstmate CI readiness.";
   }
   if (markerKey === "green") return "No action for Pedro; the task is progressing or finished cleanly.";
   if (githubResult.readiness === "approved and ready to merge") return "Approve the guarded merge when ready.";
@@ -638,7 +826,7 @@ function fetchGithubStatuses(urls) {
         "view",
         url,
         "--json",
-        "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews,reviewRequests",
+        "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews,reviewRequests,headRefOid",
       ]);
       results.set(url, { ok: true, ...githubStatus(JSON.parse(text)) });
     } catch (fetchError) {
@@ -653,7 +841,7 @@ function fetchGithubStatuses(urls) {
   return { fetchedAtMs: Date.now(), results, error };
 }
 
-function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github }) {
+function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github, reviewRequests, quota }) {
   const observedMilliseconds = Date.parse(snapshot.generated || "");
   const backlogPresent = snapshot.backlog?.present === true;
   const records = Array.isArray(snapshot.backlog?.records) ? snapshot.backlog.records : [];
@@ -677,6 +865,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
 
   const decisions = [];
   const ours = [];
+  const obligations = [];
   const reviewing = [];
 
   for (const record of records) {
@@ -691,7 +880,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         tag: looksAnswered ? "ANSWER?" : aged ? "AGED" : "HOLD",
         name: cleanProse(record.title) || record.id,
         id: record.id,
-        project: record.repo ?? null,
+        project: projectLabel(record.repo),
         prose: looksAnswered
           ? `looks answered; hold still open: ${cleanProse(record.hold_reason)}`
           : aged
@@ -703,6 +892,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         raw: record.raw,
         attentionClass: looksAnswered ? "answered" : aged ? "aged" : "now",
         stableKey: null,
+        identityVerb: "captain-hold",
         markerKey: looksAnswered ? "unknown" : "yellow",
         markerSource: "local",
         currentState: "captain hold open",
@@ -730,7 +920,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     const base = {
       name: titleById.get(task.id) || task.id,
       id: task.id,
-      project: currentRecord?.repo || task.project || null,
+      project: projectLabel(currentRecord?.repo || task.project),
       age: itemAge,
       live: task.endpoint?.exists === true,
       statusLog: task.paths?.status_log?.present ? task.paths.status_log.path : null,
@@ -739,6 +929,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       worktree: task.paths?.worktree?.path ?? null,
       currentState: state,
     };
+    base.evidence = reportEvidence(base.report);
     const openDecisions = task.hints?.open_decisions || [];
     for (const decision of openDecisions.filter((entry) => entry.verb === "needs-decision")) {
       decisions.push({
@@ -748,6 +939,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
         attentionClass: "now",
         stableKey: decision.key ?? "default",
+        identityVerb: "ask",
         markerKey: "yellow",
         markerSource: "local",
         blocker: cleanProse(decision.summary) || "decision summary absent",
@@ -763,6 +955,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
         attentionClass: "now",
         stableKey: blocker.key ?? "default",
+        identityVerb: "block",
         markerKey: "red",
         markerSource: "local",
         blocker: cleanProse(blocker.summary) || "blocker summary absent",
@@ -778,6 +971,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         note: null,
         attentionClass: "now",
         stableKey: "blocked",
+        identityVerb: "block",
         markerKey: "red",
         markerSource: "local",
         blocker: detail || "blocked, no detail reported",
@@ -799,13 +993,14 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       const lastEvent = cleanProse(task.hints?.last_event_text).replaceAll(/https?:\/\/\S+/g, "").trim();
       const recorded = detail || lastEvent || "no status recorded";
       const githubResult = registeredPr ? github?.results?.get(task.pr.url) ?? null : null;
-      const prNumber = stageMatch?.[1] ?? task.pr.url.match(/\/pull\/(\d+)/)?.[1] ?? null;
+      const registeredPrNumber = registeredPr ? task.pr.url.match(/\/pull\/(\d+)/)?.[1] ?? null : null;
+      const prNumber = registeredPrNumber ?? stageMatch?.[1] ?? null;
       const firstmatePr = base.project === "firstmate" || (registeredPr && isFirstmatePr(task.pr.url));
       const effectiveGithubResult = firstmatePr && githubResult
         ? {
             ...githubResult,
             ci: "CI unknown",
-            readiness: firstmateReadiness(githubResult),
+            localChecksRequired: true,
           }
         : githubResult;
       const checkStatus = firstmatePr
@@ -819,6 +1014,15 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           ? firstmateReadiness(githubResult)
           : readinessLabel(githubResult);
       const status = `${checkStatus} · ${reviewStatus}`;
+      const datedChangeRequests = (githubResult?.reviewRecords ?? [])
+        .filter((review) => review.state === "CHANGES_REQUESTED" && review.author)
+        .map((review) => {
+          const submitted = review.submittedAt ? review.submittedAt.slice(0, 10) : "date unknown";
+          return `${review.author} on ${submitted}`;
+        });
+      const blocker = datedChangeRequests.length > 0
+        ? `changes requested by ${datedChangeRequests.join(", ")}; remains blocking until approved or dismissed`
+        : status;
       const marker = ourPrMarker(state, registeredPr, effectiveGithubResult);
       ours.push({
         ...base,
@@ -829,7 +1033,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         note: registeredPr ? task.pr.url : null,
         markerKey: marker.key,
         markerSource: marker.source,
-        blocker: status,
+        blocker,
         review: registeredPr
           ? githubResult?.reviewSummary ?? "reviewers unknown (not checked yet)"
           : "reviewers unknown (PR not registered)",
@@ -874,9 +1078,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     reviewing.push({
       tag: "THEIRS",
       name: relationship.name,
-      listLabel: `${relationship.number ? relationship.name : "PR unknown"} | ${relationship.status.replaceAll(" · ", " | ")}`,
+      listLabel: `${relationship.name} | ${relationship.status.replaceAll(" · ", " | ")}`,
       id: relationship.id,
-      project: relationship.project,
+      project: projectLabel(relationship.project),
       prose: `${relationship.status} · ${forgeState}`,
       note: relationship.link ?? "PR link unknown - not recorded in the review relationship",
       age: sinceAge(relationship.since),
@@ -889,9 +1093,67 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       blocker: relationship.holdReason ?? relationship.status,
       review: relationship.status,
       recommendation,
+      evidence: { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false },
       why: relationship.linkSource === "verified_project_remote"
         ? "review records grouped by PR; link established from the recorded PR number and verified project GitHub remote"
         : "review records grouped by PR; completed rounds remain until terminal PR evidence exists",
+    });
+  }
+
+  const relationshipByUrl = new Map(
+    reviews.relationships.filter((relationship) => relationship.link).map((relationship) => [relationship.link, relationship]),
+  );
+  for (const request of reviewRequests?.items ?? []) {
+    const githubResult = github?.results?.get(request.url) ?? null;
+    const relationship = relationshipByUrl.get(request.url) ?? null;
+    const recordedHeads = relationship?.heads ?? [];
+    const roundLabel = recordedHeads.length === 0 ? "first pass" : `re-review ${recordedHeads.length + 1}`;
+    const pushedSinceReview = recordedHeads.length === 0
+      ? null
+      : githubResult?.headRefOid
+        ? !recordedHeads.includes(githubResult.headRefOid)
+        : null;
+    const manualEvidence = `${request.title ?? ""} ${relationship?.status ?? ""}`;
+    const manualOutstanding = /manual validation[^.\n]*(?:required|outstanding|pending)/i.test(manualEvidence);
+    const unansweredFindings = relationship?.holdReason
+      ? /(?:waiting on (?:the )?(?:author|their|fix)|unanswered|findings?)/i.test(relationship.holdReason)
+      : false;
+    const waiting = request.requestedAt
+      ? sinceAge(request.requestedAt)
+      : { seconds: null, label: "waiting time unknown" };
+    const stateParts = [
+      waiting.seconds === null ? "waiting time unknown" : `waiting ${formatDuration(waiting.seconds)}`,
+      roundLabel,
+      pushedSinceReview === true ? "author pushed since review" : pushedSinceReview === false ? "head unchanged since review" : null,
+      recordedHeads.length > 0 && pushedSinceReview === null ? "head change unknown" : null,
+      manualOutstanding ? "manual validation outstanding" : "manual validation unknown",
+      unansweredFindings ? "findings recorded as unanswered" : "findings status unknown",
+    ].filter(Boolean);
+    obligations.push({
+      tag: "REVIEW",
+      name: `PR ${request.number}: ${cleanProse(request.title) || "title unknown"}`,
+      listLabel: `PR ${request.number}${request.repository?.name ? ` [${request.repository.name}]` : ""} | ${stateParts.join(" | ")}`,
+      id: `review-request-${request.repositoryName ?? "unknown"}-${request.number}`,
+      stableKey: `${request.repositoryName ?? "unknown"}-${request.number}`,
+      project: projectLabel(request.repository?.name ?? request.repositoryName?.split("/")[1]),
+      prose: stateParts.join(" · "),
+      note: request.url,
+      age: waiting,
+      live: false,
+      raw: relationship?.raw ?? null,
+      currentState: "review requested from Pedro",
+      pr: { url: request.url, source: "GitHub requested-review search" },
+      markerKey: "yellow",
+      markerSource: "forge",
+      blocker: request.requestedAt
+        ? `Pedro has been a requested reviewer since ${request.requestedAt}`
+        : "GitHub reports Pedro as requested reviewer; request date is unknown",
+      review: stateParts.join(" · "),
+      recommendation: manualOutstanding
+        ? "Run the recorded manual validation, then submit the requested review."
+        : "Review the current head and submit the requested review.",
+      evidence: { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false },
+      why: "GitHub currently reports the authenticated viewer as a requested reviewer",
     });
   }
 
@@ -907,9 +1169,10 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
   decisions.sort((left, right) => importanceTier(left) - importanceTier(right) || oldestFirst(left, right));
   ours.sort(oldestFirst);
+  obligations.sort(oldestFirst);
   reviewing.sort((left, right) => (left.age.seconds ?? Number.POSITIVE_INFINITY) - (right.age.seconds ?? Number.POSITIVE_INFINITY));
 
-  for (const items of [decisions, ours, reviewing]) {
+  for (const items of [decisions, ours, obligations, reviewing]) {
     items.sort((left, right) => MARKER_PRIORITY[left.markerKey] - MARKER_PRIORITY[right.markerKey]);
     for (const item of items) {
       item.marker = MARKERS[item.markerKey] ?? MARKERS.unknown;
@@ -918,7 +1181,11 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
 
   const localAttention = new Map();
   for (const item of [...decisions, ...ours, ...reviewing]) {
-    if (item.markerSource === "local" && ["yellow", "red"].includes(item.markerKey)) {
+    if (
+      item.markerSource === "local" &&
+      ["yellow", "red"].includes(item.markerKey) &&
+      !["aged", "answered"].includes(item.attentionClass)
+    ) {
       const identity = `${item.project ?? ""}/${item.id ?? item.name}`;
       if (!localAttention.has(identity)) localAttention.set(identity, item);
     }
@@ -930,10 +1197,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     telemetryPresent,
     reviews,
     github,
+    reviewRequests,
+    quota,
     recap: {
       available: backlogPresent,
       needsPedro: [...localAttention.values()].filter((item) => item.markerKey === "yellow"),
       stuck: [...localAttention.values()].filter((item) => item.markerKey === "red"),
+      obligations,
     },
     buckets: [
       {
@@ -951,6 +1221,15 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         empty: "no PR of ours recorded in review",
       },
       {
+        key: "review-obligations",
+        name: "REVIEWS WAITING ON PEDRO",
+        htmlTitle: "Reviews waiting on Pedro",
+        items: obligations,
+        empty: reviewRequests?.available === false
+          ? `review requests unknown - ${reviewRequests.reason}`
+          : "nobody is waiting on Pedro for review",
+      },
+      {
         key: "reviewing",
         name: "REVIEWING",
         htmlTitle: "Reviewing",
@@ -961,38 +1240,28 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   };
 
   let rowNumber = 0;
-  const rowEntries = [];
   for (const bucket of model.buckets) {
     for (const item of bucket.items) {
       rowNumber += 1;
       item.number = rowNumber;
       item.bucketName = bucket.name;
+      const decisionUsesKey = bucket.key === "decisions" && item.stableKey && item.stableKey !== item.id;
       const stablePart = bucket.key === "decisions"
-        ? item.stableKey && item.stableKey !== item.id ? item.stableKey : item.id
+        ? decisionUsesKey ? `${item.id}-${item.stableKey}-${item.identityVerb ?? "row"}` : item.id
         : bucket.key === "ours-in-review"
           ? item.prNumber ?? item.id
-          : String(item.id).replace(/^pr-/, "");
-      const prefix = bucket.key === "decisions" ? "d" : bucket.key === "ours-in-review" ? "o" : "r";
-      const canonical = `${bucket.key}/${item.id}/${item.stableKey ?? ""}`;
-      const natural = `${prefix}:${stablePart}`;
-      const candidate = natural.length <= 20
-        ? natural
-        : `${prefix}:${createHash("sha256").update(canonical).digest("hex").slice(0, 8)}`;
-      rowEntries.push({ item, canonical, candidate });
-    }
-  }
-  const candidates = new Map();
-  for (const entry of rowEntries) {
-    const group = candidates.get(entry.candidate) ?? [];
-    group.push(entry);
-    candidates.set(entry.candidate, group);
-  }
-  for (const group of candidates.values()) {
-    group.sort((left, right) => left.canonical.localeCompare(right.canonical));
-    for (let index = 0; index < group.length; index += 1) {
-      group[index].item.identity = group.length === 1
-        ? group[index].candidate
-        : `${group[index].candidate}-${index + 1}`;
+          : bucket.key === "review-obligations"
+            ? item.stableKey
+            : String(item.id).replace(/^pr-/, "");
+      const prefix = bucket.key === "decisions"
+        ? "d"
+        : bucket.key === "ours-in-review"
+          ? "o"
+          : bucket.key === "review-obligations"
+            ? "v"
+            : "r";
+      const canonical = `${bucket.key}/${item.id}/${item.stableKey ?? ""}/${item.identityVerb ?? bucket.key}`;
+      item.identity = readableRowId(prefix, stablePart, canonical, item.name);
     }
   }
   model.totalRows = rowNumber;
@@ -1029,9 +1298,7 @@ function githubAgeLine(github, nowMs) {
 
 function recapFeaturedItems(recap) {
   const featured = [];
-  if (recap.needsPedro[0]) featured.push(recap.needsPedro[0]);
-  if (recap.stuck[0]) featured.push(recap.stuck[0]);
-  for (const item of [...recap.needsPedro, ...recap.stuck]) {
+  for (const item of [...recap.obligations, ...recap.stuck, ...recap.needsPedro]) {
     if (featured.length >= 2) break;
     if (!featured.includes(item)) featured.push(item);
   }
@@ -1039,12 +1306,34 @@ function recapFeaturedItems(recap) {
 }
 
 function recapNeedsPedroLabel(recap) {
-  const aged = recap.needsPedro.filter((item) => item.attentionClass === "aged").length;
-  const current = recap.needsPedro.length - aged;
-  return `${recap.needsPedro.length} need Pedro - ${current} now, ${aged} aged over 7d`;
+  return `${recap.needsPedro.length} need Pedro`;
 }
 
-function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
+function visibleBucketItems(bucket, showAll) {
+  if (showAll || bucket.key === "review-obligations") return bucket.items;
+  return bucket.items.filter((item) =>
+    ["yellow", "red"].includes(item.markerKey) && !["aged", "answered"].includes(item.attentionClass),
+  );
+}
+
+function collapsedBucketLabel(bucket, count) {
+  if (bucket.key === "decisions") return `${count} deferred decision${count === 1 ? "" : "s"}`;
+  if (bucket.key === "ours-in-review") return `${count} other PR${count === 1 ? "" : "s"}`;
+  if (bucket.key === "reviewing") return `${count} review relationship${count === 1 ? "" : "s"}`;
+  return `${count} other item${count === 1 ? "" : "s"}`;
+}
+
+function bucketItemGroups(bucket, items) {
+  if (bucket.key === "review-obligations") return [{ project: null, items }];
+  const projectNames = [...new Set(items.map((item) => item.project || "project unknown"))];
+  if (projectNames.length <= 1) return [{ project: null, items }];
+  return projectNames.map((project) => ({
+    project,
+    items: items.filter((item) => (item.project || "project unknown") === project),
+  }));
+}
+
+function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
   width = Math.min(width, 80);
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
@@ -1058,33 +1347,29 @@ function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
       ),
     ),
   );
-  lines.push(
-    paint(
-      "dim",
-      clip(
-        `sources backlog ${model.backlogPresent ? "present" : "absent"} | telemetry ${model.telemetryPresent ? "present" : "absent"} | token spend not measured`,
-        width,
-      ),
-    ),
-  );
   lines.push("");
   if (!model.recap.available) {
     lines.push(paint("bold", "ATTENTION NOW"));
     lines.push(paint("dim", "  unknown - backlog source absent"));
-  } else if (model.recap.needsPedro.length === 0 && model.recap.stuck.length === 0) {
+  } else if (
+    model.recap.needsPedro.length === 0 &&
+    model.recap.stuck.length === 0 &&
+    model.recap.obligations.length === 0
+  ) {
     lines.push(`${paint("bold", "ATTENTION NOW")} | nothing needs Pedro`);
   } else {
     lines.push(paint("bold", "ATTENTION NOW"));
     const counts = [
       model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
       model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+      model.recap.obligations.length > 0 ? `${model.recap.obligations.length} review${model.recap.obligations.length === 1 ? "" : "s"} waiting` : null,
     ].filter(Boolean);
     lines.push(`  ${counts.join(" | ")}`);
     const featured = recapFeaturedItems(model.recap);
     for (const item of featured) {
       lines.push(`  ${paint(item.marker.color, item.marker.glyph)} ${clip(item.name, Math.max(1, width - 4))}`);
     }
-    const hidden = model.recap.needsPedro.length + model.recap.stuck.length - featured.length;
+    const hidden = model.recap.needsPedro.length + model.recap.stuck.length + model.recap.obligations.length - featured.length;
     if (hidden > 0) {
       lines.push(paint("dim", `  +${hidden} more below`));
     }
@@ -1092,7 +1377,10 @@ function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
 
   for (const bucket of model.buckets) {
     lines.push("");
-    const label = `${bucket.name} (${bucket.items.length}) `;
+    const visibleItems = visibleBucketItems(bucket, showAll);
+    const hiddenCount = bucket.items.length - visibleItems.length;
+    const count = showAll || bucket.key === "review-obligations" ? ` (${bucket.items.length})` : "";
+    const label = `${bucket.name}${count} `;
     const header = `── ${label}${"─".repeat(Math.max(0, width - label.length - 3))}`;
     lines.push(paint("dim", clip(header, width)));
     if (bucket.items.length === 0) {
@@ -1100,15 +1388,21 @@ function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
       continue;
     }
     const numberWidth = String(model.totalRows).length;
-    for (const item of bucket.items) {
-      const rowLabel = String(item.number).padStart(numberWidth);
-      const prefix = `  ${rowLabel} `;
-      const marker = paint(item.marker.color, item.marker.glyph);
-      const stablePrefix = `${item.identity} `;
-      const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));
-      lines.push(
-        `${paint("dim", `${prefix}${stablePrefix}`)}${marker} ${paint(item.attentionClass === "aged" ? "dim" : null, title)}`,
-      );
+    for (const group of bucketItemGroups(bucket, visibleItems)) {
+      if (group.project) lines.push(paint("dim", `   project ${group.project}`));
+      for (const item of group.items) {
+        const rowLabel = String(item.number).padStart(numberWidth);
+        const prefix = `  ${rowLabel} `;
+        const marker = paint(item.marker.color, item.marker.glyph);
+        const stablePrefix = `${item.identity} `;
+        const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));
+        lines.push(
+          `${paint("dim", `${prefix}${stablePrefix}`)}${marker} ${paint(item.attentionClass === "aged" ? "dim" : null, title)}`,
+        );
+      }
+    }
+    if (hiddenCount > 0) {
+      lines.push(paint("dim", clip(`   … ${collapsedBucketLabel(bucket, hiddenCount)} - --all shows`, width)));
     }
   }
   lines.push("");
@@ -1116,9 +1410,35 @@ function renderTerminal(model, width, useColor, _showAll, nowMs = Date.now()) {
   return `${lines.join("\n")}\n`;
 }
 
+function quotaDetailLines(quota, nowMs) {
+  if (!quota?.available) {
+    return [`quota: unknown${quota?.reason ? ` (${quota.reason})` : ""}`];
+  }
+  const lines = [];
+  for (const provider of quota.providers) {
+    const windows = Array.isArray(provider.windows) ? provider.windows : [];
+    if (windows.length === 0) {
+      lines.push(`quota: ${provider.label ?? provider.provider ?? "provider"} unknown`);
+      continue;
+    }
+    for (const window of windows) {
+      const remaining = Number.isFinite(window.percentRemaining) ? `${window.percentRemaining}% remaining` : "remaining unknown";
+      const resetSeconds = secondsSince(nowMs, Date.parse(window.resetsAt || ""));
+      const reset = resetSeconds === null ? "reset unknown" : `resets in ${formatDuration(resetSeconds)}`;
+      lines.push(`quota: ${provider.label ?? provider.provider ?? "provider"} ${window.label ?? window.id ?? "window"} ${remaining}; ${reset}`);
+    }
+  }
+  if (lines.length === 0) lines.push("quota: unknown (no provider windows reported)");
+  const quotaObservedMs = Date.parse(quota.generatedAt || "");
+  const dataAge = secondsSince(Number.isFinite(quotaObservedMs) ? quotaObservedMs : quota.fetchedAtMs, nowMs);
+  lines.push(`quota data: ${dataAge !== null && dataAge < 3 ? "checked just now" : `checked ${formatDuration(dataAge) ?? "?"} ago`}`);
+  return lines;
+}
+
 // Full single-item context: nothing truncated, every field sourced from data
-// the cockpit already read.
-function renderExpandedItem(item) {
+// the cockpit already read. Task reports are the sole manual-script and impact
+// source; absent named sections stay absent instead of being inferred.
+function renderExpandedItem(item, model, options = {}) {
   const lines = [];
   lines.push(`#${item.number} | ${item.bucketName} | ${item.marker.glyph} ${item.marker.label}`);
   lines.push(item.name || "(unnamed)");
@@ -1126,6 +1446,14 @@ function renderExpandedItem(item) {
   lines.push(`row id: ${item.identity}`);
   lines.push(`current state: ${item.currentState || "unknown"}`);
   lines.push(`age: ${item.age.label}`);
+  lines.push("token usage: not measured");
+  const observedDetailMs = Date.parse(model.generated || "");
+  const quotaObservedMs = Date.parse(model.quota?.generatedAt || "");
+  const establishedNowCandidates = [observedDetailMs, quotaObservedMs].filter(Number.isFinite);
+  const detailNowMs = options.nowMs ?? (establishedNowCandidates.length > 0
+    ? Math.max(...establishedNowCandidates)
+    : Date.now());
+  lines.push(...quotaDetailLines(model.quota, detailNowMs));
   if (item.prose) {
     lines.push(`detail: ${item.prose}`);
   }
@@ -1135,9 +1463,23 @@ function renderExpandedItem(item) {
   if (item.review) {
     lines.push(`review: ${item.review}`);
   }
-  lines.push(`blocker/status: ${item.blocker || "none established"}`);
-  lines.push(`recommendation: ${item.recommendation || "Evidence is incomplete; record current state before choosing an action."}`);
+  lines.push(`open review threads: ${item.pr?.url ? "unknown - not read from GitHub" : "not applicable"}`);
+  lines.push(`blockers: ${item.blocker || "none established"}`);
+  const recommendation = item.recommendation || "Evidence is incomplete; record current state before choosing an action.";
+  lines.push(`context and recommendation: ${recommendation}`);
+  lines.push(`verdict: ${recommendation}`);
   lines.push(`why here: ${item.why || "routing reason not recorded"}`);
+  lines.push(`what this affects: ${item.evidence?.impact ? cleanProse(item.evidence.impact) : "not recorded in the task report"}`);
+  const manualScript = options.forHtml ? item.evidence?.htmlManualScript : item.evidence?.manualScript;
+  if (manualScript) {
+    lines.push("manual test script (task report):");
+    for (const line of manualScript.split(/\r?\n/)) lines.push(`  ${line}`);
+  } else {
+    lines.push("manual test script: no manual test script recorded in the task report");
+  }
+  if (options.forHtml && item.evidence?.credentialsOmitted) {
+    lines.push(`credentials: Credentials are omitted from HTML; use --show ${item.identity} in the interactive terminal detail.`);
+  }
   const identity = [item.id ? `task ${item.id}` : null, item.project ? `project ${item.project}` : null]
     .filter(Boolean)
     .join(" · ");
@@ -1156,13 +1498,19 @@ function renderExpandedItem(item) {
     const events = readFileSync(item.statusLog, "utf8")
       .split(/\r?\n/)
       .filter((line) => line.trim() !== "")
-      .slice(-5);
+      .slice(-5)
+      .map((event) => cleanProse(event));
     lines.push(`recent events (${item.statusLog}):`);
+    const closed = events.filter((event) => /^done:/i.test(event));
+    lines.push(`what we closed: ${closed.length > 0 ? closed.join(" | ") : "none established in recent events"}`);
     for (const event of events) {
       lines.push(`  ${event}`);
     }
   } else if (item.id && !item.raw) {
+    lines.push("what we closed: none established in recent events");
     lines.push("recent events: no status log");
+  } else {
+    lines.push("what we closed: none established in recent events");
   }
   return `${lines.join("\n")}\n`;
 }
@@ -1171,16 +1519,28 @@ function renderExpandedItem(item) {
 // newness slice has one place to record a viewed row without touching renderers.
 function expandRow(model, selection) {
   const items = model.buckets.flatMap((bucket) => bucket.items);
-  const item = selection.identity
-    ? items.find((candidate) => candidate.identity === selection.identity)
-    : items.find((candidate) => candidate.number === selection.number);
+  let item;
+  if (selection.identity) {
+    const prefixRequested = selection.identity.endsWith("*");
+    const requestedIdentity = prefixRequested ? selection.identity.slice(0, -1) : selection.identity;
+    item = prefixRequested ? null : items.find((candidate) => candidate.identity === requestedIdentity);
+    if (!item && prefixRequested) {
+      const prefixMatches = items.filter((candidate) => candidate.identity.startsWith(requestedIdentity));
+      if (prefixMatches.length > 1) {
+        throw new Error(`--show ${selection.identity}: ambiguous row id prefix (${prefixMatches.map((candidate) => candidate.identity).join(", ")})`);
+      }
+      item = prefixMatches[0];
+    }
+  } else {
+    item = items.find((candidate) => candidate.number === selection.number);
+  }
   if (!item) {
     if (selection.number !== undefined) {
       throw new Error(`--show ${selection.number}: no such row (valid: 1..${model.totalRows})`);
     }
-    throw new Error(`selected row is no longer present: ${selection.identity}`);
+    throw new Error(`--show ${selection.identity}: no row has that id`);
   }
-  return renderExpandedItem(item);
+  return renderExpandedItem(item, model);
 }
 
 function escapeHtml(value) {
@@ -1192,17 +1552,29 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function htmlRow(item) {
+function htmlRow(item, model) {
   return `<li class="row${item.attentionClass === "aged" ? " row-aged" : ""}">
-    <span class="row-number">${item.number}</span>
-    <span class="row-id">${escapeHtml(item.identity)}</span>
-    <span class="marker marker-${escapeHtml(item.markerKey)}" aria-label="${escapeHtml(item.marker.label)}">${escapeHtml(item.marker.glyph)}</span>
-    <span class="row-title">${escapeHtml(item.listLabel ?? item.name ?? "detail absent")}</span>
+    <details>
+      <summary>
+        <span class="row-number">${item.number}</span>
+        <span class="row-id">${escapeHtml(item.identity)}</span>
+        <span class="marker marker-${escapeHtml(item.markerKey)}" aria-label="${escapeHtml(item.marker.label)}">${escapeHtml(item.marker.glyph)}</span>
+        <span class="row-title">${escapeHtml(item.listLabel ?? item.name ?? "detail absent")}</span>
+      </summary>
+      <pre>${escapeHtml(renderExpandedItem(item, model, { forHtml: true }))}</pre>
+    </details>
   </li>`;
 }
 
 function emptyState(message) {
   return `<li class="empty">${escapeHtml(message)}</li>`;
+}
+
+function htmlRows(bucket, items, model) {
+  return bucketItemGroups(bucket, items).map((group) => [
+    group.project ? `<li class="project-label">${escapeHtml(group.project)}</li>` : "",
+    ...group.items.map((item) => htmlRow(item, model)),
+  ].join("")).join("");
 }
 
 function sourceValue(label, value) {
@@ -1211,26 +1583,33 @@ function sourceValue(label, value) {
 
 function renderHtml(model) {
   const featured = recapFeaturedItems(model.recap);
-  const hiddenRecap = model.recap.needsPedro.length + model.recap.stuck.length - featured.length;
+  const hiddenRecap = model.recap.needsPedro.length + model.recap.stuck.length + model.recap.obligations.length - featured.length;
   const recap = !model.recap.available
     ? '<p class="muted">Unknown - backlog source absent.</p>'
-    : model.recap.needsPedro.length === 0 && model.recap.stuck.length === 0
+    : model.recap.needsPedro.length === 0 && model.recap.stuck.length === 0 && model.recap.obligations.length === 0
       ? "<p>Nothing needs Pedro.</p>"
       : [
           `<p><strong>${[
             model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
             model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+            model.recap.obligations.length > 0 ? `${model.recap.obligations.length} review${model.recap.obligations.length === 1 ? "" : "s"} waiting` : null,
           ].filter(Boolean).join(" | ")}</strong></p>`,
           ...featured.map((item) => `<p><strong class="marker marker-${escapeHtml(item.markerKey)}">${escapeHtml(item.marker.glyph)}</strong> ${escapeHtml(item.name)}</p>`),
           hiddenRecap > 0 ? `<p class="muted">+${hiddenRecap} more below</p>` : "",
         ].filter(Boolean).join("\n    ");
   const sections = model.buckets
-    .map(
-      (bucket) => `<section id="${bucket.key}">
-    <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2><p>${bucket.items.length} item${bucket.items.length === 1 ? "" : "s"}</p></div>
-    <ol class="rows">${bucket.items.map((item) => htmlRow(item)).join("") || emptyState(bucket.empty)}</ol>
-  </section>`,
-    )
+    .map((bucket) => {
+      const visible = visibleBucketItems(bucket, false);
+      const hidden = bucket.items.filter((item) => !visible.includes(item));
+      const deferred = hidden.length > 0
+        ? `<details class="deferred"><summary>${escapeHtml(collapsedBucketLabel(bucket, hidden.length))}</summary><ol class="rows">${htmlRows(bucket, hidden, model)}</ol></details>`
+        : "";
+      return `<section id="${bucket.key}">
+    <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2>${bucket.key === "review-obligations" ? `<p>${bucket.items.length} waiting</p>` : ""}</div>
+    <ol class="rows">${htmlRows(bucket, visible, model) || (hidden.length === 0 ? emptyState(bucket.empty) : "")}</ol>
+    ${deferred}
+  </section>`;
+    })
     .join("\n\n  ");
   return `<!doctype html>
 <html lang="en">
@@ -1248,7 +1627,7 @@ function renderHtml(model) {
     h1 { font-size:clamp(2rem,5vw,3.25rem); line-height:1; letter-spacing:-.04em; }
     h2 { font-size:.78rem; letter-spacing:.09em; text-transform:uppercase; }
     .lede,.stamp,.empty,.muted { color:var(--muted); }
-    .sources { display:flex; flex-wrap:wrap; gap:8px 18px; margin:18px 0 28px; color:var(--muted); font-size:.8rem; }
+    .sources { margin-top:28px; color:var(--muted); font-size:.8rem; }
     .source { display:flex; gap:6px; }
     .source span { text-transform:uppercase; letter-spacing:.06em; }
     .recap { display:grid; gap:6px; margin:0 0 28px; }
@@ -1257,7 +1636,11 @@ function renderHtml(model) {
     .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); }
     .section-head p { color:var(--muted); }
     .rows { display:grid; gap:2px; margin:0; padding:0; list-style:none; }
-    .row { min-width:0; display:grid; grid-template-columns:3ch max-content 2ch minmax(0,1fr); gap:8px; align-items:baseline; padding:5px 0; }
+    .row { min-width:0; padding:5px 0; }
+    .row details,.row summary { min-width:0; }
+    .row summary { display:grid; grid-template-columns:3ch max-content 2ch minmax(0,1fr); gap:8px; align-items:baseline; cursor:pointer; list-style:none; }
+    .row summary::-webkit-details-marker { display:none; }
+    .row pre { overflow:auto; margin:10px 0 8px 3ch; padding:12px; border-left:1px solid var(--line); color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; }
     .row-number,.row-id { color:var(--muted); font-variant-numeric:tabular-nums; }
     .row-number { text-align:right; }
     .row-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -1270,6 +1653,9 @@ function renderHtml(model) {
     .marker-unknown { color:var(--unknown); }
     .legend { display:flex; flex-wrap:wrap; gap:6px 16px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.8rem; }
     .empty { color:var(--muted); }
+    .project-label { margin:10px 0 2px; color:var(--muted); font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
+    .deferred { margin-top:8px; color:var(--muted); }
+    .deferred > summary { cursor:pointer; }
     @media (max-width:560px) { main { width:min(100% - 20px,760px); padding-top:24px; } }
   </style>
 </head>
@@ -1282,18 +1668,19 @@ function renderHtml(model) {
     <p class="stamp">Observed ${escapeHtml(model.generated)} | ${escapeHtml(githubAgeLine(model.github, Date.now()))}</p>
   </header>
 
-  <div class="sources" aria-label="Source availability">
-    ${sourceValue("Backlog source", model.backlogPresent ? "Present" : "Absent")}
-    ${sourceValue("Model telemetry", model.telemetryPresent ? "Present" : "Absent")}
-    ${sourceValue("Token spend", "Not measured")}
-  </div>
-
   <div class="recap">
     <h2>Attention now</h2>
     ${recap}
   </div>
 
   ${sections}
+
+  <details class="sources" aria-label="Source availability">
+    <summary>Data sources and measurement limits</summary>
+    ${sourceValue("Backlog source", model.backlogPresent ? "Present" : "Absent")}
+    ${sourceValue("Model telemetry", model.telemetryPresent ? "Present" : "Absent")}
+    ${sourceValue("Token spend", "Not measured")}
+  </details>
 
   <p class="legend">
     ${Object.entries(MARKERS).map(([key, marker]) => `<span><strong class="marker marker-${key}">${escapeHtml(marker.glyph)}</strong> ${escapeHtml(marker.label)}</span>`).join("")}
@@ -1332,7 +1719,7 @@ function collectLocalInputs() {
   return { snapshot, telemetryRows, telemetryPresent, reviews };
 }
 
-function githubPrUrls(inputs) {
+function githubPrUrls(inputs, reviewRequests = null) {
   const records = Array.isArray(inputs.snapshot.backlog?.records) ? inputs.snapshot.backlog.records : [];
   const completed = new Set(
     records.filter((record) => record.structured && record.id && record.state === "done").map((record) => record.id),
@@ -1344,7 +1731,8 @@ function githubPrUrls(inputs) {
     )
     .map((task) => task.pr.url);
   const theirs = (inputs.reviews.relationships || []).map((relationship) => relationship.link).filter(Boolean);
-  return [...new Set([...ours, ...theirs])];
+  const requested = (reviewRequests?.items || []).map((request) => request.url).filter(Boolean);
+  return [...new Set([...requested, ...ours, ...theirs])];
 }
 
 function writeAtomically(outputPath, html) {
@@ -1378,6 +1766,8 @@ function watchLoop(width, useColor, showAll) {
   process.on("SIGTERM", () => process.exit(0));
 
   let github = null;
+  let reviewRequests = null;
+  let quota = null;
   let model = null;
   let selectedIdentity = null;
   let input = "";
@@ -1403,9 +1793,13 @@ function watchLoop(width, useColor, showAll) {
     try {
       const inputs = collectLocalInputs();
       if (github === null || secondsSince(github.fetchedAtMs, Date.now()) >= WATCH_GITHUB_SECONDS) {
-        github = fetchGithubStatuses(githubPrUrls(inputs));
+        reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
+          ? fetchReviewRequests()
+          : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
+        github = fetchGithubStatuses(githubPrUrls(inputs, reviewRequests));
+        quota = fetchQuota();
       }
-      model = buildModel({ ...inputs, github });
+      model = buildModel({ ...inputs, github, reviewRequests, quota });
       if (
         selectedIdentity !== null &&
         !model.buckets.flatMap((bucket) => bucket.items).some((item) => item.identity === selectedIdentity)
@@ -1470,9 +1864,13 @@ try {
     watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
   } else {
     const inputs = collectLocalInputs();
-    const urls = githubPrUrls(inputs);
+    const reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
+      ? fetchReviewRequests()
+      : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
+    const urls = githubPrUrls(inputs, reviewRequests);
     const github = urls.length > 0 ? fetchGithubStatuses(urls) : null;
-    const model = buildModel({ ...inputs, github });
+    const quota = fetchQuota();
+    const model = buildModel({ ...inputs, github, reviewRequests, quota });
     if (showRow !== null) {
       process.stdout.write(expandRow(
         model,
