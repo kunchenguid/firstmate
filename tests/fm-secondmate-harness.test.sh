@@ -322,11 +322,10 @@ SH
   case "$got" in
     ''|*[!0-9]*) fail "OMP session-lock ancestry returned nonnumeric identity '$got'" ;;
   esac
-  got=$(FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
-  case "$got" in
-    ''|*[!0-9]*) fail "the lock-only bare Bun fallback returned nonnumeric identity '$got'" ;;
-  esac
+  if FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT"; then
+    fail "the lock-only bare Bun fallback accepted an unrelated process"
+  fi
   PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \
     || fail "session-lock liveness rejected the exact Bun/OMP process"
@@ -334,9 +333,10 @@ SH
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_process_matches /opt/homebrew/bin/bun "bun /opt/omp/tools/compiler.js --prompt omp"' "$ROOT"; then
     fail "strict harness identity accepted an unrelated Bun process that merely mentioned OMP"
   fi
-  FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \
-    || fail "session-lock liveness rejected the deliberate bare-Bun lock fallback"
+  if FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
+    fail "session-lock liveness accepted an unrelated bare Bun helper"
+  fi
   if FM_TEST_OMP_SHAPE=bunx PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
     fail "session-lock liveness accepted bunx running the OMP script"

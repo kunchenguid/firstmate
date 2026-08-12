@@ -495,16 +495,8 @@ fm_harness_process_matches() {  # <comm> <args> [executable] [script]
   return 1
 }
 
-fm_harness_omp_bare_lock_matches() {  # <comm> <args>
-  local comm=${1:-}
-  fm_harness_omp_attribution_allowed || return 1
-  [ "$(basename -- "$comm")" = bun ] || return 1
-  return 0
-}
-
 fm_harness_lock_process_matches() {  # <comm> <args> [executable] [script]
-  fm_harness_process_matches "${1:-}" "${2:-}" "${3:-}" "${4:-}" && return 0
-  fm_harness_omp_bare_lock_matches "${1:-}" "${2:-}"
+  fm_harness_process_matches "${1:-}" "${2:-}" "${3:-}" "${4:-}"
 }
 
 # Walk the current process ancestry (up to 80 hops) and print this session's

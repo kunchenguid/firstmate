@@ -293,10 +293,13 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
-test_bare_bun_lock_holder_remains_live() {
-  local dir fakebin
-  dir="$TMP_ROOT/bare-bun-lock-holder"
+test_bun_lock_identity_and_stale_recovery() {
+  local dir fakebin out status lock_after
+  dir="$TMP_ROOT/bun-lock-identity"
   fakebin=$(fm_fakebin "$dir")
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/omp"
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/bun"
+  chmod +x "$fakebin/omp" "$fakebin/bun"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -308,21 +311,48 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-case "$pid:$field" in
-  700:comm=) printf '%s\n' bun ;;
-  700:args=) printf '%s\n' 'bun /tmp/omp' ;;
-  700:ppid=) printf '%s\n' 1 ;;
+case "${FM_TEST_BUN_LOCK_SHAPE:-unrelated}:$pid:$field" in
+  unrelated:700:comm=) printf '%s\n' bun ;;
+  unrelated:700:args=) printf '%s\n' 'bun /tmp/omp' ;;
+  canonical:700:comm=) printf '%s\n' "$FM_TEST_BUN_PATH" ;;
+  canonical:700:args=) printf 'bun %s --resume\n' "$FM_TEST_OMP_PATH" ;;
+  *:*:comm=) printf '%s\n' "$FM_TEST_BUN_PATH" ;;
+  *:*:args=) printf 'bun %s --resume\n' "$FM_TEST_OMP_PATH" ;;
+  *:*:ppid=) printf '%s\n' 1 ;;
   *) exit 1 ;;
 esac
 SH
   chmod +x "$fakebin/ps"
-  if ! lib_eval "$fakebin" 'fm_harness_pid_alive 700'; then
-    fail "a bare Bun OMP lock holder was treated as stale"
-  fi
-  if lib_eval "$fakebin" 'fm_harness_process_matches bun "bun /tmp/omp"'; then
-    fail "the bare Bun lock fallback widened generic harness identity"
-  fi
-  pass "session-lock: bare Bun remains live only through the lock-specific fallback"
+  printf 'kill() { return 0; }\n' > "$dir/bash-env"
+  mkdir -p "$dir/state"
+  printf '700\n' > "$dir/state/.lock"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_BUN_LOCK_SHAPE=unrelated \
+    FM_TEST_BUN_PATH="$fakebin/bun" FM_TEST_OMP_PATH="$fakebin/omp" \
+    BASH_ENV="$dir/bash-env" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-lock.sh" status 2>&1)
+  assert_contains "$out" "lock: stale (pid 700 dead or not a harness)" \
+    "an unrelated Bun helper kept a stale session lock live"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_BUN_LOCK_SHAPE=canonical \
+    FM_TEST_BUN_PATH="$fakebin/bun" FM_TEST_OMP_PATH="$fakebin/omp" \
+    BASH_ENV="$dir/bash-env" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-lock.sh" status 2>&1)
+  assert_contains "$out" "lock: held by live harness pid 700" \
+    "canonical Bun plus OMP script evidence was not kept live"
+
+  printf '700\n' > "$dir/state/.lock"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_BUN_LOCK_SHAPE=unrelated \
+    FM_TEST_BUN_PATH="$fakebin/bun" FM_TEST_OMP_PATH="$fakebin/omp" \
+    BASH_ENV="$dir/bash-env" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-lock.sh" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "stale unrelated Bun ownership was not recoverable: $out"
+  lock_after=$(tr -d '[:space:]' < "$dir/state/.lock")
+  case "$lock_after" in
+    ''|700|*[!0-9]*) fail "stale unrelated Bun lock was not replaced with a verified owner: $lock_after" ;;
+  esac
+  pass "session-lock: unrelated Bun is stale while canonical Bun OMP ownership stays live"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -467,7 +497,7 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_owner_selection_is_harness_specific
 test_omp_identity_requires_canonical_executable_evidence
 test_competing_version_named_session_is_seen_as_live
-test_bare_bun_lock_holder_remains_live
+test_bun_lock_identity_and_stale_recovery
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
