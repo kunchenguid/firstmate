@@ -847,6 +847,33 @@ fm_wake_append() {
   return "$status"
 }
 
+fm_wake_append_preserving_recovery() {
+  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_append_preserving_recovery: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
+
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
+  epoch=$(date +%s)
+  seq_file="$STATE/.wake-queue.seq"
+  status=0
+
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  seq=$(cat "$seq_file" 2>/dev/null || echo 0)
+  case "$seq" in
+    ''|*[!0-9]*) seq=0 ;;
+  esac
+  seq=$((seq + 1))
+  printf '%s\n' "$seq" > "$seq_file" || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 # fm_wake_queued_keys <kind>
 # Print the distinct keys currently queued for <kind>, oldest first. Read under
 # the append lock so a concurrent append is never observed half-written. The

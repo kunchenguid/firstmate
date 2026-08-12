@@ -350,7 +350,6 @@ printf 'signal: classified away action\n'
 SH
   chmod +x "$arm"
   hold_wake_queue_lock "$home"
-
   FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
   pid=$!
   wait_for_file "$home/state/arm-closed" || fail "classification away-transfer arm did not close"
@@ -397,7 +396,7 @@ SH
 }
 
 test_away_transfer_during_failed_classification_stays_dormant() {
-  local home arm out pid
+  local home arm out pid failure rows
   home=$(make_home failed-classification-away-transfer)
   arm="$home/fake-arm.sh"
   out="$home/owner.out"
@@ -414,15 +413,16 @@ SH
   wait_for_file "$home/state/arm-closed" || fail "failed-classification away arm did not close"
   sleep 0.1
   : > "$home/state/.afk"
-  sleep 1.2
+  sleep 2
   kill -0 "$pid" 2>/dev/null || fail "classification failure completed after away mode took supervision"
-  wait_for_file "$home/state/.watcher-down" || fail "classification failure was not published for away supervision"
-  recovery=$(cat "$home/state/.watcher-down")
-  case "$recovery" in pending:downtime:*) ;; *) fail "away classification failure published invalid recovery state: $recovery" ;; esac
-  sleep 0.2
-  [ "$(cat "$home/state/.watcher-down")" = "$recovery" ] || fail "away classification failure was published more than once"
   : > "$home/state/release-classification"
   wait "$CLASSIFICATION_LOCK_PID" || fail "wake queue lock holder failed"
+  failure='watcher: FAILED - Grok continuity could not classify a completed arm: wake queue lock remained unavailable'
+  wait_for_file "$home/state/.wake-queue" || fail "classification failure was not queued for away supervision"
+  rows=$(cat "$home/state/.wake-queue")
+  assert_contains "$rows" "$failure" "away successor could not see the exact classification failure"
+  sleep 0.2
+  [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "away classification failure was queued more than once"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   assert_not_contains "$(cat "$out")" "watcher: FAILED - Grok continuity could not classify" "old owner surfaced classification failure after away transfer"
@@ -430,7 +430,7 @@ SH
 }
 
 test_session_transfer_during_failed_classification_stays_dormant() {
-  local home arm out pid replacement
+  local home arm out pid replacement failure rows
   home=$(make_home failed-classification-session-transfer)
   arm="$home/fake-arm.sh"
   out="$home/owner.out"
@@ -442,21 +442,24 @@ printf 'signal: classification will fail\n'
 SH
   chmod +x "$arm"
   hold_wake_queue_lock "$home"
+  printf 'pending:handling:existing-generation\n' > "$home/state/.watcher-down"
 
   FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
   pid=$!
   wait_for_file "$home/state/arm-closed" || fail "failed-classification session arm did not close"
   sleep 0.1
   printf '%s\n' "$replacement" > "$home/state/.lock"
-  sleep 1.2
+  sleep 2
   kill -0 "$pid" 2>/dev/null || fail "classification failure completed after session ownership transferred"
-  wait_for_file "$home/state/.watcher-down" || fail "classification failure was not published for successor supervision"
-  recovery=$(cat "$home/state/.watcher-down")
-  case "$recovery" in pending:downtime:*) ;; *) fail "session classification failure published invalid recovery state: $recovery" ;; esac
-  sleep 0.2
-  [ "$(cat "$home/state/.watcher-down")" = "$recovery" ] || fail "session classification failure was published more than once"
   : > "$home/state/release-classification"
   wait "$CLASSIFICATION_LOCK_PID" || fail "wake queue lock holder failed"
+  failure='watcher: FAILED - Grok continuity could not classify a completed arm: wake queue lock remained unavailable'
+  wait_for_file "$home/state/.wake-queue" || fail "classification failure was not queued for successor supervision"
+  rows=$(cat "$home/state/.wake-queue")
+  assert_contains "$rows" "$failure" "session successor could not see the exact classification failure"
+  sleep 0.2
+  [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "session classification failure was queued more than once"
+  [ "$(cat "$home/state/.watcher-down")" = 'pending:handling:existing-generation' ] || fail "failure publication clobbered active recovery handling"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   assert_not_contains "$(cat "$out")" "watcher: FAILED - Grok continuity could not classify" "old owner surfaced classification failure after session transfer"
@@ -481,7 +484,7 @@ SH
 }
 
 test_away_transfer_during_arm_failure_classification_stays_dormant() {
-  local home arm out pid
+  local home arm out pid failure
   home=$(make_home arm-failure-away-transfer)
   arm="$home/fake-arm.sh"
   out="$home/owner.out"
@@ -500,18 +503,18 @@ SH
   : > "$home/state/release-failure-classification"
   sleep 0.2
   kill -0 "$pid" 2>/dev/null || fail "arm failure completed after away mode took supervision"
-  wait_for_file "$home/state/.watcher-down" || fail "arm failure was not published for away supervision"
-  recovery=$(cat "$home/state/.watcher-down")
-  case "$recovery" in pending:downtime:*) ;; *) fail "away arm failure published invalid recovery state: $recovery" ;; esac
+  failure='watcher: FAILED - classified after away transfer'
+  wait_for_file "$home/state/.wake-queue" || fail "arm failure was not queued for away supervision"
+  assert_contains "$(cat "$home/state/.wake-queue")" "$failure" "away successor could not see the exact arm failure"
   sleep 0.2
-  [ "$(cat "$home/state/.watcher-down")" = "$recovery" ] || fail "away arm failure was published more than once"
+  [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "away arm failure was queued more than once"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   pass "away transfer during arm failure classification keeps the old owner dormant"
 }
 
 test_session_transfer_during_arm_failure_classification_stays_dormant() {
-  local home arm out pid replacement
+  local home arm out pid replacement failure
   home=$(make_home arm-failure-session-transfer)
   arm="$home/fake-arm.sh"
   out="$home/owner.out"
@@ -531,11 +534,11 @@ SH
   : > "$home/state/release-failure-classification"
   sleep 0.2
   kill -0 "$pid" 2>/dev/null || fail "arm failure completed after session ownership transferred"
-  wait_for_file "$home/state/.watcher-down" || fail "arm failure was not published for successor supervision"
-  recovery=$(cat "$home/state/.watcher-down")
-  case "$recovery" in pending:downtime:*) ;; *) fail "session arm failure published invalid recovery state: $recovery" ;; esac
+  failure='watcher: FAILED - classified after session transfer'
+  wait_for_file "$home/state/.wake-queue" || fail "arm failure was not queued for successor supervision"
+  assert_contains "$(cat "$home/state/.wake-queue")" "$failure" "session successor could not see the exact arm failure"
   sleep 0.2
-  [ "$(cat "$home/state/.watcher-down")" = "$recovery" ] || fail "session arm failure was published more than once"
+  [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "session arm failure was queued more than once"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   pass "session transfer during arm failure classification keeps the old owner dormant"

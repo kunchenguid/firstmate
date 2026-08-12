@@ -177,7 +177,8 @@ while :; do
 
   if [ "$rc" -ne 0 ] || grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
     if [ "$rc" -eq 0 ]; then rc=1; fi
-    if ! grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
+    completion_failure=$(grep -m 1 '^watcher: FAILED' "$stream_dir/output" 2>/dev/null || true)
+    if [ -z "$completion_failure" ]; then
       completion_failure="watcher: FAILED - Grok continuity arm exited $rc"
     fi
     completion_rc=$rc
@@ -202,7 +203,8 @@ while :; do
 
   if [ -n "$completion_rc" ]; then
     if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; then
-      if [ "$completion_rc" -ne 0 ] && ! fm_recovery_marker_publish "$RECOVERY_MARKER" downtime; then
+      if [ "$completion_rc" -ne 0 ] \
+        && ! fm_wake_append_preserving_recovery check "grok-transfer-failure:${stream_dir##*.}" "$completion_failure"; then
         while :; do sleep "$IDLE_POLL"; done
       fi
       rm -rf "$stream_dir"
