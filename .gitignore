@@ -8,5 +8,6 @@ data/
 .DS_Store
 __pycache__/
 *.pyc
+node_modules/
 .env
 config/

@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/feishu-channel.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -153,6 +154,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/feishu-channel/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -253,6 +258,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/feishu-channel.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },
@@ -326,6 +335,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/feishu-channel.md",
       "audience": "maintainer-verification"
     },
     {

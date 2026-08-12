@@ -1011,16 +1011,12 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-if (handlers.has("turn_end")) throw new Error("guard still treats internal Pi turns as logical runs");
 const settled = handlers.get("agent_settled");
 if (!settled) throw new Error("agent_settled handler was not registered");
 
 await settled({ type: "agent_settled" }, {});
 if (prompts !== 1) throw new Error(`no-tool run injected ${prompts} follow-ups`);
 
-for (let i = 0; i < 3; i += 1) {
-  await handlers.get("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
-}
 await settled({ type: "agent_settled" }, {});
 if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);
 

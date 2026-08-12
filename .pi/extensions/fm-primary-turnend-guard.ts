@@ -167,6 +167,7 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+
   pi.on?.("session_start", async (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = { startup: "startup", new: "clear", resume: "resume", fork: "fork" }[reason];
