@@ -35,6 +35,18 @@ detect_own() {
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
+  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
+  # carries BOTH markers and whichever is tested first wins. Cursor's own
+  # markers are unambiguous when present, so ordering them first is what makes
+  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
+  # at the launch boundary. Both are kept: the launch sanitization only covers
+  # sessions fm-spawn started, while this ordering also covers a cursor session
+  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
+  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
+  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
+  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
