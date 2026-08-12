@@ -649,7 +649,15 @@ EOF
 }
 
 fm_backend_herdr_projection_close_bound_pane() {
-  return 1
+  local session=$1 pane_id=$2 required_agent_state=${3:-}
+  local expected_workspace=${4:-} expected_tab=${5:-} expected_label=${6:-} expected_harness=${7:-}
+  [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ] || return 1
+  [ -n "$expected_workspace" ] && [ -n "$expected_tab" ] \
+    && [ -n "$expected_label" ] || return 1
+  fm_backend_herdr_projection_task_identity_matches \
+    "$session" "$expected_workspace" "$expected_tab" "$pane_id" \
+    "$expected_label" "$expected_harness" "$required_agent_state" || return 1
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1
 }
 
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [workspace] [tab] [label] [harness]
