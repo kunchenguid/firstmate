@@ -215,7 +215,7 @@ run_two_level() {
   wwt="$base/wwt"
   fm_git_worktree "$wproj" "$wwt" "wt-$name"
   mkdir -p "$sm/state" "$sm/projects" "$sm/data/$worker_id"
-  printf 'worker brief\n' > "$sm/data/$worker_id/brief.md"
+  printf 'worker brief\nSurface contract: non-web\n' > "$sm/data/$worker_id/brief.md"
   touch "$sm/state/.last-watcher-beat"
   start_trace_session "$sm" "$TL_ENV_TC"
   wlog="$base/worker-launch.log"
