@@ -212,6 +212,7 @@ function containsOmpCommand(source, depth = 0, cwd = process.cwd()) {
     }
 
     const position = commandPosition(node);
+    if (position.unresolvedWrapperOption) continue;
     for (const payload of position.wrapperPayloads) {
       if (containsOmpCommand(payload, depth + 1, nodeCwd)) return true;
     }

@@ -958,9 +958,8 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] 
 # submit path uses an internal content-diff approach with no separately named
 # classifier, so it reports unknown here - callers fall back to their own
 # policy, exactly as an unknown fm_backend_busy_state already does.
-fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner] -> empty|pending|pending-unproven|unknown
-  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} raw_owner=${5-}
-  shift
+fm_backend_composer_state() {  # <backend> <target> [expected-label] [recorded-harness] [raw-launch] [raw-owner] -> empty|pending|pending-unproven|unknown
+  local backend=$1 target=${2:-} expected_label=${3-} recorded_harness=${4-} raw_launch=${5-} raw_owner=${6-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
     && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
@@ -969,11 +968,11 @@ fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-laun
     return 0
   fi
   case "$backend" in
-    tmux) fm_tmux_composer_state "$@" ;;
-    herdr) fm_backend_herdr_composer_state "$@" ;;
-    orca) fm_backend_orca_composer_state "$@" ;;
-    cmux) fm_backend_cmux_composer_state "$@" ;;
-    zellij) fm_backend_zellij_composer_state "$@" ;;
+    tmux) fm_tmux_composer_state "$target" ;;
+    herdr) fm_backend_herdr_composer_state "$target" "$recorded_harness" "$raw_launch" "$raw_owner" ;;
+    orca) fm_backend_orca_composer_state "$target" ;;
+    cmux) fm_backend_cmux_composer_state "$target" "$expected_label" ;;
+    zellij) fm_backend_zellij_composer_state "$target" "$expected_label" ;;
     *) printf 'unknown' ;;
   esac
 }

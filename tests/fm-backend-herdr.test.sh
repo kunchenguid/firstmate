@@ -4637,7 +4637,7 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
   printf '  \xe2\x9d\xaf hello there this is a test message\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2 claude' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2 "" claude' "$ROOT" )
   [ "$out" = pending ] || fail "the pre-injection empty-box guard must still refuse real unsubmitted composer text after this change, got '$out'"
   pass "fm_backend_composer_state (herdr): the pre-injection empty-box guard still refuses a genuinely non-empty composer, unaffected by the submit-confirmation change"
 }
@@ -4738,6 +4738,37 @@ test_dispatch_composer_state_routes_by_backend() {
   pass "fm_backend_composer_state dispatches every backend to its named thin classifier, unknown for unrecognized backends"
 }
 
+test_composer_state_separates_expected_label_and_recorded_harness() {
+  (
+    . "$ROOT/bin/fm-backend.sh"
+    _FM_BACKEND_TMUX_SOURCED=1
+    _FM_BACKEND_HERDR_SOURCED=1
+    _FM_BACKEND_CMUX_SOURCED=1
+    _FM_BACKEND_ZELLIJ_SOURCED=1
+    fm_backend_herdr_composer_state() {
+      [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"
+      [ "$2" = kimi ] || fail "herdr composer_state got wrong recorded harness: ${2:-missing}"
+      [ "$3" = 1 ] || fail "herdr composer_state got wrong raw-launch flag: ${3:-missing}"
+      [ "$4" = owner-1 ] || fail "herdr composer_state got wrong raw owner: ${4:-missing}"
+      printf empty
+    }
+    fm_backend_cmux_composer_state() {
+      [ "$1" = "workspace:surface" ] || fail "cmux composer_state got wrong target: $1"
+      [ "$2" = fm-kimi ] || fail "cmux composer_state got wrong expected label: ${2:-missing}"
+      printf empty
+    }
+    fm_backend_zellij_composer_state() {
+      [ "$1" = "session:7" ] || fail "zellij composer_state got wrong target: $1"
+      [ "$2" = fm-kimi ] || fail "zellij composer_state got wrong expected label: ${2:-missing}"
+      printf empty
+    }
+    [ "$(fm_backend_composer_state herdr default:w1:p2 fm-kimi kimi 1 owner-1)" = empty ] || exit 1
+    [ "$(fm_backend_composer_state cmux workspace:surface fm-kimi kimi 1 owner-1)" = empty ] || exit 1
+    [ "$(fm_backend_composer_state zellij session:7 fm-kimi kimi 1 owner-1)" = empty ] || exit 1
+  ) || fail "composer_state identity/label separation subshell failed"
+  pass "fm_backend_composer_state keeps expected labels separate from recorded harness ownership"
+}
+
 test_kimi_herdr_composer_uses_recorded_harness_identity() {
   local dir="$TMP_ROOT/kimi-herdr-composer" fb out
   mkdir -p "$dir/fakebin"
@@ -4757,8 +4788,8 @@ SH
   fb="$dir/fakebin"
   out=$(PATH="$fb:$PATH" bash -c '
     . "$0/bin/fm-backend.sh"
-    [ "$(fm_backend_composer_state herdr default:w1:p2 kimi "" "")" = empty ] || exit 1
-    [ "$(fm_backend_composer_state herdr default:w1:p2 fm-kimi "" "")" = unknown ] || exit 1
+    [ "$(fm_backend_composer_state herdr default:w1:p2 fm-kimi kimi "" "")" = empty ] || exit 1
+    [ "$(fm_backend_composer_state herdr default:w1:p2 fm-kimi fm-kimi "" "")" = unknown ] || exit 1
   ' "$ROOT") || fail "Kimi Herdr composer identity contract failed"
   [ -z "$out" ] || fail "Kimi Herdr composer probe wrote unexpected output: $out"
   pass "Kimi Herdr delivery: composer checks use the recorded harness identity"
@@ -5515,6 +5546,7 @@ test_send_text_submit_unknown_on_capture_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
+test_composer_state_separates_expected_label_and_recorded_harness
 test_kimi_herdr_composer_uses_recorded_harness_identity
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty

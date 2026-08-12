@@ -1165,6 +1165,23 @@ test_composer_state_reads_styled_dump() {
   pass "fm_backend_zellij_composer_state: classifies the real claude-in-zellij --ansi dump as empty"
 }
 
+test_dispatch_composer_state_passes_kimi_expected_label() {
+  local dir fb out target label title
+  dir="$TMP_ROOT/dispatch-kimi-label"; mkdir -p "$dir/responses"
+  target="firstmate:7"
+  label=fm-kimi
+  title=$(zellij_expected_scoped_title "$label")
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 "$title"
+  printf 'transcript line\n\033[m\342\235\257\302\240' > "$dir/responses/3.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state zellij "$1" "$2" kimi "" ""' "$ROOT" "$target" "$label" )
+  [ "$out" = empty ] || fail "Kimi zellij composer dispatch should validate the expected task label, got '$out'"
+  pass "Kimi zellij composer dispatch uses the expected task label separately from recorded harness"
+}
+
 test_composer_state_dead_pane_is_unknown() {
   # The unconditional-exit-0 CLI quirk (file header): a dead target dumps
   # nothing. Both the styled and the plain fallback come back empty, so the
@@ -1352,6 +1369,7 @@ test_send_text_submit_accepts_wrapped_bare_text
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump
+test_dispatch_composer_state_passes_kimi_expected_label
 test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent

@@ -337,6 +337,22 @@ test_dispatch_composer_state_routes_cmux() {
   pass "fm_backend_composer_state: routes cmux to the cmux composer classifier"
 }
 
+test_dispatch_composer_state_passes_kimi_expected_label() {
+  local dir fb out target label title
+  dir="$TMP_ROOT/dispatch-kimi-label"; mkdir -p "$dir/responses"
+  target="aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"
+  label=fm-kimi
+  title=$(cmux_expected_scoped_title "$label")
+  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 3 $'  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state cmux "$1" "$2" kimi "" ""' "$ROOT" "$target" "$label" )
+  [ "$out" = empty ] || fail "Kimi cmux composer dispatch should validate the expected task label, got '$out'"
+  pass "Kimi cmux composer dispatch uses the expected task label separately from recorded harness"
+}
+
 # --- ping_state / ensure_running ---------------------------------------------
 
 test_ping_state_ok() {
@@ -1120,6 +1136,7 @@ test_scoped_title_changes_with_root_path
 test_dispatch_routes_cmux_backend
 test_dispatch_busy_state_unknown_for_cmux
 test_dispatch_composer_state_routes_cmux
+test_dispatch_composer_state_passes_kimi_expected_label
 test_ping_state_ok
 test_ping_state_denied
 test_ping_state_unauth

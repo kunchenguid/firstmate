@@ -2266,7 +2266,7 @@ kimi_capture() {
 # claude's did. The banner and brief-echo greps below are launch-progress
 # signals, not composer shapes, so they stay here.
 kimi_composer_is_empty() {
-  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$HARNESS" "$RAW_LAUNCH" "$RAW_LAUNCH_OWNER" 2>/dev/null)" = empty ]
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" "$HARNESS" "$RAW_LAUNCH" "$RAW_LAUNCH_OWNER" 2>/dev/null)" = empty ]
 }
 
 kimi_wait_for_ready() {

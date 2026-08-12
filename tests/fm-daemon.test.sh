@@ -1728,8 +1728,9 @@ test_pane_input_pending_passes_primary_harness_metadata() {
     FM_DAEMON_PRIMARY_HARNESS=omp
     fm_backend_composer_state() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state target: $1 $2"
-      [ "$3" = omp ] || fail "pane_input_pending did not pass the primary harness: ${3:-missing}"
-      [ -z "${4:-}" ] || fail "pane_input_pending unexpectedly marked a verified primary raw"
+      [ -z "${3:-}" ] || fail "pane_input_pending unexpectedly passed an expected label: ${3:-missing}"
+      [ "$4" = omp ] || fail "pane_input_pending did not pass the primary harness: ${4:-missing}"
+      [ -z "${5:-}" ] || fail "pane_input_pending unexpectedly marked a verified primary raw"
       printf empty
     }
     if pane_input_pending "default:w1:p2" herdr; then
@@ -1819,8 +1820,9 @@ test_inject_msg_passes_primary_harness_metadata() {
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() {
-      [ "$3" = omp ] || fail "inject_msg did not pass the primary harness to composer_state: ${3:-missing}"
-      [ -z "${4:-}" ] || fail "inject_msg unexpectedly marked a verified primary raw for composer_state"
+      [ -z "${3:-}" ] || fail "inject_msg unexpectedly passed an expected label to composer_state: ${3:-missing}"
+      [ "$4" = omp ] || fail "inject_msg did not pass the primary harness to composer_state: ${4:-missing}"
+      [ -z "${5:-}" ] || fail "inject_msg unexpectedly marked a verified primary raw for composer_state"
       printf empty
     }
     fm_backend_send_text_submit() {
@@ -1848,9 +1850,10 @@ test_inject_msg_passes_raw_owner_from_supervisor_metadata() {
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() {
-      [ "$3" = omp ] || fail "inject_msg did not preserve the primary harness"
-      [ "$4" = 1 ] || fail "inject_msg did not load raw-launch metadata"
-      [ "$5" = raw-supervisor-owner ] || fail "inject_msg did not load the raw owner metadata"
+      [ -z "${3:-}" ] || fail "inject_msg unexpectedly passed an expected label"
+      [ "$4" = omp ] || fail "inject_msg did not preserve the primary harness"
+      [ "$5" = 1 ] || fail "inject_msg did not load raw-launch metadata"
+      [ "$6" = raw-supervisor-owner ] || fail "inject_msg did not load the raw owner metadata"
       printf empty
     }
     fm_backend_send_text_submit() {

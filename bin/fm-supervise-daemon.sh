@@ -620,7 +620,7 @@ pane_input_pending() {  # <target> [backend]
   IFS=$'\t' read -r raw_launch raw_owner <<EOF
 $(fm_daemon_supervisor_raw_context "$target" "$(_state_root)")
 EOF
-  [ "$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null)" != empty ]
+  [ "$(fm_backend_composer_state "$backend" "$target" "" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1182,7 +1182,7 @@ EOF
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null)
+  composer=$(fm_backend_composer_state "$backend" "$target" "" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
