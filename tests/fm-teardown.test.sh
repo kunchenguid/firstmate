@@ -155,6 +155,12 @@ SH
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   printf '# agents\n' > "$case_dir/project/AGENTS.md"
   cp -R "$ROOT/bin" "$case_dir/project/bin"
+  if [ "${FM_TEARDOWN_TEST_FOCUS:-}" = s1 ]; then
+    # Focused return fixtures test lifecycle ordering, not host-wide process
+    # occupancy. Keep that answer deterministic on busy CI runners.
+    printf '%s\n' 'fm_slot_process_occupant_tasks() { return 1; }' \
+      >> "$case_dir/project/bin/fm-slot-owner-lib.sh"
+  fi
   fm_test_write_primary_attestation "$case_dir/project" \
     "$case_dir/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID"
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
@@ -839,11 +845,6 @@ SH
 test_teardown_failed_return_stays_retryable_for_a_ship_task() {
   local case_dir rc wt_head gate branch
   case_dir=$(make_case failed-return-retry)
-  # This regression isolates the durable treehouse-return retry. Make the
-  # process-census answer explicit so a busy CI runner cannot turn a failed
-  # return into a successful retain-only teardown.
-  printf '%s\n' 'fm_slot_process_occupant_tasks() { return 1; }' \
-    >> "$case_dir/project/bin/fm-slot-owner-lib.sh"
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "landed work before the failed return"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
