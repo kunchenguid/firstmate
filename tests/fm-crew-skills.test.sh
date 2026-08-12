@@ -60,20 +60,17 @@ test_validation_fails_loudly() {
 
 test_inheritance_allowlist_contains_crew_skills() {
   local src="$TMP_ROOT/inherit/source" dest="$TMP_ROOT/inherit/destination"
+  unset FM_INHERITABLE_CONFIG
   # shellcheck source=bin/fm-config-inherit-lib.sh
   . "$ROOT/bin/fm-config-inherit-lib.sh"
-  case " $FM_INHERITABLE_CONFIG " in
-    *' crew-skills.json '*) ;;
-    *) fail "crew-skills.json is absent from the secondmate inheritance allowlist" ;;
-  esac
   mkdir -p "$src" "$dest"
   printf '%s\n' '{"phases":{"review":{"skill":"review-skill"}}}' > "$src/crew-skills.json"
-  FM_INHERITABLE_CONFIG=crew-skills.json propagate_inheritable_config "$src" "$dest" \
+  propagate_inheritable_config "$src" "$dest" \
     || fail "crew-skills inheritance copy failed"
   cmp -s "$src/crew-skills.json" "$dest/crew-skills.json" \
     || fail "secondmate did not inherit crew-skills bytes"
   rm "$src/crew-skills.json"
-  FM_INHERITABLE_CONFIG=crew-skills.json propagate_inheritable_config "$src" "$dest" \
+  propagate_inheritable_config "$src" "$dest" \
     || fail "crew-skills inheritance absence mirror failed"
   assert_absent "$dest/crew-skills.json" "primary absence did not remove inherited crew-skills"
   pass "crew skills copy and absence-mirror into secondmate homes"
