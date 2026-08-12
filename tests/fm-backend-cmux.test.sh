@@ -84,6 +84,15 @@ cmux_panes_response() {  # <dir> <n> <surface_id>
   printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}' "$3" "$3" > "$1/responses/$2.out"
 }
 
+cmux_panes_selected_only_response() {  # <dir> <n> <surface_id>
+  printf '{"panes":[{"selected_surface_id":"%s"}]}' "$3" > "$1/responses/$2.out"
+}
+
+cmux_panes_multi_surface_response() {  # <dir> <n> <selected_id> <other_id>
+  printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s","%s"]}]}' \
+    "$3" "$3" "$4" > "$1/responses/$2.out"
+}
+
 cmux_windows_response() {  # <dir> <n> <window_id1> <count1> [<window_id2> <count2> ...]
   local dir=$1 n=$2 json first=1
   shift 2
@@ -509,6 +518,23 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: uses the provider workspace id and validates its title context"
 }
 
+test_create_task_accepts_selected_only_surface_response() {
+  local dir fb out title surface_id
+  dir="$TMP_ROOT/create-task-selected-only"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-selected-only)
+  surface_id=cccccccc-2222-2222-2222-222222222222
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"workspace_id":"bbbbbbbb-1111-1111-1111-111111111111"}' > "$dir/responses/2.out"
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_panes_selected_only_response "$dir" 4 "$surface_id"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-selected-only /tmp/proj' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 $surface_id" ] \
+    || fail "create_task should accept selected_surface_id without surface_ids, got '$out'"
+  pass "fm_backend_cmux_create_task: accepts the observed selected-only surface response"
+}
+
 test_create_task_rejects_replaced_workspace_after_provider_id() {
   local dir fb out status title
   dir="$TMP_ROOT/create-task-replaced"; mkdir -p "$dir/responses"
@@ -780,6 +806,33 @@ test_target_ready_checks_expected_label() {
   pass "fm_backend_cmux_target_ready: verifies the workspace title against the expected label first"
 }
 
+test_target_ready_accepts_selected_only_surface_response() {
+  local dir fb
+  dir="$TMP_ROOT/ready-selected-only"; mkdir -p "$dir/responses"
+  cmux_panes_selected_only_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+  expect_code 0 $? "target_ready should accept selected_surface_id without surface_ids"
+  pass "fm_backend_cmux_target_ready: accepts selected-only surface liveness responses"
+}
+
+test_surface_inventory_returns_one_valid_set() {
+  local dir fb out expected surface_one surface_two
+  dir="$TMP_ROOT/surface-inventory-set"; mkdir -p "$dir/responses"
+  surface_one=aaaaaaaa-1111-1111-1111-111111111111
+  surface_two=bbbbbbbb-2222-2222-2222-222222222222
+  expected=$(printf '%s\n%s' "$surface_one" "$surface_two")
+  cmux_panes_multi_surface_response "$dir" 1 "$surface_two" "$surface_one"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_surface_ids_for_workspace "$1"' "$ROOT" \
+      cccccccc-3333-3333-3333-333333333333 )
+  [ "$out" = "$expected" ] \
+    || fail "surface inventory should return the normalized surface set, got '$out'"
+  pass "fm_backend_cmux_surface_ids_for_workspace: returns one strict deduplicated surface set"
+}
+
 test_target_ready_rejects_label_mismatch() {
   local dir fb status
   dir="$TMP_ROOT/ready-label-mismatch"; mkdir -p "$dir/responses"
@@ -906,7 +959,7 @@ test_capture_trims_locally() {
   local dir fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"
   # 1: list-panes --json --id-format uuids (target_ready)
-  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_selected_only_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   # 2: read-screen --scrollback --lines 200 --json (actual fetch)
   cmux_read_screen_response "$dir" 2 $'line one\nline two\nline three\nline four'
   fb=$(make_cmux_fakebin "$dir")
@@ -979,7 +1032,7 @@ test_send_key_recovers_stale_target_by_label() {
     "ffffffff-0000-0000-0000-000000000000" 1
   cmux_workspace_list_response "$dir" 2 "11111111-2222-2222-2222-222222222222" other
   cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
+  cmux_panes_selected_only_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
@@ -1682,6 +1735,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_accepts_selected_only_surface_response
 test_create_task_rejects_replaced_workspace_after_provider_id
 test_create_task_rejects_invalid_surface_identity_without_replacing_record
 test_unresolved_record_preserves_previous_record_on_publish_failure
@@ -1692,6 +1746,8 @@ test_create_task_preserves_exact_workspace_on_nonzero_create
 test_create_task_retains_unresolved_record_on_nonzero_create_without_identity
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
+test_target_ready_accepts_selected_only_surface_response
+test_surface_inventory_returns_one_valid_set
 test_target_ready_rejects_label_mismatch
 test_target_ready_rejects_untrusted_list_panes_response
 test_stale_recovery_requires_unique_valid_inventory

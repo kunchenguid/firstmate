@@ -510,14 +510,39 @@ fm_backend_cmux_created_workspace_id() {  # <provider-output>
   printf '%s' "$workspace_id"
 }
 
-fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
-  local wsid=$1 response surface_id
-  response=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
-  surface_id=$(printf '%s' "$response" | jq -s -e -r '
+fm_backend_cmux_surface_ids_from_response() {  # <provider-response>
+  printf '%s' "$1" | jq -s -e -r '
     def valid_id:
       if type != "string" then false
       elif length == 0 then false
       else test("^[^[:cntrl:] =:]+$")
+      end;
+    def pane_ids:
+      if (type != "object") then
+        error("cmux list-panes pane is not an object")
+      elif (has("pane_id") and ((.pane_id | valid_id) | not))
+        or (has("workspace_id") and ((.workspace_id | valid_id) | not))
+        or (has("tab_id") and ((.tab_id | valid_id) | not)) then
+        error("cmux list-panes pane has an invalid provider id")
+      elif (has("selected_surface_id") and ((.selected_surface_id | valid_id) | not)) then
+        error("cmux list-panes response has an invalid selected surface id")
+      elif (has("surface_ids") and ((.surface_ids | type) != "array")) then
+        error("cmux list-panes response has an invalid surface id list")
+      elif (has("surface_ids") and ((.surface_ids | length) == 0)) then
+        error("cmux list-panes response has an empty surface id list")
+      elif (has("surface_ids") and any(.surface_ids[]?; (valid_id | not))) then
+        error("cmux list-panes response has an invalid surface id")
+      elif (has("surface_ids") and (([.surface_ids[]] | unique | length) != (.surface_ids | length))) then
+        error("cmux list-panes response has duplicate surface ids")
+      elif (has("selected_surface_id") and has("surface_ids")
+        and ((. as $pane | ($pane.surface_ids | index($pane.selected_surface_id))) == null)) then
+        error("cmux list-panes response has a selected surface outside its pane")
+      elif has("surface_ids") then
+        .surface_ids
+      elif has("selected_surface_id") then
+        [.selected_surface_id]
+      else
+        error("cmux list-panes response has no surface id")
       end;
     if length != 1 then
       error("expected one cmux list-panes response")
@@ -525,45 +550,42 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
       error("cmux list-panes response is not an object")
     elif (.[0].panes | type) != "array" then
       error("cmux list-panes response has no panes array")
-    elif (.[0].panes | length) != 1 then
-      error("cmux list-panes response does not identify exactly one pane")
     else
-      .[0].panes[0] as $pane
-      | if ($pane | type) != "object" then
-          error("cmux list-panes pane is not an object")
-        elif ($pane | has("selected_surface_id")) then
-          if (($pane.selected_surface_id | valid_id) | not) then
-            error("cmux list-panes response has an invalid selected surface id")
-          elif ($pane | has("surface_ids")) then
-            if (($pane.surface_ids | type) != "array") then
-              error("cmux list-panes response has an invalid surface id list")
-            elif ($pane.surface_ids | length) != 1 then
-              error("cmux list-panes response does not identify exactly one surface")
-            elif ($pane.surface_ids[0] != $pane.selected_surface_id) then
-              error("cmux list-panes response has conflicting surface ids")
-            elif (($pane.surface_ids[0] | valid_id) | not) then
-              error("cmux list-panes response has an invalid surface id")
-            else
-              $pane.selected_surface_id
-            end
-          else
-            $pane.selected_surface_id
-          end
-        elif ($pane | has("surface_ids")) then
-          if (($pane.surface_ids | type) != "array") then
-            error("cmux list-panes response has an invalid surface id list")
-          elif ($pane.surface_ids | length) != 1 then
-            error("cmux list-panes response does not identify exactly one surface")
-          elif (($pane.surface_ids[0] | valid_id) | not) then
-            error("cmux list-panes response has an invalid surface id")
-          else
-            $pane.surface_ids[0]
-          end
+      .[0].panes as $panes
+      | if any($panes[]?; (type != "object")) then
+          error("cmux list-panes response has an invalid pane")
         else
-          error("cmux list-panes response has no surface id")
+          [ $panes[] | pane_ids[] ] as $ids
+          | if ($ids | length) == 0 then
+              error("cmux list-panes response has no surface ids")
+            elif ([ $ids[] ] | unique | length) != ($ids | length) then
+              error("cmux list-panes response has duplicate surface ids")
+            else
+              $ids | unique[]
+            end
         end
     end
-  ' 2>/dev/null) || return 1
+  ' 2>/dev/null
+}
+
+fm_backend_cmux_surface_ids_for_workspace() {  # <workspace_id>
+  local wsid=$1 response
+  fm_backend_cmux_workspace_id_valid "$wsid" || return 1
+  response=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  fm_backend_cmux_surface_ids_from_response "$response"
+}
+
+fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
+  local wsid=$1 surface_ids surface_id count=0
+  surface_ids=$(fm_backend_cmux_surface_ids_for_workspace "$wsid") || return 1
+  while IFS= read -r surface_id; do
+    [ -n "$surface_id" ] || continue
+    count=$((count + 1))
+  done <<EOF
+$surface_ids
+EOF
+  [ "$count" -eq 1 ] || return 1
+  surface_id=${surface_ids%%$'\n'*}
   fm_backend_cmux_provider_id_valid "$surface_id" || return 1
   printf '%s' "$surface_id"
 }
@@ -789,43 +811,16 @@ fm_backend_cmux_parse_target() {  # <target>
 # (fm_backend_zellij_pane_exists) rather than the design sketch's original
 # read-screen-based suggestion.
 fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
-  local wsid=$1 sfid=$2 response
+  local wsid=$1 sfid=$2 surface_ids surface_id
   fm_backend_cmux_workspace_id_valid "$wsid" || return 1
   fm_backend_cmux_provider_id_valid "$sfid" || return 1
-  response=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
-  printf '%s' "$response" | jq -s -e --arg s "$sfid" '
-    def valid_id:
-      if type != "string" then false
-      elif length == 0 then false
-      else test("^[^[:cntrl:] =:]+$")
-      end;
-    if length != 1 or (.[0] | type) != "object" then
-      false
-    elif (.[0].panes | type) != "array" then
-      false
-    else
-      .[0].panes as $panes
-      | if any($panes[]?;
-          (type != "object")
-          or ((.surface_ids | type) != "array")
-          or ((.surface_ids | length) == 0)
-          or (any(.surface_ids[]?; (valid_id | not)))
-          or ((.surface_ids | unique | length) != (.surface_ids | length))
-          or (has("selected_surface_id") and ((.selected_surface_id | valid_id) | not))
-          or (has("selected_surface_id") and (. as $pane | ($pane.surface_ids | index($pane.selected_surface_id)) == null))
-          or (has("pane_id") and ((.pane_id | valid_id) | not))
-          or (has("workspace_id") and ((.workspace_id | valid_id) | not))
-          or (has("tab_id") and ((.tab_id | valid_id) | not))
-        ) then
-          false
-        elif ([$panes[] | .surface_ids[]] | unique | length)
-             != ([$panes[] | .surface_ids[]] | length) then
-          false
-        else
-          ([$panes[] | .surface_ids[] | select(. == $s)] | length) == 1
-        end
-    end
-  ' >/dev/null 2>&1
+  surface_ids=$(fm_backend_cmux_surface_ids_for_workspace "$wsid") || return 1
+  while IFS= read -r surface_id; do
+    [ "$surface_id" = "$sfid" ] && return 0
+  done <<EOF
+$surface_ids
+EOF
+  return 1
 }
 
 fm_backend_cmux_recovery_meta_path() {
