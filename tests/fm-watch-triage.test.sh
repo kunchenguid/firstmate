@@ -1526,8 +1526,8 @@ test_procevent_captured_result_surfaces_proactively() {
   [ "$beacon_age" -lt 60 ] || fail "the surfacing watcher was not a healthy one (beacon age ${beacon_age}s)"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the process-event wake failed"
-  grep -F "— check: process-event result captured: procevent lavish delivery-src 1" "$drain_out" >/dev/null \
-    || fail "the process-event result was not queued for the drain that follows the wake"
+  grep -F "— check: procevent lavish delivery-src 1" "$drain_out" >/dev/null \
+    || fail "the drain did not preserve the queued process-event reason"
   pass "a captured process-event result wakes a healthy watcher proactively, with no manual drain"
 }
 
