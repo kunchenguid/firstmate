@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # fm-timing-lib.sh - the single owner of the deferred network stage's elapsed-time
-# instrumentation.
+# instrumentation, and of the millisecond clock reading (fm_timing_now_ms) any
+# caller measuring real elapsed time uses.
 #
 # Sourced, never executed.
+#
+# The recording helpers below are the deferred stage's alone. A caller that only
+# needs the clock - bin/fm-control.sh, whose lifecycle waits spend a budget of
+# real seconds rather than counting their own polls - sources this file for
+# fm_timing_now_ms and stays inert, since recording needs FM_TIMING_LOG.
 #
 # WHY THIS EXISTS. The deferred stage (bin/fm-startup-network.sh) publishes one
 # aggregate started/finished pair, so a run that took a minute could not be
@@ -55,7 +61,9 @@ fm_timing_enabled() {
 # without it - macOS's system bash 3.2, which `env bash` still resolves to on a
 # host with no newer bash on PATH - degrades to whole-second granularity rather
 # than losing the timing entirely. That is a coarser answer to "which host was
-# slow", not a missing one, because the steps being measured are seconds-scale.
+# slow", not a missing one, because the steps being measured are seconds-scale -
+# as are the control plane's lifecycle wait budgets, which stay correct at that
+# granularity and only report the duration they waited more coarsely.
 fm_timing_now_ms() {
   local raw sec frac
   raw=${EPOCHREALTIME:-}
