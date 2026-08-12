@@ -64,6 +64,14 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
 
+test_ambient_harness_markers_are_scrubbed() {
+  [ -z "${CLAUDECODE+x}" ] || fail "suite inherited ambient CLAUDECODE"
+  [ -z "${PI_CODING_AGENT+x}" ] || fail "suite inherited ambient PI_CODING_AGENT"
+  [ -z "${FM_PI_HARNESS+x}" ] || fail "suite inherited ambient FM_PI_HARNESS"
+  [ -z "${GROK_AGENT+x}" ] || fail "suite inherited ambient GROK_AGENT"
+  pass "secondmate harness suite scrubs ambient harness markers"
+}
+
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
 # ===========================================================================
@@ -2464,6 +2472,7 @@ SH
   pass "B25 spawn quarantines stale rereads without blocking relaunch"
 }
 
+test_ambient_harness_markers_are_scrubbed
 test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
