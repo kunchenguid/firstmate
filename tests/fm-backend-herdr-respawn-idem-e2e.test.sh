@@ -21,7 +21,7 @@
 # agent, via herdr's own `pane report-agent`) still refuses exactly as
 # before. Adapter-level (fm_backend_herdr_container_ensure/create_task), not
 # through the full bin/fm-spawn.sh + treehouse pipeline - mirrors
-# tests/fm-backend-herdr-prune-safety-e2e.test.sh's own style, and avoids any
+# the collision-suite's own style, and avoids any
 # question of whether treehouse itself supports re-acquiring a worktree for
 # an id that already has one checked out (a separate, out-of-scope concern).
 #

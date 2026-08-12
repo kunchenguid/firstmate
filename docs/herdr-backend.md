@@ -136,7 +136,6 @@ A working seed pane is never closed.
 This created-versus-adopted gate is a destructive safety boundary.
 A prior label heuristic could adopt a captain-owned workspace named `firstmate` and close its live seed-shaped tab.
 The current structural gate removes label inference from cleanup authority.
-`tests/fm-backend-herdr-prune-safety-e2e.test.sh` reproduces the collision in an isolated named session and proves the adopted pane remains untouched.
 
 ## Endpoint metadata
 
@@ -268,7 +267,6 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-backend-herdr-smoke.test.sh
-tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-herdr-session-cleanup.test.sh

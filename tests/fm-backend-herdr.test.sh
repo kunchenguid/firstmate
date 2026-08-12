@@ -45,7 +45,11 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   exit 0
 fi
 if [ "${1:-}" = api ] && [ "${2:-}" = schema ] && [ "${3:-}" = --json ]; then
-  if [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" = 1 ]; then
+  if [ "${FM_HERDR_SCHEMA_FROM_RESPONSE:-0}" = 1 ]; then
+    n=$next
+    echo "$n" > "$COUNT_FILE"
+    [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+  elif [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" = 1 ]; then
     exit 0
   elif [ "${FM_HERDR_SCHEMA_MODE:-}" = bad ]; then
     printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/OtherParams"}}}]},"$defs":{"OtherParams":{"properties":{"expected_pid":{"type":"integer"}},"required":["expected_pid"]}}}}'
@@ -63,6 +67,15 @@ fi
 exit 0
 SH
   chmod +x "$fb/herdr"
+  cat > "$fb/herdr-bound-close" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${2:-}" = --tab ] || exit 2
+printf 'BOUND_TAB_CLOSE\x1f%s\x1f%s\x1f%s\n' "${3:-}" "${4:-}" "${5:-}" >> "${FM_HERDR_LOG:?}"
+[ "${FM_HERDR_BOUND_CLOSE_FAIL:-0}" = 1 ] && exit 1
+exit 0
+SH
+  chmod +x "$fb/herdr-bound-close"
   printf '%s\n' "$fb"
 }
 
@@ -370,6 +383,7 @@ test_container_ensure_starts_server_and_workspace() {
   printf '{"server":{"running":false}}\n' > "$resp/2.out"
   # 3: `herdr server` backgrounded launch - no meaningful output
   # 4: server_ensure poll -> now running
+  printf '{"server":{"running":true}}\n' > "$resp/3.out"
   printf '{"server":{"running":true}}\n' > "$resp/4.out"
   # 5: workspace list -> empty (no "firstmate" workspace yet)
   printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
@@ -479,10 +493,13 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   # 4: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace a dead-pane husk instead of refusing"
   read -r tab pane <<EOF
 $out
@@ -492,7 +509,7 @@ EOF
   fi
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-husk1' \
     "create_task did not create the replacement tab"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the dead husk's tab"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t2'$'\x1f''w1:p2' "create_task did not issue the identity-bound close for the dead husk"
   pass "fm_backend_herdr_create_task: closes and replaces a same-labeled tab whose pane is dead (pane_not_found)"
 }
 
@@ -507,10 +524,15 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   # 5: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}\n' > "$resp/9.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace a no-agent husk (restored plain shell) instead of refusing"
   read -r tab pane <<EOF
 $out
@@ -520,7 +542,7 @@ EOF
   fi
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-husk2' \
     "create_task did not create the replacement tab"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the no-agent husk's tab"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t2'$'\x1f''w1:p2' "create_task did not issue the identity-bound close for the no-agent husk"
   pass "fm_backend_herdr_create_task: closes and replaces a same-labeled tab whose pane is alive but hosts no registered agent (a restored plain shell)"
 }
 
@@ -535,10 +557,19 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/7.out"
   printf '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}\n' > "$resp/8.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
+  printf '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/9.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}\n' > "$resp/10.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/11.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}\n' > "$resp/12.out"
+  printf '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t3"}}}\n' > "$resp/13.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3"}}}\n' > "$resp/14.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/15.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3"}}}\n' > "$resp/16.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/17.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace all same-labeled husks after creating a replacement"
   read -r tab pane <<EOF
 $out
@@ -546,11 +577,11 @@ EOF
   if [ "$tab" != "w1:t4" ] || [ "$pane" != "w1:p4" ]; then
     fail "create_task should echo the NEW tab/pane ids, got '$out'"
   fi
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the first duplicate husk"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' "create_task did not close the second duplicate husk"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t2'$'\x1f''w1:p2' "create_task did not issue the identity-bound close for the first duplicate husk"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t3'$'\x1f''w1:p3' "create_task did not issue the identity-bound close for the second duplicate husk"
   create_line=$(grep -n $'\x1f''tab'$'\x1f''create' "$log" | head -1 | cut -d: -f1)
-  close_p2_line=$(grep -n $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "$log" | head -1 | cut -d: -f1)
-  close_p3_line=$(grep -n $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' "$log" | head -1 | cut -d: -f1)
+  close_p2_line=$(grep -n $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t2' "$log" | head -1 | cut -d: -f1)
+  close_p3_line=$(grep -n $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t3' "$log" | head -1 | cut -d: -f1)
   [ -n "$create_line" ] || fail "expected a 'tab create' call in the log"
   if [ "$create_line" -ge "$close_p2_line" ] || [ "$create_line" -ge "$close_p3_line" ]; then
     fail "REGRESSION: duplicate husks were closed before the replacement tab was created"
@@ -566,15 +597,18 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '1\n' > "$resp/6.exit"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1 || true; }; fm_backend_herdr_create_task_rollback() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" FM_HERDR_BOUND_CLOSE_FAIL=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task must fail when a preexisting same-labeled husk remains after close-and-replace"
-  assert_contains "$out" "failed to remove preexisting herdr tab" "create_task did not report the stale preexisting husk tab"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the stale husk by tab id"
+  assert_contains "$out" "cleanup-required" "create_task did not preserve recovery after bound husk close failure"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1f''w1'$'\x1f''w1:t2'$'\x1f''w1:p2' "create_task did not attempt the identity-bound husk close"
   assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "create_task should not rely on pane close for a preexisting husk"
   pass "fm_backend_herdr_create_task: refuses success when a preexisting husk tab remains after replacement"
 }
@@ -615,15 +649,18 @@ test_create_task_husk_replacement_creates_before_closing() {
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/5.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace the dead-pane husk"
   create_line=$(grep -n $'\x1f''tab'$'\x1f''create' "$log" | head -1 | cut -d: -f1)
-  close_line=$(grep -n $'\x1f''tab'$'\x1f''close' "$log" | head -1 | cut -d: -f1)
+  close_line=$(grep -n 'BOUND_TAB_CLOSE' "$log" | head -1 | cut -d: -f1)
   [ -n "$create_line" ] || fail "expected a 'tab create' call in the log"
-  [ -n "$close_line" ] || fail "expected a 'tab close' call in the log"
+  [ -n "$close_line" ] || fail "expected a bound tab close call in the log"
   [ "$create_line" -lt "$close_line" ] || fail "REGRESSION: the husk tab was closed (line $close_line) before (or at the same time as) the replacement tab was created (line $create_line) - risks deleting the whole workspace if the husk was its only tab"
   pass "fm_backend_herdr_create_task: creates the replacement tab BEFORE closing the husk tab, never the reverse"
 }
@@ -912,16 +949,18 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
-  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/9.out"
+  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
       fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }
       token=$(fm_backend_herdr_projection_journal_create "$1" task-p2) || exit 1
       label=$(fm_backend_herdr_projection_workspace_label task-p2 "$token")
       fm_backend_herdr_projection_create_task /tmp/proj "$label" fm-task-p2 || exit 1
@@ -940,8 +979,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
     "projection workspace create did not use the corner label, full token, and --no-focus"
   assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
     "projection task tab did not target the exact new workspace"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
-    "projection create did not prune the exact seeded root pane"
+  assert_contains "$(cat "$log")" $'BOUND_TAB_CLOSE\x1f''w9'$'\x1f''w9:t1'$'\x1f''w9:p1' \
+    "projection create did not prune the exact seeded tab through the bound close"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
     "projection create must never call workspace close"
   pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
@@ -955,13 +994,14 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/4.out"
-  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/9.out"
+  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a concurrent tab should prevent exact one-pane projection convergence"
   assert_contains "$out" "did not converge to exactly one task pane" \
@@ -994,19 +1034,19 @@ test_projection_close_restores_exact_prior_focus() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/5.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/7.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}' > "$resp/8.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/9.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/10.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/6.out"
+  : > "$resp/7.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+    FM_HERDR_LOG="$log" HERDR_PRESENTATION_LOCK_HELD=1 bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf live; }; fm_backend_herdr_projection_task_identity_matches() { FM_BACKEND_HERDR_BOUND_PID=123; FM_BACKEND_HERDR_BOUND_PID_START=456; return 0; }; fm_agent_pid_start_matches() { return 0; }; fm_agent_worker_identity_matches() { return 0; }; fm_backend_herdr_projection_provider_close_bound() { printf "BOUND_PANE_CLOSE\\x1f%s\\x1f%s\\n" "$2" "$3" >> "$FM_HERDR_LOG"; }; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 live w9 w9:t2 label claude task /tmp/proj /tmp/home' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "an exact non-active projection close should succeed after restoring focus: $out"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
-    "focus-preserving cleanup did not close only the exact projection pane"
+  assert_contains "$(cat "$log")" $'BOUND_PANE_CLOSE\x1f''w9:p2'$'\x1f''123' \
+    "focus-preserving cleanup did not close only the exact projection pane through the bound provider"
   assert_contains "$(cat "$log")" $'tab\x1ffocus\x1fw2:t2' \
     "focus-preserving cleanup did not restore the exact prior active tab"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
@@ -1023,7 +1063,7 @@ test_projection_close_refuses_active_tab() {
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 live w9 w9:t2 label claude task /tmp/proj /tmp/home' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "cleanup must refuse when exact active-tab preservation is impossible"
   assert_contains "$out" "target is the captain's active tab" \
@@ -1040,21 +1080,20 @@ test_projection_close_reports_focus_restore_failure() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
-  : > "$resp/4.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true}]}}' > "$resp/5.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/7.out"
-  : > "$resp/8.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true}]}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/6.out"
+  : > "$resp/7.out"
+  cp "$resp/4.out" "$resp/8.out"
   cp "$resp/5.out" "$resp/9.out"
-  cp "$resp/6.out" "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+    HERDR_PRESENTATION_LOCK_HELD=1 bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf live; }; fm_backend_herdr_projection_task_identity_matches() { FM_BACKEND_HERDR_BOUND_PID=123; FM_BACKEND_HERDR_BOUND_PID_START=456; return 0; }; fm_agent_pid_start_matches() { return 0; }; fm_agent_worker_identity_matches() { return 0; }; fm_backend_herdr_projection_provider_close_bound() { printf "BOUND_PANE_CLOSE\\x1f%s\\x1f%s\\n" "$2" "$3" >> "$FM_HERDR_LOG"; }; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 live w9 w9:t2 label claude task /tmp/proj /tmp/home' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 2 ] || fail "cleanup did not distinguish post-close focus uncertainty: $status"
   assert_contains "$out" "did not restore the exact prior workspace and tab" \
     "focus restoration failure was not reported"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+  assert_contains "$(cat "$log")" $'BOUND_PANE_CLOSE\x1f''w9:p2'$'\x1f''123' \
     "focus restoration failure fixture did not reach the close boundary"
   pass "herdr presentation focus: pane close fails when exact focus restoration fails"
 }
@@ -1074,7 +1113,7 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
       esac
     }
     set +e
-    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 no-agent
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 no-agent w1 w1:t1 label claude task /tmp/proj /tmp/home
     rc=$?
     set -e
     printf "%s:%s" "$rc" "$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE"
@@ -1149,7 +1188,7 @@ printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","work
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_FROM_RESPONSE=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t2"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -1181,7 +1220,7 @@ printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","work
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_FROM_RESPONSE=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w5\tw5:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w6 2ndmate-alpha' "$ROOT" 2>&1)
   status=$?
@@ -1235,7 +1274,7 @@ printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","work
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_FROM_RESPONSE=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w6 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -1263,7 +1302,7 @@ printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","work
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_FROM_RESPONSE=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w2\tw2:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -1288,7 +1327,7 @@ exit 9
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_FROM_RESPONSE=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -1455,7 +1494,7 @@ exit 0
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_SCHEMA_FROM_RESPONSE=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w2 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -1563,10 +1602,10 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/14.out"
   cp "$resp/6.out" "$resp/15.out"
   cp "$resp/7.out" "$resp/16.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/17.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/18.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/17.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/18.out"
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/19.out"
-  : > "$resp/20.out"
+  cp "$resp/18.out" "$resp/20.out"
   cp "$resp/6.out" "$resp/21.out"
   cp "$resp/7.out" "$resp/22.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/23.out"
@@ -1575,8 +1614,10 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/26.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
     bash -c '
       . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_presentation_session_socket_path() { printf "/tmp/fmtest.sock"; }
       fm_backend_herdr_projection_reclaim_task \
         fmtest "$1" fm-hibit-r1 "$2" w2 w2:t2 w2:p2 firstmate fm-fm-hibit-r1 /tmp/project || exit 1
       printf "%s %s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
@@ -1587,11 +1628,13 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
     || fail "reclaim did not advance the journal to the replacement endpoint"
   calls=$(cat "$log")
   create_line=$(grep -n $'tab\x1fcreate\x1f--workspace\x1fw2' "$log" | cut -d: -f1)
-  close_line=$(grep -n $'pane\x1fclose\x1fw2:p2' "$log" | cut -d: -f1)
+  close_line=$(grep -n $'BOUND_TAB_CLOSE\x1fw2\x1fw2:t2\x1fw2:p2' "$log" | cut -d: -f1)
   [ -n "$create_line" ] && [ -n "$close_line" ] && [ "$create_line" -lt "$close_line" ] \
     || fail "reclaim did not create the exact replacement before closing the old husk"
-  [ "$(sed -n "$((close_line - 1))p" "$log")" = $'HERDR_SESSION=fmtest\x1fagent\x1fget\x1fw2:p2\x1f--session\x1ffmtest' ] \
+  [ "$(sed -n "$((close_line - 2))p" "$log")" = $'HERDR_SESSION=fmtest\x1fagent\x1fget\x1fw2:p2\x1f--session\x1ffmtest' ] \
     || fail "reclaim did not recheck the old pane agent state at the exact close boundary"
+  [ "$(sed -n "$((close_line - 1))p" "$log")" = $'HERDR_SESSION=fmtest\x1fpane\x1fget\x1fw2:p2\x1f--session\x1ffmtest' ] \
+    || fail "reclaim did not recheck the old pane identity at the exact close boundary"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
   assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
   assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
@@ -1841,6 +1884,7 @@ test_kill_requires_close_and_confirmed_absence() {
       [ "${READY:-1}" = 1 ]
     }
     fm_backend_herdr_cli() { [ "${CLOSE:-1}" = 1 ]; }
+    fm_backend_herdr_projection_provider_close_bound() { [ "${CLOSE:-1}" = 1 ]; }
     fm_backend_herdr_pane_agent_state() {
       if [ -e "$STATE_MARKER" ]; then
         printf "%s" "$AFTER"
@@ -1856,7 +1900,7 @@ EOF
       STATE_MARKER="$1/state-marker"
       rm -f "$STATE_MARKER"
       export READY CLOSE INITIAL AFTER STATE_MARKER
-      fm_backend_herdr_kill default:w1:p2 >/dev/null 2>&1
+      fm_backend_herdr_kill default:w1:p2 123 456 >/dev/null 2>&1
       printf "%s\n" "$?"
     done
   ' "$ROOT" "$dir")
@@ -1870,7 +1914,7 @@ test_projection_teardown_requires_confirmed_absence() {
   mkdir -p "$dir"
   out=$(bash -c '
     . "$0/bin/backends/herdr.sh"
-    fm_backend_herdr_projection_close_pane_focus_preserving() { [ "$CLOSE_OK" = 1 ]; }
+    fm_backend_herdr_close_tab_focus_preserving() { [ "$CLOSE_OK" = 1 ]; }
     fm_backend_herdr_pane_agent_state() {
       if [ -e "$STATE_FILE" ]; then
         printf "%s" "$AFTER"
@@ -1886,7 +1930,7 @@ EOF
       STATE_FILE="$1/state"
       rm -f "$STATE_FILE"
       export BEFORE AFTER CLOSE_OK STATE_FILE
-      fm_backend_herdr_projection_teardown_close fmtest w1:p2
+      fm_backend_herdr_projection_teardown_close fmtest w1:p2 "" w1 w1:t2
       printf "%s\n" "$?"
     done
   ' "$ROOT" "$dir")
@@ -2859,12 +2903,19 @@ test_dispatch_composer_state_routes_by_backend() {
 }
 
 test_scripts_route_explicit_target_through_meta_backend() {
-  local dir state log resp fb neutral script_root out
-  dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
+  local dir state log resp fb neutral script_root token out
+  dir="$TMP_ROOT/script-explicit-target"; neutral="$dir/neutral-root"; state="$neutral/state"
+  mkdir -p "$state" "$neutral/data" "$neutral/config" "$neutral/projects" "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
-  neutral="$dir/neutral-root"; mkdir -p "$neutral"
   script_root="$dir/repo"
-  mkdir -p "$script_root"
+  mkdir -p "$script_root" "$neutral/bin"
+  git -C "$neutral" init -q
+  git -C "$neutral" symbolic-ref HEAD refs/heads/main
+  printf '# agents\n' > "$neutral/AGENTS.md"
+  cp -a "$ROOT/bin/." "$neutral/bin/"
+  token=route-script-target
+  printf 'root=%s\ntoken=%s\n' "$neutral" "$token" > "$state/.primary-attestation"
+  printf '%s|codex:script-routing|fallback\n' "$$" > "$state/.lock"
   cp -a "$ROOT/bin" "$script_root/bin"
   fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
   touch "$state/.last-watcher-beat"
@@ -2892,7 +2943,10 @@ SH
   (
     cd "$neutral" || exit 1
     env -u NO_MISTAKES_GATE PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" \
-      FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$neutral/data" FM_PROJECTS_OVERRIDE="$neutral/projects" \
+      FM_CONFIG_OVERRIDE="$neutral/config" FM_PENDING_REPLY_DIR_OVERRIDE="$state/pending-replies" \
+      CODEX_THREAD_ID=script-routing FM_PRIMARY_ATTESTATION="$token" \
+      FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       "$script_root/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null 2>&1
   )
   expect_code 0 $? "fm-send --key should route an explicit metadata-matched target through herdr"

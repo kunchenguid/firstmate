@@ -61,10 +61,9 @@ In this captain-owned delivery lane, no-mistakes PRs must target `JTInventory/fi
 `bin/fm-no-mistakes-pr-target-guard.sh` checks direct push targets, all no-mistakes fetch and push targets, and `no-mistakes status` before the test suite runs, so stale gate state cannot open or update a PR on `kunchenguid/firstmate`.
 It allows `origin` to fetch from upstream `kunchenguid/firstmate` only in a controlled-fork checkout where `fork`, branch tracking, no-mistakes status, the no-mistakes gate, and resolved `origin` push targets all prove delivery to `JTInventory/firstmate`.
 
-### Local behavior-test runner
+### Focused validation
 
-Run `FM_TEST_JOBS=1 bash bin/fm-run-behavior-tests.sh` for the serial local gate replay, or choose another positive `FM_TEST_JOBS` value for bounded local parallelism.
-See [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) for the runner's guard, isolation, failure-aggregation, and CI-boundary contract.
+Run the focused isolation and endpoint tests through `bin/fm-test-run.sh`.
 
 Check and test the toolbelt before pushing:
 

@@ -558,7 +558,7 @@ Load `harness-adapters` for the target harness's skill invocation form; natural 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
 Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
-The local behavior-test runner is `bin/fm-run-behavior-tests.sh`; its guard, parallelism, isolation, failure aggregation, and CI boundary are documented in [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml).
+Focused isolation and endpoint validation runs through `bin/fm-test-run.sh`.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.

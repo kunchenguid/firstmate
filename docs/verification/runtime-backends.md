@@ -81,7 +81,6 @@ The real label-collision reproduction is owned by:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-prune-safety-e2e.test.sh
 ```
 
 Observed guarantee: a pre-existing captain-owned workspace with a seed-shaped tab was adopted for routing but its tab was never eligible for prune because the current create call did not return that seed id.

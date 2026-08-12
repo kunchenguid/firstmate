@@ -342,7 +342,21 @@ case "$verdict" in
   *) fail "an ordinary registered task home did not retain the slot: $verdict" ;;
 esac
 pass "registered ordinary task homes retain a pooled slot"
-rm -f "$ORDINARY_HOME/state/ordinary-paused.meta" "$HOME_DIR/AGENTS.md"
+mv "$ORDINARY_HOME/state/ordinary-paused.meta" "$ORDINARY_HOME/state/unterminated-paused.meta"
+rm -f "$HOME_DIR/AGENTS.md"
+
+printf '%s\n' '## Secondmate Backlogs' > "$HOME_DIR/AGENTS.md"
+printf '%s' \
+  "- unterminated-paused - paused task (home: $ORDINARY_HOME; scope: alpha; projects: alpha; added 2026-08-10)" \
+  >> "$HOME_DIR/AGENTS.md"
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
+case "$verdict" in
+  "retain: slot is also recorded by task(s) unterminated-paused"*) : ;;
+  *) fail "an unterminated registry record did not retain a pooled slot: $verdict" ;;
+esac
+pass "unterminated home registry records retain a pooled slot"
+rm -f "$ORDINARY_HOME/state/unterminated-paused.meta" "$HOME_DIR/AGENTS.md"
 
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)

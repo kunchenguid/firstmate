@@ -222,13 +222,14 @@ fm_slot_meta_worktree() {
 }
 
 fm_slot_registry_homes() {
-  local file=$1 line candidate section=all
+  local file=$1 content line candidate section=all
   [ -e "$file" ] || [ -L "$file" ] || return 2
   [ -f "$file" ] && [ -r "$file" ] || return 2
+  content=$(cat "$file") || return 2
   case "$file" in
     */AGENTS.md|*/data/backlog.md) section=none ;;
   esac
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     if [ "$section" = none ]; then
       case "$line" in
         '## Secondmate Backlogs') section=all ;;
@@ -242,7 +243,7 @@ fm_slot_registry_homes() {
     case "$candidate" in
       /*) printf '%s\n' "$candidate" ;;
     esac
-  done < "$file"
+  done < <(printf '%s\n' "$content")
 }
 
 # fm_slot_same_path <a> <b>: physical comparison where both paths exist, exact
