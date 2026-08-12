@@ -533,7 +533,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
 The following vendored skills have provenance pinned by `skills-lock.json`.
-Before applying any of them, read `.agents/skills/VENDORED-ENGINEERING-CONTRACT.md`, which owns how their upstream workflows compose with Firstmate's project-write delegation, task lifecycle, outward-consent, forge-tool, and merge-authority contracts.
+They refine a deliverable without overriding Firstmate's project-write delegation, task lifecycle, outward-consent, or merge-authority contracts.
 
 - `ask-matt` - load when the captain asks which engineering skill or workflow fits the work.
 - `code-review` - load when reviewing a branch, pull request, work-in-progress change, or fixed-point diff against both repository standards and its originating specification.
