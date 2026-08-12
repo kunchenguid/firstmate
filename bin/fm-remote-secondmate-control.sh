@@ -111,12 +111,14 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness model effort traceparent
+  local id=$1 harness model effort effective_effort traceparent
   remote_endpoint_require "$id"
   harness=$(fm_profile_normalize_harness "$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)") \
     || die "remote secondmate $id endpoint metadata has an unrecognized harness"
   model=$(fm_profile_normalize_model "$(fm_meta_get "$REMOTE_ENDPOINT_META" model)")
   effort=$(fm_profile_normalize_effort "$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)")
+  effective_effort=$(fm_profile_effective_effort "$harness" "$effort") \
+    || die "remote secondmate $id endpoint metadata has an unrecognized effort"
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
@@ -124,25 +126,32 @@ print_route() { # <id>
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
   printf 'model=%s\n' "$model"
-  printf 'effective_effort=%s\n' "$effort"
+  printf 'effective_effort=%s\n' "$effective_effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
 remote_profile_require_match() {
   local id=$1 requested_harness=$2 requested_model=$3 requested_effort=$4
-  local live_harness live_model live_effort
+  local live_harness live_model live_requested_effort live_effective_effort
+  local requested_effective_effort
   live_harness=$(fm_profile_normalize_harness "$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)") \
     || die "remote secondmate $id endpoint metadata has an unrecognized harness"
   requested_harness=$(fm_profile_normalize_harness "$requested_harness") \
     || die "remote secondmate $id request has an unrecognized harness"
   live_model=$(fm_profile_normalize_model "$(fm_meta_get "$REMOTE_ENDPOINT_META" model)")
-  live_effort=$(fm_profile_normalize_effort "$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)")
+  live_requested_effort=$(fm_profile_normalize_effort "$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)")
   requested_model=$(fm_profile_normalize_model "$requested_model")
   requested_effort=$(fm_profile_normalize_effort "$requested_effort")
+  fm_profile_validate_effort_capability "$live_harness" "$live_model" "$live_requested_effort" \
+    || die "remote secondmate $id live profile is not supported; refusing reuse without retargeting or stopping the endpoint"
+  live_effective_effort=$(fm_profile_effective_effort "$live_harness" "$live_requested_effort") \
+    || die "remote secondmate $id endpoint metadata has an unrecognized effort"
+  requested_effective_effort=$(fm_profile_effective_effort "$requested_harness" "$requested_effort") \
+    || die "remote secondmate $id request has an unrecognized effort"
   [ "$live_harness" = "$requested_harness" ] \
     && [ "$live_model" = "$requested_model" ] \
-    && [ "$live_effort" = "$requested_effort" ] \
-    || die "remote secondmate $id is alive with profile harness=$live_harness model=$live_model effective_effort=$live_effort, but the requested profile is harness=$requested_harness model=$requested_model effective_effort=$requested_effort; refusing reuse without retargeting or stopping the live endpoint"
+    && [ "$live_effective_effort" = "$requested_effective_effort" ] \
+    || die "remote secondmate $id is alive with profile harness=$live_harness model=$live_model effective_effort=$live_effective_effort, but the requested profile is harness=$requested_harness model=$requested_model effective_effort=$requested_effective_effort; refusing reuse without retargeting or stopping the live endpoint"
 }
 
 cmd_route() {

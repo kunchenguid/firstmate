@@ -383,7 +383,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_model remote_effort remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_model remote_effort remote_expected_effort remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -578,10 +578,17 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  remote_expected_effort=$(fm_profile_effective_effort "$harness" "$effort") || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: could not resolve the effective remote effort for profile harness=$harness effort=$effort; preserving the remote route for reconciliation" >&2
+    return 1
+  }
   [ -n "$remote_target" ] \
     && [ "$(fm_profile_normalize_harness "$remote_harness")" = "$(fm_profile_normalize_harness "$harness")" ] \
     && [ "$remote_model" = "$(fm_profile_normalize_model "$model")" ] \
-    && [ "$remote_effort" = "$(fm_profile_normalize_effort "$effort")" ] || {
+    && [ "$remote_effort" = "$remote_expected_effort" ] || {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true

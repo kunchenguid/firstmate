@@ -28,6 +28,37 @@ fm_profile_normalize_effort() {
   esac
 }
 
+fm_profile_effective_effort() {
+  local harness=$1 effort=$2
+  harness=$(fm_profile_normalize_harness "$harness") || return 1
+  effort=$(fm_profile_normalize_effort "$effort")
+  case "$effort" in
+    default)
+      printf 'default\n'
+      ;;
+    low|medium|high|xhigh|max)
+      case "$harness" in
+        claude|codex|pi|pi-signed) printf '%s\n' "$effort" ;;
+        grok)
+          case "$effort" in
+            low|medium|high) printf '%s\n' "$effort" ;;
+            xhigh|max) printf 'high\n' ;;
+          esac
+          ;;
+        opencode|kimi) printf 'default\n' ;;
+        muse)
+          case "$effort" in
+            max) printf 'ultra\n' ;;
+            low|medium|high|xhigh) printf '%s\n' "$effort" ;;
+          esac
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_profile_codex_max_effort_capability() {
   case "${1:-}" in
     gpt-5.6-sol|gpt-5.6-sol-wm|gpt-5.6-terra|gpt-5.6-luna|codex-auto-review)
@@ -41,6 +72,9 @@ fm_profile_codex_max_effort_capability() {
 
 fm_profile_validate_effort_capability() {
   local harness=$1 model=${2:-default} effort=${3:-} capability
+  harness=$(fm_profile_normalize_harness "$harness") || return 0
+  model=$(fm_profile_normalize_model "$model")
+  effort=$(fm_profile_normalize_effort "$effort")
   [ "$harness" = codex ] && [ "$effort" = max ] || return 0
   fm_profile_codex_max_effort_capability "$model"
   capability=$?

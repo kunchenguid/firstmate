@@ -741,6 +741,60 @@ cmp -s "$remote_route_meta_before_reuse" "$REMOTE_HOME/state/parent-route/ios.me
   || fail "an exact remote profile reuse changed the live remote profile record"
 pass "remote secondmate exact profile reuse preserves the live endpoint and both records"
 
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-default-profile.meta"
+set_remote_profile() {
+  local harness=$1 model=$2 effort=$3 source=$4
+  awk -v harness="$harness" -v model="$model" -v effort="$effort" '
+    /^harness=/ { print "harness=" harness; next }
+    /^model=/ { print "model=" model; next }
+    /^effort=/ { print "effort=" effort; next }
+    { print }
+  ' "$source" > "$remote_route_meta"
+}
+
+set_remote_profile grok grok-4 max "$TMP_ROOT/remote-ios-default-profile.meta"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$out" 'harness=grok' "remote route did not expose the live Grok harness"
+assert_contains "$out" 'effective_effort=high' "remote route published Grok's requested max as effective max"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios grok grok-4 max herdr)
+assert_contains "$out" 'effective_effort=high' "Grok exact reuse did not compare or report its applied high effort"
+
+set_remote_profile opencode opencode-model high "$TMP_ROOT/remote-ios-default-profile.meta"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$out" 'effective_effort=default' "remote route published OpenCode's unapplied effort as effective high"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model high herdr)
+assert_contains "$out" 'effective_effort=default' "OpenCode exact reuse did not preserve its unapplied effort truth"
+
+set_remote_profile kimi kimi-model max "$TMP_ROOT/remote-ios-default-profile.meta"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$out" 'effective_effort=default' "remote route published Kimi's unapplied effort as effective max"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model max herdr)
+assert_contains "$out" 'effective_effort=default' "Kimi exact reuse did not preserve its unapplied effort truth"
+
+set_remote_profile codex future-codex-model max "$TMP_ROOT/remote-ios-default-profile.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-stale-codex.meta"
+herdr_launches_before_stale_codex=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_before_stale_codex=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex future-codex-model max herdr \
+  > "$TMP_ROOT/remote-stale-codex.out" 2>&1
+stale_codex_rc=$?
+set -e
+[ "$stale_codex_rc" -ne 0 ] || fail "an alive remote Codex endpoint bypassed capability validation"
+assert_grep 'unknown max reasoning capability' "$TMP_ROOT/remote-stale-codex.out" \
+  "stale remote Codex reuse did not report its unverifiable max capability"
+herdr_launches_after_stale_codex=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_after_stale_codex=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+[ "$herdr_launches_before_stale_codex" -eq "$herdr_launches_after_stale_codex" ] \
+  || fail "stale remote Codex reuse created a new Herdr endpoint"
+[ "$herdr_closes_before_stale_codex" -eq "$herdr_closes_after_stale_codex" ] \
+  || fail "stale remote Codex reuse stopped the live Herdr endpoint"
+cmp -s "$TMP_ROOT/remote-ios-before-stale-codex.meta" "$remote_route_meta" \
+  || fail "stale remote Codex reuse changed the live remote metadata"
+mv -f "$TMP_ROOT/remote-ios-default-profile.meta" "$remote_route_meta"
+pass "remote reuse reports applied effort and rejects unverifiable live Codex max"
+
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-profile-mismatch.meta"
 cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-profile-mismatch.meta"
 herdr_launches_before_profile_mismatch=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
