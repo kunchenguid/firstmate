@@ -121,7 +121,9 @@ The software cap is four active runner VMs and may be configured only from one t
 The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
 A short renewable Azure Blob lease serializes count-and-create admission across controllers without a machine-wide singleton daemon.
 Lease loss stops before repository execution and retains exact state for reconciliation.
-Under that same lease, the controller stores a subscription/resource-group/storage/generation-bound reservation ledger in the private control container.
+The controller also acquires and renews an independent lease on the reservation-ledger blob itself.
+Every ledger read and write carries that exact object lease ID, so a controller that loses admission ownership cannot overwrite a successor's reservation even if its stale write was already in flight.
+Under those leases, the controller stores a subscription/resource-group/storage/generation-bound reservation ledger in the private control container.
 Each invocation reserves its complete first-day worst-case dollar bound before staging or compute creation, and admission adds every non-reconciled reservation to the greater of actual or forecast cost.
 The reservation survives controller restart and fenced retry lineage.
 It is marked cleanup-verified only after exact compute and staging absence, and is released only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
@@ -132,7 +134,9 @@ Admission emits separate first-hour and first-day bounds itemized as VM compute,
 The VM's complete bootstrap/output channel is shaped to one megabit per second, the trusted bootstrap terminates its exact network process group at an aggregate byte ceiling, staging input and result output have explicit byte ceilings, trusted curl has connection/elapsed/size bounds, and Azure control operations have a fixed count ceiling.
 The invocation template independently installs an Azure-native `ComputeVmShutdownTask` schedule before repository execution.
 Its deterministic identity, complete ownership tags, exact VM target, UTC recurrence, enabled state, and fixed preparation-time deadline are immediately adopted and rechecked at both cleanup boundaries.
-Azure auto-shutdown deallocates the VM no later than 24 hours after preparation even if the host controller and guest are both lost.
+The recurrence is fixed at preparation plus 23 hours, preserving an hour of slack inside the 24-hour billable ceiling.
+Immediately before the VM deployment call, the controller refuses unless the schedule still has more than Azure's 30-minute activation requirement plus the complete five-minute deployment-call timeout remaining, so a delayed dispatch cannot defer shutdown to the next day's recurrence.
+Azure auto-shutdown therefore deallocates the VM no later than 24 hours after preparation even if the host controller and guest are both lost.
 The guest shutdown Run Command remains defense in depth, while itemized OS-disk, storage, NAT, public-IP, private-endpoint, private-DNS, and monitoring floors remain visible after compute deallocation.
 Every host subprocess and Azure CLI call has a five-minute deadline.
 Before every Azure call, an atomic home-scoped ledger durably increments either the control or storage category under the state lock.
@@ -167,13 +171,15 @@ A missing, foreign, replaced, or unreadable resource retains everything and repo
 
 Cleanup removes resources in this exact scope and order:
 
-1. The exact Azure-native TTL schedule.
-2. The invocation's `execute` and `safety-shutdown` Managed Run Command child resources.
-3. The exact invocation VM, whose NIC and OS disk delete options are both `Detach`.
-4. The exact recorded NIC, after a stable-identity detached transition is recorded.
-5. The exact recorded OS disk, after a stable-identity detached transition is recorded.
+1. The invocation's `execute` and `safety-shutdown` Managed Run Command child resources.
+2. The exact invocation VM, whose NIC and OS disk delete options are both `Detach`.
+3. The exact recorded NIC, after a stable-identity detached transition is recorded.
+4. The exact recorded OS disk, after a stable-identity detached transition is recorded.
+5. The exact Azure-native TTL schedule, only after exact VM absence and detached capacity cleanup are proven.
 6. The exact input and output staging blobs.
 7. The local transient input payload, while retaining local verified result and state.
+
+A VM deletion failure, timeout, unreadable response, or ambiguous absence proof retains the TTL schedule untouched so the independent deallocation deadline remains enforceable while cleanup is reconciled.
 
 No resource-group, subnet, storage account, container, another VM, another NIC, another disk, another task prefix, or durable foundation resource is deleted.
 A failed absence proof or partial delete records `cleanup-retained` and stops.
@@ -186,6 +192,8 @@ Its ARM template grants that exact principal Storage Blob Delegator at the pilot
 The runner VM itself receives no role assignment or managed identity.
 The operator host must have private data-plane reachability to the storage private endpoint, normally through the separately accepted private overlay.
 Failure to reach the private endpoint is a hard transport failure and never enables public storage or SSH as a shortcut.
+After the reviewed foundation apply and before the first runner admission, the operator must independently read and accept the exact deterministic blob private-endpoint NIC `resourceGuid`, then persist it as `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID` in the private operator configuration.
+Every foundation gate compares the live NIC and the mutable deployment output to that independent accepted value, so a same-name NIC replacement plus same-name deployment rerun cannot authorize itself.
 
 Use Azure CLI only.
 Do not install an extension, change the ambient subscription default, enable storage public networking, enable shared keys, add a public IP, or weaken the subnet NSG for this runner.
@@ -194,6 +202,7 @@ Set the foundation variables from [`docs/azure-pilot.md`](azure-pilot.md), inclu
 
 ```sh
 export FM_AZURE_RUNNER_OPERATOR_OBJECT_ID='<exact signed-in Entra object id>'
+export FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID='<independently accepted blob endpoint NIC resourceGuid>'
 export FM_AZURE_RUNNER_TASK='<task or validation-run id>'
 export FM_AZURE_RUNNER_GENERATION='<task or validation-run generation>'
 export FM_AZURE_RUNNER_CONFIRM_SUBSCRIPTION="$FM_AZURE_SUBSCRIPTION_ID"

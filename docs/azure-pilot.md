@@ -81,7 +81,9 @@ The elastic validation, policy-review, and browser subnets also deny cross-compa
 
 Storage and Key Vault disable public network access and use blob/vault private endpoints, private DNS zones, and VNet links.
 The blob endpoint uses the deterministic `nic-<prefix>-pe-blob` network-interface name.
-The foundation deployment outputs both that exact NIC resource ID and its Azure `resourceGuid`, and the runner proves those recorded values, the endpoint's forward reference, the NIC's reverse endpoint relation, its exact private subnet configuration, its tags/generation, and absence of any VM relation at every foundation gate.
+The foundation deployment outputs both that exact NIC resource ID and its Azure `resourceGuid`.
+After the reviewed apply, the operator independently accepts that GUID into private configuration as `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID`.
+The runner proves the live NIC and deployment output both equal that independently retained value, plus the endpoint's forward reference, the NIC's reverse endpoint relation, its exact private subnet configuration, its tags/generation, and absence of any VM relation at every foundation gate.
 The private-endpoint subnet disables private-endpoint network policies; compute subnets do not.
 
 Private overlay enrollment is an explicit post-deploy acceptance step.

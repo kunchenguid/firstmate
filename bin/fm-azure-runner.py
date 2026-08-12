@@ -47,6 +47,8 @@ MAX_BOOTSTRAP_NETWORK_BYTES = 16 * 1024**3
 MAX_RESULT_UPLOAD_BYTES = 600 * 1024**2
 BOOTSTRAP_RATE_BITS_PER_SECOND = 1_000_000
 MAX_BILLABLE_LIFETIME_HOURS = 24
+TTL_SCHEDULE_HOURS_AFTER_PREPARATION = 23
+AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS = 30 * 60
 SHELLCHECK_ARCHIVE_BYTES = 2_559_196
 UV_ARCHIVE_BYTES = 21_427_164
 FOUNDATION_SHARED_METER_RESERVE_USD = 210.0
@@ -206,6 +208,7 @@ def environment():
         "FM_AZURE_STORAGE_NAME",
         "FM_AZURE_OWNER_TAG",
         "FM_AZURE_DEPLOYMENT_GENERATION",
+        "FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID",
     ]
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
@@ -222,6 +225,9 @@ def environment():
         raise RunnerError("FM_AZURE_STORAGE_NAME is malformed")
     generation = require_identifier("deployment generation", os.environ["FM_AZURE_DEPLOYMENT_GENERATION"])
     owner = require_identifier("owner tag", os.environ["FM_AZURE_OWNER_TAG"])
+    blob_private_endpoint_nic_resource_guid = os.environ["FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID"]
+    if not re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", blob_private_endpoint_nic_resource_guid):
+        raise RunnerError("FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID must be the explicitly accepted Azure resourceGuid")
     resource_group = os.environ.get("FM_AZURE_RESOURCE_GROUP", "rg-firstmate-pilot-eastus-001")
     max_concurrency = int(os.environ.get("FM_AZURE_RUNNER_MAX_CONCURRENCY", "4"))
     if max_concurrency < 1 or max_concurrency > 8:
@@ -251,6 +257,7 @@ def environment():
         "nat": "nat-{}-eus".format(prefix),
         "blob_private_endpoint": "pe-{}-blob".format(prefix),
         "blob_private_endpoint_nic": "nic-{}-pe-blob".format(prefix),
+        "blob_private_endpoint_nic_resource_guid": blob_private_endpoint_nic_resource_guid.lower(),
         "blob_private_dns_zone": "privatelink.blob.core.windows.net",
     }
 
@@ -658,7 +665,7 @@ def prepare(env, args, parent_state=None):
     command_digest = "sha256:" + sha256_bytes(canonical_bytes(command))
     locked_python_path, locked_python = prepare_locked_python_closure(repo, payload_dir)
     prepared_at = now_utc()
-    expires_at = prepared_at + dt.timedelta(hours=MAX_BILLABLE_LIFETIME_HOURS)
+    expires_at = prepared_at + dt.timedelta(hours=TTL_SCHEDULE_HOURS_AFTER_PREPARATION)
     request = {
         "schema": SCHEMA,
         "home_binding": env["home_binding"],
@@ -952,7 +959,7 @@ def foundation_gate(env):
     recorded_nic_guid = (outputs.get("blobPrivateEndpointNicResourceGuid") or {}).get("value")
     if (
         str(recorded_nic_id).lower() != endpoint_nic_id.lower()
-        or not recorded_nic_guid
+        or str(recorded_nic_guid).lower() != env["blob_private_endpoint_nic_resource_guid"]
         or [str(item.get("id", "")).lower() for item in endpoint_properties["networkInterfaces"]]
         != [endpoint_nic_id.lower()]
     ):
@@ -963,7 +970,8 @@ def foundation_gate(env):
     endpoint_ip_configs = endpoint_nic_properties.get("ipConfigurations", [])
     if (
         str(endpoint_nic.get("id", "")).lower() != endpoint_nic_id.lower()
-        or endpoint_nic_properties.get("resourceGuid") != recorded_nic_guid
+        or str(endpoint_nic_properties.get("resourceGuid", "")).lower()
+        != env["blob_private_endpoint_nic_resource_guid"]
         or str((endpoint_nic_properties.get("privateEndpoint") or {}).get("id", "")).lower() != endpoint_id.lower()
         or endpoint_nic_properties.get("virtualMachine")
         or len(endpoint_ip_configs) != 1
@@ -1213,28 +1221,17 @@ def verify_reservation_ledger(env, ledger):
         raise RunnerError("cost reservation ledger entries are malformed")
 
 
-def load_reservation_ledger(env, state):
+def load_reservation_ledger(env, state, lease):
+    lease.assert_held()
     path = write_private_json(env, ".reservations-empty-", empty_reservation_ledger(env))
     try:
-        _, rc, _ = az_command(env, [
+        _, rc, stderr = az_command(env, [
             "storage", "blob", "download", "--auth-mode", "login", "--account-name", env["storage"],
             "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-            "--file", str(path), "--overwrite", "true",
+            "--file", str(path), "--overwrite", "true", "--lease-id", lease.reservation_lease_id,
         ], check=False)
         if rc != 0:
-            _, create_rc, _ = az_command(env, [
-                "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
-                "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-                "--file", str(path), "--overwrite", "false",
-            ], check=False)
-            if create_rc != 0:
-                _, retry_rc, retry_stderr = az_command(env, [
-                    "storage", "blob", "download", "--auth-mode", "login", "--account-name", env["storage"],
-                    "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-                    "--file", str(path), "--overwrite", "true",
-                ], check=False)
-                if retry_rc != 0:
-                    raise RunnerError("cost reservation ledger is unavailable: {}".format(retry_stderr))
+            raise RunnerError("leased cost reservation ledger is unavailable: {}".format(stderr))
         try:
             ledger = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -1253,8 +1250,9 @@ def save_reservation_ledger(env, state, ledger, lease):
         az_command(env, [
             "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
             "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-            "--file", str(path), "--overwrite", "true",
+            "--file", str(path), "--overwrite", "true", "--lease-id", lease.reservation_lease_id,
         ])
+        lease.assert_held()
     finally:
         path.unlink(missing_ok=True)
 
@@ -1284,7 +1282,7 @@ def reservation_is_reconciled(env, entry, actual, forecast):
 
 
 def reserve_budget(env, state, lease, limits):
-    ledger = load_reservation_ledger(env, state)
+    ledger = load_reservation_ledger(env, state, lease)
     preliminary = budget_gate(env, limits)
     for entry in ledger["reservations"].values():
         if entry.get("status") == "reserved":
@@ -1316,12 +1314,13 @@ def reserve_budget(env, state, lease, limits):
     }
     ledger["updated_at"] = iso_utc()
     save_reservation_ledger(env, state, ledger, lease)
+    lease.assert_held()
     return cost
 
 
 def mark_reservation_cleanup_verified(env, state):
     with AdmissionLease(env, state) as lease:
-        ledger = load_reservation_ledger(env, state)
+        ledger = load_reservation_ledger(env, state, lease)
         entry = ledger["reservations"].get(state["invocation"])
         if entry is None:
             raise RunnerError("cost reservation is absent after compute cleanup")
@@ -1363,47 +1362,85 @@ def ensure_admission_blob(env, state):
             raise RunnerError("admission-lock blob could not be created or proven present")
 
 
+def ensure_reservation_blob(env, state):
+    path = write_private_json(env, ".reservations-initial-", empty_reservation_ledger(env))
+    try:
+        _, rc, _ = az_command(env, [
+            "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
+            "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
+            "--file", str(path), "--overwrite", "false",
+        ], check=False)
+        if rc != 0:
+            exists, _, _ = az_command(env, [
+                "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
+                "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
+            ])
+            if not exists.get("exists"):
+                raise RunnerError("cost reservation ledger blob could not be created or proven present")
+    finally:
+        path.unlink(missing_ok=True)
+
+
 class AdmissionLease:
     def __init__(self, env, state):
         self.env = env
         self.state = state
-        self.lease_id = str(uuid.uuid4())
+        self.admission_lease_id = str(uuid.uuid4())
+        self.reservation_lease_id = str(uuid.uuid4())
         self.stop = threading.Event()
         self.failed = threading.Event()
         self.thread = None
 
-    def _lease_args(self, operation):
+    def _lease_args(self, operation, blob_name, lease_id):
         args = [
             "storage", "blob", "lease", operation, "--auth-mode", "login", "--account-name", self.env["storage"],
-            "--container-name", CONTAINER, "--blob-name", self.state["staging"]["admission_blob"],
+            "--container-name", CONTAINER, "--blob-name", blob_name,
         ]
         if operation == "acquire":
-            args += ["--lease-duration", "60", "--proposed-lease-id", self.lease_id]
+            args += ["--lease-duration", "60", "--proposed-lease-id", lease_id]
         else:
-            args += ["--lease-id", self.lease_id]
+            args += ["--lease-id", lease_id]
         return args
 
     def __enter__(self):
         ensure_admission_blob(self.env, self.state)
         acquired = False
         for _ in range(7):
-            _, rc, _ = az_command(self.env, self._lease_args("acquire"), check=False)
+            _, rc, _ = az_command(self.env, self._lease_args(
+                "acquire", self.state["staging"]["admission_blob"], self.admission_lease_id
+            ), check=False)
             if rc == 0:
                 acquired = True
                 break
             time.sleep(10)
         if not acquired:
             raise RunnerError("runner admission lock is busy or unreachable")
+        try:
+            ensure_reservation_blob(self.env, self.state)
+            _, reservation_rc, _ = az_command(self.env, self._lease_args(
+                "acquire", self.state["staging"]["reservation_blob"], self.reservation_lease_id
+            ), check=False)
+            if reservation_rc != 0:
+                raise RunnerError("cost reservation ledger lease is busy or unreachable")
+        except Exception:
+            az_command(self.env, self._lease_args(
+                "release", self.state["staging"]["admission_blob"], self.admission_lease_id
+            ), check=False)
+            raise
         self.thread = threading.Thread(target=self._renew, daemon=True)
         self.thread.start()
         return self
 
     def _renew(self):
         while not self.stop.wait(25):
-            _, rc, _ = az_command(self.env, self._lease_args("renew"), check=False)
-            if rc != 0:
-                self.failed.set()
-                return
+            for blob_name, lease_id in (
+                (self.state["staging"]["admission_blob"], self.admission_lease_id),
+                (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
+            ):
+                _, rc, _ = az_command(self.env, self._lease_args("renew", blob_name, lease_id), check=False)
+                if rc != 0:
+                    self.failed.set()
+                    return
 
     def assert_held(self):
         if self.failed.is_set():
@@ -1413,7 +1450,11 @@ class AdmissionLease:
         self.stop.set()
         if self.thread:
             self.thread.join(timeout=2)
-        az_command(self.env, self._lease_args("release"), check=False)
+        for blob_name, lease_id in (
+            (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
+            (self.state["staging"]["admission_blob"], self.admission_lease_id),
+        ):
+            az_command(self.env, self._lease_args("release", blob_name, lease_id), check=False)
 
 
 def storage_upload(env, local_path, blob, overwrite=False):
@@ -1618,6 +1659,16 @@ def adopt_vm_identity(env, state, vm):
 
 
 def create_vm(env, state):
+    deadline = dt.datetime.fromisoformat(
+        state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
+    )
+    required_lead = dt.timedelta(
+        seconds=AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS + LOCAL_COMMAND_TIMEOUT_SECONDS
+    )
+    if deadline <= now_utc() + required_lead:
+        raise RunnerError(
+            "control-plane TTL schedule has insufficient lead for Azure's 30-minute activation window and bounded deployment"
+        )
     params = write_private_json(env, ".vm-params-", deployment_parameters(env, state))
     try:
         az_command(env, [
@@ -1990,7 +2041,7 @@ def cleanup(env, state):
     try:
         classified = classify_disposable_resources(env, state, include_vm=True)
         by_key = {identity_key: (kind, resource_id, resource) for kind, identity_key, resource_id, resource in classified}
-        for identity_key in ("ttl-schedule", "run-command-execute", "run-command-safety"):
+        for identity_key in ("run-command-execute", "run-command-safety"):
             if identity_key in by_key:
                 kind, resource_id, resource = by_key[identity_key]
                 delete_classified_resource(env, state, resource_id, kind, identity_key, resource)
@@ -2004,6 +2055,9 @@ def cleanup(env, state):
             resource = adopt_expected_detach(env, state, kind, identity_key, resource_id)
             if resource is not None:
                 delete_classified_resource(env, state, resource_id, kind, identity_key, resource)
+        if "ttl-schedule" in by_key:
+            kind, resource_id, resource = by_key["ttl-schedule"]
+            delete_classified_resource(env, state, resource_id, kind, "ttl-schedule", resource)
     except RunnerError:
         transition(env, state, "cleanup-retained", "compute cleanup ambiguous; staging retained")
         raise
@@ -2061,6 +2115,7 @@ def dispatch_prepared(env, state, confirm_subscription):
             input_url = blob_sas(env, state["staging"]["input_blob"], "r", expiry)
             output_url = blob_sas(env, state["staging"]["output_blob"], "cw", expiry)
             foundation_gate(env)
+            lease.assert_held()
             create_vm(env, state)
             lease.assert_held()
         create_run_command(env, state, input_url, output_url)

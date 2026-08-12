@@ -16,6 +16,7 @@ EXECUTOR="$ROOT/bin/fm-azure-runner-exec.py"
 TEMPLATE="$ROOT/docs/azure-runner/invocation.json"
 SUB=11111111-1111-4111-8111-111111111111
 TENANT=22222222-2222-4222-8222-222222222222
+PE_GUID=33333333-3333-4333-8333-333333333333
 
 make_repo() {
   local path=$1
@@ -44,6 +45,7 @@ runner() {
     FM_AZURE_STORAGE_NAME=fmteststorage0001 \
     FM_AZURE_OWNER_TAG=owner \
     FM_AZURE_DEPLOYMENT_GENERATION=gen-one \
+    FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID="$PE_GUID" \
     "$RUNNER" "$@"
 }
 
@@ -168,7 +170,7 @@ assert request["limits"]["sku_family"] == "standardDav6Family"
 assert request["lineage_root_invocation"] == state["invocation"]
 created = dt.datetime.fromisoformat(request["created_at"].replace("Z", "+00:00"))
 deadline = dt.datetime.fromisoformat(request["compute_deallocation_deadline"].replace("Z", "+00:00"))
-assert deadline - created == dt.timedelta(hours=24)
+assert deadline - created == dt.timedelta(hours=23)
 assert "FM_AZURE_SUBSCRIPTION_ID" not in json.dumps(request)
 assert state["resources"]["vm_id"].endswith("/" + state["resources"]["vm_name"])
 assert state["resources"]["nic_id"].endswith("/" + state["resources"]["nic_name"])
@@ -489,6 +491,7 @@ env = {
     "subnet": "snet-validation-shards", "elastic_nsg": "nsg-prefix-elastic-isolated", "nat": "nat-prefix-eus",
     "blob_private_endpoint": "pe-prefix-blob", "blob_private_endpoint_nic": "nic-prefix-pe-blob",
     "blob_private_dns_zone": "privatelink.blob.core.windows.net",
+    "blob_private_endpoint_nic_resource_guid": "33333333-3333-4333-8333-333333333333",
     "deployment_generation": "gen-one", "owner": "owner", "azure_operation_count": 0,
 }
 def rid(provider, kind, name):
@@ -513,12 +516,12 @@ resources = {
     pip_id.lower(): {"id": pip_id, "location": "eastus", "sku": {"name": "Standard"}, "tags": common, "properties": {"publicIPAllocationMethod": "Static", "publicIPAddressVersion": "IPv4", "idleTimeoutInMinutes": 4}},
     nat_id.lower(): {"id": nat_id, "location": "eastus", "sku": {"name": "Standard"}, "tags": common, "properties": {"idleTimeoutInMinutes": 10, "publicIpAddresses": [{"id": pip_id}]}},
     pe_id.lower(): {"id": pe_id, "location": "eastus", "tags": common, "properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}, "networkInterfaces": [{"id": pe_nic_id}], "privateLinkServiceConnections": [{"name": "blob", "properties": {"privateLinkServiceId": store_id, "groupIds": ["blob"], "privateLinkServiceConnectionState": {"status": "Approved"}}}]}},
-    pe_nic_id.lower(): {"id": pe_nic_id, "tags": common, "properties": {"resourceGuid": "pe-nic-guid", "privateEndpoint": {"id": pe_id}, "ipConfigurations": [{"properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}}}]}},
+    pe_nic_id.lower(): {"id": pe_nic_id, "tags": common, "properties": {"resourceGuid": "33333333-3333-4333-8333-333333333333", "privateEndpoint": {"id": pe_id}, "ipConfigurations": [{"properties": {"subnet": {"id": vnet_id + "/subnets/snet-private-endpoints"}}}]}},
     dns_id.lower(): {"id": dns_id, "location": "global", "tags": common},
     dns_link_id.lower(): {"id": dns_link_id, "location": "global", "properties": {"registrationEnabled": False, "virtualNetwork": {"id": vnet_id}}},
     (pe_id + "/privateDnsZoneGroups/default").lower(): {"id": pe_id + "/privateDnsZoneGroups/default", "properties": {"privateDnsZoneConfigs": [{"name": "blob", "properties": {"privateDnsZoneId": dns_id}}]}},
 }
-def run_gate(values, output_id=pe_nic_id, output_guid="pe-nic-guid"):
+def run_gate(values, output_id=pe_nic_id, output_guid="33333333-3333-4333-8333-333333333333"):
     def fake_az(env_arg, args, **kwargs):
         if args[0:3] == ["deployment", "sub", "show"]:
             return {"properties": {"outputs": {
@@ -564,13 +567,24 @@ for resource_id, mutation in (
         pass
     else:
         raise AssertionError("foreign foundation binding accepted: {}".format(resource_id))
-for output_id, output_guid in (("/foreign", "pe-nic-guid"), (pe_nic_id, "foreign-guid")):
+for output_id, output_guid in (("/foreign", "33333333-3333-4333-8333-333333333333"), (pe_nic_id, "44444444-4444-4444-8444-444444444444")):
     try:
         run_gate(resources, output_id=output_id, output_guid=output_guid)
     except module.RunnerError:
         pass
     else:
         raise AssertionError("foreign deployment-output NIC binding was accepted")
+
+# A same-name NIC replacement plus same-name deployment rerun cannot rewrite
+# the independently accepted resourceGuid anchor.
+coupled = json.loads(json.dumps(resources))
+coupled[pe_nic_id.lower()]["properties"]["resourceGuid"] = "44444444-4444-4444-8444-444444444444"
+try:
+    run_gate(coupled, output_guid="44444444-4444-4444-8444-444444444444")
+except module.RunnerError:
+    pass
+else:
+    raise AssertionError("coupled live NIC and mutable deployment-output replacement was accepted")
 
 # Dispatch proves immediately before staging and again immediately before compute create.
 sequence = []
@@ -579,7 +593,7 @@ module.sku_quota_gate = lambda e, limits: None
 module.budget_gate = lambda e, limits: {"max_increment": 1}
 module.foundation_gate = lambda e: sequence.append("foundation")
 module.active_runner_vms = lambda e: []
-module.reserve_budget = lambda e, s, lease, limits: {"max_increment": 1}
+module.reserve_budget = lambda e, s, lease, limits: sequence.append("reservation-write") or {"max_increment": 1}
 module.storage_upload = lambda *args, **kwargs: sequence.append("stage")
 module.blob_sas = lambda *args, **kwargs: "https://capability"
 module.create_vm = lambda e, s: sequence.append("create-vm")
@@ -589,7 +603,7 @@ class FakeLease:
     def __init__(self, *args): pass
     def __enter__(self): return self
     def __exit__(self, *args): pass
-    def assert_held(self): pass
+    def assert_held(self): sequence.append("lease-held")
 module.AdmissionLease = FakeLease
 state = {
     "invocation": "azr-aaaaaaaaaaaa", "parent_invocation": None,
@@ -607,7 +621,10 @@ except module.RunnerError as exc:
     assert "stop after create" in str(exc)
 else:
     raise AssertionError("dispatch fixture did not stop")
-assert sequence[-4:] == ["foundation", "stage", "foundation", "create-vm"]
+assert sequence[sequence.index("reservation-write") + 1] == "foundation"
+create_index = sequence.index("create-vm")
+assert sequence[create_index - 1] == "lease-held"
+assert sequence[create_index + 1] == "lease-held"
 PY
   pass "foundation exact owner/resource/subnet/NSG/NAT/private-endpoint/DNS matrix and mutation-boundary reproof pass"
 }
@@ -632,6 +649,32 @@ except module.RunnerError as exc:
     assert "bounded" in str(exc)
 else:
     raise AssertionError("host subprocess deadline was not enforced")
+
+# A delayed dispatch cannot create compute inside Azure's documented 30-minute
+# schedule-change window plus the complete bounded deployment call.
+original_now_utc = module.now_utc
+fixed_now = original_now_utc()
+stale_state = {
+    "request": {
+        "compute_deallocation_deadline": module.iso_utc(
+            fixed_now + module.dt.timedelta(
+                seconds=module.AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS
+                + module.LOCAL_COMMAND_TIMEOUT_SECONDS
+            )
+        )
+    }
+}
+module.now_utc = lambda: fixed_now
+module.az_command = lambda *args, **kwargs: (_ for _ in ()).throw(
+    AssertionError("stale schedule lead reached Azure compute creation")
+)
+try:
+    module.create_vm({}, stale_state)
+except module.RunnerError as exc:
+    assert "30-minute activation window" in str(exc)
+else:
+    raise AssertionError("slow dispatch could slip the TTL schedule into the next day")
+module.now_utc = original_now_utc
 
 state = {
     "invocation": "azr-aaaaaaaaaaaa",
@@ -748,8 +791,28 @@ reservation_env = {
     "subscription": "sub", "resource_group": "rg", "storage": "store",
     "deployment_generation": "gen-one", "budget_limit": 400,
 }
+# The real admission owner acquires and releases independent admission and
+# reservation-object leases with non-interchangeable IDs.
+lease_calls = []
+module.ensure_admission_blob = lambda *args: None
+module.ensure_reservation_blob = lambda *args: None
+def lease_az(env_arg, args, **kwargs):
+    if args[0:3] == ["storage", "blob", "lease"]:
+        lease_calls.append(list(args))
+        return ({}, 0, "")
+    raise AssertionError("unexpected dual-lease Azure call: {}".format(args))
+module.az_command = lease_az
+lease_state = {"staging": {"admission_blob": "admission.lock", "reservation_blob": "reservations.json"}}
+with module.AdmissionLease(reservation_env, lease_state) as dual_lease:
+    assert dual_lease.admission_lease_id != dual_lease.reservation_lease_id
+assert [(args[3], args[args.index("--blob-name") + 1]) for args in lease_calls] == [
+    ("acquire", "admission.lock"), ("acquire", "reservations.json"),
+    ("release", "reservations.json"), ("release", "admission.lock"),
+]
 reservation_ledger = module.empty_reservation_ledger(reservation_env)
 reservation_lock = threading.Lock()
+real_load_reservation_ledger = module.load_reservation_ledger
+real_save_reservation_ledger = module.save_reservation_ledger
 class ReservationLease:
     def assert_held(self): pass
 def load_ledger(*args):
@@ -789,6 +852,48 @@ except module.RunnerError as exc:
     assert "outstanding reservations" in str(exc)
 else:
     raise AssertionError("sequential stale-cost admission ignored the durable reservation")
+
+# The reservation blob's own lease fences a stale controller even when it
+# reaches its write after successor B acquired the object lease.
+with tempfile.TemporaryDirectory() as tmp:
+    fenced_env = dict(reservation_env, state_dir=Path(tmp))
+    fenced_state = {"staging": {"reservation_blob": "runner-control/reservations.json"}}
+    stored = {"value": None, "current_lease": "lease-b", "calls": []}
+    class ObjectLease:
+        def __init__(self, lease_id):
+            self.reservation_lease_id = lease_id
+            self.assertions = 0
+        def assert_held(self): self.assertions += 1
+    def fenced_az(env_arg, args, **kwargs):
+        lease_id = args[args.index("--lease-id") + 1]
+        stored["calls"].append((args[2], lease_id))
+        if lease_id != stored["current_lease"]:
+            raise module.RunnerError("Azure rejected stale reservation blob lease")
+        path = Path(args[args.index("--file") + 1])
+        if args[2] == "upload":
+            stored["value"] = json.loads(path.read_text())
+        else:
+            path.write_text(json.dumps(stored["value"]))
+        return ({}, 0, "")
+    module.az_command = fenced_az
+    ledger_b = module.empty_reservation_ledger(fenced_env)
+    ledger_b["reservations"]["azr-bbbbbbbbbbbb"] = {"status": "reserved"}
+    lease_b = ObjectLease("lease-b")
+    real_save_reservation_ledger(fenced_env, fenced_state, ledger_b, lease_b)
+    assert lease_b.assertions == 2
+    assert real_load_reservation_ledger(
+        fenced_env, fenced_state, ObjectLease("lease-b")
+    )["reservations"] == ledger_b["reservations"]
+    ledger_a = module.empty_reservation_ledger(fenced_env)
+    ledger_a["reservations"]["azr-aaaaaaaaaaaa"] = {"status": "reserved"}
+    try:
+        real_save_reservation_ledger(fenced_env, fenced_state, ledger_a, ObjectLease("lease-a"))
+    except module.RunnerError as exc:
+        assert "stale reservation blob lease" in str(exc)
+    else:
+        raise AssertionError("stale controller A clobbered successor B's reservation ledger")
+    assert stored["value"]["reservations"] == ledger_b["reservations"]
+    assert ("upload", "lease-b") in stored["calls"] and ("download", "lease-b") in stored["calls"]
 
 # Complete one-property-at-a-time disposable-resource identity matrix.
 env = {"deployment_generation": "gen-one", "owner": "owner", "resource_group": "rg"}
@@ -973,10 +1078,45 @@ with tempfile.TemporaryDirectory() as tmp:
     module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
     module.cleanup(positive_env, positive)
 assert deleted == [
-    resources["ttl-schedule"]["id"], resources["run-command"]["id"], resources["run-command-safety"]["id"], resources["vm"]["id"],
-    resources["nic"]["id"], resources["disk"]["id"],
+    resources["run-command"]["id"], resources["run-command-safety"]["id"], resources["vm"]["id"],
+    resources["nic"]["id"], resources["disk"]["id"], resources["ttl-schedule"]["id"],
 ]
 assert positive["phase"] == "complete"
+
+# A failed VM deletion retains the already-classified Azure TTL owner untouched.
+failure_state = json.loads(json.dumps(state))
+failure_state["phase"] = "result-collected"
+failure_live = {key: json.loads(json.dumps(value)) for key, value in live.items()}
+for value in resources.values():
+    failure_live[value["id"].lower()] = json.loads(json.dumps(value))
+failure_deleted = []
+def failure_reader(env_arg, resource_id, kind):
+    value = failure_live.get(resource_id.lower())
+    return (value is not None), value
+def failure_az(env_arg, args, **kwargs):
+    if args[0:2] == ["resource", "list"]:
+        return ([{"id": value["id"], "tags": value.get("tags", {})} for value in failure_live.values()], 0, "")
+    if args[0:3] == ["rest", "--method", "delete"]:
+        resource_id = args[args.index("--url") + 1].split("https://management.azure.com", 1)[1].split("?", 1)[0]
+        if resource_id.lower() == resources["vm"]["id"].lower():
+            return (None, 1, "bounded VM delete failed")
+        failure_deleted.append(resource_id)
+        failure_live.pop(resource_id.lower())
+        return ({}, 0, "")
+    raise AssertionError("unexpected failed-cleanup Azure call: {}".format(args))
+module.read_exact_resource = failure_reader
+module.az_command = failure_az
+module.transition = lambda env_arg, state_arg, phase, note=None, **updates: state_arg.update({"phase": phase, **updates})
+try:
+    module.cleanup(env, failure_state)
+except module.RunnerError as exc:
+    assert "VM delete failed" in str(exc)
+else:
+    raise AssertionError("failed VM deletion did not retain cleanup state")
+assert failure_state["phase"] == "cleanup-retained"
+assert resources["ttl-schedule"]["id"].lower() in failure_live
+assert resources["ttl-schedule"]["id"] not in failure_deleted
+assert failure_deleted == [resources["run-command"]["id"], resources["run-command-safety"]["id"]]
 
 # create_run_command publishes the complete ownership tags and records immutable identity.
 with tempfile.TemporaryDirectory() as tmp:
