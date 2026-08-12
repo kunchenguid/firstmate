@@ -120,7 +120,7 @@ git -C "$PARENT/projects/alpha" push -q -u origin main
 cat > "$PARENT/data/projects.md" <<EOF
 - alpha [direct-PR] - alpha project (added 2026-08-02)
 EOF
-printf 'codex\n' > "$PARENT/config/secondmate-harness"
+printf 'pi - high\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
 
@@ -827,6 +827,51 @@ assert_grep 'unverifiable' "$TMP_ROOT/remote-default-kimi.out" \
 cmp -s "$TMP_ROOT/remote-ios-before-default-kimi.meta" "$remote_route_meta" \
   || fail "Kimi default refusal changed the live remote metadata"
 
+for default_harness in claude codex pi pi-signed grok; do
+  set_remote_profile "$default_harness" default-model - "$TMP_ROOT/remote-ios-default-profile.meta"
+  cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-$default_harness.meta"
+  cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-default-$default_harness.meta"
+  default_ssh_before=$(cat "$SSH_COUNT")
+  set +e
+  out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness "$default_harness" \
+    --model default-model 2>&1)
+  default_parent_rc=$?
+  set -e
+  [ "$default_parent_rc" -ne 0 ] \
+    || fail "remote parent accepted $default_harness's unselected effort axis"
+  assert_contains "$out" 'before readiness or inheritance' \
+    "$default_harness parent preflight did not identify its side-effect boundary"
+  [ "$(cat "$SSH_COUNT")" = "$default_ssh_before" ] \
+    || fail "$default_harness parent refusal reached readiness or inheritance SSH"
+  cmp -s "$TMP_ROOT/parent-ios-before-default-$default_harness.meta" "$PARENT/state/ios.meta" \
+    || fail "$default_harness parent refusal changed parent metadata"
+  default_herdr_launches=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+  default_herdr_closes=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+  set +e
+  out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+  default_route_rc=$?
+  set -e
+  [ "$default_route_rc" -ne 0 ] \
+    || fail "remote route published $default_harness's unselected effort axis"
+  assert_contains "$out" 'unverifiable' \
+    "$default_harness default route did not refuse unverifiable effort"
+  set +e
+  remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios \
+    "$default_harness" default-model - herdr > "$TMP_ROOT/remote-default-$default_harness.out" 2>&1
+  default_launch_rc=$?
+  set -e
+  [ "$default_launch_rc" -ne 0 ] \
+    || fail "$default_harness exact reuse accepted an unverified default effort"
+  assert_grep 'unverifiable' "$TMP_ROOT/remote-default-$default_harness.out" \
+    "$default_harness default reuse did not refuse unverifiable effort"
+  [ "$default_herdr_launches" -eq "$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)" ] \
+    || fail "$default_harness default refusal created a new Herdr endpoint"
+  [ "$default_herdr_closes" -eq "$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)" ] \
+    || fail "$default_harness default refusal stopped the live Herdr endpoint"
+  cmp -s "$TMP_ROOT/remote-ios-before-default-$default_harness.meta" "$remote_route_meta" \
+    || fail "$default_harness default refusal changed the live remote metadata"
+done
+
 set_remote_profile grok grok-4 max "$TMP_ROOT/remote-ios-default-profile.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-unverifiable-grok.meta"
 herdr_launches_before_unverifiable_grok=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
@@ -1014,7 +1059,7 @@ EOF
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-before-refusal.meta"
 printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 set +e
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr \
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - high herdr \
   > "$TMP_ROOT/legacy-alive-refusal.out" 2>&1
 legacy_alive_rc=$?
 set -e

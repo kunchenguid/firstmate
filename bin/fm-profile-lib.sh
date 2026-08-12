@@ -35,8 +35,8 @@ fm_profile_effective_effort() {
   case "$effort" in
     default)
       case "$harness" in
-        opencode|kimi) printf 'unverifiable\n'; return 1 ;;
-        *) printf 'default\n' ;;
+        muse) printf 'high\n' ;;
+        *) printf 'unverifiable\n'; return 1 ;;
       esac
       ;;
     low|medium|high|xhigh|max)
