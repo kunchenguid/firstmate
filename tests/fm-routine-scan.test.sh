@@ -634,6 +634,26 @@ test_symlink_fired_state_cannot_suppress_due_routine() {
   esac
   pass "routine scanner rejects symlinked fired state"
 }
+test_hardlink_fired_state_cannot_suppress_due_routine() {
+  local home outside out rc
+  home=$(make_home hardlink-fired)
+  outside="$TMP_ROOT/outside-hardlink-fired-state"
+  write_registry "$home" \
+    '- protected-item | daily | captain | must surface'
+  printf '%s\n' 'protected-item|daily|2026-08-10' > "$outside"
+  ln "$outside" "$home/state/.routine-fired"
+  out=$(run_scan "$home" 2026-08-10 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the scanner accepted a hardlinked fired state"
+  case "$out" in
+    *'routine-scan: fired routine state is unavailable:'*) ;;
+    *) fail "the hardlinked fired-state diagnostic was missing: $out" ;;
+  esac
+  case "$out" in
+    *'routine-due: protected-item'*) fail "external hardlinked state suppressed a due routine: $out" ;;
+  esac
+  pass "routine scanner rejects hardlinked fired state"
+}
 test_check_surfaces_registry_diagnostics() {
   local home check out
   home=$(make_home diagnostics)
@@ -684,4 +704,5 @@ test_normal_acknowledgement_uses_its_scan_generation
 test_ack_rejects_dangling_pending_symlink
 test_symlink_registry_is_rejected_at_scan_boundary
 test_symlink_fired_state_cannot_suppress_due_routine
+test_hardlink_fired_state_cannot_suppress_due_routine
 test_check_surfaces_registry_diagnostics

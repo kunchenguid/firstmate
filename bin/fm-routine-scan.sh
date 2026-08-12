@@ -100,12 +100,16 @@ if [ "$ROUTINE_ACK" -eq 0 ]; then
     exit 0
   fi
 fi
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] \
   || { routine_error "state directory is unavailable: $STATE"; exit 1; }
 [ ! -L "$FIRED" ] \
   || { routine_error "fired routine state is unavailable: $FIRED"; exit 1; }
 if [ -e "$FIRED" ]; then
   [ -f "$FIRED" ] \
+    || { routine_error "fired routine state is unavailable: $FIRED"; exit 1; }
+  [ "$(fm_pr_file_link_count "$FIRED")" = 1 ] \
     || { routine_error "fired routine state is unavailable: $FIRED"; exit 1; }
 fi
 
