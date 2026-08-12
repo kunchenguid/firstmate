@@ -220,6 +220,9 @@ family_for_basename() {
     fm-backend-orca.test.sh)
       printf '%s\n' orca
       ;;
+    fm-backend-paseo.test.sh)
+      printf '%s\n' paseo
+      ;;
     *)
       printf '%s\n' unclassified
       ;;
@@ -230,7 +233,7 @@ expected_gate_skip_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' optin-env ;;
-    cmux|zellij|orca) printf '%s\n' optional-binary ;;
+    cmux|zellij|orca|paseo) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -251,6 +254,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+paseo
 unclassified
 EOF
 }
@@ -874,6 +878,10 @@ families_for_changed_path() {
     bin/backends/orca*|bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
+      ;;
+    bin/backends/paseo*)
+      printf '%s\n' paseo
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch

@@ -31,6 +31,7 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/paseo-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -96,6 +97,10 @@
     },
     {
       "source": "docs/cmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/paseo-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -230,6 +235,10 @@
     },
     {
       "path": "docs/cmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/paseo-backend.md",
       "audience": "operator-current"
     },
     {

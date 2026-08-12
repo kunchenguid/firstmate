@@ -12,6 +12,10 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
+unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
+  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
+  PASEO_AGENT_ID PASEO_AGENT_CWD 2>/dev/null || true
+
 # Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
 # argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
 # one per line, in send order, so ordering is observable.
@@ -109,7 +113,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  env -u FM_TRACE_CONTEXT \
+  env -u FM_TRACE_CONTEXT -u PASEO_AGENT_ID -u PASEO_AGENT_CWD \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -127,7 +131,8 @@ run_spawn_tc() {
   local tc=$1 home=$2 wt=$3 fakebin=$4 launchlog=$5
   shift 5
   : > "$launchlog"
-  env FM_TRACE_CONTEXT="$tc" \
+  env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD \
+    FM_TRACE_CONTEXT="$tc" \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -195,7 +200,8 @@ run_two_level() {
   smlog="$base/sm-launch.log"
   smfake=$(make_spawn_fakebin "$base/sm-fake")
   : > "$smlog"
-  env FM_TRACE_CONTEXT="$penv" \
+  env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD \
+    FM_TRACE_CONTEXT="$penv" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
@@ -221,7 +227,8 @@ run_two_level() {
   wlog="$base/worker-launch.log"
   wfake=$(make_spawn_fakebin "$base/w-fake")
   : > "$wlog"
-  env FM_TRACE_CONTEXT="$TL_ENV_TC" TRACEPARENT="$TL_CARRIER" \
+  env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD \
+    FM_TRACE_CONTEXT="$TL_ENV_TC" TRACEPARENT="$TL_CARRIER" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
@@ -361,7 +368,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   printf 'charter\n' > "$sm/data/charter.md"
   fake=$(make_spawn_fakebin "$base/fake")
 
-  out=$(env -u FM_TRACE_CONTEXT \
+  out=$(env -u FM_TRACE_CONTEXT -u PASEO_AGENT_ID -u PASEO_AGENT_CWD \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \

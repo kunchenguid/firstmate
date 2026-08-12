@@ -166,14 +166,14 @@ test_backend_name_precedence() {
   # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
   # on the function call itself does not re-bind it, so these calls set
   # FM_BACKEND_CONFIG_DIR directly.
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "fm_backend_name should default to tmux with no env/config/detection markers"
 
   printf 'tmux\n' > "$cfg/backend"
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "fm_backend_name should read config/backend"
 
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "FM_BACKEND env should win over config/backend"
 
   pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
@@ -188,43 +188,47 @@ test_backend_name_precedence() {
 test_backend_detect_precedence() {
   local out
 
-  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" fm_backend_detect); then
+  if out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" fm_backend_detect); then
     fail "fm_backend_detect should return 1 (undetected) with no markers set, got '$out'"
   fi
 
-  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 fm_backend_detect) \
+  out=$(unset TMUX PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; HERDR_ENV=1 fm_backend_detect) \
     || fail "fm_backend_detect should succeed when HERDR_ENV=1"
   [ "$out" = herdr ] || fail "fm_backend_detect should report herdr for HERDR_ENV=1 alone, got '$out'"
 
-  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' fm_backend_detect) \
+  out=$(unset HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; TMUX='fake,1,0' fm_backend_detect) \
     || fail "fm_backend_detect should succeed when \$TMUX is set"
   [ "$out" = tmux ] || fail "fm_backend_detect should report tmux for \$TMUX alone, got '$out'"
 
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD; CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
     || fail "fm_backend_detect should succeed when CMUX_WORKSPACE_ID is set"
   [ "$out" = cmux ] || fail "fm_backend_detect should report cmux for CMUX_WORKSPACE_ID alone, got '$out'"
 
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PASEO_AGENT_ID='agent-1' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed when PASEO_AGENT_ID is set"
+  [ "$out" = paseo ] || fail "fm_backend_detect should report paseo for PASEO_AGENT_ID alone, got '$out'"
+
   # Nesting: tmux started inside a herdr pane carries BOTH markers. Innermost
   # (tmux) must win, since that is the surface firstmate is actually running on.
-  out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
+  out=$(unset CMUX_WORKSPACE_ID PASEO_AGENT_ID PASEO_AGENT_CWD; TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
     || fail "fm_backend_detect should succeed with both markers present"
   [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over herdr), got '$out'"
 
   # Nesting: tmux started inside a cmux-provided shell carries BOTH markers.
   # cmux is a terminal application, not a nestable multiplexer, so the
   # innermost multiplexer (tmux) must still win.
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+  out=$(unset HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
     || fail "fm_backend_detect should succeed with tmux and cmux markers present"
   [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over cmux), got '$out'"
 
   # Nesting: herdr started inside a cmux-provided shell carries BOTH markers.
   # Same reasoning: herdr (the innermost multiplexer) must win over cmux.
-  out=$(unset TMUX; HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+  out=$(unset TMUX PASEO_AGENT_ID PASEO_AGENT_CWD; HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
     || fail "fm_backend_detect should succeed with herdr and cmux markers present"
   [ "$out" = herdr ] || fail "fm_backend_detect should resolve nesting innermost-first (herdr over cmux), got '$out'"
 
   # Pathological: all three markers present. tmux still wins (innermost of all).
-  out=$(TMUX='fake,1,0' HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+  out=$(unset PASEO_AGENT_ID PASEO_AGENT_CWD; TMUX='fake,1,0' HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
     || fail "fm_backend_detect should succeed with all three markers present"
   [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first with all three markers (tmux wins), got '$out'"
 
@@ -242,18 +246,18 @@ test_backend_detect_cmux_fallback_bundle_id() {
   dir="$TMP_ROOT/detect-fallback-bundle"; mkdir -p "$dir"
   fb=$(make_cmux_fallback_fakebin "$dir")
 
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PATH="$fb:$PATH" __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect) \
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; PATH="$fb:$PATH" __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect) \
     || fail "fm_backend_detect should fall back to the cmux bundle id when CMUX_WORKSPACE_ID is absent"
   [ "$out" = cmux ] || fail "bundle-id fallback should report cmux, got '$out'"
 
   (
-    unset TMUX HERDR_ENV CMUX_WORKSPACE_ID
+    unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID
     PATH="$fb:$PATH" __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect >/dev/null || exit 1
     [ "$FM_BACKEND_DETECT_SIGNAL" = bundle-id ] || exit 2
   ) || fail "bundle-id fallback should set FM_BACKEND_DETECT_SIGNAL=bundle-id (subshell exit $?)"
 
   # A foreign bundle id (an ordinary terminal app) must not match.
-  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PATH="$fb:$PATH" FM_FAKE_PS_TABLE="$dir/no-table" __CFBundleIdentifier='com.apple.Terminal' fm_backend_detect); then
+  if out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; PATH="$fb:$PATH" FM_FAKE_PS_TABLE="$dir/no-table" __CFBundleIdentifier='com.apple.Terminal' fm_backend_detect); then
     fail "a non-cmux __CFBundleIdentifier should not detect cmux, got '$out'"
   fi
 
@@ -262,7 +266,7 @@ test_backend_detect_cmux_fallback_bundle_id() {
 
 test_backend_detect_cmux_fallback_requires_darwin() {
   local out
-  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH" __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect); then
+  if out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH" __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect); then
     fail "the cmux fallback must be macOS-only (cmux itself is), got '$out' on a non-Darwin uname"
   fi
   pass "fm_backend_detect: the cmux fallback signals are macOS-only (inert on a non-Darwin uname)"
@@ -279,11 +283,11 @@ test_backend_detect_cmux_fallback_tmux_nested_false_positive() {
   dir="$TMP_ROOT/detect-fallback-nested"; mkdir -p "$dir"
   fb=$(make_cmux_fallback_fakebin "$dir")
 
-  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; PATH="$fb:$PATH" TMUX='fake,1,0' __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect) \
+  out=$(unset HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; PATH="$fb:$PATH" TMUX='fake,1,0' __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect) \
     || fail "fm_backend_detect should still succeed with \$TMUX plus an inherited cmux bundle id"
   [ "$out" = tmux ] || fail "\$TMUX must win over an inherited cmux bundle id (tmux-inside-cmux pane), got '$out'"
 
-  out=$(unset TMUX CMUX_WORKSPACE_ID; PATH="$fb:$PATH" HERDR_ENV=1 __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect) \
+  out=$(unset TMUX PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; PATH="$fb:$PATH" HERDR_ENV=1 __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect) \
     || fail "fm_backend_detect should still succeed with HERDR_ENV=1 plus an inherited cmux bundle id"
   [ "$out" = herdr ] || fail "HERDR_ENV=1 must win over an inherited cmux bundle id (herdr-inside-cmux pane), got '$out'"
 
@@ -301,7 +305,7 @@ test_backend_detect_cmux_fallback_ancestry_pid_match() {
   printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
 
   (
-    unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier
+    unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID __CFBundleIdentifier
     PATH="$fb:$PATH" FM_FAKE_PS_TABLE="$table" FM_FAKE_LSAPPINFO_OUT='"pid"=66666' fm_backend_detect >/dev/null || exit 1
     [ "$FM_BACKEND_DETECTED" = cmux ] || exit 2
     [ "$FM_BACKEND_DETECT_SIGNAL" = ancestry ] || exit 3
@@ -321,7 +325,7 @@ test_backend_detect_cmux_fallback_ancestry_comm_match() {
   printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
 
   (
-    unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT
+    unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT
     PATH="$fb:$PATH" FM_FAKE_PS_TABLE="$table" fm_backend_detect >/dev/null || exit 1
     [ "$FM_BACKEND_DETECTED" = cmux ] || exit 2
     [ "$FM_BACKEND_DETECT_SIGNAL" = ancestry ] || exit 3
@@ -341,7 +345,7 @@ test_backend_detect_cmux_fallback_ancestry_stops_at_launchd() {
   table="$dir/ps-table"
   printf '%s\t77777\t/bin/zsh\n77777\t1\ttmux\n' "$$" > "$table"
 
-  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT; PATH="$fb:$PATH" FM_FAKE_PS_TABLE="$table" fm_backend_detect); then
+  if out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT; PATH="$fb:$PATH" FM_FAKE_PS_TABLE="$table" fm_backend_detect); then
     fail "ancestry fallback should stop undetected at a launchd-reparented chain, got '$out'"
   fi
   pass "fm_backend_detect: ancestry fallback stops undetected at launchd (a reparented tmux server never reaches cmux)"
@@ -357,7 +361,7 @@ test_backend_name_cmux_fallback_notice() {
   errfile="$dir/err.txt"
 
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PATH="$fb:$PATH" __CFBundleIdentifier='com.cmuxterm.app' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; PATH="$fb:$PATH" __CFBundleIdentifier='com.cmuxterm.app' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = cmux ] || fail "fm_backend_name should auto-detect cmux via the bundle-id fallback, got '$out'"
   assert_contains "$(cat "$errfile")" "FALLBACK signal __CFBundleIdentifier" \
     "the fallback-detected cmux notice did not name the bundle-id fallback signal"
@@ -369,7 +373,7 @@ test_backend_name_cmux_fallback_notice() {
   # The primary-marker notice is unchanged: it names CMUX_WORKSPACE_ID and
   # carries no FALLBACK wording.
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = cmux ] || fail "fm_backend_name should auto-detect cmux from CMUX_WORKSPACE_ID, got '$out'"
   assert_contains "$(cat "$errfile")" "(CMUX_WORKSPACE_ID)" \
     "the primary-marker cmux notice no longer names CMUX_WORKSPACE_ID"
@@ -392,12 +396,12 @@ test_backend_name_autodetect_notice() {
   errfile="$dir/err.txt"
 
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
   [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
-  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX CMUX_WORKSPACE_ID PASEO_AGENT_ID PASEO_AGENT_CWD; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
   assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
     "fm_backend_name did not print a loud notice when auto-detecting herdr"
@@ -405,12 +409,12 @@ test_backend_name_autodetect_notice() {
     "fm_backend_name's auto-detect notice did not name the opt-out"
 
   : > "$errfile"
-  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD CMUX_WORKSPACE_ID; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "fm_backend_name should auto-detect tmux from \$TMUX, got '$out'"
   [ -s "$errfile" ] && fail "auto-detecting tmux must stay silent (today's unchanged default-path behavior)"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = cmux ] || fail "fm_backend_name should auto-detect cmux from CMUX_WORKSPACE_ID, got '$out'"
   assert_contains "$(cat "$errfile")" "EXPERIMENTAL cmux backend" \
     "fm_backend_name did not print a loud notice when auto-detecting cmux"
@@ -445,19 +449,19 @@ test_backend_name_explicit_beats_detection() {
   # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
   # on the function call itself does not re-bind it, so these calls set
   # FM_BACKEND_CONFIG_DIR directly to control which config dir is checked.
-  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$dir/config-empty" fm_backend_name)
+  out=$(unset TMUX PASEO_AGENT_ID PASEO_AGENT_CWD; HERDR_ENV=1 FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$dir/config-empty" fm_backend_name)
   [ "$out" = tmux ] || fail "FM_BACKEND=tmux should win over an ambient HERDR_ENV=1 auto-detect marker, got '$out'"
 
-  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  out=$(unset TMUX PASEO_AGENT_ID PASEO_AGENT_CWD; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
   [ "$out" = tmux ] || fail "config/backend=tmux should win over an ambient HERDR_ENV=1 auto-detect marker, got '$out'"
 
   # The same opt-out must work for an ambient cmux auto-detect marker: a
   # captain who is running firstmate inside a cmux terminal but explicitly
   # wants tmux is never overridden by CMUX_WORKSPACE_ID.
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$dir/config-empty" fm_backend_name)
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$dir/config-empty" fm_backend_name)
   [ "$out" = tmux ] || fail "FM_BACKEND=tmux should win over an ambient CMUX_WORKSPACE_ID auto-detect marker, got '$out'"
 
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  out=$(unset TMUX HERDR_ENV PASEO_AGENT_ID PASEO_AGENT_CWD; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
   [ "$out" = tmux ] || fail "config/backend=tmux should win over an ambient CMUX_WORKSPACE_ID auto-detect marker, got '$out'"
 
   pass "fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection, including an ambient cmux marker"

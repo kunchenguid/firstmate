@@ -25,7 +25,12 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 adds bin/backends/paseo.sh,
+# also EXPERIMENTAL and spawn-capable, behind `--backend paseo`/
+# `FM_BACKEND=paseo`/`config/backend`, and behind runtime auto-detection when
+# firstmate itself is running inside a Paseo agent session (PASEO_AGENT_ID or
+# PASEO_AGENT_CWD marker) with no explicit backend setting; see
+# docs/paseo-backend.md for its empirical basis.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -33,7 +38,7 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
+# spawn-capable backend, currently experimental herdr, zellij, orca, cmux, or paseo,
 # carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
@@ -66,8 +71,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -150,6 +155,12 @@ fm_backend_detect() {
     FM_BACKEND_DETECTED=herdr
     FM_BACKEND_DETECT_SIGNAL=HERDR_ENV
     printf 'herdr'
+    return 0
+  fi
+  if [ -n "${PASEO_AGENT_ID:-}" ] || [ -n "${PASEO_AGENT_CWD:-}" ]; then
+    FM_BACKEND_DETECTED=paseo
+    FM_BACKEND_DETECT_SIGNAL=PASEO_AGENT_ID
+    printf 'paseo'
     return 0
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
@@ -262,6 +273,9 @@ fm_backend_name() {
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
+    if [ "$detected" = paseo ]; then
+      echo "NOTICE: auto-detected paseo runtime (PASEO_AGENT_ID=${PASEO_AGENT_ID:-set}) - spawning into the EXPERIMENTAL paseo backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
     if [ "$detected" = cmux ]; then
       case "$FM_BACKEND_DETECT_SIGNAL" in
         bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
@@ -299,12 +313,12 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
-#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo);
+#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux, paseo) whose
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
+#     (tmux, herdr, zellij, cmux, paseo); orca owns its own task worktree and terminal,
 #     so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
@@ -314,6 +328,7 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
+    paseo)  printf '%s' 'paseo jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -327,6 +342,10 @@ fm_backend_required_tool_available() {  # <backend> <tool>
     cmux:cmux)
       fm_backend_source cmux >/dev/null 2>&1 || return 1
       fm_backend_cmux_bin >/dev/null 2>&1
+      ;;
+    paseo:paseo)
+      fm_backend_source paseo >/dev/null 2>&1 || return 1
+      fm_backend_paseo_readiness_check >/dev/null 2>&1
       ;;
     *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
@@ -523,6 +542,18 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    paseo)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: legacy Paseo endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      recorded_agent_id=$(fm_backend_meta_exact_value "$meta" paseo_agent_id) || recorded_agent_id=
+      if [ -z "$recorded_agent_id" ] || [ "$window" != "$recorded_agent_id" ] \
+        || ! fm_backend_endpoint_atom_valid "$recorded_agent_id"; then
+        echo "REFUSED: Paseo endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -631,6 +662,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    paseo)
+      if [ -z "${_FM_BACKEND_PASEO_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/paseo.sh" || return 1
+        _FM_BACKEND_PASEO_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -702,6 +740,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    paseo) fm_backend_paseo_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -717,6 +756,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    paseo) fm_backend_paseo_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -734,6 +774,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    paseo) fm_backend_paseo_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -752,6 +793,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    paseo) fm_backend_paseo_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -789,6 +831,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    paseo) fm_backend_paseo_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -815,6 +858,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    paseo) fm_backend_paseo_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -864,6 +908,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    paseo)
+      fm_backend_source paseo || return 1
+      fm_backend_paseo_target_exists "$target" "$expected_label"
+      ;;
     *)
       return 1
       ;;
@@ -891,6 +939,7 @@ fm_backend_agent_state() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    paseo) fm_backend_paseo_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }

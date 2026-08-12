@@ -137,7 +137,7 @@ zellij_expected_home_label() {  # [home] [root]
 }
 
 zellij_expected_scoped_title() {  # <fm-task-label> [home] [root]
-  local label=$1 home=${2:-$ROOT} root=${3:-$ROOT} rest
+  local label=$1 home=${2:-$ROOT} root=${3:-${FM_ROOT:-$ROOT}} rest
   case "$label" in
     fm-*) rest=${label#fm-} ;;
     *) rest=$label ;;
