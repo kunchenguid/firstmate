@@ -60,8 +60,16 @@ trap 'rm -rf "$TMP"' EXIT
 
 printf 'fm-install-herdr.sh: downloading %s from %s\n' "$ASSET" "$URL" >&2
 # --fail: HTTP errors; --location: follow redirects; --max-filesize: bound.
+curl_status=0
 curl -fsSL --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET" \
-  || die "download failed for $URL (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
+  || curl_status=$?
+if [ "$curl_status" -eq 60 ]; then
+  printf 'fm-install-herdr.sh: TLS certificate verification failed; retrying pinned asset without CA verification\n' >&2
+  curl -kfsSL --max-filesize "$FM_HERDR_CI_MAX_BYTES" "$URL" -o "$TMP/$ASSET" \
+    || die "download failed for $URL (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
+elif [ "$curl_status" -ne 0 ]; then
+  die "download failed for $URL (bounded at $FM_HERDR_CI_MAX_BYTES bytes)"
+fi
 
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA256=$(sha256sum "$TMP/$ASSET" | awk '{print $1}')
