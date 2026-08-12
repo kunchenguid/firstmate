@@ -1123,7 +1123,11 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
-  ln -s /bin/bash "$dir/fake-claude"
+  # Named exactly "claude" (not e.g. "fake-claude"): the session-lock harness
+  # identity match is an exact basename match, so a decoy name only containing
+  # "claude" as a substring would not resolve as the harness ancestry does for
+  # a genuine Claude Code process.
+  ln -s /bin/bash "$dir/claude"
 }
 
 run_integrated_autoarm() {
@@ -1131,7 +1135,7 @@ run_integrated_autoarm() {
   home=$(cd "$dir" && pwd)
   # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
   printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
-    | FM_HOME="$home" "$dir/fake-claude" -c '
+    | FM_HOME="$home" "$dir/claude" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1

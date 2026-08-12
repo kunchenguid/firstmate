@@ -61,7 +61,10 @@ fm_harness_script_name() {  # <path>
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
 # Evidence, in order:
-#   1. the exact basename of the reported command name, against FM_HARNESS_RE.
+#   1. the exact basename of the reported command name, against FM_HARNESS_RE -
+#      stripping one leading "-" first, since a login-shell-style invocation
+#      (`exec -a -codex ...`) reports comm/argv[0] with that convention-carried
+#      dash and is still the same exact harness executable.
 #   2. Claude Code's version-named native-install shape in that command path or
 #      in argv[0]. Both are needed because macOS reports argv[0] in `ps -o
 #      comm=`, while procps on Linux reports the kernel exec name and ignores
@@ -70,11 +73,12 @@ fm_harness_script_name() {  # <path>
 #      argument identifies a harness.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 rest script name
+  local comm=$1 args=$2 base dashless argv0 rest script name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    [ "$base" = claude ] && FM_HARNESS_IS_CLAUDE=1
+  dashless=${base#-}
+  if printf '%s' "$dashless" | grep -qE "$FM_HARNESS_RE"; then
+    [ "$dashless" = claude ] && FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
   argv0=${args%%[[:space:]]*}
