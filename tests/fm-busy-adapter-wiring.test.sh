@@ -279,6 +279,30 @@ switch (process.env.MODE) {
     }
     break;
   }
+  case "overlapping-terminal-events": {
+    const turnEndPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".turn-ended";
+    await fire("agent_start");
+    const firstToken = readFileSync(
+      process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run", "utf8").trim();
+    await fire("agent_start");
+    removeMarker(turnEndPath);
+    await fire("agent_end", { last_assistant_message: { timestamp: Date.now() } });
+    if (!busyState().includes("state=busy") || markerPresent(turnEndPath)) {
+      throw new Error("a timestamped tokenless terminal event settled overlapping runs");
+    }
+    await fire("session_stop", {
+      run_token: firstToken,
+      last_assistant_message: { timestamp: Date.now() },
+    });
+    if (!busyState().includes("state=busy") || markerPresent(turnEndPath)) {
+      throw new Error("an explicit terminal token cleared busy while another run remained active");
+    }
+    await fire("agent_end", { last_assistant_message: { timestamp: Date.now() } });
+    if (busyState().includes("state=busy") || !markerPresent(turnEndPath)) {
+      throw new Error("the remaining unique run did not settle after an explicit sibling token");
+    }
+    break;
+  }
   case "ambiguous-session-shutdown":
     await fire("agent_start");
     await fire("agent_start");
@@ -399,6 +423,24 @@ test_omp_extension_persistent_run_correlation() {
   [ "$out" = "busy omp-ext" ] \
     || fail "ambiguous active runs must remain busy after tokenless agent_end, got '$out'"
   pass "omp extension correlates repeated tokenless terminal events to one active run"
+}
+
+test_omp_extension_rejects_overlapping_timestamped_runs() {
+  local rec id=busy-omp-overlap out state ext
+  rec=$(make_spawn_case omp-overlap omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" overlapping-terminal-events "$state" "$id") \
+    || fail "overlapping OMP terminal-event drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] \
+    || fail "the remaining unique run must settle after overlap is resolved, got '$out'"
+  [ -e "$state/$id.turn-ended" ] \
+    || fail "the final unique terminal event must publish turn-end evidence"
+  pass "omp terminal correlation rejects overlap before settling the remaining run"
 }
 
 test_omp_extension_reloads_and_reconciles_persisted_run() {
@@ -677,6 +719,7 @@ test_omp_extension_semantic_lifecycle
 test_omp_extension_rejects_late_prior_run_stop
 test_omp_session_shutdown_requires_one_active_run
 test_omp_extension_persistent_run_correlation
+test_omp_extension_rejects_overlapping_timestamped_runs
 test_omp_extension_reloads_and_reconciles_persisted_run
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected

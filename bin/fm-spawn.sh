@@ -2587,7 +2587,7 @@ import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 let runToken = "";
-let runSettledToken = "";
+let idlePublishedToken = "";
 let runSequence = 0;
 let tempSequence = 0;
 const runRecords: Array<{ token: string; startedAt: number; active: boolean }> = [];
@@ -2625,7 +2625,7 @@ const rotateRun = () => {
   const startedAt = Date.now();
   const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
   runToken = token;
-  runSettledToken = "";
+  idlePublishedToken = "";
   runRecords.push({ token, startedAt, active: true });
   if (runRecords.length > 64) runRecords.shift();
   atomicWrite(SESSION_RUN, token + "\\n");
@@ -2653,7 +2653,7 @@ const adoptCurrentRun = (timestamp?: number) => {
   const persisted = persistedRun();
   if (!persisted || (timestamp !== undefined && (persisted.startedAt <= 0 || timestamp < persisted.startedAt))) return "";
   runToken = persisted.token;
-  runSettledToken = "";
+  idlePublishedToken = "";
   runRecords.push({ token: persisted.token, startedAt: persisted.startedAt, active: true });
   if (runRecords.length > 64) runRecords.shift();
   return runToken;
@@ -2671,48 +2671,56 @@ const eventTimestamp = (event: any) => {
   }
   return latest;
 };
-const eventRunToken = (event: any) => {
-  const timestamp = eventTimestamp(event);
-  adoptCurrentRun(timestamp);
+const explicitRunToken = (event: any) => {
   for (const key of ["run_token", "runToken"]) {
     const token = event?.[key];
     if (typeof token === "string" && token) return token;
   }
-  if (timestamp === undefined) return runRecords.length === 1 ? runToken : "";
-  let matched = "";
-  for (let index = 0; index < runRecords.length; index += 1) {
-    const record = runRecords[index];
-    const next = runRecords[index + 1];
-    if (timestamp >= record.startedAt && (!next || timestamp < next.startedAt)) {
-      if (matched) return "";
-      matched = record.token;
-    }
+  return "";
+};
+const timestampMatchesRun = (record: { startedAt: number }, timestamp: number | undefined) =>
+  timestamp === undefined || (record.startedAt > 0 && timestamp >= record.startedAt);
+const uniqueActiveCurrentRun = (timestamp?: number) => {
+  const current = adoptCurrentRun(timestamp);
+  if (!current) return null;
+  const active = runRecords.filter((record) => record.active);
+  if (active.length !== 1 || active[0].token !== current) return null;
+  return active[0];
+};
+const eventRunToken = (event: any) => {
+  const timestamp = eventTimestamp(event);
+  adoptCurrentRun(timestamp);
+  const explicit = explicitRunToken(event);
+  if (explicit) {
+    const record = runRecords.find((candidate) => candidate.token === explicit);
+    return record?.active && timestampMatchesRun(record, timestamp) ? explicit : "";
   }
-  return matched;
+  const active = uniqueActiveCurrentRun(timestamp);
+  return active && timestampMatchesRun(active, timestamp) ? active.token : "";
 };
 const resolveUniqueActiveRunToken = () => {
-  const current = adoptCurrentRun();
-  if (!current) return "";
-  const active = runRecords.filter((record) => record.active);
-  return active.length === 1 && active[0].token === current ? current : "";
+  return uniqueActiveCurrentRun()?.token || "";
 };
 const resolveSessionShutdownToken = (event: any) => {
   const token = eventRunToken(event);
-  if (token || eventTimestamp(event) !== undefined) return token;
+  if (token || eventTimestamp(event) !== undefined || explicitRunToken(event)) return token;
   return resolveUniqueActiveRunToken();
 };
 const resolveRunToken = (event: any) => {
   const token = eventRunToken(event);
-  if (token || eventTimestamp(event) !== undefined) return token;
+  if (token || eventTimestamp(event) !== undefined || explicitRunToken(event)) return token;
   return resolveUniqueActiveRunToken();
 };
 const settleRun = async (token: string, event: string) => {
-  if (!token || token !== runToken || runSettledToken === token) return;
-  runSettledToken = token;
+  if (!token) return;
   const record = runRecords.find((candidate) => candidate.token === token);
-  if (record) record.active = false;
-  await busyEvent(token, "idle", event);
-  if (token === runToken) await touchTurnEnd(token);
+  if (!record?.active) return;
+  record.active = false;
+  if (runRecords.some((candidate) => candidate.active)) return;
+  if (!runToken || idlePublishedToken === runToken) return;
+  idlePublishedToken = runToken;
+  await busyEvent(runToken, "idle", event);
+  await touchTurnEnd(runToken);
 };
 export default function (omp: any) {
   omp.on("agent_start", () => {
@@ -2721,8 +2729,11 @@ export default function (omp: any) {
   });
   omp.on("session_stop", async (event: any) => {
     const token = resolveRunToken(event);
-    if (!token || token !== runToken) return;
-    atomicWrite(SESSION_STOP, token + "\\n");
+    const record = runRecords.find((candidate) => candidate.token === token);
+    if (!record?.active) return;
+    if (token === runToken && !runRecords.some((candidate) => candidate.active && candidate.token !== token)) {
+      atomicWrite(SESSION_STOP, token + "\\n");
+    }
     await settleRun(token, "session-stop");
   });
   omp.on("agent_end", (event: any) => {
