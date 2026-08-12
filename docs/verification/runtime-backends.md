@@ -176,14 +176,17 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 ## Worker isolation repository identity
 
 The spawn-time worker-isolation boundary was validated on 2026-08-11 with git 2.50.1 on macOS 15.6.1 arm64.
-`bin/fm-spawn.sh` accepts a task worktree only when its physically resolved `git rev-parse --git-common-dir` equals the project's, and refuses when either side cannot be established.
-Path shape carries no weight in that decision, because any other repository is also a real worktree root distinct from the project.
+`bin/fm-spawn.sh` proves two separate properties before a worker is armed, and refuses when either one cannot be established.
+The first is membership: the task worktree's physically resolved `git rev-parse --git-common-dir` must equal the project's, and the project directory must itself be its repository's top level, since that query walks up and would otherwise answer with an enclosing repository's identity.
+The second is isolation: the worker root must not be one of firstmate's own homes, which membership cannot establish, because in the self-hosted fleet a firstmate home is a linked worktree of the very repository the task belongs to.
+Path shape carries no weight in either decision, because any other repository is also a real worktree root distinct from the project.
 
 | Backend | Path into the assertion | Result |
 | --- | --- | --- |
-| tmux, herdr, zellij, cmux | Treehouse pools the worktree, and each adapter opens the task endpoint with the project as its working directory, so `treehouse get` acquires a worktree of the project's own repository | Verified live: a pooled worktree and its project checkout resolve to the same git common directory, and a worktree created from an already linked worktree resolves there too |
+| tmux, herdr, zellij, cmux | Treehouse pools the worktree, and each adapter opens the task endpoint with the project as its working directory, so `treehouse get` acquires a worktree of the project's own repository | Verified live: a pooled worktree and its project checkout resolve to the same git common directory, and a worktree created from an already linked worktree resolves there too, so the pooled shape passes membership and is separated from a firstmate home by the isolation check alone |
 | orca | Orca registers the project repository and returns its own worktree path, which the spawn validates directly from that result instead of a pane path | Verified against the Orca call site with a fake Orca CLI: a foreign worktree refuses and a worktree of the project's repository still spawns |
 | relaunch, every backend | The worktree recorded in the task's metadata | Same assertion applies before a replacement agent is armed |
+| self-hosted fleet, every backend | firstmate is its own project, so its active home and its leased secondmate homes are linked worktrees of the project's repository and pass membership | Refused by the isolation check on its own diagnostic, while an ordinary linked worktree of that same repository still spawns |
 | secondmate spawns | Not applicable after inspecting the spawn path: a secondmate home is a firstmate home rather than a project worktree, so the assertion is deliberately skipped there and is unchanged | Unchanged |
 
 ```sh
@@ -199,11 +202,17 @@ ok - a real worktree of an unrelated repository is refused
 ok - an unreadable worktree repository identity refuses the launch instead of passing
 ok - a project whose repository identity cannot be established refuses the launch
 ok - a legitimate worktree of the project's repository still spawns
+ok - a firstmate home that belongs to the project's own repository is still refused
+ok - a seeded firstmate home in the project's own repository is refused
+ok - an isolated worktree still spawns when firstmate's own homes share that repository
+ok - a project nested inside another repository refuses the launch instead of borrowing its identity
 ok - an Orca worktree belonging to another repository is refused
 ok - an Orca worktree of the project's own repository still spawns
 ```
 
 The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
+The self-hosted cases and the nested-project case were each run against the unfixed assertion first, where all three spawned instead of refusing, reporting `worktree=<firstmate home>`, `worktree=<seeded home>`, and `worktree=<enclosing repository's worktree>` respectively.
+The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, the seeded-home marker, or a directory holding the running fleet's operational directories.
 The Orca cases need `node`, which the Orca adapter's JSON helpers require, and report themselves as not run when it is absent.
 
 ## Composer classification matrix

@@ -18,8 +18,16 @@
 # real, settled, but foreign worktree, and assert the spawn is refused: the
 # firstmate home itself, an unrelated repository's worktree, a worktree whose
 # repository identity cannot be read, and a project whose repository identity
-# cannot be read. The last case asserts a legitimate worktree of the project
-# still spawns, so the assertion cannot pass by refusing everything.
+# cannot be read.
+#
+# Repository membership alone does not prove isolation, so the self-hosted
+# cases cover the configuration where firstmate IS the project: a firstmate home
+# there is a linked worktree of the project's own repository, so it shares the
+# project's git common directory and must be refused on its own terms. A project
+# directory nested inside another repository is refused for the mirror-image
+# reason - it inherits an identity it does not own. Two cases assert that
+# legitimate worktrees still spawn, including in the self-hosted shape, so the
+# assertion cannot pass by refusing everything.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -92,6 +100,17 @@ SH
   chmod +x "$fakebin/git"
 }
 
+# seed_case_home <id>: give CASE_HOME the operational directories and the task
+# brief a spawn reads, so nothing downstream of the assertion refuses a case for
+# an unrelated reason.
+seed_case_home() {
+  local id=$1
+  mkdir -p "$CASE_HOME/data/$id" "$CASE_HOME/projects" "$CASE_HOME/state" "$CASE_HOME/config"
+  printf 'codex\n' > "$CASE_HOME/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$CASE_HOME/data/$id/brief.md"
+  touch "$CASE_HOME/state/.last-watcher-beat"
+}
+
 # make_identity_case <name> <id>: a home, a project with a real worktree, an
 # unrelated repository with its own real worktree, and a fake tmux. Sets the
 # CASE_* variables the runner reads.
@@ -104,13 +123,57 @@ make_identity_case() {
   CASE_OTHER="$CASE_DIR/other-project"
   CASE_OTHER_WT="$CASE_DIR/other-wt"
   CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
-  mkdir -p "$CASE_HOME/data" "$CASE_HOME/projects" "$CASE_HOME/state" "$CASE_HOME/config"
-  printf 'codex\n' > "$CASE_HOME/config/crew-harness"
   fm_git_worktree "$CASE_PROJ" "$CASE_WT" "wt-$name"
   fm_git_worktree "$CASE_OTHER" "$CASE_OTHER_WT" "other-wt-$name"
-  mkdir -p "$CASE_HOME/data/$id"
-  printf 'brief for %s\n' "$id" > "$CASE_HOME/data/$id/brief.md"
-  touch "$CASE_HOME/state/.last-watcher-beat"
+  seed_case_home "$id"
+}
+
+# make_selfhosted_case <name> <id>: the self-hosted shape, where firstmate's own
+# repository IS the project. The active firstmate home and a second, seeded
+# firstmate home are both LINKED WORKTREES of the project's repository, which is
+# how a treehouse-leased secondmate home is built, so both share the project's
+# git common directory with the legitimate task worktree CASE_WT and cannot be
+# told apart from it by repository identity alone.
+make_selfhosted_case() {
+  local name=$1 id=$2
+  CASE_DIR="$TMP_ROOT/$name"
+  CASE_HOME="$CASE_DIR/home"
+  CASE_PROJ="$CASE_DIR/project"
+  CASE_WT="$CASE_DIR/wt"
+  CASE_SUB_HOME="$CASE_DIR/sub-home"
+  CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
+  # Real firstmate homes gitignore their private state and their seed marker, so
+  # ignore both here: an untracked operational directory would otherwise let a
+  # later, unrelated check (the base-freshen cleanliness refusal) stop these
+  # cases, and what the isolation assertion itself decides is what they measure.
+  fm_git_init_commit "$CASE_PROJ"
+  printf '%s\n' 'data/' 'state/' 'config/' 'projects/' '.fm-secondmate-home' > "$CASE_PROJ/.gitignore"
+  git -C "$CASE_PROJ" add .gitignore
+  git -C "$CASE_PROJ" commit -qm gitignore
+  fm_git_add_origin "$CASE_PROJ" "$CASE_PROJ.origin.git"
+  git -C "$CASE_PROJ" worktree add --quiet -b "wt-$name" "$CASE_WT"
+  git -C "$CASE_PROJ" worktree add --quiet -b "home-$name" "$CASE_HOME"
+  git -C "$CASE_PROJ" worktree add --quiet -b "sub-home-$name" "$CASE_SUB_HOME"
+  printf '%s\n' "$id" > "$CASE_SUB_HOME/.fm-secondmate-home"
+  seed_case_home "$id"
+}
+
+# make_nested_project_case <name> <id>: the configured project is a plain
+# directory NESTED inside another repository, so `git rev-parse
+# --git-common-dir` started from it walks up and answers with the enclosing
+# repository's identity. A worktree of that enclosing repository is not the
+# project's own worktree, however alike the two identities read.
+make_nested_project_case() {
+  local name=$1 id=$2
+  CASE_DIR="$TMP_ROOT/$name"
+  CASE_HOME="$CASE_DIR/home"
+  CASE_ENCLOSING="$CASE_DIR/enclosing"
+  CASE_ENCLOSING_WT="$CASE_DIR/enclosing-wt"
+  CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
+  fm_git_worktree "$CASE_ENCLOSING" "$CASE_ENCLOSING_WT" "enclosing-wt-$name"
+  CASE_PROJ="$CASE_ENCLOSING/nested/project"
+  mkdir -p "$CASE_PROJ"
+  seed_case_home "$id"
 }
 
 # run_identity_spawn <id> <pane-path>: drive one spawn whose pane reports
@@ -271,6 +334,83 @@ test_project_worktree_still_spawns() {
   pass "a legitimate worktree of the project's repository still spawns"
 }
 
+# The self-hosted fleet: firstmate is its own project, so a firstmate home that
+# is a linked worktree of the firstmate repository shares the project's git
+# common directory. Repository identity therefore accepts it, and only a
+# separate isolation check can refuse the live incident's shape - a pane that
+# never left the home - in that configuration.
+test_selfhosted_firstmate_home_is_refused() {
+  local id out status
+  id=identity-selfhosted-home-i8
+  make_selfhosted_case identity-selfhosted-home "$id"
+
+  out=$(run_identity_spawn "$id" "$CASE_HOME")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the active firstmate home as the task worktree when firstmate is the project"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "firstmate home" "refusal did not name the firstmate home"
+  assert_not_contains "$out" "belongs to a different repository" \
+    "the home was refused as a foreign repository, so the isolation check is not independent of repository identity"
+  assert_not_contains "$out" "spawned $id" "spawn launched a worker into the firstmate home"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing the firstmate home"
+  pass "a firstmate home that belongs to the project's own repository is still refused"
+}
+
+# The same rule for a home this process is not itself running from: a seeded
+# firstmate home carrying the secondmate marker, and a worktree of the project's
+# repository like every other home in the self-hosted shape.
+test_selfhosted_seeded_home_is_refused() {
+  local id out status
+  id=identity-selfhosted-seeded-i9
+  make_selfhosted_case identity-selfhosted-seeded "$id"
+
+  out=$(run_identity_spawn "$id" "$CASE_SUB_HOME")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a seeded firstmate home as the task worktree"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "firstmate home" "refusal did not name the firstmate home"
+  assert_not_contains "$out" "spawned $id" "spawn launched a worker into a seeded firstmate home"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing a seeded firstmate home"
+  pass "a seeded firstmate home in the project's own repository is refused"
+}
+
+# The isolation check must discriminate, not blanket-refuse: in the very same
+# self-hosted shape, an ordinary linked worktree of that repository is the
+# disposable task checkout a worker belongs in, and it still spawns.
+test_selfhosted_project_worktree_still_spawns() {
+  local id out status
+  id=identity-selfhosted-legit-ia
+  make_selfhosted_case identity-selfhosted-legit "$id"
+
+  out=$(run_identity_spawn "$id" "$CASE_WT")
+  status=$?
+  expect_code 0 "$status" "an isolated worktree of the project's repository should still spawn when firstmate is the project"
+  assert_contains "$out" "spawned $id" "spawn did not report success for an isolated worktree in the self-hosted shape"
+  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" \
+    "meta did not record the isolated worktree"
+  pass "an isolated worktree still spawns when firstmate's own homes share that repository"
+}
+
+# A project directory that is not its repository's top level has no repository
+# identity of its own to compare against: it inherits the enclosing
+# repository's, which would accept any worktree of that enclosing repository.
+test_nested_project_directory_is_refused() {
+  local id out status
+  id=identity-nested-project-ib
+  make_nested_project_case identity-nested-project "$id"
+
+  out=$(run_identity_spawn "$id" "$CASE_ENCLOSING_WT")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a worktree of the repository merely enclosing the project directory"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "not the top level of its own git repository" \
+    "refusal did not name the project's inherited repository identity"
+  assert_not_contains "$out" "spawned $id" \
+    "spawn launched a worker using an enclosing repository's identity"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata for a project nested inside another repository"
+  pass "a project nested inside another repository refuses the launch instead of borrowing its identity"
+}
+
 # Orca never runs treehouse get: it hands fm-spawn its own worktree path, so its
 # call site needs the same proof, and must still accept a real worktree of the
 # project's repository.
@@ -312,6 +452,10 @@ test_unrelated_repository_worktree_is_refused
 test_unreadable_repository_identity_is_refused
 test_project_without_repository_identity_is_refused
 test_project_worktree_still_spawns
+test_selfhosted_firstmate_home_is_refused
+test_selfhosted_seeded_home_is_refused
+test_selfhosted_project_worktree_still_spawns
+test_nested_project_directory_is_refused
 if command -v node >/dev/null 2>&1; then
   test_orca_worktree_of_another_repository_is_refused
   test_orca_project_worktree_still_spawns

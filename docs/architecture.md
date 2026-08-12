@@ -167,7 +167,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that belongs to the project's own repository and is distinct from the project primary checkout.
-Repository membership is proven from the shared git common directory rather than inferred from the path, because any other repository - firstmate's own home most dangerously - is a real worktree root distinct from the project too; a membership that cannot be established for either side refuses the launch instead of passing.
+Repository membership is proven from the shared git common directory rather than inferred from the path, because any other repository is a real worktree root distinct from the project too, and the configured project directory must itself be that repository's top level, because `--git-common-dir` otherwise walks up and answers with an enclosing repository's identity.
+Membership is not isolation, so a second, independent check refuses a worker root that is one of firstmate's own homes: the active home, the firstmate repository root, a directory carrying the seeded-home marker, or the directory holding the running fleet's operational directories.
+That check is what covers the self-hosted fleet, where firstmate is its own project and its homes are linked worktrees of the very repository the task belongs to, so repository identity alone would accept them.
+Either property that cannot be established refuses the launch instead of passing, and secondmate spawns are outside this assertion because a secondmate home is a firstmate home rather than a project worktree.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
