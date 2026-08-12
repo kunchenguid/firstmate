@@ -852,6 +852,10 @@ fm_wake_format_reason() {  # <epoch> <reason>
   printf '%s — %s\n' "$timestamp" "$2"
 }
 
+fm_wake_unprefix_reason() {  # <possibly-timestamped-reason>
+  printf '%s\n' "$1" | sed -E "s/^${FM_WAKE_SHORT_TIMESTAMP_RE} — //"
+}
+
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   local recovery_marker

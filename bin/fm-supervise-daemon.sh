@@ -1191,8 +1191,17 @@ should_force_self() {  # <reason>
 # as an unknown wake would flood the escalation buffer and restart the child with
 # no crash backoff. The main loop treats a non-wake line as idle (log + sleep +
 # continue), so a singleton collision cannot hot-loop escalations.
+daemon_unprefix_wake_reason() {  # <possibly-timestamped-reason>
+  if command -v fm_wake_unprefix_reason >/dev/null 2>&1; then
+    fm_wake_unprefix_reason "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 is_wake_reason() {  # <reason>
-  local reason=$1
+  local reason
+  reason=$(daemon_unprefix_wake_reason "$1") || return 1
   case "$reason" in
     signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
   esac
@@ -1202,8 +1211,9 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail
+  local reason state=$2 decision action distilled task last stale_detail
   local kind="" arg=""
+  reason=$(daemon_unprefix_wake_reason "$1") || reason=$1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
@@ -1281,7 +1291,7 @@ handle_wake() {  # <reason> <state>
 }
 
 handle_durable_wakes() {  # <watcher-reason> <state>
-  local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
+  local fallback_reason=$1 state=$2 out err reason
   local handled=0 ack_through ack_generation
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
@@ -1291,12 +1301,9 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     return 1
   fi
 
-  tab=$(printf '\t')
-  while IFS="$tab" read -r epoch sequence kind key payload rest; do
-    case "$epoch" in ''|*[!0-9]*) continue ;; esac
-    case "$sequence" in ''|*[!0-9]*) continue ;; esac
-    case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
-    handle_wake "$payload" "$state"
+  while IFS= read -r reason; do
+    is_wake_reason "$reason" || continue
+    handle_wake "$reason" "$state"
     handled=$((handled + 1))
   done < "$out"
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"

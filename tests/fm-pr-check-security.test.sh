@@ -2963,7 +2963,7 @@ test_merged_poll_retires_once() {
   set -e
   [ "$rc" -eq 0 ] || fail "merged retirement watcher failed: $(cat "$dir/watch-1.err")"
   first=$(cat "$dir/watch-1.out")
-  case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
+  case "$first" in *" — check:"*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
   ack_watcher_cycle "$state" || fail "first merged notification handling acknowledgement failed"
   assert_poll_absent "$state" task-a
   [ "$(cat "$state/task-a.meta")" = "$meta_before" ] || fail "merged retirement changed canonical metadata"
@@ -2975,7 +2975,7 @@ test_merged_poll_retires_once() {
   set -e
   [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
   second=$(cat "$dir/watch-2.out")
-  case "$second" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
+  case "$second" in *" — check:"*z-stop.check.sh:*stop-cycle) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "retired merged poll executed a second time"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
@@ -3076,7 +3076,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-check-removal restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in *" — check:"*z-stop.check.sh:*stop-cycle) ;; *) fail "post-check-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
   fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" || fail "completed retirement was not idempotent"
 
@@ -3093,7 +3093,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-registration-removal restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "post-registration-removal restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in *" — check:"*z-stop.check.sh:*stop-cycle) ;; *) fail "post-registration-removal restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
 
   dir=$(make_case retirement-before-receipt-removal)
@@ -3109,7 +3109,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "receipt-only restart failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "receipt-only restart did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in *" — check:"*z-stop.check.sh:*stop-cycle) ;; *) fail "receipt-only restart did not reach the control check" ;; esac
   assert_poll_absent "$state" task-a
 
   dir=$(make_case retirement-after-template-update)
@@ -3138,7 +3138,7 @@ test_retirement_crash_recovery() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "template-update recovery watcher failed: $(cat "$dir/restart.err")"
-  case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "template-update recovery did not reach the control check" ;; esac
+  case "$(cat "$dir/restart.out")" in *" — check:"*z-stop.check.sh:*stop-cycle) ;; *) fail "template-update recovery did not reach the control check" ;; esac
   [ ! -s "$dir/gh.log" ] || fail "template-update migration rebuilt and queried the retired poll"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "template-update recovery left the handled terminal wake queued"
@@ -3175,7 +3175,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
     rc=$?
     set -e
     [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
-    case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
+    case "$(cat "$dir/$label.out")" in *" — check:"*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
@@ -3186,7 +3186,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
-  case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
+  case "$(cat "$dir/merged.out")" in *" — check:"*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
   pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
 }
@@ -3350,7 +3350,7 @@ test_gitlab_merged_poll_retires() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "GitLab merged retirement watcher failed: $(cat "$dir/watch.err")"
-  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "GitLab merged wake was missing" ;; esac
+  case "$(cat "$dir/watch.out")" in *" — check:"*task-a.check.sh:*merged) ;; *) fail "GitLab merged wake was missing" ;; esac
   assert_poll_absent "$state" task-a
   grep -qxF "pr=$url" "$state/task-a.meta" || fail "GitLab retirement removed canonical metadata"
   pass "GitHub and GitLab exact merged results share one retirement path"
