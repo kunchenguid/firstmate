@@ -128,6 +128,15 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+show_string_field() {  # <show-output> <field>
+  local value
+  value=$(show_field "$1" "$2")
+  case "$value" in
+    \"*\") printf '%s\n' "$value" | jq -Rer 'fromjson | select(type == "string")' ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
@@ -265,11 +274,8 @@ command_hold() {
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
-    existing_title=$(show_field "$show" title)
-    # tasks-axi quotes punctuation-heavy titles in show output.
-    case "$existing_title" in
-      \"*\") existing_title=${existing_title#\"}; existing_title=${existing_title%\"} ;;
-    esac
+    existing_title=$(show_string_field "$show" title) \
+      || fail "existing captain hold $id has an invalid encoded title"
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"

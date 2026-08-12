@@ -459,7 +459,7 @@ test_hold_retry_matches_quoted_title() {
   local home origin title hold retry show
   home=$(make_home quoted-title-retry)
   origin=sample-budget-review
-  title='Is sample budget-bucket computation done locally per edge site, or centrally with buckets shipped to edge Redis over Kafka?'
+  title='Is sample "budget-bucket" computation local at C:\edge\site, or central?'
   mkdir -p "$home/data/$origin"
   tasks_in "$home" add "$origin" "Review sample budget routing" --kind scout --repo sample --start >/dev/null \
     || fail "could not create quoted-title origin"
@@ -471,7 +471,7 @@ test_hold_retry_matches_quoted_title() {
     --title "$title" --reason "captain budget route pending" --repo sample) \
     || fail "could not register quoted-title hold"
   show=$(tasks_in "$home" show "$hold" --full)
-  assert_contains "$show" "title: \"$title\"" \
+  assert_contains "$show" 'title: "Is sample \"budget-bucket\" computation local at C:\\edge\\site, or central?"' \
     "quoted-title fixture must exercise tasks-axi's quoted rendering"
 
   retry=$(run_decisions "$home" hold "$origin" bucket-route \
@@ -490,7 +490,8 @@ test_hold_retry_matches_quoted_title() {
   assert_grep "has a different title" "$home/changed-title.err" \
     "changed title must retain the identity-collision refusal"
   show=$(tasks_in "$home" show "$hold" --full)
-  assert_contains "$show" "title: \"$title\"" "changed-title refusal altered the original title"
+  assert_contains "$show" 'title: "Is sample \"budget-bucket\" computation local at C:\\edge\\site, or central?"' \
+    "changed-title refusal altered the original title"
   assert_contains "$show" "held: yes" "changed-title refusal released the captain hold"
 
   pass "quoted-title hold retries preserve exact identity and reject changed titles"
