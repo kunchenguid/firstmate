@@ -277,6 +277,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pi-system-health.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },

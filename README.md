@@ -110,6 +110,7 @@ Pi's `/calm` toggle hides supported transcript chrome, including canonically cla
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+Pi's compact [system-health indicator](docs/pi-system-health.md) reports free RAM and sampled CPU utilization without replacing the built-in footer.
 
 ### Talk to it
 
