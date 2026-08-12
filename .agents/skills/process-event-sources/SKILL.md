@@ -87,7 +87,7 @@ Two rules the commands cannot enforce for you:
   This home is not listening, whatever its own registration suggests, and no result will arrive here.
   Decide which home should own it, then repair the placement with the retire-then-arm transfer above: retire the registration in the home that should not have it, and confirm the owning home has it armed.
   The diagnostic itself captures and consumes nothing, and the results already taken belong to the home named as owner, so recover any outstanding one from there.
-  It is re-announced after each acknowledgement while the misplacement stands, so acknowledging it without repairing the placement only defers it.
+  The watcher reports one proactive check while its diagnostic record is queued, and reconcile re-announces it after acknowledgement while the misplacement stands, so acknowledging it without repairing the placement only defers it.
 
 ## What the runner guarantees, exactly
 

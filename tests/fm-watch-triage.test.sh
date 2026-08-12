@@ -1645,7 +1645,7 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
 }
 
 test_procevent_shadow_diagnostic_surfaces_proactively() {
-  local dir state out pid
+  local dir state out drain_out drain_err pid sequence generation
   # A registration shadowed by another home's live owner produces no result to
   # wait for, so the diagnostic is only useful if the watcher delivers it the
   # same way it delivers a captured result. The incident it exists for is a
@@ -1661,11 +1661,37 @@ test_procevent_shadow_diagnostic_surfaces_proactively() {
     || fail "the shadow diagnostic was not reported as an actionable check: $(cat "$out")"
   grep -F "procevent-shadow:lavish-board" "$out" >/dev/null \
     || fail "the actionable reason did not name the shadowed source: $(cat "$out")"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+  : > "$out.replay"
+  procevent_watch_bg "$dir" "$out.replay"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "the watcher did not complete its unchanged-queue recovery cycle: $(cat "$out.replay")"
+  ! grep -F "procevent-shadow:lavish-board" "$out.replay" >/dev/null \
+    || fail "an unchanged still-queued shadow diagnostic was re-delivered: $(cat "$out.replay")"
+
+  drain_out="$dir/drain.out"; drain_err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
     || fail "drain after the shadow diagnostic failed"
-  grep -F "owner=/other/home" "$dir/drain.out" >/dev/null \
+  grep -F "owner=/other/home" "$drain_out" >/dev/null \
     || fail "the drain did not name the foreign owner the handler must act on"
-  pass "a shadowed registration wakes a healthy watcher proactively and names its foreign owner"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "the shadow diagnostic drain omitted its post-handling acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "the shadow diagnostic acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged shadow diagnostic remained durable"
+
+  append_wake "$state" check "procevent-shadow:lavish-board" \
+    "check: procevent-shadow lavish lavish-board owner=/other/home"
+  : > "$out.replay"
+  procevent_watch_bg "$dir" "$out.replay"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "an acknowledged shadow diagnostic was not re-delivered after re-announcement: $(cat "$out.replay")"
+  grep -F "procevent-shadow:lavish-board" "$out.replay" >/dev/null \
+    || fail "the re-announced shadow diagnostic did not name the same stable source"
+  pass "a shadow diagnostic deduplicates while queued and re-wakes after acknowledgement"
 }
 
 test_procevent_marker_keys_are_injective() {
