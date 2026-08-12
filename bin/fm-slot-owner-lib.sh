@@ -203,11 +203,22 @@ fm_slot_stamp_clear_after_return() {
   fm_slot_stamp_clear "$wt"
 }
 
+# fm_slot_meta_value <meta-file> <key>: the last value, or empty.
+fm_slot_meta_value() {
+  local meta=$1 key=$2 values status
+  if values=$(grep "^$key=" "$meta" 2>/dev/null); then
+    printf '%s\n' "$values" | tail -1 | cut -d= -f2-
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 1 ] && return 0
+  return 2
+}
+
 # fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.
 fm_slot_meta_worktree() {
-  local meta=$1
-  [ -f "$meta" ] || return 0
-  grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  fm_slot_meta_value "$1" worktree
 }
 
 fm_slot_registry_homes() {
@@ -285,10 +296,10 @@ fm_slot_meta_referencing_tasks() {
       [ -r "$meta" ] || return 2
       id=$(basename "$meta" .meta)
       [ "$home_real" = "$current_home" ] && [ "$id" = "$self" ] && continue
-      slot_returned=$(grep '^slot_returned=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      slot_returning=$(grep '^slot_returning=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      slot_returned=$(fm_slot_meta_value "$meta" slot_returned) || return 2
+      slot_returning=$(fm_slot_meta_value "$meta" slot_returning) || return 2
       [ "$slot_returned" = 1 ] && [ -z "$slot_returning" ] && continue
-      other=$(fm_slot_meta_worktree "$meta")
+      other=$(fm_slot_meta_worktree "$meta") || return 2
       [ -n "$other" ] || continue
       if fm_slot_same_path "$other" "$wt"; then
         :
@@ -298,7 +309,7 @@ fm_slot_meta_referencing_tasks() {
       fi
       printf '%s\n' "$id"
       found=0
-      candidate=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      candidate=$(fm_slot_meta_value "$meta" home) || return 2
       case "$candidate" in
         /*) homes+=("$candidate") ;;
       esac

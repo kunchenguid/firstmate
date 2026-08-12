@@ -1157,6 +1157,28 @@ test_unexpected_metadata_scan_failure_retains() {
   pass "unexpected pooled-slot metadata scan failures retain the lease"
 }
 
+test_metadata_record_read_failure_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-record-read-failure)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-record-read-failure.meta" \
+    "window=firstmate:fm-task-record-read-failure" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_write_meta "$WORLD/home/state/other-record-read-probe.meta" \
+    "window=firstmate:fm-other-record-read-probe" "worktree=$OTHER_WT" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-record-read-failure "$WORLD/home" )
+  verdict=$( \
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    grep() { return 2; }
+    fm_slot_disposal_verdict "$WORLD/home/state" task-record-read-failure "$WT_DIR" \
+      "$WORLD/home" "$WORLD/home" crewmate closed "" "" )
+  assert_contains "$verdict" "retain: all-home slot metadata evidence is unavailable" \
+    "a metadata read failure authorized pooled-slot disposal"
+  pass "metadata record read failures retain the pooled lease"
+}
+
 test_missing_ownership_stamp_retains() {
   local rec verdict
   rec=$(make_slot_world slot-missing-stamp)
@@ -1647,6 +1669,7 @@ test_spawn_does_not_promote_an_unproven_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
 test_unexpected_metadata_scan_failure_retains
+test_metadata_record_read_failure_retains
 test_missing_ownership_stamp_retains
 test_relinquish_refuses_without_ownership_evidence
 test_missing_recorded_worktree_retains
