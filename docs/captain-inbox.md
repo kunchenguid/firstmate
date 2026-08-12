@@ -6,10 +6,12 @@ It is disabled unless the Firstmate home's private `config/captain-inbox` file c
 
 ## Capture boundary
 
-The tracked Pi extension captures only a finalized assistant text response after Pi reports that its logical agent run has settled.
-This excludes user prompts, tool calls and results, thinking blocks, incomplete or tool-using assistant messages, worker and secondmate sessions, operational envelopes, and extension-originated routine notifications.
+The tracked Pi extension captures a finalized visible assistant text response only after Pi reports that its logical agent run has settled.
+A capture candidate must have the `assistant` role, `stop` reason, and nonblank text content, and its trimmed text must not equal the exact routine no-action acknowledgement `Captain, shipshape.`.
+The input source is not a capture criterion because Pi does not associate an `input` event with the later logical agent run, so a Firstmate operational envelope may initiate a capture-eligible substantive response without a FIFO input-state queue.
+This excludes user prompts, including Firstmate operational envelopes themselves, tool calls and results, thinking blocks, incomplete or tool-using assistant messages, custom extension entries that are not assistant responses, and the exact routine acknowledgement above.
 The extension requires both the primary session lock and an unmarked primary home, so a Pi worker or secondmate cannot write this inbox even when it shares project code.
-Capture never reads terminal scrollback, session transcripts, or screen output.
+Capture never reads terminal scrollback, session transcripts, screen output, or input text after Pi has accepted it.
 Capture is local-only and sends no network request.
 Persistence is asynchronous from Pi's `agent_settled` callback, so it does not delay the existing turn-end supervision extension.
 
