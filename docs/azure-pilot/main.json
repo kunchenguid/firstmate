@@ -514,6 +514,20 @@
             "vaultPrivateEndpointName": "[format('pe-{0}-vault', parameters('namingPrefix'))]",
             "blobPrivateDnsZone": "privatelink.blob.core.windows.net",
             "vaultPrivateDnsZone": "privatelink.vaultcore.azure.net",
+            "privateDnsZoneTags": {
+              "workload": "[parameters('commonTags').workload]",
+              "environment": "[parameters('commonTags').environment]",
+              "managed-by": "[parameters('commonTags')['managed-by']]",
+              "region": "[parameters('commonTags').region]",
+              "steady-state-cost-target": "[parameters('commonTags')['steady-state-cost-target']]",
+              "commissioning-cost-ceiling": "[parameters('commonTags')['commissioning-cost-ceiling']]",
+              "data-classification": "[parameters('commonTags')['data-classification']]",
+              "activation-policy": "[parameters('commonTags')['activation-policy']]",
+              "cleanup-owner": "[parameters('commonTags')['cleanup-owner']]",
+              "deployment-generation": "[parameters('commonTags')['deployment-generation']]",
+              "capacity-profile": "[parameters('commonTags')['capacity-profile']]",
+              "author-capacity-mode": "[parameters('commonTags')['author-capacity-mode']]"
+            },
             "blobDataContributorRoleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
             "blobDelegatorRoleId": "db58b8e5-c6ad-4a2a-8342-4190687cbf4a",
             "workerCount": "[length(parameters('workerSlots'))]"
@@ -834,14 +848,14 @@
               "apiVersion": "2020-06-01",
               "name": "[variables('blobPrivateDnsZone')]",
               "location": "global",
-              "tags": "[parameters('commonTags')]"
+              "tags": "[variables('privateDnsZoneTags')]"
             },
             {
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2020-06-01",
               "name": "[variables('vaultPrivateDnsZone')]",
               "location": "global",
-              "tags": "[parameters('commonTags')]"
+              "tags": "[variables('privateDnsZoneTags')]"
             },
             {
               "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
