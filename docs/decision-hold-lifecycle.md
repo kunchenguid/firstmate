@@ -23,10 +23,11 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
-An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
-A failed intermediate step leaves the hold open.
+The `resolve` subcommand requires a decision file and exactly one of two mutually exclusive outcomes.
+With one or more `--routed-to`, every named task must already exist and have a structured `blocked-by` edge pointing to the hold; it records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
+With `--no-work <reason>`, the captain's decision created no new work - already landed, intentionally nothing, or owned elsewhere; it records the decision digest and the stated reason as the same retry identity and marks the hold Done with no dependency edges to clear.
+An exact retry can finish a partial routing operation or repeat an identical no-work close, while a changed decision, routed-task set, or reason is rejected.
+A failed intermediate step leaves the hold open, and a hold closed outside this command (for example a hand `tasks-axi done`) is never treated as durably resolved.
 
 ## Structured read surfaces
 
@@ -43,11 +44,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+`resolve --no-work` regression verification date: 2026-08-12.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+A further regression covers a decided-no-work outcome: `resolve --no-work <reason>` closes the hold durably with no routed task, rejects supplying neither or both outcome flags, is idempotent on an identical retry, rejects a drifted reason, and satisfies `verify`; a separate regression confirms a hold closed by hand outside `fm-decision-hold.sh` still reads as not durably resolved.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -62,6 +65,8 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - resolve --no-work closes a captain hold with no routed work and satisfies verify
+ok - a hand-closed hold is still reported as not durably resolved
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

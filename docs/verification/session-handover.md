@@ -61,7 +61,7 @@ The largest transcript on this machine is a genuine working session:
 
 ```console
 $ ls -S ~/.claude/projects/*/*.jsonl | head -1 | xargs ls -lh | awk '{print $5, $9}'
-45M /Users/uayyagari/.claude/projects/-Users-uayyagari-workspace-applypass-apply-pass-backend/9a700c4c-b851-49f4-8e5b-84b28199c550.jsonl
+45M $HOME/.claude/projects/<encoded-project-dir>/<session-id>.jsonl
 $ time bash -c '. bin/fm-context-measure-lib.sh; fm_context_measure_transcript "$1"' _ "$BIG"
 494320
 bash -c ...  1.98s user 0.08s system 127% cpu 1.613 total

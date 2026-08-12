@@ -550,6 +550,94 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# A decided-no-work outcome (already landed, intentionally nothing, owned
+# elsewhere) has no dependent task to route to. --no-work must still let the
+# decision close durably so scout teardown's verify gate does not push the
+# operator toward --force.
+test_resolve_no_work_closes_hold_without_routed_task() {
+  local home origin hold show
+  home=$(make_home no-work-outcome)
+  origin=sample-no-work-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review a sample no-work outcome" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create no-work origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample no-work review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" no-work-choice \
+    --title "Choose the sample no-work outcome" --reason "captain no-work choice pending" --repo sample) \
+    || fail "could not register no-work hold"
+  run_decisions "$home" complete "$origin" no-work-choice >/dev/null \
+    || fail "shared completion gate failed for no-work fixture"
+
+  printf 'Already shipped last week; no further work needed.\n' > "$home/no-work-decision.txt"
+  if run_decisions "$home" resolve "$origin" no-work-choice --decision-file "$home/no-work-decision.txt" \
+    > "$home/neither.out" 2> "$home/neither.err"; then
+    fail "resolve succeeded with neither --no-work nor --routed-to"
+  fi
+  assert_grep "exactly one of" "$home/neither.err" "missing-outcome error must be explicit"
+
+  tasks_in "$home" add sample-no-work-dep "Unrelated dependent" --kind ship --repo sample >/dev/null \
+    || fail "could not create unrelated dependent fixture"
+  if run_decisions "$home" resolve "$origin" no-work-choice --decision-file "$home/no-work-decision.txt" \
+    --no-work "already landed" --routed-to sample-no-work-dep \
+    > "$home/both.out" 2> "$home/both.err"; then
+    fail "resolve succeeded with both --no-work and --routed-to"
+  fi
+  assert_grep "mutually exclusive" "$home/both.err" "conflicting-outcome error must be explicit"
+
+  run_decisions "$home" resolve "$origin" no-work-choice --decision-file "$home/no-work-decision.txt" \
+    --no-work "already landed last week" >/dev/null \
+    || fail "no-work resolution failed"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "no-work resolution did not close the hold"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" "no-work resolution lost the decision record"
+  assert_contains "$show" "already landed last week" "no-work resolution lost the stated reason"
+  assert_contains "$show" "Already shipped last week" "no-work resolution lost the captain decision text"
+
+  run_decisions "$home" resolve "$origin" no-work-choice --decision-file "$home/no-work-decision.txt" \
+    --no-work "already landed last week" >/dev/null \
+    || fail "identical no-work resolution retry was not idempotent"
+  if run_decisions "$home" resolve "$origin" no-work-choice --decision-file "$home/no-work-decision.txt" \
+    --no-work "a different reason" > "$home/drifted-reason.out" 2> "$home/drifted-reason.err"; then
+    fail "no-work resolution retry accepted a different reason"
+  fi
+
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verify refused a hold closed through the sanctioned no-work path"
+  pass "resolve --no-work closes a captain hold with no routed work and satisfies verify"
+}
+
+# A hold closed by hand (tasks-axi done, bypassing fm-decision-hold.sh) must
+# still read as not durably resolved: only the sanctioned resolve paths may
+# satisfy verify_hold_durable, never an ad hoc close.
+test_hand_closed_hold_is_not_durably_resolved() {
+  local home origin hold
+  home=$(make_home hand-closed-hold)
+  origin=sample-hand-closed-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review a sample hand-closed hold" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create hand-closed origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample hand-closed review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" hand-closed \
+    --title "Choose the sample hand-closed outcome" --reason "captain hand-closed choice pending" --repo sample) \
+    || fail "could not register hand-closed hold"
+  run_decisions "$home" complete "$origin" hand-closed >/dev/null \
+    || fail "shared completion gate failed for hand-closed fixture"
+
+  tasks_in "$home" "done" "$hold" >/dev/null || fail "could not hand-close the hold fixture"
+  if run_decisions "$home" verify "$origin" > "$home/hand-closed-verify.out" 2> "$home/hand-closed-verify.err"; then
+    fail "verify accepted a hand-closed hold as durably resolved"
+  fi
+  assert_grep "neither actively held nor durably resolved" "$home/hand-closed-verify.err" \
+    "hand-closed refusal must be explicit"
+  pass "a hand-closed hold is still reported as not durably resolved"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +648,5 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_resolve_no_work_closes_hold_without_routed_task
+test_hand_closed_hold_is_not_durably_resolved
