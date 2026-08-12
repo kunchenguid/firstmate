@@ -29,6 +29,10 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+#            A source registered here whose live owner is ANOTHER home is not
+#            repaired and never silently accepted either: it is announced as a
+#            `procevent-shadow` check wake naming that owner, at most one
+#            unacknowledged record per source, and counted as `shadowed=`.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -44,6 +48,9 @@
 #            claims, then refuse unless no registration, runner record, or owned
 #            claim remains. Used by supported Firstmate home retirement.
 # list       Show registered sources, owners, and pending captured results.
+#            OWNER is `live` only for a runner this home owns; another home's
+#            live runner reads as `foreign`, because that is a shadowed
+#            registration here, not a listener this home can act through.
 #
 # Terminal knowledge is adapter-owned. This runner never inspects a result and
 # never names an adapter-specific status: it calls
@@ -462,8 +469,24 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# Announce that a source registered HERE is live-owned by another home. That
+# home's runner consumes every result into its own inbox and its own wake queue,
+# so this registration is inert: a foreign claim is never this home's healthy
+# listener, and staying silent is what lets a misplaced source strand results
+# where its owner cannot see them. Bounded by the durable queue itself - the
+# existing queued-key read - so a persistent shadow contributes at most one
+# unacknowledged record per source rather than one per watcher cycle.
+announce_foreign_shadow() {  # <source-id> <adapter> <owner-home>
+  local id=$1 adapter=$2 owner=$3 key
+  key="procevent-shadow:$id"
+  case $'\n'$(fm_wake_queued_keys check)$'\n' in
+    *$'\n'"$key"$'\n'*) return 1 ;;
+  esac
+  fm_wake_append check "$key" "check: procevent-shadow $adapter $id owner=$owner"
+}
+
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  local rec id published started=0 stopped=0 uncertain=0 shadowed=0 claim owner pid token identity claim_state stop_state adapter
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -562,12 +585,18 @@ cmd_reconcile() {
           uncertain=$((uncertain + 1))
         elif [ "$claim_state" -eq 2 ]; then
           uncertain=$((uncertain + 1))
+        elif [ "$claim_state" -eq 0 ] && [ "$FM_PROCEVENT_CLAIM_HOME" != "$FM_HOME" ]; then
+          owner=$FM_PROCEVENT_CLAIM_HOME
+          adapter=$(read_adapter "$id" 2>/dev/null) || adapter=
+          fm_procevent_adapter_valid "$adapter" || adapter=unknown
+          announce_foreign_shadow "$id" "$adapter" "$owner" && shadowed=$((shadowed + 1))
         fi
       fi
       fm_procevent_source_lock_release "$id"
     done
   fi
-  printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s\n' "$published" "$started" "$stopped" "$uncertain"
+  printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s shadowed=%s\n' \
+    "$published" "$started" "$stopped" "$uncertain" "$shadowed"
 }
 
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
@@ -790,7 +819,12 @@ cmd_list() {
     adapter=$(read_adapter "$id" 2>/dev/null || echo '?')
     fm_procevent_source_lock_acquire "$id" || continue
     fm_procevent_claim_state_locked "$id"
-    case "$?" in 0) owner=live ;; 1) owner=none ;; 3) owner=orphaned ;; *) owner=uncertain ;; esac
+    case "$?" in
+      0) if [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ]; then owner=live; else owner=foreign; fi ;;
+      1) owner=none ;;
+      3) owner=orphaned ;;
+      *) owner=uncertain ;;
+    esac
     fm_procevent_source_lock_release "$id"
     pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
     printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"

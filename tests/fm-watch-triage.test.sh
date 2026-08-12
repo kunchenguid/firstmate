@@ -1644,6 +1644,30 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
 }
 
+test_procevent_shadow_diagnostic_surfaces_proactively() {
+  local dir state out pid
+  # A registration shadowed by another home's live owner produces no result to
+  # wait for, so the diagnostic is only useful if the watcher delivers it the
+  # same way it delivers a captured result. The incident it exists for is a
+  # quiet home with nothing else to wake it.
+  dir=$(make_case procevent-shadow-delivery); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent-shadow:lavish-board" \
+    "check: procevent-shadow lavish lavish-board owner=/other/home"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a healthy watcher never surfaced a queued shadow diagnostic: $(cat "$out")"
+  grep -F "check:" "$out" >/dev/null \
+    || fail "the shadow diagnostic was not reported as an actionable check: $(cat "$out")"
+  grep -F "procevent-shadow:lavish-board" "$out" >/dev/null \
+    || fail "the actionable reason did not name the shadowed source: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+    || fail "drain after the shadow diagnostic failed"
+  grep -F "owner=/other/home" "$dir/drain.out" >/dev/null \
+    || fail "the drain did not name the foreign owner the handler must act on"
+  pass "a shadowed registration wakes a healthy watcher proactively and names its foreign owner"
+}
+
 test_procevent_marker_keys_are_injective() {
   local dir state out pid marker_count
   dir=$(make_case procevent-marker-identity); state="$dir/state"; out="$dir/watch.out"
@@ -1965,6 +1989,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
+test_procevent_shadow_diagnostic_surfaces_proactively
 test_procevent_marker_keys_are_injective
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries

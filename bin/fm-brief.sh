@@ -214,6 +214,8 @@ $PROJECT_CLONES_BODY
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
+A listening source for an artifact this home owns - a review board, a watch - is armed from THIS home, and taking one over from another home means retiring it there before you arm it here.
+Load \`process-event-sources\` from this home's \`.agents/skills/\` before arming or transferring one.
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 You do not generate your own work.
