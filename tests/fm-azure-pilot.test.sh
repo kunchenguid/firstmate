@@ -115,6 +115,21 @@ assert "blobPrivateEndpointNicResourceGuid" in nested_outputs
 assert data["outputs"]["blobPrivateEndpointNicId"]["value"].endswith(".value]")
 assert data["outputs"]["blobPrivateEndpointNicResourceGuid"]["value"].endswith(".value]")
 
+# Private DNS zones have a stricter Azure limit than the ordinary 50-tag
+# resource ceiling. Keep their exact ownership/generation identity within it.
+private_dns_tags = nested["properties"]["template"]["variables"]["privateDnsZoneTags"]
+required_private_dns_tags = {
+    "workload", "environment", "managed-by", "region", "cleanup-owner",
+    "deployment-generation", "capacity-profile", "author-capacity-mode",
+    "data-classification", "activation-policy", "steady-state-cost-target",
+    "commissioning-cost-ceiling",
+}
+assert len(private_dns_tags) <= 15
+assert required_private_dns_tags <= set(private_dns_tags)
+private_dns_zones = [resource for resource in resources if resource["type"] == "Microsoft.Network/privateDnsZones"]
+assert len(private_dns_zones) == 2
+assert all(resource["tags"] == "[variables('privateDnsZoneTags')]" for resource in private_dns_zones)
+
 vms = [resource for resource in resources if resource["type"] == "Microsoft.Compute/virtualMachines"]
 assert len(vms) == 2  # supervisor plus one copied worker declaration
 for vm in vms:
