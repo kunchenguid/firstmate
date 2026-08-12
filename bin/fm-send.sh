@@ -105,6 +105,8 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -427,24 +429,16 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  send_lock_identity="$TARGET_BACKEND"$'\t'"$T"$'\t'"$EXPECTED_LABEL"
+  read -r send_lock_sum send_lock_size _ <<EOF
+$(printf '%s' "$send_lock_identity" | cksum)
+EOF
+  SEND_TEXT_LOCK="$STATE/.fm-send-$send_lock_sum-$send_lock_size.lock"
+  fm_lock_acquire_wait "$SEND_TEXT_LOCK"
+  trap 'fm_lock_release "$SEND_TEXT_LOCK"' EXIT
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
-  # Prove the new steer owns an empty composer before creating any pending-reply
-  # expectation, transforming the message, or typing a byte. Post-Enter empty
-  # alone is insufficient: stale text in a parked lane can absorb the new text,
-  # submit the combined draft, clear successfully, and make the wrong instruction
-  # look delivered. Remote sends run fm-send again against their host-local
-  # explicit endpoint, so the inner send owns this same preflight there.
-  if [ "$TARGET_BACKEND" != remote ]; then
-    if ! composer_before=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL"); then
-      composer_before=unknown
-    fi
-    if [ "$composer_before" != empty ]; then
-      echo "error: text not sent to $T (composer is not empty; verdict=${composer_before:-unknown}; refusing to append to or submit existing input; tried $RESOLUTION_TRIED)" >&2
-      exit 1
-    fi
-  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -487,6 +481,18 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  if [ "$TARGET_BACKEND" != remote ]; then
+    if ! composer_before=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL"); then
+      composer_before=unknown
+    fi
+    if [ "$composer_before" != empty ]; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: text not sent to $T (composer is not empty; verdict=${composer_before:-unknown}; refusing to append to or submit existing input; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+    fi
+  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
@@ -552,6 +558,8 @@ else
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
+  fm_lock_release "$SEND_TEXT_LOCK"
+  trap - EXIT
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the

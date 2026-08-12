@@ -41,6 +41,17 @@ case "${1:-}" in
     fi
     if [ -n "${FM_FAKE_TMUX_COMPOSER:-}" ]; then
       if [ "$literal" = 1 ]; then
+        if [ -n "${FM_FAKE_TMUX_TYPE_HOLD:-}" ]; then
+          if mkdir "$FM_FAKE_TMUX_TYPE_HOLD.active" 2>/dev/null; then
+            : > "$FM_FAKE_TMUX_TYPE_HOLD.started"
+            while [ ! -e "$FM_FAKE_TMUX_TYPE_HOLD.release" ]; do
+              /bin/sleep 0.01
+            done
+            rmdir "$FM_FAKE_TMUX_TYPE_HOLD.active"
+          else
+            : > "$FM_FAKE_TMUX_TYPE_HOLD.overlap"
+          fi
+        fi
         printf '╭──────────────────────────────╮\n│ > %-27.27s│\n╰──────────────────────────────╯\n' "${1:-}" > "$FM_FAKE_TMUX_COMPOSER"
         [ "${FM_FAKE_TMUX_SWALLOW_ENTER:-0}" != 1 ] || printf 'esc to interrupt\n' >> "$FM_FAKE_TMUX_COMPOSER"
       elif [ "${1:-}" = Enter ]; then
@@ -272,6 +283,41 @@ test_busy_queue_confirmation_survives_empty_preflight() {
   pass "fm-send delivery: empty preflight preserves proven busy-queue acceptance"
 }
 
+test_concurrent_sends_serialize_per_endpoint() {
+  local dir fb home log composer hold first_pid second_pid first_rc second_rc i
+  dir="$TMP_ROOT/concurrent-sends"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home concurrent); log="$dir/tmux.log"; composer="$dir/composer"; hold="$dir/type-hold"
+  : > "$log"
+  printf '╭────╮\n│    │\n╰────╯\n' > "$composer"
+  fm_write_meta "$home/state/shared-codex.meta" "window=sess:fm-shared-codex" "kind=ship" "harness=codex"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_TYPE_HOLD="$hold" FM_SEND_SETTLE=0 \
+    "$SEND" shared-codex "first intended steer" >/dev/null 2>"$dir/first.err" &
+  first_pid=$!
+  for i in $(seq 1 1000); do
+    [ ! -e "$hold.started" ] || break
+    /bin/sleep 0.01
+  done
+  [ -e "$hold.started" ] || fail "the first concurrent send never reached the held type boundary: $(cat "$dir/first.err")"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_TYPE_HOLD="$hold" FM_SEND_SETTLE=0 \
+    "$SEND" shared-codex "second intended steer" >/dev/null 2>"$dir/second.err" &
+  second_pid=$!
+  /bin/sleep 0.1
+  : > "$hold.release"
+  wait "$first_pid"; first_rc=$?
+  wait "$second_pid"; second_rc=$?
+
+  expect_code 0 "$first_rc" "the first serialized send should succeed"
+  expect_code 0 "$second_rc" "the second serialized send should succeed"
+  [ ! -e "$hold.overlap" ] || fail "two sends entered the shared endpoint type boundary concurrently"
+  [ "$(grep -c 'literal=1 arg=.* intended steer' "$log")" -eq 2 ] \
+    || fail "serialized sends did not each type exactly once: $(cat "$log")"
+  pass "fm-send delivery: concurrent text sends serialize per resolved endpoint"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -305,6 +351,7 @@ test_key_send_exit_status_follows_delivery
 test_stale_composer_refuses_before_typing
 test_empty_composer_delivers_intended_text_once
 test_busy_queue_confirmation_survives_empty_preflight
+test_concurrent_sends_serialize_per_endpoint
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
