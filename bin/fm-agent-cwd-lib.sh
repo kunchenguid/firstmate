@@ -58,6 +58,15 @@ fm_agent_pid_is_numeric() {  # <pid>
   return 0
 }
 
+fm_agent_pid_is_zombie() {
+  local pid=$1 stat state
+  fm_agent_pid_is_numeric "$pid" || return 1
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  state=$(printf '%s\n' "$stat" | sed -E 's/^[0-9]+ \(.*\) ([A-Z]).*/\1/')
+  [ "$state" = Z ]
+}
+
 fm_agent_ps_pid_exists() {
   local pid=$1 found
   fm_agent_pid_is_numeric "$pid" || return 1
@@ -262,6 +271,7 @@ fm_agent_task_pid_index() {
         continue
       fi
       [ "$proc_uid" = "$current_uid" ] || continue
+      fm_agent_pid_is_zombie "$pid" && continue
       if ! env=$(fm_agent_environ "$pid"); then
         fm_agent_ps_pid_exists "$pid" && uncertain=1
         continue
@@ -288,6 +298,7 @@ fm_agent_task_pid_index() {
       continue
     fi
     [ "$proc_uid" = "$current_uid" ] || continue
+    fm_agent_pid_is_zombie "$pid" && continue
     if ! env=$(fm_agent_environ "$pid"); then
       [ -d "$entry" ] && uncertain=1
       continue
@@ -325,7 +336,7 @@ EOF
 }
 
 fm_agent_worktree_process_census() {
-  local wt=$1 wt_real entry pid cwd cwd_real task proc_uid current_uid rows rest
+  local wt=$1 wt_real entry pid cwd cwd_real task proc_uid current_uid rows rest foreign_uid
   local found=1 uncertain=0
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
   current_uid=$(id -u 2>/dev/null) || return 2
@@ -337,15 +348,26 @@ fm_agent_worktree_process_census() {
         uncertain=1
         continue
       fi
-      [ "$proc_uid" = "$current_uid" ] || continue
+      foreign_uid=0
+      [ "$proc_uid" = "$current_uid" ] || foreign_uid=1
+      fm_agent_pid_is_zombie "$pid" && continue
       cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
       if [ -z "$cwd" ]; then
-        fm_agent_ps_pid_exists "$pid" && uncertain=1
+        [ "$foreign_uid" -eq 1 ] && fm_agent_ps_pid_exists "$pid" && uncertain=1
         continue
       fi
       cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
-      [ -n "$cwd_real" ] || { uncertain=1; continue; }
+      if [ -z "$cwd_real" ]; then
+        case "$cwd" in
+          "$wt_real"|"$wt_real"/*) uncertain=1 ;;
+        esac
+        continue
+      fi
       fm_agent_path_within "$wt_real" "$cwd_real" || continue
+      if [ "$foreign_uid" -eq 1 ]; then
+        uncertain=1
+        continue
+      fi
       task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK 2>/dev/null || true)
       printf '%s\n' "${task:-unidentified-process-$pid}"
       found=0
@@ -365,15 +387,26 @@ fm_agent_worktree_process_census() {
       [ -d "$entry" ] && uncertain=1
       continue
     fi
-    [ "$proc_uid" = "$current_uid" ] || continue
+    foreign_uid=0
+    [ "$proc_uid" = "$current_uid" ] || foreign_uid=1
+    fm_agent_pid_is_zombie "$pid" && continue
     cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
     if [ -z "$cwd" ]; then
-      [ -d "$entry" ] && uncertain=1
+      [ "$foreign_uid" -eq 1 ] && uncertain=1
       continue
     fi
     cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
-    [ -n "$cwd_real" ] || { uncertain=1; continue; }
+    if [ -z "$cwd_real" ]; then
+      case "$cwd" in
+        "$wt_real"|"$wt_real"/*) uncertain=1 ;;
+      esac
+      continue
+    fi
     fm_agent_path_within "$wt_real" "$cwd_real" || continue
+    if [ "$foreign_uid" -eq 1 ]; then
+      uncertain=1
+      continue
+    fi
     task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK 2>/dev/null || true)
     printf '%s\n' "${task:-unidentified-process-$pid}"
     found=0

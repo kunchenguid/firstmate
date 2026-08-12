@@ -1,4 +1,0 @@
-interface:
-  display_name: "Evaluate Idea Fit"
-  short_description: "Compare an external idea with your real stack"
-  default_prompt: "Use $evaluate-idea-fit to assess this link against my current structure and recommend Adopt, Trial, Borrow, or Reject."

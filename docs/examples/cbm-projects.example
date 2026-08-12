@@ -1,8 +1,0 @@
-# Optional allowlist for CBM brief injection (copy to config/cbm-projects — gitignored).
-# One project basename or absolute path per line.
-# When this file is absent, First Mate defaults to:
-#   .openclaw, jt-control-room, JT-Control-Room, firstmate
-
-.openclaw
-jt-control-room
-firstmate

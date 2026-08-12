@@ -199,21 +199,28 @@ fm_worker_primary_attestation_load() {
   fm_worker_primary_attestation_refresh
 }
 
-fm_worker_primary_attestation_establish() {
-  local root state file token token_file tmp root_real lock attempts owner
-  fm_worker_primary_bootstrap_proven || return 1
+fm_worker_primary_attestation_prepare() {
+  local root state file token token_file tmp root_real lock attempts owner empty_attempts
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
-  fm_session_lock_owned_by_self "$state" || return 1
   root_real=$(fm_worker_canonical_path "$root") || return 1
   mkdir -p "$state" || return 1
   file="$state/.primary-attestation"
   lock="$state/.primary-attestation.acquire"
   attempts=0
+  empty_attempts=0
   while ! mkdir "$lock" 2>/dev/null; do
     owner=$(cat "$lock/pid" 2>/dev/null || true)
     case "$owner" in
-      ''|*[!0-9]*) ;;
+      '')
+        empty_attempts=$((empty_attempts + 1))
+        if [ "$empty_attempts" -ge 3 ]; then
+          rmdir "$lock" 2>/dev/null || true
+          empty_attempts=0
+          continue
+        fi
+        ;;
+      *[!0-9]*) ;;
       *)
         if ! kill -0 "$owner" 2>/dev/null; then
           rm -f "$lock/pid" 2>/dev/null || true
@@ -281,6 +288,14 @@ fm_worker_primary_attestation_establish() {
   fm_worker_primary_attestation_refresh
   release_attestation_lock
   unset -f release_attestation_lock
+}
+
+fm_worker_primary_attestation_establish() {
+  local state
+  fm_worker_primary_bootstrap_proven || return 1
+  state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$_FM_WORKER_ISOLATION_LIB_DIR/..}}/state}
+  fm_session_lock_owned_by_self "$state" || return 1
+  fm_worker_primary_attestation_prepare
 }
 
 fm_worker_primary_attestation_refresh() {
@@ -436,9 +451,12 @@ fm_worker_primary_origin_proven() {
 }
 
 fm_worker_primary_session_entry_proven() {
-  local root root_real
+  local root state root_real
   fm_worker_primary_bootstrap_proven || return 1
+  fm_verified_harness_ancestry_pid >/dev/null 2>&1 || return 1
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$root}/state}
+  fm_session_lock_owned_by_self "$state" || return 1
   root_real=$(fm_worker_canonical_path "$root") || return 1
   fm_worker_primary_attestation_matches "$root_real"
 }
@@ -499,6 +517,13 @@ fm_worker_identity_is_complete() {
     *) return 1 ;;
   esac
   return 0
+}
+
+fm_worker_declared_secondmate_proven() {
+  [ "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" = secondmate ] \
+    && fm_worker_identity_is_complete \
+    && fm_worker_secondmate_home_proven \
+    && fm_worker_secondmate_ancestry_proven
 }
 
 # fm_worker_is_task_worker: 0 unless this process has a complete secondmate

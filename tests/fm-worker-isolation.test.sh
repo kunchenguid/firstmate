@@ -321,26 +321,22 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
 }
 
 test_reparented_markerless_worker_is_refused() {
-  local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token fakebin
+  local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
   token="primary-$RUN_TAG"
   printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
   chmod 600 "$primary_home/state/.primary-attestation"
-  fakebin=$(fm_fakebin "$TMP_ROOT/reparented-markerless")
-  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) printf claude ;; *) exit 1 ;; esac' > "$fakebin/ps"
-  chmod +x "$fakebin/ps"
   (
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK="reparented-$RUN_TAG" \
     FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
     FM_PRIMARY_ATTESTATION="$token" \
-    PATH="$fakebin:$PATH" \
     bash -c '
       (
         sleep 0.2
         exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
           -u FM_HOME -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE \
           -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
-          -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE -u FM_PRIMARY_ATTESTATION \
+          -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE \
           FM_HOME="$1" FM_ROOT_OVERRIDE="$1" FM_STATE_OVERRIDE="$1/state" \
           bash -c '\''cd "$1" && if bash "$4" >"$3.output" 2>&1; then
             echo allowed > "$3"
@@ -364,12 +360,15 @@ test_reparented_markerless_worker_is_refused() {
   out=$(cat "$result")
   [ "$out" = refused ] || fail "a reparented markerless worker was accepted as primary"
   [ ! -e "$primary_home/state/.lock" ] || fail "a reparented markerless worker acquired the primary lock"
-  pass "a reparented markerless worker is refused without a primary launch attestation"
+  pass "a reparented markerless worker cannot reuse a primary attestation"
 }
 
 test_primary_origin_requires_state_attestation() {
-  local primary_home token out
+  local primary_home token out fakebin
   primary_home=$(make_primary_home "$TMP_ROOT/attestation-required")
+  fakebin=$(fm_fakebin "$TMP_ROOT/attestation-required")
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
   out=$(cd "$primary_home" && env \
     -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
     -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_HOME -u FM_STATE_OVERRIDE \
@@ -384,12 +383,12 @@ test_primary_origin_requires_state_attestation() {
     printf 'token=%s\n' "$token"
   } > "$primary_home/state/.primary-attestation"
   ( cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    CODEX_THREAD_ID=attestation-thread FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
-    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
-    "$LOCK" >/dev/null ) || fail "primary startup could not acquire its session lock"
+    CODEX_THREAD_ID=attestation-thread FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" \
+    "$LOCK" bootstrap >/dev/null ) || fail "primary startup could not acquire its session lock"
   out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    CODEX_THREAD_ID=attestation-thread FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
-    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" bash -c \
+    CODEX_THREAD_ID=attestation-thread FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" bash -c \
     '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "primary startup could not establish a genuine attestation"
@@ -398,8 +397,8 @@ test_primary_origin_requires_state_attestation() {
     "$primary_home/state/.primary-attestation")
   [ -n "$token" ] || fail "primary startup persisted an empty attestation token"
   out=$(cd "$primary_home" && CODEX_THREAD_ID=attestation-thread FM_HOME="$primary_home" \
-    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
-    FM_PRIMARY_ATTESTATION="$token" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" \
+    FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" \
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "a persisted state attestation rejected a genuine primary"
@@ -410,10 +409,10 @@ test_primary_initialization_requires_explicit_bootstrap() {
   local primary_home fakebin out status
   primary_home=$(make_primary_home "$TMP_ROOT/initialization-path")
   fakebin=$(fm_fakebin "$TMP_ROOT/initialization-path")
-  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) printf claude ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
   chmod +x "$fakebin/ps"
   if out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    CODEX_THREAD_ID=initialization-thread FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    CODEX_THREAD_ID=initialization-thread FM_FAKE_HARNESS_PID="$RUN_TAG" FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" "$LOCK" 2>&1); then
     status=0
   else
@@ -421,7 +420,7 @@ test_primary_initialization_requires_explicit_bootstrap() {
   fi
   expect_code 1 "$status" "an un-attested normal lock entry must refuse even with harness ancestry"
   if out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    CODEX_THREAD_ID=initialization-thread FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    CODEX_THREAD_ID=initialization-thread FM_FAKE_HARNESS_PID="$RUN_TAG" FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" "$LOCK" bootstrap 2>&1); then
     status=0
   else
@@ -439,7 +438,7 @@ test_primary_bootstrap_rejects_invalid_attestation_before_lock() {
   fakebin=$(fm_fakebin "$TMP_ROOT/invalid-bootstrap-attestation")
   attestation="$primary_home/state/.primary-attestation"
   foreign="$TMP_ROOT/foreign-primary-attestation"
-  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) printf claude ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
   chmod +x "$fakebin/ps"
   for mode in malformed foreign symlink; do
     rm -f "$primary_home/state/.lock" "$attestation" "$foreign"
@@ -772,8 +771,11 @@ make_primary_home() {
 test_primary_scope_requires_authoritative_primary_proof() {
   # Named primary_home, not home: the sourced libraries carry their own `home`
   # local, and reusing the name here makes shellcheck read the two as one.
-  local primary_home out token
+  local primary_home out token fakebin
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
+  fakebin=$(fm_fakebin "$TMP_ROOT/scope-home")
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
   out=$( . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a markerless process without primary proof matched primary scope"
@@ -781,14 +783,14 @@ test_primary_scope_requires_authoritative_primary_proof() {
   printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
   chmod 600 "$primary_home/state/.primary-attestation"
   ( cd "$primary_home" && CODEX_THREAD_ID=scope-thread FM_ROOT_OVERRIDE="$primary_home" \
-    FM_HOME="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
-    FM_PRIMARY_ATTESTATION="$token" "$LOCK" >/dev/null ) \
+    FM_HOME="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" \
+    FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" "$LOCK" bootstrap >/dev/null ) \
     || fail "primary scope fixture could not acquire its session lock"
   out=$(cd "$primary_home" && env \
     -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME -u FM_ROOT \
     CODEX_THREAD_ID=scope-thread \
     FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    FM_STATE_OVERRIDE="$primary_home/state" FM_PRIMARY_ATTESTATION="$token" \
+    FM_STATE_OVERRIDE="$primary_home/state" FM_FAKE_HARNESS_PID="$RUN_TAG" FM_PRIMARY_ATTESTATION="$token" PATH="$fakebin:$PATH" \
     bash -c '. "$1" && fm_primary_scope_matches "$2" "$2/state" && printf primary || printf not-primary' _ \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$primary_home")
   [ "$out" = primary ] || fail "a normalized markerless primary did not match primary scope"
@@ -1474,17 +1476,34 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
 }
 
 test_teardown_retires_a_contested_lease_even_with_force() {
-  local rec fakebin out status stamp
+  local rec fakebin out status stamp token pid
   rec=$(make_slot_world slot-teardown)
   read_slot_world "$rec"
-  fakebin=$(fm_fakebin "$WORLD/fake")
+  fakebin=$(make_launch_fakebin "$WORLD/fake")
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  *"#{window_id} #{window_name}"*) printf "%s\\n" "@42 fm-task-e6" ;;' \
+    '  *"#{window_id}"*) printf "%s\\n" "@42" ;;' \
+    '  *"#{window_name}"*) printf "%s\\n" "fm-task-e6" ;;' \
+    '  *"#{pane_current_path}"*) printf "%s\\n" "$FM_FAKE_PANE_PATH" ;;' \
+    '  *"#{pane_current_command}"*) printf "%s\\n" bash ;;' \
+    '  *"#{pane_pid}"*) printf "%s\\n" "$FM_FAKE_PANE_PID" ;;' \
+    'esac' \
+    'case "${1:-}" in kill-window) kill -9 "$FM_FAKE_PANE_PID" 2>/dev/null || true; exit 0 ;; *) exit 0 ;; esac' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  token="teardown-$RUN_TAG"
+  printf 'root=%s\ntoken=%s\n' "$WORLD/primary-root" "$token" > "$WORLD/home/state/.primary-attestation"
+  chmod 600 "$WORLD/home/state/.primary-attestation"
+  printf '%s|codex:teardown-thread|harness\n' "$RUN_TAG" > "$WORLD/home/state/.lock"
   : > "$WORLD/treehouse.log"
   fm_write_meta "$WORLD/home/state/task-e6.meta" \
     "window=firstmate:fm-task-e6" "worktree=$WT_DIR" "project=$PROJ_DIR" \
@@ -1495,14 +1514,21 @@ SH
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e6 "$WORLD/home" ) \
     || fail "the contested-slot fixture could not be stamped"
+  pid=$(start_declared_agent "$WT_DIR" task-e6 "$WORLD/home")
 
-  out=$(cd "$WORLD/primary-root" && FM_ROOT_OVERRIDE="$WORLD/primary-root" FM_HOME="$WORLD/home" \
+  out=$(cd "$WORLD/primary-root" && env -u NO_MISTAKES_GATE \
+    CODEX_THREAD_ID=teardown-thread FM_FAKE_HARNESS_PID="$RUN_TAG" \
+    FM_PRIMARY_ATTESTATION="$token" FM_ROOT_OVERRIDE="$WORLD/primary-root" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
     FM_CONFIG_OVERRIDE="$WORLD/home/config" \
+    FM_FAKE_TMUX_STATE="$WORLD/tmux-window-name" \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
+    FM_FAKE_TMUX_LOG="$WORLD/tmux.log" \
     FM_FAKE_TREEHOUSE_LOG="$WORLD/treehouse.log" \
     PATH="$fakebin:$PATH" \
-    "$TEARDOWN" task-e6 --force 2>&1)
+    "$WORLD/primary-root/bin/fm-teardown.sh" task-e6 --force 2>&1)
   status=$?
+  out="$out$(cat "$WORLD/tmux.log" 2>/dev/null || true)"
   expect_code 0 "$status" "teardown should complete while retiring the contested lease"$'\n'"$out"
   assert_contains "$out" "lease RETAINED" "teardown did not report the retained lease"
   assert_contains "$out" "quarantined-e6" "teardown did not name the other holder"

@@ -298,3 +298,4 @@ printf 'risk_flags=%s\n' "${risk_flags:-none}"
 if [ "$explain" -eq 1 ]; then
   printf 'route: %s because %s\n' "$profile" "$reason"
 fi
+

@@ -30,14 +30,6 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
-# A Herdr presentation journal never authorizes cleanup. Teardown still closes
-# only the exact task pane from ordinary endpoint metadata and never calls
-# `workspace close`. It retires the non-authoritative journal only when a
-# read-only token correlation agrees with that endpoint and pane closure is
-# confirmed. Otherwise the journal stays quarantined for manual inspection.
-# Projected closes share the presentation-order lock, refuse to close the
-# captain's active tab, and restore the exact response-derived pre-close tab
-# if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -597,39 +589,11 @@ teardown_cleanup_returned_slot() {
   fm_slot_lock_release "$lock_path"
 }
 
-teardown_acquire_herdr_presentation_lock() {
-  local target=$1 session lock attempt=0
-  fm_backend_herdr_parse_target "$target" || return 1
-  session=$FM_BACKEND_HERDR_SESSION
-  lock=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
-  if [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ]; then
-    [ "$HERDR_PRESENTATION_LOCK_PATH" = "$lock" ]
-    return
-  fi
-  while [ "$attempt" -lt 50 ]; do
-    if fm_lock_try_acquire "$lock"; then
-      HERDR_PRESENTATION_LOCK_PATH=$lock
-      HERDR_PRESENTATION_LOCK_HELD=1
-      return 0
-    fi
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
-teardown_release_herdr_presentation_lock() {
-  if [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ]; then
-    fm_lock_release "$HERDR_PRESENTATION_LOCK_PATH" || return 1
-    HERDR_PRESENTATION_LOCK_HELD=0
-  fi
-}
-
 teardown_herdr_task_endpoint_identity_proven() {
   local child_id=$1 child_meta=$2 target=$3 expected_state=${4:-}
   local expected_home=${5:-} expected_path=${6:-}
   local session pane workspace tab label expected_label expected_key label_key raw_state info
-  local meta_session meta_pane identity agent agent_status expected_harness index pid current_path child_kind
+  local meta_session meta_pane identity agent agent_status expected_harness index pid start current_path child_kind
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
@@ -688,6 +652,9 @@ teardown_herdr_task_endpoint_identity_proven() {
     index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
     pid=$(fm_agent_pid_for_task "$child_id" "$index" "$expected_home") || return 1
     fm_agent_worker_identity_matches "$pid" "$child_id" "$expected_home" || return 1
+    start=$(fm_agent_proc_start_time "$pid") || return 1
+    FM_BACKEND_HERDR_BOUND_PID=$pid
+    FM_BACKEND_HERDR_BOUND_PID_START=$start
     current_path=$(fm_backend_herdr_current_path "$target") || return 1
     fm_agent_paths_same "$current_path" "$expected_path" || return 1
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 1
@@ -707,19 +674,13 @@ EOF
 teardown_herdr_endpoint_focus_safe() {
   local target=$1 child_id=${2:-} child_meta=${3:-} child_kind=${4:-}
   local parent_home=${5:-} child_wt=${6:-}
-  local session pane state close_status=1 acquired_here=0
-  local expected_workspace= expected_tab= expected_label= expected_harness=
-  local expected_home= expected_task_path=
+  local session pane state expected_home expected_task_path
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$state" = dead ] && return 0
-  if [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" != 1 ]; then
-    teardown_acquire_herdr_presentation_lock "$target" || return 1
-    acquired_here=1
-  fi
   if [ -n "$child_id" ]; then
     if [ "$child_kind" = secondmate ]; then
       expected_home=$(meta_value "$child_meta" home)
@@ -733,37 +694,12 @@ teardown_herdr_endpoint_focus_safe() {
   fi
   if [ -n "$child_id" ] && ! teardown_herdr_task_endpoint_identity_proven \
     "$child_id" "$child_meta" "$target" "$state" "$expected_home" "$expected_task_path"; then
-    if [ "$acquired_here" = 1 ]; then
-      teardown_release_herdr_presentation_lock || true
-    fi
     return 1
   fi
-  if [ -n "$child_id" ]; then
-    expected_workspace=$(meta_value "$child_meta" herdr_workspace_id)
-    expected_tab=$(meta_value "$child_meta" herdr_tab_id)
-    expected_label=$(meta_value "$child_meta" display_label)
-    expected_harness=$(meta_value "$child_meta" harness)
-    if [ "$child_kind" = secondmate ]; then
-      expected_home=$(meta_value "$child_meta" home)
-      expected_task_path=$expected_home
-    else
-      expected_home=$parent_home
-      expected_task_path=$child_wt
-    fi
-    [ -n "$expected_home" ] || expected_home=$parent_home
-    [ -n "$expected_task_path" ] || expected_task_path=$(meta_value "$child_meta" worktree)
-  fi
-  if fm_backend_herdr_projection_teardown_close "$session" "$pane" "$state" \
-    "$expected_workspace" "$expected_tab" "$expected_label" "$expected_harness" \
-    "$child_id" "$expected_task_path" "$expected_home"; then
-    close_status=0
-  else
-    close_status=$?
-  fi
-  if [ "$acquired_here" = 1 ]; then
-    teardown_release_herdr_presentation_lock || close_status=1
-  fi
-  return "$close_status"
+  [ -n "$child_id" ] || return 1
+  [ "$state" = live ] || return 1
+  fm_backend_herdr_kill "$target" "$FM_BACKEND_HERDR_BOUND_PID" \
+    "$FM_BACKEND_HERDR_BOUND_PID_START"
 }
 
 teardown_backend_endpoint() {
@@ -887,7 +823,7 @@ teardown_unresolved_endpoint_identity_proven() {
 
 teardown_tmux_dead_endpoint_identity_proven() {
   local id=$1 kind=$2 expected_home=$3 worktree=$4 target=$5
-  local stable stable_again path path_again command command_again marker stamp_home
+  local stable stable_again path path_again command command_again marker stamp_home foreground env env_again
   stable=$(fm_agent_tmux_window_id "$target") || return 1
   fm_backend_source tmux || return 1
   case "$target" in
@@ -922,6 +858,13 @@ teardown_tmux_dead_endpoint_identity_proven() {
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
     *) return 1 ;;
   esac
+  foreground=$(fm_backend_foreground_process_pid tmux "$stable") || return 1
+  env=$(fm_agent_environ "$foreground" 2>/dev/null) || return 1
+  fm_agent_worker_identity_matches "$foreground" "$id" "$expected_home" "$env" || return 1
+  current=$(fm_backend_foreground_process_pid tmux "$stable") || return 1
+  [ "$current" = "$foreground" ] || return 1
+  env_again=$(fm_agent_environ "$foreground" 2>/dev/null) || return 1
+  fm_agent_worker_identity_matches "$foreground" "$id" "$expected_home" "$env_again" || return 1
   teardown_backend_endpoint tmux "$stable"
 }
 
@@ -1009,24 +952,16 @@ teardown_child_endpoint() {
   local backend=$6 target=$7 status
   TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=0
   if [ "$backend" = herdr ]; then
-    teardown_acquire_herdr_presentation_lock "$target" || return 1
     if ! teardown_child_endpoint_identity_proven \
       "$child_id" "$child_meta" "$child_kind" "$parent_home" "$child_wt" "$backend" "$target"; then
-      teardown_release_herdr_presentation_lock || true
       return 1
     fi
     if [ "$TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD" = 1 ]; then
-      teardown_release_herdr_presentation_lock || return 1
       return 0
     fi
-    if teardown_herdr_endpoint_focus_safe "$target" "$child_id" "$child_meta" \
-      "$child_kind" "$parent_home" "$child_wt"; then
-      status=0
-    else
-      status=$?
-    fi
-    teardown_release_herdr_presentation_lock || status=1
-    return "$status"
+    teardown_herdr_endpoint_focus_safe "$target" "$child_id" "$child_meta" \
+      "$child_kind" "$parent_home" "$child_wt"
+    return $?
   fi
   if [ "$backend" = tmux ] \
     && [ "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" = dead ]; then
@@ -2503,10 +2438,7 @@ validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 validate_direct_pr_state_cleanup || exit 1
 validate_direct_pr_ref_cleanup || exit 1
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_WORKSPACE=
-  if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
+if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || {
     echo "REFUSED: could not load Herdr teardown support for $ID; preserving task state and worktree" >&2
     exit 1
@@ -2515,22 +2447,6 @@ HERDR_PRESENTATION_WORKSPACE=
     echo "REFUSED: invalid Herdr target $T for $ID; preserving task state and worktree" >&2
     exit 1
   }
-fi
-if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  HERDR_META_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_META_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_META_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_META_PANE" ] \
-     && [ "$T" = "$HERDR_META_SESSION:$HERDR_META_PANE" ]; then
-    if fm_backend_herdr_projection_endpoint_matches_journal \
-      "$HERDR_META_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-      "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-      HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-    fi
-  fi
 fi
 
 # Prove pooled-slot occupancy against the exact task endpoint before closing it.
@@ -2564,15 +2480,13 @@ TOP_GROK_ARTIFACTS_RETAINED=0
 TEARDOWN_RAW_ENDPOINT_STATE=
 TOP_SLOT_LOCK_HELD=0
 TOP_SLOT_LOCK_PATH=
-HERDR_PRESENTATION_LOCK_HELD=0
-HERDR_PRESENTATION_LOCK_PATH=
 teardown_release_top_slot_lock() {
   if [ "$TOP_SLOT_LOCK_HELD" = 1 ]; then
     fm_slot_lock_release "$TOP_SLOT_LOCK_PATH" || return 1
     TOP_SLOT_LOCK_HELD=0
   fi
 }
-trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true; secondmate_registry_transaction_restore || true' EXIT
+trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; secondmate_registry_transaction_restore || true' EXIT
 if [ "$ENDPOINT_RECOVERY" = 1 ]; then
   endpoint_recovery_presence=
   case "$ENDPOINT_RECOVERY_WINDOW_TARGET" in
@@ -2616,12 +2530,6 @@ if [ "$ENDPOINT_RECOVERY" = 1 ]; then
   }
   echo "teardown $ID retired endpoint recovery window $T"
   exit 0
-fi
-if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
-  teardown_acquire_herdr_presentation_lock "$T" || {
-    echo "REFUSED: could not acquire the Herdr presentation lock for $ID; preserving task state and worktree" >&2
-    exit 1
-  }
 fi
 if [ "$KIND" != secondmate ]; then
   if [ "$TOP_SLOT_RETURNED" = 1 ]; then
@@ -2747,17 +2655,13 @@ if [ "$BACKEND" = herdr ]; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
   fi
-  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
-    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
-  fi
 elif [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" != orca ] \
   && [ "$TOP_ENDPOINT_CLOSED" != 1 ]; then
   if ! teardown_backend_endpoint "$BACKEND" "${TOP_ENDPOINT_STABLE_TARGET:-$T}" 2>/dev/null; then
     echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
     exit 1
   fi
+  TOP_ENDPOINT_CLOSED=1
 fi
 
 if [ "$KIND" != secondmate ] \
@@ -2809,6 +2713,18 @@ if [ "$KIND" != secondmate ] \
     }
     teardown_grok_pointer_remove "$WT" "$STATE" "$ID" || {
       echo "REFUSED: could not prove task $ID Grok pointer ownership; preserving task state and worktree" >&2
+      exit 1
+    }
+    TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+    [ "$TOP_SLOT_ENDPOINT_STATE" = closed ] || {
+      TOP_SLOT_RELEASE_AUTHORIZED=0
+      echo "REFUSED: final endpoint occupancy for worktree $WT was not closed at return; preserving task state and lease" >&2
+      exit 1
+    }
+    slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
+      "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "" "" "$FM_HOME" crewmate || {
+      TOP_SLOT_RELEASE_AUTHORIZED=0
+      echo "REFUSED: final occupancy proof for worktree $WT was not current at return; preserving task state and lease" >&2
       exit 1
     }
     teardown_meta_mark_slot_returning "$META" || {
@@ -2879,13 +2795,9 @@ if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
     echo "error: could not remove non-ownership task records for $ID; preserving its reclaim record" >&2
     exit 1
   fi
-elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ] && [ "$TOP_ENDPOINT_CLOSED" != 1 ]; then
   teardown_release_top_slot_lock || {
     echo "error: could not release the retained-slot ownership lock for $ID" >&2
-    exit 1
-  }
-  teardown_release_herdr_presentation_lock || {
-    echo "error: could not release the Herdr presentation lock for $ID" >&2
     exit 1
   }
   echo "teardown $ID retained its task state and ownership artifacts for recovery" >&2
@@ -2970,10 +2882,6 @@ if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
 fi
 teardown_release_top_slot_lock || {
   echo "error: could not release the ownership lock for $ID" >&2
-  exit 1
-}
-teardown_release_herdr_presentation_lock || {
-  echo "error: could not release the Herdr presentation lock for $ID" >&2
   exit 1
 }
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

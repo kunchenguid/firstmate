@@ -1,9 +1,0 @@
-evaluate-idea-fit skill
-updated_at_utc: 2026-07-27T17:19:26Z
-source_of_truth: /root/.grok/skills/evaluate-idea-fit
-synced_to:
-  - /root/.grok/skills/evaluate-idea-fit
-  - /root/.codex/skills/evaluate-idea-fit
-  - /root/.agents/skills/evaluate-idea-fit
-  - /root/.claude/skills/evaluate-idea-fit
-skill_md_sha256: dfe2c9c2d33053692b489a6289bbf11ef56eb9117c59003e45834782b72ff0f9

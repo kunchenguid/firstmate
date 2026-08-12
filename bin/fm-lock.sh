@@ -22,6 +22,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+SECOND_MATE_SESSION=0
+fm_worker_declared_secondmate_proven && SECOND_MATE_SESSION=1
 LOCK="$STATE/.lock"
 
 # shellcheck source=bin/fm-session-lock-lib.sh
@@ -29,9 +32,9 @@ LOCK="$STATE/.lock"
 
 if [ "${1:-}" = bootstrap ]; then
   fm_worker_refuse_primary_initialization "session lock initialization" || exit 1
-  if [ -e "$STATE/.primary-attestation" ] || [ -L "$STATE/.primary-attestation" ]; then
-    fm_worker_primary_attestation_load || {
-      echo "error: existing primary attestation is invalid; refusing session lock initialization" >&2
+  if [ "$SECOND_MATE_SESSION" -eq 0 ]; then
+    fm_worker_primary_attestation_prepare || {
+      echo "error: could not prepare primary authorization; refusing session lock initialization" >&2
       exit 1
     }
   fi
@@ -93,6 +96,28 @@ fm_lock_acquire_wait "$CLAIM_LOCK" || {
 }
 CLAIM_LOCK_HELD=1
 
+previous_lock_present=0
+previous_lock_content=
+if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
+  previous_lock_content=$(cat "$LOCK" 2>/dev/null) || {
+    echo "error: session lock is unreadable; operate read-only until resolved" >&2
+    exit 1
+  }
+  previous_lock_present=1
+fi
+
+rollback_session_lock() {
+  local current
+  [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || return 0
+  current=$(cat "$LOCK" 2>/dev/null || true)
+  [ "$current" = "$owner" ] || return 0
+  if [ "$previous_lock_present" -eq 1 ]; then
+    printf '%s\n' "$previous_lock_content" > "$LOCK"
+  else
+    rm -f -- "$LOCK"
+  fi
+}
+
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   if [ ! -f "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is not a regular file; operate read-only until resolved" >&2
@@ -124,22 +149,40 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     esac
   fi
 fi
-if ! { printf '%s\n' "$owner" > "$LOCK"; } 2>/dev/null; then
+publication_tmp=$(mktemp "$STATE/.lock-publish.XXXXXX" 2>/dev/null) || {
+  echo "error: cannot write session lock; operate read-only until resolved" >&2
+  exit 1
+}
+if ! printf '%s\n' "$owner" > "$publication_tmp" 2>/dev/null \
+  || ! mv -f -- "$publication_tmp" "$LOCK" 2>/dev/null; then
+  rm -f -- "$publication_tmp" 2>/dev/null || true
+  rollback_session_lock
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi
 written=$(cat "$LOCK" 2>/dev/null) || {
+  rollback_session_lock
   echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
   exit 1
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
+  rollback_session_lock
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
-fm_worker_primary_attestation_establish || {
-  echo "error: could not establish primary authorization after acquiring the session lock; operate read-only until resolved" >&2
+if [ "$SECOND_MATE_SESSION" -eq 0 ]; then
+  primary_root=$(fm_worker_canonical_path "$FM_ROOT" 2>/dev/null || true)
+  if [ -z "$primary_root" ] || ! fm_worker_primary_attestation_matches "$primary_root"; then
+    rollback_session_lock
+    echo "error: primary authorization no longer matches the session entry; operate read-only until resolved" >&2
+    exit 1
+  fi
+fi
+if [ "$SECOND_MATE_SESSION" -eq 0 ] && [ -z "${FM_PRIMARY_ATTESTATION:-}" ]; then
+  rollback_session_lock
+  echo "error: primary authorization was not established; operate read-only until resolved" >&2
   exit 1
-}
+fi
 release_claim_lock
 case "$owner" in
   *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;

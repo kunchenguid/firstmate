@@ -48,9 +48,6 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
 #   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
-#   Eligible projects may also receive an optional codebase-memory-mcp (CBM)
-#   orientation block and CBM env exports at launch (soft dependency; see
-#   bin/fm-cbm-lib.sh). Missing CBM never blocks spawn.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -104,8 +101,6 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
-# shellcheck source=bin/fm-cbm-lib.sh
-. "$SCRIPT_DIR/fm-cbm-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-task-label-lib.sh
@@ -856,16 +851,9 @@ spawn_abort_cleanup() {
   [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] || endpoint_cleanup_status=0
   [ "${SPAWN_ENDPOINT_CLEANUP_CONFIRMED:-0}" = 1 ] && endpoint_cleanup_status=0
   if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
-    if fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
-       && fm_backend_herdr_projection_teardown_close \
-         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
-      endpoint_cleanup_status=0
-      rm -f "${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}"
-    else
-      spawn_herdr_flat_uncertainty_record \
-        "exact focus-safe abort cleanup unconfirmed" "$HERDR_FLAT_ABORT_TARGET" "" "" \
-        || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
-    fi
+    spawn_herdr_flat_uncertainty_record \
+      "Herdr abort cleanup requires explicit endpoint reconciliation" "$HERDR_FLAT_ABORT_TARGET" "" "" \
+      || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
     HERDR_FLAT_ABORT_CLEANUP=0
   fi
   if [ "$HERDR_FLAT_ABORT_UNCERTAIN" = 1 ]; then
@@ -2256,12 +2244,6 @@ fi
 
 append_jt_pr_intake_governor
 append_route_block
-# Soft CBM orientation for allowlisted ship/scout projects only (no-op if CBM
-# off/missing). Secondmate charters stay free of CBM policy text.
-if [ "$KIND" != secondmate ]; then
-  fm_cbm_append_brief_policy "$BRIEF" "$PROJ_ABS" "$KIND" || true
-fi
-
 mkdir -p "$STATE"
 # Record current ownership in the linked worktree's private git directory.
 # Metadata is historical; teardown uses this stamp as independent evidence.
@@ -2374,24 +2356,6 @@ LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
 fm_backend_send_text_line "$BACKEND" "$WID" "export GOTMPDIR=$sq_gotmpdir"
 sleep 0.3
-# Soft CBM env for orientation tools/CLI (cache + resource caps + PATH).
-# Also prefix the launch command so the agent process itself inherits CBM even
-# if a later pane export is missed. Missing CBM is a no-op.
-if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
-  && fm_cbm_prepare_environment 2>/dev/null \
-  && cbm_prefix=$(fm_cbm_launch_env_prefix_prepared 2>/dev/null); then
-  # Pane-level exports for shell tools the agent may run later.
-  cbm_cache=$FM_CBM_RESOLVED_CACHE
-  cbm_mem=$FM_CBM_RESOLVED_MEM
-  cbm_workers=$FM_CBM_RESOLVED_WORKERS
-  cbm_path_prefix=$FM_CBM_RESOLVED_PATH_PREFIX
-  # FM_CBM_TASK_ID tags usage.jsonl lines from fm-cbm-cli.sh for this task.
-  # FM_CBM_CLI points agents at the logged CLI wrapper when they shell out.
-  cbm_cli_wrap=$(shell_quote "$FM_ROOT/bin/fm-cbm-cli.sh")
-  fm_backend_send_text_line "$BACKEND" "$WID" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\""
-  sleep 0.2
-  LAUNCH="${cbm_prefix}${LAUNCH}"
-fi
 fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
 sleep 0.3
 HERDR_FLAT_ABORT_CLEANUP=0

@@ -19,12 +19,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+SECOND_MATE_SESSION=0
+fm_worker_declared_secondmate_proven && SECOND_MATE_SESSION=1
+
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_watch_require_session_lock() {
   if fm_session_lock_owned_by_self "$STATE"; then
     return 0
+  fi
+  if [ "$SECOND_MATE_SESSION" -eq 1 ]; then
+    echo "watch-session: FAILED - secondmate session-lock ownership is unproven" >&2
+    return 1
   fi
   if ! fm_worker_primary_bootstrap_proven; then
     fm_worker_refuse_primary_operation "watch session" || return 1
@@ -42,9 +49,12 @@ refuse_grok_primary() {
   return 1
 }
 
-fm_worker_primary_attestation_load 2>/dev/null || true
+if [ "$SECOND_MATE_SESSION" -eq 0 ]; then
+  fm_worker_primary_attestation_load 2>/dev/null || true
+fi
 
 write_primary_attestation() {
+  [ "$SECOND_MATE_SESSION" -eq 1 ] && return 0
   fm_worker_primary_attestation_establish
 }
 
@@ -52,7 +62,7 @@ case "${1:-start}" in
   start|--start|restart|--restart)
     refuse_grok_primary || exit 1
     fm_watch_require_session_lock || exit 1
-    if ! fm_worker_primary_bootstrap_proven; then
+    if [ "$SECOND_MATE_SESSION" -eq 0 ] && ! fm_worker_primary_bootstrap_proven; then
       fm_worker_refuse_primary_operation "watch session" || exit 1
       echo "watch-session: FAILED - primary bootstrap provenance is unproven" >&2
       exit 1
