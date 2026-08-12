@@ -54,6 +54,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# The ship Setup section also has the crewmate check the target project's own repo
+# for its own implementation/workflow conventions (e.g. CONTRIBUTING.md, an
+# AGENTS.md workflow section, or an agent-loaded skill) and follow them for
+# delivery methodology, project-agnostically and in addition to firstmate's own
+# unrelated delivery-mode and status-reporting rules.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -354,6 +359,7 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    WORKFLOW_STEP=2
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -366,6 +372,7 @@ EOF
     ;;
   local-only)
     SETUP2=""
+    WORKFLOW_STEP=2
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -380,6 +387,7 @@ EOF
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    WORKFLOW_STEP=3
     RULE1='1. Never push to the default branch. Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -425,6 +433,7 @@ The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$WORKFLOW_STEP. Before implementing, check this repo for its own implementation/workflow conventions - for example a \`CONTRIBUTING.md\`, an \`AGENTS.md\` workflow section, or an agent-loaded skill such as \`.claude/skills/*\` - and follow them for delivery methodology (such as incremental delivery or test-first development). This is separate from firstmate's own delivery-mode and status-reporting rules below, which still apply unchanged.
 
 # Rules
 $RULE1
