@@ -249,11 +249,11 @@ Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfac
 A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitignored `.env`; `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`.
 That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
 Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation instead of being executed from a public mention.
-The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while parent-thread context may still include other public accounts.
+The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while its surrounding conversation context may still include other public accounts.
 On the locked session-start bootstrap step, that token creates the local polling and watcher-cadence artifacts described in the [Relay configuration reference](configuration.md#relay-env).
 Without the token, the locked session-start bootstrap step removes those artifacts on opt-out and otherwise stays silent, so non-Relay users see no behavior change.
 Newly offered mentions are stored as `state/x-inbox/<request_id>.json` and wake firstmate once per retained request ID; the [Relay configuration reference](configuration.md#relay-env) owns the durable offer-marker and re-offer contract.
-The `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-post context for conversational continuity, classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
+The `fmx-respond` agent-only skill drains that inbox, uses the preserved Relay conversation context for continuity under the wire contract owned by the [Relay configuration reference](configuration.md#relay-env), classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
 When a reply has a real visual artifact, `--image <path>` attaches one local PNG, JPEG, GIF, WebP, BMP, or TIFF to the relay's optional `{media_type,data_base64}` image object.
 Actionable reversible requests run through firstmate's normal intake, backlog, dispatch, investigation, or ship lifecycle.
 Work that completes in the answering turn gets one outcome reply.
