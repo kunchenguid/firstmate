@@ -40,6 +40,7 @@
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (z) no-mistakes + recorded OPEN PR + sibling content landed -> REFUSE (live PR wins)
 #   (aa) no-mistakes + gh lookup error + content in default      -> ALLOW  (fallback preserved)
+#   (ab) no-mistakes + discovered OPEN PR + sibling content landed -> REFUSE (live PR wins)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -942,6 +943,31 @@ test_open_pr_with_sibling_content_in_default_refuses() {
   assert_present "$case_dir/state/task-x1.meta" "open-pr-sibling-content: teardown removed task metadata"
   assert_present "$case_dir/state/task-x1.status" "open-pr-sibling-content: teardown removed task status"
   pass "recorded open PR prevents sibling content in default from authorizing teardown"
+}
+
+test_discovered_open_pr_with_sibling_content_in_default_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case discovered-open-pr-sibling-content)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$pr_head"
+  printf '%s\n' 'done: PR checks green but not merged' > "$case_dir/state/task-x1.status"
+
+  # No pr= is recorded: teardown must discover the branch's open PR before it
+  # considers content equality with an independently landed sibling change.
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "discovered-open-pr-sibling-content: teardown should refuse while the discovered PR is open"
+  grep -q REFUSED "$case_dir/stderr" || fail "discovered-open-pr-sibling-content: no REFUSED line in stderr"
+  assert_present "$case_dir/state/task-x1.meta" "discovered-open-pr-sibling-content: teardown removed task metadata"
+  assert_present "$case_dir/state/task-x1.status" "discovered-open-pr-sibling-content: teardown removed task status"
+  pass "discovered open PR prevents sibling content in default from authorizing teardown"
 }
 
 test_gh_error_with_content_in_default_allows() {
@@ -2696,6 +2722,7 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_open_pr_with_sibling_content_in_default_refuses
+test_discovered_open_pr_with_sibling_content_in_default_refuses
 test_gh_error_with_content_in_default_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
