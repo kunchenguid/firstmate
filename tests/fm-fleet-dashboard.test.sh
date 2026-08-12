@@ -930,33 +930,36 @@ test_registered_pr_number_comes_from_registered_url() {
   pass "registered PR URL outranks a conflicting title number"
 }
 
-test_our_pr_ids_bind_task_and_pr_when_two_tasks_share_one_pr() {
-  local home fakebin updated out first_id second_id first_shown second_shown duplicates
+test_our_pr_ids_survive_an_engineered_two_hex_collision() {
+  local home fakebin updated out first_shown second_shown duplicates
   home=$(make_home duplicate-our-pr)
   write_live_fixture "$home"
   updated="$home/data/backlog.md.updated"
-  awk '/^## Queued$/ { print "- [ ] review-followup - Follow up on the review branch (repo: artemis) (kind: ship) (since 2026-08-02)" } { print }' \
+  awk '/^## Queued$/ { print "- [ ] collision-a-14 - Follow up on the review branch (repo: artemis) (kind: ship) (since 2026-08-02)"; print "- [ ] collision-a-20 - Recheck the review branch (repo: artemis) (kind: ship) (since 2026-08-02)" } { print }' \
     "$home/data/backlog.md" > "$updated"
   mv "$updated" "$home/data/backlog.md"
-  mkdir -p "$home/projects/review-followup"
-  fm_write_meta "$home/state/review-followup.meta" \
-    "window=firstmate:fm-review-followup" "worktree=$home/projects/review-followup" "project=artemis" \
+  mkdir -p "$home/projects/collision-a-14" "$home/projects/collision-a-20"
+  fm_write_meta "$home/state/collision-a-14.meta" \
+    "window=firstmate:fm-collision-a-14" "worktree=$home/projects/collision-a-14" "project=artemis" \
     "harness=claude" "kind=ship" "mode=ship" "yolo=off" "pr=$OUR_PR"
-  printf 'working: addressing follow-up findings on %s\n' "$OUR_PR" > "$home/state/review-followup.status"
+  fm_write_meta "$home/state/collision-a-20.meta" \
+    "window=firstmate:fm-collision-a-20" "worktree=$home/projects/collision-a-20" "project=artemis" \
+    "harness=claude" "kind=ship" "mode=ship" "yolo=off" "pr=$OUR_PR"
+  printf 'working: addressing follow-up findings on %s\n' "$OUR_PR" > "$home/state/collision-a-14.status"
+  printf 'working: rechecking follow-up findings on %s\n' "$OUR_PR" > "$home/state/collision-a-20.status"
   fakebin=$(make_fakebin "$home")
 
-  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "duplicate-PR render failed"
-  first_id=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | head -1 | awk '{print $2}')
-  second_id=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1 | awk '{print $2}')
-  [ -n "$first_id" ] && [ -n "$second_id" ] || fail "two tasks on one PR did not both render"
-  [ "$first_id" != "$second_id" ] || fail "two tasks on one PR share quotable id $first_id"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "engineered two-hex collision refused the complete render"
+  assert_contains "$out" "o:cabf59" "first engineered-collision row lost its four-hex identity"
+  assert_contains "$out" "o:cabf3f" "second engineered-collision row lost its four-hex identity"
   duplicates=$(printf '%s\n' "$out" | awk '$2 ~ /^[dorv]:/ { print $2 }' | sort | uniq -d)
   [ -z "$duplicates" ] || fail "dashboard emitted duplicate row identities: $duplicates"
-  first_shown=$(render_terminal "$home" "$fakebin" --show "$first_id") || fail "first same-PR task id did not resolve"
-  second_shown=$(render_terminal "$home" "$fakebin" --show "$second_id") || fail "second same-PR task id did not resolve"
-  assert_contains "$first_shown$second_shown" "Ship the review branch" "same-PR ids lost the original task"
-  assert_contains "$first_shown$second_shown" "Follow up on the review branch" "same-PR ids lost the follow-up task"
-  pass "our PR ids bind task and PR and every rendered identity is unique"
+  first_shown=$(render_terminal "$home" "$fakebin" --show o:cabf59) || fail "first collision row id did not resolve"
+  second_shown=$(render_terminal "$home" "$fakebin" --show o:cabf3f) || fail "second collision row id did not resolve"
+  assert_contains "$first_shown" "Follow up on the review branch" "first collision id resolved to the wrong task"
+  assert_contains "$second_shown" "Recheck the review branch" "second collision id resolved to the wrong task"
+  pass "our PR ids survive an engineered two-hex collision without refusing the render"
 }
 
 test_obligation_round_uses_viewer_review_history_or_stays_unknown() {
@@ -1015,7 +1018,7 @@ EOF
 
 test_shareable_html_omits_unstructured_manual_scripts_by_default
 test_obligation_round_uses_viewer_review_history_or_stays_unknown
-test_our_pr_ids_bind_task_and_pr_when_two_tasks_share_one_pr
+test_our_pr_ids_survive_an_engineered_two_hex_collision
 test_cockpit_shows_action_sections_and_full_inventory
 test_pr_truthfulness_regressions
 test_review_relationships_survive_completed_rounds

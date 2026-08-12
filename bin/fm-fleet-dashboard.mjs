@@ -344,7 +344,7 @@ function compactRowId(prefix, stableValue, canonical) {
   const readable = (parts.length > 1 ? parts.map((part) => part[0]).join("") : source)
     .slice(0, 2)
     .padEnd(2, "r");
-  const discriminator = createHash("sha256").update(canonical).digest("hex").slice(0, 2);
+  const discriminator = createHash("sha256").update(canonical).digest("hex").slice(0, 4);
   return `${prefix}:${readable}${discriminator}`;
 }
 
@@ -1416,7 +1416,7 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
       if (group.project) lines.push(paint("dim", `   project ${group.project}`));
       for (const item of group.items) {
         const rowLabel = String(item.number).padStart(numberWidth);
-        const prefix = `  ${rowLabel} `;
+        const prefix = bucket.key === "ours-in-review" ? ` ${rowLabel} ` : `  ${rowLabel} `;
         const marker = paint(item.marker.color, item.marker.glyph);
         const stablePrefix = `${item.identity} `;
         const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));
