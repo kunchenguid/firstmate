@@ -357,6 +357,14 @@ switch (process.env.MODE) {
     }
     break;
   }
+  case "overlapping-persisted-runs": {
+    await fire("agent_start");
+    await fire("agent_start");
+    if (!busyState().includes("state=busy")) {
+      throw new Error("overlapping persisted runs did not remain busy");
+    }
+    break;
+  }
   case "ambiguous-session-shutdown":
     await fire("agent_start");
     await fire("agent_start");
@@ -541,6 +549,13 @@ test_omp_extension_scopes_evidence_per_run() {
   [ "$(printf '%s\n' "$current_evidence" | awk '{ print $4 }')" = 0 ] \
     || fail "surviving run was incorrectly marked stopped"
 
+  printf '%s\n' "$older_token" > "$state/$id.omp-session-run"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "pointer-only stale evidence reload drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a pointer to settled evidence must not settle the pending run, got '$out'"
+  printf '%s\n' "$current_token" > "$state/$id.omp-session-run"
+
   printf '%s\n' "$older_evidence" > "$evidence_dir/$current_token"
   out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
     || fail "stale evidence reload drive failed: $out"
@@ -582,6 +597,42 @@ test_omp_extension_rejects_settled_sibling_after_reload() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "the surviving run did not settle after stale-token denial, got '$out'"
   pass "omp rejects settled sibling tokens after reload and settles the survivor"
+}
+
+test_omp_extension_rejects_overlapping_runs_after_reload() {
+  local rec id=busy-omp-reload-overlap out state ext evidence_dir first_token second_token
+  rec=$(make_spawn_case omp-reload-overlap omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  evidence_dir="$state/$id.omp-session-evidence"
+  out=$(drive_omp_ext "$ext" overlapping-persisted-runs "$state" "$id") \
+    || fail "overlapping persisted-run drive failed: $out"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "ambiguous reload terminal drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "ambiguous persisted runs must remain busy, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "ambiguous persisted runs must not publish turn-end evidence"
+
+  first_token=$(find "$evidence_dir" -maxdepth 1 -type f -print | sort | head -n 1 | xargs -n 1 basename)
+  second_token=$(cat "$state/$id.omp-session-run")
+  [ "$first_token" != "$second_token" ] || fail "overlap setup did not produce two distinct persisted runs"
+  out=$(EVENT_TOKEN="$first_token" drive_omp_ext "$ext" explicit-session-shutdown "$state" "$id") \
+    || fail "explicit older persisted-run drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "settling one persisted run must leave its sibling busy, got '$out'"
+  [ "$(cat "$state/$id.omp-session-run")" = "$second_token" ] \
+    || fail "settling the older persisted run changed the surviving pointer"
+
+  out=$(EVENT_TOKEN="$second_token" drive_omp_ext "$ext" explicit-session-shutdown "$state" "$id") \
+    || fail "explicit surviving persisted-run drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "explicitly settling both persisted runs must clear busy, got '$out'"
+  [ -e "$state/$id.turn-ended" ] || fail "explicitly settling both persisted runs must publish turn-end evidence"
+  pass "omp reload rejects ambiguous pending runs until explicit tokens settle both"
 }
 
 test_omp_extension_reloads_and_reconciles_persisted_run() {
@@ -915,6 +966,7 @@ test_omp_extension_rejects_overlapping_timestamped_runs
 test_omp_extension_recovers_stale_current_pointer
 test_omp_extension_scopes_evidence_per_run
 test_omp_extension_rejects_settled_sibling_after_reload
+test_omp_extension_rejects_overlapping_runs_after_reload
 test_omp_extension_reloads_and_reconciles_persisted_run
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy

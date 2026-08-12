@@ -2588,7 +2588,7 @@ EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
@@ -2603,6 +2603,13 @@ const runRecords: Array<{
   stoppedAt: number;
   active: boolean;
 }> = [];
+const trimRunHistory = () => {
+  while (runRecords.length > 64) {
+    const inactiveIndex = runRecords.findIndex((record) => !record.active);
+    if (inactiveIndex < 0) return;
+    runRecords.splice(inactiveIndex, 1);
+  }
+};
 const atomicWrite = (path: string, value: string) => {
   const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
   try {
@@ -2676,13 +2683,13 @@ const rotateRun = () => {
   idlePublishedToken = "";
   const record = { token, startedAt, lastEventAt: startedAt, stoppedAt: 0, active: true };
   runRecords.push(record);
-  if (runRecords.length > 64) runRecords.shift();
+  trimRunHistory();
   atomicWrite(SESSION_RUN, token + "\\n");
   atomicWrite(SESSION_STOP, "pending\\n");
   writeRunEvidence(record);
   return token;
 };
-const persistedRun = () => {
+const persistedRuns = () => {
   try {
     const runLines = readFileSync(SESSION_RUN, "utf8").split(/\r?\n/).filter(Boolean);
     const stop = readFileSync(SESSION_STOP, "utf8").trim();
@@ -2691,21 +2698,31 @@ const persistedRun = () => {
     if (!busyFields.has("gen=$BUSY_GEN") || !busyFields.has("state=busy")) return null;
     const token = runLines[0];
     if (!/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
-    const evidence = parseRunEvidence(readFileSync(evidencePath(token), "utf8"));
-    if (!evidence || evidence.token !== token || evidence.stoppedAt > 0) return null;
-    return evidence;
+    const pending = [];
+    for (const entry of readdirSync(SESSION_EVIDENCE_DIR, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^[A-Za-z0-9._-]+$/.test(entry.name) || !entry.name.startsWith("$BUSY_GEN.")) {
+        return null;
+      }
+      const evidence = parseRunEvidence(readFileSync(evidencePath(entry.name), "utf8"));
+      if (!evidence || evidence.token !== entry.name) return null;
+      if (evidence.stoppedAt === 0) pending.push(evidence);
+    }
+    if (!pending.length || !pending.some((record) => record.token === token)) return null;
+    return { token, pending };
   } catch {
     return null;
   }
 };
-const adoptCurrentRun = (timestamp?: number) => {
+const adoptCurrentRun = () => {
   if (runToken) return runToken;
-  const persisted = persistedRun();
-  if (!persisted || (timestamp !== undefined && (persisted.startedAt <= 0 || timestamp < persisted.startedAt))) return "";
+  const persisted = persistedRuns();
+  if (!persisted) return "";
   runToken = persisted.token;
   idlePublishedToken = "";
-  runRecords.push({ ...persisted, active: true });
-  if (runRecords.length > 64) runRecords.shift();
+  for (const record of persisted.pending) {
+    runRecords.push({ ...record, active: true });
+  }
+  trimRunHistory();
   return runToken;
 };
 const eventTimestamp = (event: any) => {
@@ -2763,7 +2780,7 @@ const advanceCurrentRun = () => {
   return current;
 };
 const uniqueActiveCurrentRun = (timestamp?: number) => {
-  if (!adoptCurrentRun(timestamp)) return null;
+  if (!adoptCurrentRun()) return null;
   const active = runRecords.filter((record) => record.active);
   if (active.length !== 1) return null;
   const current = advanceCurrentRun();
@@ -2771,7 +2788,7 @@ const uniqueActiveCurrentRun = (timestamp?: number) => {
 };
 const eventRunToken = (event: any) => {
   const timestamp = eventTimestamp(event);
-  adoptCurrentRun(timestamp);
+  adoptCurrentRun();
   const explicit = explicitRunToken(event);
   if (explicit) {
     const record = runRecords.find((candidate) => candidate.token === explicit);
