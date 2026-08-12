@@ -8,8 +8,8 @@ tmux is Firstmate's verified reference runtime backend and the fully supported b
 Install tmux with `brew install tmux` or your platform package manager.
 The universal harness and toolchain requirements are in [`configuration.md`](configuration.md#toolchain).
 
-tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
-Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
+New spawns outside a detected runtime must select tmux explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
+See [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) for the authoritative selection and marker-free refusal contract.
 An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
 
 No provisioning is required before the first task.
@@ -24,7 +24,7 @@ tmux new -s firstmate
 
 Crew tasks become windows in that session.
 `tmux display-message -p '#S'` prints its name.
-If the primary harness runs outside tmux, Firstmate creates or reuses a detached session named `firstmate`:
+When tmux is selected while the primary harness runs outside tmux, Firstmate creates or reuses a detached session named `firstmate`:
 
 ```sh
 tmux attach -t firstmate
