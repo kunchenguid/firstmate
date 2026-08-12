@@ -236,8 +236,10 @@ Worker deletion removes disposable VM/NIC/OS capacity and retains both encrypted
 A later worker may adopt those disks only after exact slot, VM, task, home, and generation recovery proof.
 
 The urgent one-shot runner is specified by [`docs/azure-runner.md`](azure-runner.md) and implemented by `bin/fm-azure-runner.sh`.
-It creates identity-less invocation VMs in `snet-validation-shards` rather than reusing author-worker slots or retained provider/task disks.
-The foundation grants the exact `FM_AZURE_RUNNER_OPERATOR_OBJECT_ID` delegation-key authority at storage-account scope and blob data access only on `validation-shards`; the invocation VM receives only short-lived exact-object capabilities in protected bootstrap parameters.
+It creates one-invocation private controller VMs in `snet-validation-shards` rather than reusing author-worker slots or retained provider/task disks.
+The foundation grants `id-<prefix>-validation-shards` Blob Data Contributor only on the exact `validation-shards` container and no ARM role.
+Trusted root uses that identity only after the networkless repository command exits to upload and verify the private result archive; the command receives no identity, token, SAS, or network namespace.
+The separate `st<prefix>ctl01` account has public networking, shared keys, and public blobs disabled and holds no payload data; its `runner-control` management child resource provides ETag/If-Match admission fencing while exact tagged zero-cost UAMIs provide durable per-invocation cost reservations.
 Its reviewed validation SKU seam defaults to the live-verified 4-vCPU/16-GiB `Standard_D4as_v6`, accepts the foundation's reviewed mixed-family alternatives, and re-proves that selected family's quota, SKU capability, budget, forecast, and retail rate before every invocation.
 The runner owns snapshot upload, command/result protocol, no-mistakes command integration, fencing, sandboxing, restart-safe collection, and exact cleanup.
 The intended first real use is parallel heavy test, lint, and behavior commands while the local primary remains responsive.

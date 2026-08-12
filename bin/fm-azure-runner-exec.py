@@ -88,6 +88,18 @@ def drop_privileges(uid, gid, pid_max, disk_bytes):
     libc = ctypes.CDLL(None)
     if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
         os._exit(126)
+    if os.getuid() != uid or os.getgid() != gid or os.getgroups():
+        os._exit(126)
+    if sys.platform.startswith("linux"):
+        status = {}
+        for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                status[key] = value.strip()
+        if any(int(status.get(name, "1"), 16) != 0 for name in ("CapEff", "CapPrm", "CapAmb")):
+            os._exit(126)
+        if status.get("NoNewPrivs") != "1":
+            os._exit(126)
     os.setsid()
 
 

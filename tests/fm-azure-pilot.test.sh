@@ -100,12 +100,23 @@ for nsg in nsgs:
             assert props["sourceAddressPrefix"] not in ("Internet", "*")
             assert props.get("destinationPortRange") != "22"
 
-storage = next(resource for resource in resources if resource["type"] == "Microsoft.Storage/storageAccounts")
+storage = next(resource for resource in resources if resource["type"] == "Microsoft.Storage/storageAccounts" and resource["name"] == "[parameters('storageAccountName')]")
 props = storage["properties"]
 assert props["allowBlobPublicAccess"] is False
 assert props["allowSharedKeyAccess"] is False
 assert props["supportsHttpsTrafficOnly"] is True
 assert props["publicNetworkAccess"] == "Disabled"
+control = next(resource for resource in resources if resource["type"] == "Microsoft.Storage/storageAccounts" and resource["name"] == "[variables('runnerControlStorageName')]")
+assert control["sku"]["name"] == "Standard_LRS"
+assert control["properties"]["allowBlobPublicAccess"] is False
+assert control["properties"]["allowSharedKeyAccess"] is False
+assert control["properties"]["publicNetworkAccess"] == "Disabled"
+control_container = next(resource for resource in resources if resource["type"] == "Microsoft.Storage/storageAccounts/blobServices/containers" and "runner-control" in resource["name"])
+assert control_container["properties"]["publicAccess"] == "None"
+assert control_container["properties"]["metadata"] == {"schema": "fm-azure-runner-control-v1", "deploymentgeneration": "[parameters('deploymentGeneration')]"}
+controller_role = next(resource for resource in resources if resource["type"] == "Microsoft.Storage/storageAccounts/blobServices/containers/providers/roleAssignments" and "runner-private-controller-validation-shards" in resource["name"])
+assert "validation-shards" in controller_role["name"]
+assert "validationShardIdentityName" in json.dumps(controller_role)
 
 blob_endpoint = next(resource for resource in resources if resource["type"] == "Microsoft.Network/privateEndpoints")
 assert blob_endpoint["properties"]["customNetworkInterfaceName"] == "[variables('blobPrivateEndpointNicName')]"
