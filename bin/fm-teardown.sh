@@ -323,6 +323,24 @@ remote_outbox_cleanup() {
   )
 }
 
+# Drop this task's bounded progress-observation baseline written by
+# bin/fm-inactive-reconcile.sh, so per-task suspicion state retires with the
+# task instead of accumulating for the lifetime of the home. Defined above every
+# caller because the remote secondmate path below runs before the rest of this
+# file is parsed.
+remove_progress_observation() {
+  local state_dir=$1 id=$2 dir record
+  fm_task_id_path_safe "$id" || return 0
+  dir="$state_dir/progress-observations"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  record="$dir/$id.record"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    rm -f -- "$record" || return 1
+  fi
+  rmdir "$dir" 2>/dev/null || true
+  return 0
+}
+
 remote_secondmate_teardown() {
   local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
   remote_host=$(fm_meta_get "$META" remote_host)
@@ -736,22 +754,6 @@ validate_pr_poll_cleanup() {
       return 1
     fi
   done
-}
-
-# Drop this task's bounded progress-observation baseline written by
-# bin/fm-inactive-reconcile.sh, so per-task suspicion state retires with the
-# task instead of accumulating for the lifetime of the home.
-remove_progress_observation() {
-  local state_dir=$1 id=$2 dir record
-  fm_task_id_path_safe "$id" || return 0
-  dir="$state_dir/progress-observations"
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
-  record="$dir/$id.record"
-  if [ -e "$record" ] || [ -L "$record" ]; then
-    rm -f -- "$record" || return 1
-  fi
-  rmdir "$dir" 2>/dev/null || true
-  return 0
 }
 
 remove_pr_poll_artifacts() {

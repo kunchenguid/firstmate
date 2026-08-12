@@ -1349,6 +1349,76 @@ test_teardown_removes_progress_observation_record() {
   pass "teardown retires this task's progress-observation record and spares other tasks'"
 }
 
+# Drive the remote secondmate retirement path end to end. fm-teardown.sh derives
+# SCRIPT_DIR from its own location, so a fixture bin/ carrying the real script
+# plus stubbed siblings exercises the genuine remote branch (including every
+# helper it calls) without reaching a real remote host.
+make_remote_secondmate_case() { # <name>
+  local case_dir bin_dir stub
+  case_dir=$(make_case "$1")
+  bin_dir="$case_dir/bin"
+  mkdir -p "$case_dir/data/handoff"
+  cp -R "$ROOT/bin" "$bin_dir"
+  for stub in fm-on.sh fm-procevent-remote-reply.sh fm-guard.sh; do
+    cat > "$bin_dir/$stub" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$bin_dir/$stub"
+  done
+  chmod +x "$bin_dir/fm-teardown.sh"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=local-only" \
+    "remote_host=remote.invalid" \
+    "remote_root=/srv/fm" \
+    "home=/srv/fm/sm1"
+  printf '# Secondmates\n\n- task-x1 - remote secondmate (host: remote.invalid; root: /srv/fm; home: /srv/fm/sm1; scope: all; projects: demo; added 2026-08-13)\n' \
+    > "$case_dir/data/secondmates.md"
+  printf '%s\n' "$case_dir"
+}
+
+run_remote_teardown() { # <case-dir> [args...]
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$case_dir/bin/fm-teardown.sh" task-x1 "$@"
+}
+
+test_remote_secondmate_teardown_removes_progress_observation_record() {
+  local case_dir rc
+  case_dir=$(make_remote_secondmate_case remote-progress-observation-cleanup)
+  mkdir -p "$case_dir/state/progress-observations"
+  printf 'schema=fm-progress-observation.v1\ntask_id=task-x1\n' \
+    > "$case_dir/state/progress-observations/task-x1.record"
+  printf 'schema=fm-progress-observation.v1\ntask_id=task-other\n' \
+    > "$case_dir/state/progress-observations/task-other.record"
+
+  set +e
+  run_remote_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "remote-progress-observation-cleanup: remote teardown must report success, not fail after destroying local records ($(cat "$case_dir/stderr"))"
+  assert_contains "$(cat "$case_dir/stdout")" 'teardown task-x1 complete' \
+    "remote-progress-observation-cleanup: remote teardown skipped its completion line"
+  assert_absent "$case_dir/state/progress-observations/task-x1.record" \
+    "remote-progress-observation-cleanup: remote teardown left this task's progress baseline behind"
+  [ -f "$case_dir/state/progress-observations/task-other.record" ] \
+    || fail "remote-progress-observation-cleanup: remote teardown removed an unrelated task's progress baseline"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "remote-progress-observation-cleanup: remote teardown remained incomplete"
+  pass "remote secondmate teardown retires the progress-observation record and still reports success"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2624,6 +2694,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_teardown_removes_progress_observation_record
+test_remote_secondmate_teardown_removes_progress_observation_record
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
