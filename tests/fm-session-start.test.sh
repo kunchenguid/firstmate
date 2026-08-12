@@ -778,7 +778,7 @@ SH
       done
       if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
-        "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
+        "$ROOT/bin/fm-lock.sh" bootstrap >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
       : > "$completed/$i"

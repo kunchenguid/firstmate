@@ -51,7 +51,7 @@ fi
 export CODEX_THREAD_ID="$SESSION_ID"
 
 if [ "$EVENT" = SessionStart ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
+  "$SCRIPT_DIR/fm-lock.sh" bootstrap >/dev/null 2>&1 || true
   exit 0
 fi
 [ "$EVENT" = SessionEnd ] || exit 0

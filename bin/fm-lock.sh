@@ -27,7 +27,9 @@ LOCK="$STATE/.lock"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-if [ "${1:-}" != status ]; then
+if [ "${1:-}" = bootstrap ]; then
+  fm_worker_refuse_primary_initialization "session lock initialization" || exit 1
+elif [ "${1:-}" != status ]; then
   fm_worker_refuse_unproven_session_entry "session lock acquisition" || exit 1
 fi
 

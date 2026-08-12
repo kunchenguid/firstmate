@@ -440,8 +440,21 @@ fm_worker_primary_session_entry_proven() {
   fm_worker_primary_bootstrap_proven || return 1
   root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   root_real=$(fm_worker_canonical_path "$root") || return 1
-  fm_worker_primary_attestation_matches "$root_real" && return 0
-  fm_verified_harness_ancestry_pid >/dev/null 2>&1
+  fm_worker_primary_attestation_matches "$root_real"
+}
+
+fm_worker_refuse_primary_initialization() {
+  local operation=$1
+  if fm_worker_declaration_present; then
+    fm_worker_refuse_declared_task_worker "$operation"
+    return $?
+  fi
+  if fm_worker_primary_bootstrap_proven \
+    && fm_verified_harness_ancestry_pid >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "error: $operation refused: primary initialization requires a verified harness bootstrap" >&2
+  return 1
 }
 
 fm_worker_identity_is_complete() {

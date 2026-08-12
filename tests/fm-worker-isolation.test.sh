@@ -321,15 +321,19 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
 }
 
 test_reparented_markerless_worker_is_refused() {
-  local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token
+  local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token fakebin
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
   token="primary-$RUN_TAG"
   printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
   chmod 600 "$primary_home/state/.primary-attestation"
+  fakebin=$(fm_fakebin "$TMP_ROOT/reparented-markerless")
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) printf claude ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
   (
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK="reparented-$RUN_TAG" \
     FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
     FM_PRIMARY_ATTESTATION="$token" \
+    PATH="$fakebin:$PATH" \
     bash -c '
       (
         sleep 0.2
@@ -400,6 +404,33 @@ test_primary_origin_requires_state_attestation() {
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = allowed ] || fail "a persisted state attestation rejected a genuine primary"
   pass "primary startup reuses a state-bound launch attestation"
+}
+
+test_primary_initialization_requires_explicit_bootstrap() {
+  local primary_home fakebin out status
+  primary_home=$(make_primary_home "$TMP_ROOT/initialization-path")
+  fakebin=$(fm_fakebin "$TMP_ROOT/initialization-path")
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) printf claude ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+  if out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=initialization-thread FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" "$LOCK" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "an un-attested normal lock entry must refuse even with harness ancestry"
+  if out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=initialization-thread FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" "$LOCK" bootstrap 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "the explicit primary bootstrap path must initialize the lock"
+  [ -f "$primary_home/state/.primary-attestation" ] \
+    || fail "the explicit primary bootstrap path did not persist attestation"
+  pass "primary initialization requires an explicit bootstrap path"
 }
 
 test_process_environment_requires_linux_procfs() {
@@ -715,7 +746,8 @@ test_primary_scope_requires_authoritative_primary_proof() {
   printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
   chmod 600 "$primary_home/state/.primary-attestation"
   ( cd "$primary_home" && CODEX_THREAD_ID=scope-thread FM_ROOT_OVERRIDE="$primary_home" \
-    FM_HOME="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" "$LOCK" >/dev/null ) \
+    FM_HOME="$primary_home" FM_STATE_OVERRIDE="$primary_home/state" \
+    FM_PRIMARY_ATTESTATION="$token" "$LOCK" >/dev/null ) \
     || fail "primary scope fixture could not acquire its session lock"
   out=$(cd "$primary_home" && env \
     -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME -u FM_ROOT \
@@ -1693,6 +1725,7 @@ test_primary_ancestry_refuses_unreadable_process_environment
 test_primary_ancestry_refuses_any_inherited_worker_marker
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
+test_primary_initialization_requires_explicit_bootstrap
 test_process_environment_requires_linux_procfs
 test_process_environment_newline_is_not_a_marker
 test_unreadable_task_start_proof_remains_contested

@@ -247,7 +247,7 @@ section "SESSION START - $FM_HOME"
 
 # --- 1. lock -----------------------------------------------------------
 subsection "LOCK"
-LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
+LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" bootstrap 2>&1)
 LOCK_RC=$?
 printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0

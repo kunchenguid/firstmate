@@ -105,9 +105,12 @@ SH
 }
 
 run_lock() {
-  local home=$1 thread=$2 fakebin=$3
+  local home=$1 thread=$2 fakebin=$3 token
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$home/state/.primary-attestation" 2>/dev/null || true)
   ( cd "$HOOK_ROOT" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       FM_ROOT_OVERRIDE="$HOOK_ROOT" FM_HOME="$home" CODEX_THREAD_ID="$thread" \
+      FM_PRIMARY_ATTESTATION="$token" \
       PATH="$fakebin:$BASE_PATH" bash "$LOCK" )
 }
 
@@ -260,27 +263,33 @@ test_different_threads_remain_excluded() {
 }
 
 test_grok_precedence_and_primary_lock_protection() {
-  local home fakebin grokbin sleeper out status owner
+  local home fakebin grokbin sleeper out status owner token
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 CODEX_THREAD_ID=inherited-thread \
     FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-harness.sh")
   [ "$out" = grok ] || fail "Grok did not precede inherited CODEX_THREAD_ID: $out"
 
   home=$(make_home grok-owner-format)
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$home/state/.primary-attestation")
   grokbin="$home/grokbin"
   make_any_grok_ps "$grokbin"
   ( cd "$HOOK_ROOT" && env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 \
       CODEX_THREAD_ID=inherited-thread FM_ROOT_OVERRIDE="$HOOK_ROOT" \
-      FM_HOME="$home" PATH="$grokbin:$BASE_PATH" bash "$LOCK" >/dev/null )
+      FM_HOME="$home" FM_PRIMARY_ATTESTATION="$token" \
+      PATH="$grokbin:$BASE_PATH" bash "$LOCK" >/dev/null )
   owner=$(cat "$home/state/.lock")
   case "$owner" in ''|*[!0-9]*) fail "Grok owner was incorrectly structured as Codex: $owner" ;; esac
 
   home=$(make_home grok-primary)
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$home/state/.primary-attestation")
   fakebin="$home/fakebin"
   sleep 60 & sleeper=$!
   make_live_owner_ps "$fakebin" grok
   printf '%s\n' "$sleeper" > "$home/state/.lock"
   status=0
-  out=$(FM_FAKE_LIVE_PID="$sleeper" run_lock "$home" crewmate-thread "$fakebin" 2>&1) || status=$?
+  out=$(FM_FAKE_LIVE_PID="$sleeper" FM_PRIMARY_ATTESTATION="$token" \
+    run_lock "$home" crewmate-thread "$fakebin" 2>&1) || status=$?
   expect_code 1 "$status" "Codex crewmate must not steal a live Grok primary lock"
   run_hook "$home" SessionEnd crewmate-thread
   [ "$(cat "$home/state/.lock")" = "$sleeper" ] || fail "Codex SessionEnd changed the Grok primary owner"
