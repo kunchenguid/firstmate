@@ -83,17 +83,20 @@ fm_cursor_path_is_cursor() {  # <path>
 # True when running `$1 --help` produces Cursor's own CLI identity. Bounded and
 # fail-closed: a timeout, a non-zero exit, or output without a Cursor-specific
 # marker is a refusal. Never called during a process scan.
-fm_cursor_probe_is_cursor() {  # <path>
-  local path=$1 out runner=
+fm_cursor_bounded_output() {  # <path> <args...>
+  local path=$1 runner=
+  shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
   if command -v timeout >/dev/null 2>&1; then runner=timeout
   elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
   fi
-  if [ -n "$runner" ]; then
-    out=$("$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>/dev/null) || return 1
-  else
-    return 1
-  fi
+  [ -n "$runner" ] || return 1
+  "$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
+}
+
+fm_cursor_probe_is_cursor() {  # <path>
+  local path=$1 out
+  out=$(fm_cursor_bounded_output "$path" --help) || return 1
   [ -n "$out" ] || return 1
   case "$out" in
     *"Start the Cursor Agent"*) return 0 ;;
@@ -115,6 +118,28 @@ fm_cursor_verify_executable() {  # <path>
   case "${path##*/}" in cursor-agent) return 0 ;; esac
   fm_cursor_path_is_cursor "$path" && return 0
   fm_cursor_probe_is_cursor "$path"
+}
+
+fm_cursor_list_models() {  # <path>
+  fm_cursor_bounded_output "$1" --list-models
+}
+
+fm_cursor_catalog_has_model() {  # <model>
+  local wanted=$1
+  awk -v wanted="$wanted" '
+    BEGIN { ansi = sprintf("%c\\[[0-9;]*[A-Za-z]", 27) }
+    {
+      line = $0
+      gsub(ansi, "", line)
+      separator = index(line, " - ")
+      if (!separator) next
+      id = substr(line, 1, separator - 1)
+      sub(/^[[:space:]]+/, "", id)
+      sub(/[[:space:]]+$/, "", id)
+      if (id == wanted) found = 1
+    }
+    END { exit found ? 0 : 1 }
+  '
 }
 
 # Print the canonical absolute path of the Cursor executable to launch, or

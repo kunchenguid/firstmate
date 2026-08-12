@@ -1247,6 +1247,14 @@ case "$HARNESS" in
     # missing install a loud spawn refusal instead of a pane that dies with a
     # command-not-found the supervisor would read as a wedged worker.
     CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
+    if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+      if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
+        if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then
+          echo "error: Cursor model '$MODEL' is not available from '$CURSOR_BIN --list-models'; choose an id listed by that command or omit --model" >&2
+          exit 1
+        fi
+      fi
+    fi
     ;;
 esac
 

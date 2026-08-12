@@ -60,6 +60,20 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+  cat > "$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -113,6 +127,8 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
+    FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -524,6 +540,42 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
+test_cursor_refuses_model_absent_from_live_catalog() {
+  local rec id out status
+  id=profile-cursor-unsupported-z6d
+  rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.5)
+  status=$?
+  expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
+  assert_contains "$out" "Cursor model 'cursor-grok-4.5' is not available" \
+    "cursor model refusal did not identify the unavailable model"
+  assert_contains "$out" "--list-models" \
+    "cursor model refusal did not tell the caller how to find valid ids"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor model refusal must happen before launch"
+  pass "cursor refuses model ids absent from its resolved binary's live catalog"
+}
+
+test_cursor_failed_catalog_probe_does_not_block_spawn() {
+  local rec id out status launch
+  id=profile-cursor-catalog-unreachable-z6e
+  rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
+  read_case_record "$rec"
+
+  FM_TEST_CURSOR_LIST_STATUS=124 \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model cursor-catalog-unreachable)
+  status=$?
+  expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'cursor-catalog-unreachable'" \
+    "failed catalog lookup incorrectly removed the requested model"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
+  pass "cursor preserves the requested model when its live catalog is unreachable"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -775,6 +827,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_refuses_model_absent_from_live_catalog
+test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
