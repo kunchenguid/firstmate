@@ -117,6 +117,7 @@ Watcher and turn-end operational prompts call Pi's supported `sendUserMessage(..
 They do not enter Feishu state.
 
 An accepted Feishu event remains pending until the exact bound live Pi session and current transport identity are available.
+Transient contention from a live Feishu state-lock owner leaves accepted events pending, and the existing bridge pump retries with bounded backoff after contention clears without restarting Pi or the transport or adding another scheduler.
 The bridge records one owner-fenced submission attempt and calls `sendUserMessage` with Pi's native `steer` mode.
 While Pi is busy, each accepted Feishu message is delivered after the current Assistant turn finishes its tool calls and before the next model call.
 While Pi is idle, the same call starts a normal turn immediately.
@@ -161,6 +162,7 @@ Durable accepted events, ledgers, pending indexes, Assistant-registration intent
 Directories are mode `0700` and files are mode `0600`.
 Raw identity is never used as a filename.
 Symlinks, hardlinks, partial files, malformed schemas, cross-record mismatches, and cross-home paths are rejected.
+A live lock owner is distinguishable from stale dead-owner reclamation, a fresh dead owner still inside the stale-owner grace period, and malformed or unsafe lock state; only live-owner contention is retried by the active ingress pump.
 
 Healthy normal startup prints no Feishu status or success line.
 Public status shows only enabled state, binding status, generation, body-free transport phase, and aggregate counts.
