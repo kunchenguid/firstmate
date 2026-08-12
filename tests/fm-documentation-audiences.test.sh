@@ -131,6 +131,11 @@ MD
   "$CHECK" --root "$repo" >/dev/null \
     || fail "structural checker rejected legitimate maintainer evidence prose"
 
+  printf '%s\n' '# Agent runtime' 'one two three four five six seven' > "$repo/AGENTS.md"
+  git -C "$repo" add AGENTS.md
+  "$CHECK" --root "$repo" >/dev/null \
+    || fail "agent-runtime word limit rejected a document at the exact boundary"
+
   printf '%s\n' '# Agent runtime' 'one two three four five six seven eight nine' > "$repo/AGENTS.md"
   git -C "$repo" add AGENTS.md
   run_expect_failure "AGENTS.md exceeds agent-runtime word limit" "$CHECK" --root "$repo"
