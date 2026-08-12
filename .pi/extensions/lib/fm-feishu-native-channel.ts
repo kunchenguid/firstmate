@@ -310,7 +310,7 @@ function flushAssistantOutbound(runtime: ActiveRuntime): void {
         const message = result.status === "secret-refused"
           ? "Feishu send refused: a finalized Assistant response matched a fixed credential pattern and stayed private."
           : result.status === "chunk-refused"
-            ? "Feishu send refused: deterministic chunking could not preserve a complete URL within the platform limit."
+            ? "Feishu send refused: deterministic chunking could not preserve a complete URL or Markdown construct within the platform limit."
             : "Feishu send refused: a finalized Assistant response exceeded the local output or free-space safety threshold and stayed private.";
         runtime.ctx.ui.notify(message, "error");
         runtime.pi.appendEntry("fm-feishu-local-alert", { kind: result.status, message, alertId: result.alert.id, createdAt: new Date().toISOString() });

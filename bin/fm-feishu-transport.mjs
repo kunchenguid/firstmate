@@ -234,17 +234,23 @@ function sdkFailureIsAuthentication(error) {
   return status === 401 || status === 403;
 }
 
+function renderMarkdownCard(markdown) {
+  return JSON.stringify({
+    config: { wide_screen_mode: true },
+    elements: [{ tag: "markdown", content: markdown }],
+  });
+}
+
 async function sendOneOutbound(client, binding, ownerFence) {
   if (!transportHealthAllowsDispatch(HOME, binding)) return false;
   assertOwnerAndBinding(binding, ownerFence);
   const claim = claimNextOutbound(HOME);
   if (!claim) return false;
-  const content = JSON.stringify({ text: claim.chunk.chunk });
   const payload = {
     data: {
       receive_id: claim.outbox.destination_chat_id,
-      content,
-      msg_type: "text",
+      content: renderMarkdownCard(claim.chunk.chunk),
+      msg_type: "interactive",
       uuid: claim.chunk.idempotency_key,
     },
     params: { receive_id_type: "chat_id" },

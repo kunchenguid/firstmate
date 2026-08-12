@@ -1547,11 +1547,111 @@ function packUnits(units, maxBytes) {
   return chunks;
 }
 
+function markdownFenceEnd(text, index) {
+  if (index !== 0 && text[index - 1] !== "\n") return -1;
+  let opener = index;
+  while (opener < text.length && opener - index < 3 && text[opener] === " ") opener += 1;
+  const marker = text[opener];
+  if (marker !== "`" && marker !== "~") return -1;
+  let markerEnd = opener;
+  while (text[markerEnd] === marker) markerEnd += 1;
+  const markerLength = markerEnd - opener;
+  if (markerLength < 3) return -1;
+  const openerLineEnd = text.indexOf("\n", markerEnd);
+  if (marker === "`" && text.slice(markerEnd, openerLineEnd < 0 ? text.length : openerLineEnd).includes("`")) return -1;
+  let lineStart = openerLineEnd < 0 ? text.length : openerLineEnd + 1;
+  while (lineStart < text.length) {
+    let candidate = lineStart;
+    while (candidate < text.length && candidate - lineStart < 3 && text[candidate] === " ") candidate += 1;
+    let candidateEnd = candidate;
+    while (text[candidateEnd] === marker) candidateEnd += 1;
+    const lineEnd = text.indexOf("\n", candidateEnd);
+    const remainderEnd = lineEnd < 0 ? text.length : lineEnd;
+    if (candidateEnd - candidate >= markerLength && /^[ \t]*$/.test(text.slice(candidateEnd, remainderEnd))) {
+      return lineEnd < 0 ? text.length : lineEnd + 1;
+    }
+    lineStart = lineEnd < 0 ? text.length : lineEnd + 1;
+  }
+  return text.length;
+}
+
+function markdownCodeSpanEnd(text, index) {
+  if (text[index] !== "`") return -1;
+  let openerEnd = index;
+  while (text[openerEnd] === "`") openerEnd += 1;
+  const markerLength = openerEnd - index;
+  for (let cursor = openerEnd; cursor < text.length;) {
+    const candidate = text.indexOf("`", cursor);
+    if (candidate < 0) return -1;
+    let candidateEnd = candidate;
+    while (text[candidateEnd] === "`") candidateEnd += 1;
+    if (candidateEnd - candidate === markerLength) return candidateEnd;
+    cursor = candidateEnd;
+  }
+  return -1;
+}
+
+function markdownLinkEnd(text, index) {
+  const bracket = text[index] === "!" && text[index + 1] === "[" ? index + 1 : index;
+  if (text[bracket] !== "[") return -1;
+  let depth = 1;
+  let cursor = bracket + 1;
+  for (; cursor < text.length && depth > 0; cursor += 1) {
+    if (text[cursor] === "\\") cursor += 1;
+    else if (text[cursor] === "[") depth += 1;
+    else if (text[cursor] === "]") depth -= 1;
+  }
+  if (depth !== 0 || text[cursor] !== "(") return -1;
+  depth = 1;
+  for (cursor += 1; cursor < text.length; cursor += 1) {
+    if (text[cursor] === "\\") cursor += 1;
+    else if (text[cursor] === "(") depth += 1;
+    else if (text[cursor] === ")" && --depth === 0) return cursor + 1;
+  }
+  return -1;
+}
+
+function markdownAutolinkEnd(text, index) {
+  if (text[index] !== "<" || !/^https?:\/\//.test(text.slice(index + 1))) return -1;
+  const end = text.indexOf(">", index + 1);
+  if (end < 0 || /\s/.test(text.slice(index + 1, end))) return -1;
+  return end + 1;
+}
+
+function markdownUnits(text, maxBytes) {
+  const units = [];
+  let plainStart = 0;
+  let cursor = 0;
+  while (cursor < text.length) {
+    let protectedEnd = markdownFenceEnd(text, cursor);
+    if (protectedEnd < 0) protectedEnd = markdownCodeSpanEnd(text, cursor);
+    if (protectedEnd < 0) protectedEnd = markdownLinkEnd(text, cursor);
+    if (protectedEnd < 0) protectedEnd = markdownAutolinkEnd(text, cursor);
+    if (protectedEnd < 0) {
+      cursor += 1;
+      continue;
+    }
+    if (plainStart < cursor) {
+      const plain = text.slice(plainStart, cursor);
+      units.push(...plain.split(/(?<=\n\n)/u).flatMap((paragraph) => splitUnit(paragraph, maxBytes)));
+    }
+    const protectedUnit = text.slice(cursor, protectedEnd);
+    if (utf8Bytes(protectedUnit) > maxBytes) throw new Error("a complete Markdown construct exceeds the Feishu chunk size");
+    units.push(protectedUnit);
+    cursor = protectedEnd;
+    plainStart = cursor;
+  }
+  if (plainStart < text.length) {
+    const plain = text.slice(plainStart);
+    units.push(...plain.split(/(?<=\n\n)/u).flatMap((paragraph) => splitUnit(paragraph, maxBytes)));
+  }
+  return units;
+}
+
 export function deterministicChunks(text, maxBytes = DEFAULT_MAX_OUTBOUND_CHUNK_BYTES) {
   maxBytes = positiveInteger(maxBytes, DEFAULT_MAX_OUTBOUND_CHUNK_BYTES);
   if (utf8Bytes(text) <= maxBytes) return [text];
-  const paragraphs = text.split(/(?<=\n\n)/u);
-  const chunks = packUnits(paragraphs.flatMap((paragraph) => splitUnit(paragraph, maxBytes)), maxBytes);
+  const chunks = packUnits(markdownUnits(text, maxBytes), maxBytes);
   if (chunks.join("") !== text) throw new Error("Feishu chunking changed Assistant text");
   return chunks;
 }
@@ -1817,7 +1917,7 @@ export function registerAssistantOutbound(home, input) {
   try {
     chunks = deterministicChunks(text, input.maxChunkBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_CHUNK_BYTES);
   } catch (error) {
-    const alert = createLocalAlert(paths, "outbound-chunk-refused", eventId, "A finalized Assistant response could not be split without changing a complete URL. It stayed local.");
+    const alert = createLocalAlert(paths, "outbound-chunk-refused", eventId, "A finalized Assistant response could not be split without breaking a complete URL or Markdown construct. It stayed local.");
     return { status: "chunk-refused", error: String(error), alert };
   }
   const filename = `${sha(eventId)}.json`;

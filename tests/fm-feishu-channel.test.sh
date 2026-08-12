@@ -337,6 +337,24 @@ assert(String(wrong.statuses.get("fm-feishu")).includes("another Pi session"));
 const chunks = deterministicChunks("alpha\n\nhttps://example.test/a/complete/url\n\nomega", 36);
 assert.equal(chunks.join(""), "alpha\n\nhttps://example.test/a/complete/url\n\nomega");
 assert(chunks.some((chunk) => chunk.includes("https://example.test/a/complete/url")));
+const markdownText = [
+  "Intro **bold** and `inline code`.",
+  "",
+  "[link](https://example.test/markdown)",
+  "",
+  "```js",
+  'const marker = "<&>";',
+  "```",
+  "",
+  "Tail with a snowman ☃.",
+].join("\n");
+const markdownChunks = deterministicChunks(markdownText, 60);
+assert(markdownChunks.length > 1, "Markdown chunk fixture did not cross a deterministic boundary");
+assert.equal(markdownChunks.join(""), markdownText, "Markdown-aware chunking changed finalized Assistant text");
+assert(markdownChunks.some((chunk) => chunk.includes("`inline code`")), "Markdown chunking split an inline code span");
+assert(markdownChunks.some((chunk) => chunk.includes("[link](https://example.test/markdown)")), "Markdown chunking split a link");
+assert(markdownChunks.some((chunk) => chunk.includes('```js\nconst marker = "<&>";\n```')), "Markdown chunking split a fenced code block");
+assert.throws(() => deterministicChunks(`\`${"x".repeat(80)}\``, 60), /complete Markdown construct/, "oversize Markdown syntax was split into malformed cards");
 
 const unsafeHome = join(home, "unsafe-home");
 mkdirSync(join(unsafeHome, "data"), { recursive: true });
@@ -676,8 +694,16 @@ async function send(kind, payload) {
     try { mkdirSync(lock); }
     catch { if (process.env.FM_FAKE_SDK_OVERLAP) writeFileSync(process.env.FM_FAKE_SDK_OVERLAP, "overlap\n"); }
   }
-  const text = JSON.parse(payload.data.content).text;
-  log({ type: "send", kind, uuid: payload.data.uuid, text, replyTo: payload.path?.message_id ?? null, receiveId: payload.data.receive_id ?? null });
+  const card = JSON.parse(payload.data.content);
+  const markdown = card?.elements?.length === 1 && card.elements[0]?.tag === "markdown"
+    ? card.elements[0].content
+    : undefined;
+  log({ type: "send", kind, uuid: payload.data.uuid, msgType: payload.data.msg_type, card, markdown, replyTo: payload.path?.message_id ?? null, receiveId: payload.data.receive_id ?? null });
+  if (payload.data.msg_type !== "interactive" || typeof markdown !== "string" || card?.config?.wide_screen_mode !== true) {
+    const error = new Error("unsupported outbound fixture format");
+    error.response = { status: 400, data: { code: 230099 } };
+    throw error;
+  }
   const mode = process.env.FM_FAKE_SDK_SEND_MODE || "success";
   const mark = process.env.FM_FAKE_SDK_SEND_MARK;
   if (mode === "ambiguous-once" && mark && !existsSync(mark)) {
@@ -693,6 +719,11 @@ async function send(kind, payload) {
     const error = new Error("rate limit fixture");
     error.response = { status: 429, headers: { "retry-after": "1" }, data: { code: 99991400 } };
     throw error;
+  }
+  if (mode === "unsupported-once" && mark && !existsSync(mark)) {
+    writeFileSync(mark, "unsupported\n");
+    if (lock) rmSync(lock, { recursive: true, force: true });
+    return { code: 230099, msg: "unsupported interactive fixture" };
   }
   await sleep(Number(process.env.FM_FAKE_SDK_SEND_DELAY_MS || 0));
   let count = 0;
@@ -956,8 +987,19 @@ import { bindSession, createPairing, registerAssistantOutbound } from "./bin/fm-
 const home = process.env.FM_HOME;
 createPairing(home, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
 const binding = bindSession(home, { sessionId: process.env.SID, sessionFile: process.env.SESSION_FILE, sessionCwd: process.env.SESSION_DIR, headerId: process.env.SID, headerCwd: process.env.SESSION_DIR });
+const markdown = [
+  "# Markdown reply",
+  "",
+  'Special characters: "quotes", \\ backslash, <tag>, &, and snowman ☃.',
+  "",
+  "[full link](https://example.test/kept?x=1&y=two) and `inline *code*`.",
+  "",
+  "```sh",
+  `printf '%s\\n' 'literal $(touch ${process.env.TOUCH_SENTINEL})'`,
+  "```",
+].join("\n");
 const result = registerAssistantOutbound(home, {
-  text: `literal $(touch ${process.env.TOUCH_SENTINEL}) https://example.test/kept`,
+  text: markdown,
   assistantEntryId: "feed0001",
   sessionOrder: 1,
   sessionEntryTimestamp: "2026-08-12T00:00:01.000Z",
@@ -1048,8 +1090,23 @@ const events = readdirSync(dir).filter((name) => name.endsWith(".json")).map((na
 assert.deepEqual(events.map((event) => event.message_id), ["om_sdkA1234", "om_sdkB1234"]);
 assert(events.every((event) => event.transport === "feishu-sdk-long-connection"));
 JS
-node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);const sends=rows.filter(r=>r.type==="send");if(sends.length!==2||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.kind!=="create"||r.receiveId!=="oc_chat1234"||r.replyTo!==null)||!rows.some(r=>r.type==="ws-start")||!rows.some(r=>r.type==="client"&&r.hasSecret===true)||rows.some(r=>JSON.stringify(r).includes(process.argv[2])))process.exit(1)' "$SDK_LOG" "$APP_SECRET" \
-  || fail "SDK startup, canonical bound-chat message.create, stable UUID, or credential-redaction evidence was wrong"
+if ! FM_HOME="$TRANSPORT_HOME" node --input-type=module - "$SDK_LOG" "$APP_SECRET" <<'JS'
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+const [logPath, secret] = process.argv.slice(2);
+const rows = readFileSync(logPath, "utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);
+const sends = rows.filter((row) => row.type === "send");
+const outboxDir = join(process.env.FM_HOME, "state", "feishu", "outbox");
+const outbox = readdirSync(outboxDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(outboxDir, name), "utf8"))).find((record) => record.assistant_entry_id === "feed0001");
+if (!outbox || sends.length !== 2 || new Set(sends.map((row) => row.uuid)).size !== 1) process.exit(1);
+if (sends.some((row) => row.kind !== "create" || row.receiveId !== "oc_chat1234" || row.replyTo !== null || row.msgType !== "interactive")) process.exit(1);
+if (sends.some((row) => row.markdown !== outbox.text || row.card?.elements?.length !== 1 || row.card.elements[0]?.tag !== "markdown" || row.card?.config?.wide_screen_mode !== true)) process.exit(1);
+if (!sends.every((row) => row.markdown.includes("\n") && row.markdown.includes("[full link](https://example.test/kept?x=1&y=two)") && row.markdown.includes("`inline *code*`") && row.markdown.includes("```sh"))) process.exit(1);
+if (!rows.some((row) => row.type === "ws-start") || !rows.some((row) => row.type === "client" && row.hasSecret === true) || rows.some((row) => JSON.stringify(row).includes(secret))) process.exit(1);
+JS
+then
+  fail "SDK Markdown card encoding, canonical bound-chat message.create, stable UUID, or credential-redaction evidence was wrong"
+fi
 [ "$(FM_HOME="$TRANSPORT_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).outbound_pending)))')" -eq 0 ] \
   || fail "SDK success did not publish a durable outbound receipt"
 [ -n "$(find "$TRANSPORT_HOME/state/feishu/quarantine" -type f -name '*.json' -print -quit)" ] \
@@ -1058,7 +1115,24 @@ node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8
 FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
 import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const binding = readActiveBinding(process.env.FM_HOME);
-const result = registerAssistantOutbound(process.env.FM_HOME, { text: "server delayed SDK retry", assistantEntryId: "feed0002", sessionOrder: 2, sessionEntryTimestamp: "2026-08-12T00:00:02.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
+const result = registerAssistantOutbound(process.env.FM_HOME, { text: "Unsupported delivery keeps **Markdown** with `code` and no plain-text fallback.", assistantEntryId: "feed0002", sessionOrder: 2, sessionEntryTimestamp: "2026-08-12T00:00:02.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
+if (result.status !== "registered") throw new Error(JSON.stringify(result));
+JS
+rm -f "$SDK_SEND_MARK"
+: > "$SDK_LOG"
+env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=unsupported-once FM_FEISHU_ONCE_SETTLE_MS=20 \
+  node bin/fm-feishu-transport.mjs run --once
+sleep 1.1
+env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=unsupported-once FM_FEISHU_ONCE_SETTLE_MS=20 \
+  node bin/fm-feishu-transport.mjs run --once
+# shellcheck disable=SC2016 # Backticks are literal JavaScript fixture data.
+node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="interactive"||r.markdown!=="Unsupported delivery keeps **Markdown** with `code` and no plain-text fallback."||Object.hasOwn(r.card,"text")))process.exit(1)' "$SDK_LOG" \
+  || fail "an unsupported Markdown delivery changed payload type, content, or stable retry identity"
+
+FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
+import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
+const binding = readActiveBinding(process.env.FM_HOME);
+const result = registerAssistantOutbound(process.env.FM_HOME, { text: "server delayed SDK retry", assistantEntryId: "feed0003", sessionOrder: 3, sessionEntryTimestamp: "2026-08-12T00:00:03.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
 if (result.status !== "registered") throw new Error(JSON.stringify(result));
 JS
 rm -f "$SDK_SEND_MARK"
@@ -1068,8 +1142,8 @@ env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=rate-lim
 sleep 1.1
 env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=rate-limit-once FM_FEISHU_ONCE_SETTLE_MS=20 \
   node bin/fm-feishu-transport.mjs run --once
-node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||sends[1].at-sends[0].at<900||new Set(sends.map(r=>r.uuid)).size!==1)process.exit(1)' "$SDK_LOG" \
-  || fail "SDK Retry-After mapping shortened the delay or changed UUID"
+node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||sends[1].at-sends[0].at<900||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="interactive"))process.exit(1)' "$SDK_LOG" \
+  || fail "SDK Retry-After mapping shortened the delay, changed UUID, or fell back from Markdown"
 
 rm -f "$SDK_SEND_MARK" "$SDK_OVERLAP" "$SDK_SEND_LOCK"
 : > "$SDK_LOG"
@@ -1086,8 +1160,19 @@ done
 FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
 import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const binding = readActiveBinding(process.env.FM_HOME);
-const result = registerAssistantOutbound(process.env.FM_HOME, { text: "single flight SDK send", assistantEntryId: "feed0003", sessionOrder: 3, sessionEntryTimestamp: "2026-08-12T00:00:03.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
-if (result.status !== "registered") throw new Error(JSON.stringify(result));
+const text = [
+  "Chunk one has **bold** and `inline code`.",
+  "",
+  "[chunk-safe link](https://example.test/chunk-safe)",
+  "",
+  "```js",
+  'const value = "<&>";',
+  "```",
+  "",
+  "Multiline tail ☃.",
+].join("\n");
+const result = registerAssistantOutbound(process.env.FM_HOME, { text, assistantEntryId: "feed0004", sessionOrder: 4, sessionEntryTimestamp: "2026-08-12T00:00:04.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation, maxChunkBytes: 60 });
+if (result.status !== "registered" || result.chunks < 2) throw new Error(JSON.stringify(result));
 JS
 settled=0
 for _ in $(seq 1 150); do
@@ -1103,6 +1188,20 @@ if [ "$settled" -ne 1 ]; then
   fail "serialized SDK outbound send did not settle"
 fi
 [ ! -e "$SDK_OVERLAP" ] || fail "SDK outbound timer overlapped an active send"
+FM_HOME="$TRANSPORT_HOME" node --input-type=module - "$SDK_LOG" <<'JS'
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+const rows = readFileSync(process.argv[2], "utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);
+const sends = rows.filter((row) => row.type === "send");
+const outboxDir = join(process.env.FM_HOME, "state", "feishu", "outbox");
+const outbox = readdirSync(outboxDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(outboxDir, name), "utf8"))).find((record) => record.assistant_entry_id === "feed0004");
+assert(outbox && outbox.chunks.length > 1, "multi-chunk Markdown outbox was absent");
+assert.equal(sends.length, outbox.chunks.length, "one Markdown card was not sent per deterministic chunk");
+assert.equal(sends.map((row) => row.markdown).join(""), outbox.text, "Markdown card chunks changed finalized Assistant text");
+assert.deepEqual(sends.map((row) => row.uuid), outbox.chunks.map((chunk) => chunk.idempotency_key), "Markdown chunk delivery changed stable identities or order");
+assert(sends.every((row) => row.msgType === "interactive" && row.card?.elements?.length === 1 && row.card.elements[0]?.tag === "markdown"), "a chunk did not use the supported Markdown card envelope");
+JS
 
 OWNER_BACKUP="$TMP_ROOT/owner.json"
 cp "$OWNER_PATH" "$OWNER_BACKUP"
@@ -1115,4 +1214,4 @@ cp "$OWNER_BACKUP" "$OWNER_PATH"
 FM_HOME="$TRANSPORT_HOME" bash bin/fm-feishu-transport.sh stop >"$TMP_ROOT/owner-stop.out"
 grep -Fq 'feishu transport stopped' "$TMP_ROOT/owner-stop.out" || fail "verified SDK transport owner did not stop gracefully"
 
-pass "official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized outbound"
+pass "official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized Markdown outbound"
