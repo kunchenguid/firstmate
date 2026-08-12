@@ -267,6 +267,61 @@ SH
   pass "a Grok task whose session lost the fleet lock stays dormant and does not re-arm"
 }
 
+test_actionable_close_after_away_transfer_stays_dormant() {
+  local home arm out pid count
+  home=$(make_home actionable-away-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '1\t1\tsignal\ttask\tsignal: away-owned action\n' > "$FM_HOME/state/.wake-queue"
+: > "$FM_HOME/state/.afk"
+printf 'signal: away-owned action\n'
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/.afk" || fail "actionable away-transfer arm did not finish"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "actionable close completed after away mode took supervision"
+  [ -s "$home/state/.wake-queue" ] || fail "old Grok owner consumed away mode's durable wake"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "an actionable close stays dormant when away mode takes supervision"
+}
+
+test_actionable_close_after_session_transfer_stays_dormant() {
+  local home arm out pid replacement
+  home=$(make_home actionable-session-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  replacement=$$
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '1\t1\tsignal\ttask\tsignal: successor-owned action\n' > "$FM_HOME/state/.wake-queue"
+printf '%s\n' "$REPLACEMENT_OWNER" > "$FM_HOME/state/.lock"
+printf 'signal: successor-owned action\n'
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" REPLACEMENT_OWNER="$replacement" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$home/state/.lock" 2>/dev/null || true)" = "$replacement" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$home/state/.lock")" = "$replacement" ] || fail "actionable session-transfer arm did not change ownership"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "actionable close completed after the session lock transferred"
+  [ -s "$home/state/.wake-queue" ] || fail "old Grok owner consumed the successor's durable wake"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "an actionable close stays dormant after session-lock ownership transfers"
+}
+
 test_owner_signal_retires_arm_child() {
   local home arm out pid child status
   home=$(make_home signal-cleanup)
@@ -300,4 +355,6 @@ test_malformed_recovery_fails_closed
 test_no_supervision_need_stays_dormant_until_work_returns
 test_away_mode_stays_dormant_until_normal_supervision_returns
 test_changed_session_owner_stays_dormant
+test_actionable_close_after_away_transfer_stays_dormant
+test_actionable_close_after_session_transfer_stays_dormant
 test_owner_signal_retires_arm_child

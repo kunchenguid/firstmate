@@ -173,6 +173,13 @@ while :; do
   wait "$reader" 2>/dev/null || true
   reader=
 
+  if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; then
+    rm -rf "$stream_dir"
+    stream_dir=
+    wait_until_needed
+    continue
+  fi
+
   if [ "$rc" -ne 0 ] || grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
     if [ "$rc" -eq 0 ]; then rc=1; fi
     if ! grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
