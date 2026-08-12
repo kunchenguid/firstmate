@@ -1077,7 +1077,7 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
 # exists alongside it, never right after workspace creation - and this
 # function independently re-checks the tab count as a second layer.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
-  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id agent_out agent_status
+  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id state
   local focus_before active_tab
   [ -n "$tab_id" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
@@ -1087,9 +1087,8 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   [ "$current_label" = "1" ] || return 0
   pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
   [ -n "$pane_id" ] || return 0
-  agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
-  agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-  [ "$agent_status" = working ] && return 0
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  [ "$state" = no-agent ] || return 1
   case "$close_mode" in
     direct) ;;
     focus-preserving)
@@ -1647,12 +1646,45 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
 # fm_backend_herdr_projection_cleanup_exact: same-process abort cleanup for a
 # projection whose create calls returned complete exact IDs.
 # It performs no lookup and never calls workspace close.
-fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-pane>
-  local session=$1 task_pane=$2 seeded_pane=$3
-  [ -z "$task_pane" ] || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" || true
-  if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
+fm_backend_herdr_projection_cleanup_exact() {  # <session> <workspace> <task-tab> <task-pane> <seeded-tab> <seeded-pane> <task-label> <harness> <task> <path> <home>
+  local session=$1 workspace=$2 task_tab=$3 task_pane=$4 seeded_tab=$5 seeded_pane=$6
+  local task_label=$7 harness=$8 task=$9 path=${10} home=${11} task_state seeded_state status=0
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$task_tab" ] && [ -n "$task_pane" ] \
+    && [ -n "$task_label" ] && [ -n "$harness" ] && [ -n "$task" ] \
+    && [ -n "$path" ] && [ -n "$home" ] || return 1
+  task_state=$(fm_backend_herdr_pane_agent_state "$session" "$task_pane")
+  case "$task_state" in
+    live)
+      if ! fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$session" "$task_pane" live "$workspace" "$task_tab" "$task_label" \
+        "$harness" "$task" "$path" "$home"; then
+        status=1
+      fi
+      ;;
+    no-agent)
+      if ! fm_backend_herdr_close_tab_focus_preserving \
+        "$session" "$workspace" "$task_tab" "" husk "$task_pane"; then
+        status=1
+      fi
+      ;;
+    *) status=1 ;;
+  esac
+  if [ -n "$seeded_tab" ] || [ -n "$seeded_pane" ]; then
+    if [ -z "$seeded_tab" ] || [ -z "$seeded_pane" ] || [ "$seeded_pane" = "$task_pane" ]; then
+      return 1
+    fi
+    seeded_state=$(fm_backend_herdr_pane_agent_state "$session" "$seeded_pane")
+    case "$seeded_state" in
+      no-agent)
+        if ! fm_backend_herdr_close_tab_focus_preserving \
+          "$session" "$workspace" "$seeded_tab" "" husk "$seeded_pane"; then
+          status=1
+        fi
+        ;;
+      *) status=1 ;;
+    esac
   fi
+  return "$status"
 }
 
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
