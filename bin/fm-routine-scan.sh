@@ -102,6 +102,12 @@ if [ "$ROUTINE_ACK" -eq 0 ]; then
 fi
 [ -d "$STATE" ] && [ ! -L "$STATE" ] \
   || { routine_error "state directory is unavailable: $STATE"; exit 1; }
+[ ! -L "$FIRED" ] \
+  || { routine_error "fired routine state is unavailable: $FIRED"; exit 1; }
+if [ -e "$FIRED" ]; then
+  [ -f "$FIRED" ] \
+    || { routine_error "fired routine state is unavailable: $FIRED"; exit 1; }
+fi
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
