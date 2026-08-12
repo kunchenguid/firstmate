@@ -5,7 +5,8 @@ Audience: maintainer verification.
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The existing runner and Lavish protocol evidence was verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The home-affine arming and foreign-shadow guarantees were verified on 2026-08-12 in isolated fixture homes with an isolated claim root by `tests/fm-procevent.test.sh` (`all procevent tests passed`), `tests/fm-watch-triage.test.sh` (47/47), and `tests/fm-watch-arm.test.sh` (14/14).
 
 ## The published Lavish poll interface the adapter wraps
 
