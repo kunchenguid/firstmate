@@ -317,12 +317,16 @@ nm_ci_checks_state() {
 #
 # This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
 # expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
-# matched id via `axi status --run <id>`. Verified against the real installed
-# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
-# there is no runs-listing subcommand under `axi` at all, so that table never
-# appears and the lookup was silently dead code; whenever the bare `axi
-# status` answer was not this crew's own branch, attribution always failed and
-# the caller fell straight through to the pane/log fallback below. (The
+# matched id via `axi status --run <id>`. Verified against the then-installed
+# CLI (v1.32.2): the `axi` surface exposed only abort/logs/respond/run/status,
+# so that table never appeared and the lookup was silently dead code; whenever
+# the bare `axi status` answer was not this crew's own branch, attribution
+# always failed and the caller fell straight through to the pane/log fallback
+# below. (v1.46.0's bare `axi` home view DOES now emit
+# `runs[N]{id,branch,status,head,pr}` with run ids, verified 2026-08-12 - but
+# it reports the same current head this listing does, and `axi status --run`
+# carries no branch_sync for a run bound to another branch, so switching to it
+# would buy no attribution this path does not already have.) (The
 # PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
 # a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
 # file's history - but this cross-branch path was independently confirmed
