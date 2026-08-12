@@ -87,7 +87,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf 'Delivery contract: mode=no-mistakes\nSurface contract: non-web\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -130,6 +130,40 @@ run_spawn() {
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
+}
+
+test_ship_spawn_rejects_missing_surface_contract() {
+  local rec id out status
+  id=profile-missing-surface-z9
+  rec=$(make_spawn_case missing-surface claude "$id")
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=no-mistakes\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "ship spawn with no surface contract must fail"
+  assert_contains "$out" "must contain exactly one Surface contract" \
+    "missing surface contract refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "missing surface contract refusal still wrote task metadata"
+  pass "fm-spawn: missing ship surface contract refuses before launch"
+}
+
+test_ship_spawn_rejects_web_without_visual_gate_contract() {
+  local rec id out status
+  id=profile-missing-web-gate-z9
+  rec=$(make_spawn_case missing-web-gate claude "$id")
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=no-mistakes\nSurface contract: web\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "web ship spawn without its visual gate contract must fail"
+  assert_contains "$out" "declares web but lacks the required Web gate contract" \
+    "web gate contract refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "web gate contract refusal still wrote task metadata"
+  pass "fm-spawn: web surface without visual gate contract refuses before launch"
 }
 
 read_case_record() {
@@ -923,6 +957,8 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
+test_ship_spawn_rejects_missing_surface_contract
+test_ship_spawn_rejects_web_without_visual_gate_contract
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

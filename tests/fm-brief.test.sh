@@ -245,7 +245,7 @@ ROWS
 }
 
 test_ship_web_surface_is_required_and_closed_set() {
-  local home out status
+  local home out status duplicate
   home="$TMP_ROOT/web-surface-required-home"
   mkdir -p "$home/data"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" missing-web-surface website --mode no-mistakes 2>&1)
@@ -255,6 +255,15 @@ test_ship_web_surface_is_required_and_closed_set() {
     "missing web-surface declaration did not explain the fail-closed requirement"
   assert_absent "$home/data/missing-web-surface/brief.md" \
     "ship brief without web-surface declaration still wrote a brief"
+
+  duplicate=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" duplicate-web-surface website \
+    --mode no-mistakes --web --no-web 2>&1)
+  status=$?
+  expect_code 1 "$status" "repeated web-surface declarations must fail"
+  assert_contains "$duplicate" "--web and --no-web may be supplied only once" \
+    "repeated web-surface declaration did not fail closed"
+  assert_absent "$home/data/duplicate-web-surface/brief.md" \
+    "repeated web-surface declaration still wrote a brief"
   pass "fm-brief.sh: ship web-surface declaration is mandatory and fail-closed"
 }
 
@@ -386,7 +395,7 @@ test_ship_project_memory_wording() {
 }
 
 test_web_ship_brief_requires_visual_verification() {
-  local home web nonweb
+  local home web nonweb gate_line done_line
   home="$TMP_ROOT/web-visual-gate-home"
   mkdir -p "$home/data"
 
@@ -394,6 +403,10 @@ test_web_ship_brief_requires_visual_verification() {
     --mode no-mistakes --web >/dev/null 2>&1 \
     || fail "web ship brief should scaffold successfully"
   web="$home/data/web-visual-gate-a1/brief.md"
+  grep -qx "Surface contract: web" "$web" \
+    || fail "web ship brief missing its machine-readable surface contract"
+  grep -qx "Web gate contract: custom-domain/interceptor/revision-marker/screenshot" "$web" \
+    || fail "web ship brief missing its machine-readable visual gate contract"
   assert_grep "custom production domain" "$web" \
     "web ship brief missing custom production domain verification"
   assert_grep "fresh-browser visual verification with the existing Interceptor skill" "$web" \
@@ -406,11 +419,17 @@ test_web_ship_brief_requires_visual_verification() {
     "web ship brief missing screenshot evidence"
   assert_grep "HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as insufficient" "$web" \
     "web ship brief missing explicit HTTP-only rejection"
+  gate_line=$(grep -n '^## Website deployment completion gate$' "$web" | cut -d: -f1)
+  done_line=$(grep -n 'append `done:' "$web" | head -n 1 | cut -d: -f1)
+  [ -n "$gate_line" ] && [ -n "$done_line" ] && [ "$gate_line" -lt "$done_line" ] \
+    || fail "web visual gate appeared after the terminal done instruction"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-ship-a2 website \
     --mode no-mistakes --no-web >/dev/null 2>&1 \
     || fail "non-web ship brief should scaffold successfully"
   nonweb="$home/data/ordinary-ship-a2/brief.md"
+  grep -qx "Surface contract: non-web" "$nonweb" \
+    || fail "non-web ship brief missing its machine-readable surface contract"
   assert_no_grep "Website deployment completion gate" "$nonweb" \
     "non-web ship brief received the website completion gate"
   assert_no_grep "Interceptor" "$nonweb" \

@@ -41,6 +41,9 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# Ship briefs also record a fixed machine-readable "Surface contract: web|non-web"
+# line. bin/fm-spawn.sh refuses to launch a ship brief with a missing or invalid
+# surface contract.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -127,8 +130,14 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
-    --web) WEB=1; WEB_SET=1 ;;
-    --no-web) WEB=0; WEB_SET=1 ;;
+    --web)
+      [ "$WEB_SET" -eq 0 ] || { echo "error: --web and --no-web may be supplied only once" >&2; exit 1; }
+      WEB=1; WEB_SET=1
+      ;;
+    --no-web)
+      [ "$WEB_SET" -eq 0 ] || { echo "error: --web and --no-web may be supplied only once" >&2; exit 1; }
+      WEB=0; WEB_SET=1
+      ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -423,6 +432,16 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+if [ "$WEB" -eq 1 ]; then
+  SURFACE=web
+else
+  SURFACE=non-web
+fi
+DOD=${DOD/"Delivery contract: mode=$MODE"/"Delivery contract: mode=$MODE"$'\n'"Surface contract: $SURFACE"}
+if [ "$WEB" -eq 1 ]; then
+  DOD=${DOD/"Surface contract: web"/"Surface contract: web"$'\n'"Web gate contract: custom-domain/interceptor/revision-marker/screenshot"}
+fi
+
 WEB_DOD=""
 if [ "$WEB" -eq 1 ]; then
   IFS= read -r -d '' WEB_DOD <<'EOF' || true
@@ -438,6 +457,7 @@ HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as in
 Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing.
 EOF
   WEB_DOD=${WEB_DOD%$'\n'}
+  DOD="$WEB_DOD"$'\n'"$DOD"
 fi
 
 cat > "$BRIEF" <<EOF
@@ -491,6 +511,5 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
-$WEB_DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
