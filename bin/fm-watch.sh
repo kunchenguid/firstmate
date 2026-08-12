@@ -498,15 +498,17 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason
+  local epoch key reason
   PROCEVENT_SURFACED=
+  FM_WAKE_APPENDED_EPOCH=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  while IFS= read -r key; do
+  while IFS=$'\t' read -r epoch key; do
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+    [ -n "$FM_WAKE_APPENDED_EPOCH" ] || FM_WAKE_APPENDED_EPOCH=$epoch
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
-  done < <(fm_wake_queued_keys_locked check)
+  done < <(fm_wake_queued_epoch_keys_locked check)
   if [ -z "$PROCEVENT_SURFACED" ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0

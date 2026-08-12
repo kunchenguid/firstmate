@@ -1495,21 +1495,23 @@ procevent_watch_bg() {  # <dir> <out>
 }
 
 test_procevent_captured_result_surfaces_proactively() {
-  local dir state out drain_out pid beacon_age
+  local dir state out drain_out pid beacon_age queue_tmp
   dir=$(make_case procevent-delivery); state="$dir/state"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
   grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
     || fail "the captured result was never published to the durable queue"
+  queue_tmp="$state/.wake-queue.test"
+  awk -F '\t' 'BEGIN { OFS="\t" } { $1=1704141000; print }' "$state/.wake-queue" > "$queue_tmp" \
+    && mv "$queue_tmp" "$state/.wake-queue" \
+    || fail "could not age the durable process-event fixture"
 
-  procevent_watch_bg "$dir" "$out"
+  TZ=UTC procevent_watch_bg "$dir" "$out"
   pid=$!
   wait_for_exit "$pid" 100 \
     || fail "a healthy watcher never surfaced a durably captured process-event result: $(cat "$out")"
-  grep -F "check:" "$out" >/dev/null \
-    || fail "the process-event wake was not reported as an actionable check: $(cat "$out")"
-  grep -F "procevent:delivery-src:1" "$out" >/dev/null \
-    || fail "the actionable reason did not name the queued result: $(cat "$out")"
+  [ "$(cat "$out")" = "Jan 1 8:30p — check: process-event result captured: procevent:delivery-src:1" ] \
+    || fail "the process-event wake did not use its durable epoch and byte-exact reason: $(cat "$out")"
   beacon_age=$(FM_STATE_OVERRIDE="$state" bash -c \
     '. "$1/bin/fm-wake-lib.sh"; fm_path_age "$2"' _ "$ROOT" "$state/.last-watcher-beat")
   [ "$beacon_age" -lt 60 ] || fail "the surfacing watcher was not a healthy one (beacon age ${beacon_age}s)"

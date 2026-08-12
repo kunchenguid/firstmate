@@ -910,6 +910,12 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+fm_wake_queued_epoch_keys_locked() {
+  local kind=$1
+  awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $1 "\t" $4 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"
