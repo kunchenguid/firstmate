@@ -161,6 +161,15 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#   Before any harness launches, fm-spawn prefixes the submitted launch line
+#   with an export of the caller's exact PATH. Long-lived tmux, Herdr, Zellij,
+#   Orca, and cmux providers can otherwise create a fresh shell from an older or
+#   app-owned environment that omits an operator's current user-installed command
+#   directories. The snapshot is one non-empty control-byte-free value,
+#   shell-quoted as data; no other ambient variable is copied by this contract.
+#   Fresh spawns and relaunches both replace, rather than append to, the task
+#   PATH in the same atomic launch submission, so repeated delivery is
+#   deterministic and idempotent and no prompt hook can reset it between steps.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -194,6 +203,27 @@
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
+
+# Snapshot and validate the launcher's command search path before resolving any
+# helper or mutating any task state. Session providers are long-lived processes
+# (or GUI apps), so the shell they create can carry an older, app-owned, or
+# otherwise reduced PATH even though every command fm-spawn itself resolves from
+# this value is available now. PATH is the one general ambient variable this
+# boundary deliberately preserves. Reject an empty value and every control byte
+# rather than putting unsafe multi-line or terminal-control input into the
+# one-line launch command; ordinary spaces, quotes, shell metacharacters, and
+# non-ASCII path bytes remain data and are protected later by shell_quote.
+SPAWN_WORKER_PATH=${PATH:-}
+if [ -z "$SPAWN_WORKER_PATH" ]; then
+  echo "error: caller PATH is empty; refusing to launch a worker without a deterministic command search path" >&2
+  exit 1
+fi
+case "$SPAWN_WORKER_PATH" in
+  *[[:cntrl:]]*)
+    echo "error: caller PATH contains a control byte; refusing to place it in the worker command channel" >&2
+    exit 1
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -2775,6 +2805,10 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+# Keep the environment handoff and harness launch in one submitted shell line.
+# This makes the worker independent of the long-lived provider's environment
+# without a second command/prompt cycle that a shell hook could rewrite.
+LAUNCH="export PATH=$(shell_quote "$SPAWN_WORKER_PATH"); $LAUNCH"
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" tmp status=0

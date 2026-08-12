@@ -6,6 +6,66 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Worker launch PATH
+
+The shared worker environment handoff was verified on 2026-08-12 with Herdr 0.8.0 protocol 19 on macOS arm64 and with the portable real-`fm-spawn.sh` regression.
+The expected behavior is that the worker receives the exact non-empty, control-byte-free `PATH` of the `fm-spawn.sh` process before its harness starts, rather than the unrelated environment of a long-lived session provider.
+
+The live Herdr reproduction provisioned only a guarded named non-default lab and created a fresh pane from a server process whose `PATH` lacked the keg-only Node prefix.
+The probe printed only `PATH` and command-resolution results, never the rest of the environment.
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+LAB=$("$HERDR_LAB_HELPER" name worker-path)
+trap '"$HERDR_LAB_HELPER" teardown "$LAB"' EXIT
+"$HERDR_LAB_HELPER" provision "$LAB"
+"$HERDR_LAB_HELPER" run "$LAB" workspace create --cwd "$probe_dir" --label worker-path --no-focus
+"$HERDR_LAB_HELPER" run "$LAB" pane run "$pane" \
+  "sh -c 'printf \"path=%s\\n\" \"\$PATH\"; command -v node || printf \"node=MISSING\\n\"; command -v npx || printf \"npx=MISSING\\n\"'"
+```
+
+Bounded failing shape before the spawn handoff:
+
+```text
+path=/opt/homebrew/bin:/opt/homebrew/sbin:...:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+node=MISSING
+npx=MISSING
+```
+
+Provisioning a second guarded lab from a process whose `PATH` included `/opt/homebrew/opt/node@24/bin` made a fresh pane inherit that directory and execute `npx --version` successfully.
+The final counterfactual also used the same literal-send-then-Enter shape as `fm-spawn.sh`, with the `PATH` export and executable probe in one submitted line, and resolved both commands.
+This is disconfirming evidence against Herdr stripping versioned Homebrew paths or the Node installation itself being defective.
+
+```text
+node=/opt/homebrew/opt/node@24/bin/node
+npx=/opt/homebrew/opt/node@24/bin/npx
+11.12.1
+```
+
+The portable regression drives the real `bin/fm-spawn.sh` interface against a stateful provider-shell fixture whose baseline cannot resolve Node.
+It supplies a temporary `homebrew/opt/node@24/bin`, runs both its `node` executable and an executable carrying `#!/usr/bin/env node`, proves an entry containing spaces, a single quote, a dollar expression, and a semicolon remains quoted data, refuses an empty `PATH` before helper resolution, and refuses a control-byte `PATH` before endpoint creation.
+
+```sh
+tests/fm-spawn-worker-path.test.sh
+```
+
+Observed output:
+
+```text
+ok - fm-spawn: a provider shell missing node receives the exact caller PATH, resolves a versioned formula's node/npx, runs env-node, and preserves quoted entries
+ok - fm-spawn: fresh spawn and public relaunch both replace provider PATH with one deterministic caller snapshot
+ok - fm-spawn: an empty PATH refuses before helper resolution or task mutation
+ok - fm-spawn: a control byte in PATH refuses before endpoint creation and never reaches the worker command channel
+# all fm-spawn worker PATH tests passed
+```
+
+Applicability was inspected across every supported axis.
+All verified worker harnesses - Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse - launch after the one shared export, and their existing narrower launch prefixes do not clear `PATH`.
+Tmux, Herdr, Zellij, Orca, and cmux all submit that export in the existing backend-neutral literal launch line immediately before the harness command, so no provider-specific environment mutation was added.
+Fresh spawns and recovery relaunches converge by replacing the shell value with the current caller snapshot instead of appending directories.
+A remote secondmate's host-local `fm-spawn.sh` receives the filesystem-composed remote job `PATH` and now forwards that same explicit value into its Herdr pane; the parent-side remote transport remains not applicable because it never creates the remote pane itself.
+Orca and cmux secondmate launches remain not applicable because those backend-kind combinations are still unsupported, while their ordinary worker launches use the shared handoff.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

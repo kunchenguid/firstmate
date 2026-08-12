@@ -152,6 +152,13 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+assert_worker_path_then_launch() { # <actual> <expected command> <message>
+  case "$1" in
+    "export PATH="*"; $2") return 0 ;;
+  esac
+  fail "$3"$'\n'"expected suffix after PATH export: $2"$'\n'"actual: $1"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -166,7 +173,8 @@ test_no_profile_keeps_claude_profile_defaults() {
 
   launch=$(cat "$LAUNCH_LOG")
   expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_worker_path_then_launch "$launch" "$expected" \
+    "no-profile claude launch did not export worker PATH before the canonical launch kind"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -414,7 +422,8 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  assert_worker_path_then_launch "$launch" "custom-agent --flag" \
+    "raw launch command changed beyond the required worker PATH prefix"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

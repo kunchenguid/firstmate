@@ -42,8 +42,9 @@ The origin URL named for each project must be reachable from the remote account 
 ## Non-interactive tool contract
 
 No login or interactive shell ever runs on the remote host, so `~/.profile`, `~/.bashrc`, and `~/.zshrc` never contribute to the runtime `PATH`.
-`bin/fm-remote-job-lib.sh` is the single owner of the worker `PATH` and builds it by filesystem discovery rather than by evaluating shell startup files.
+`bin/fm-remote-job-lib.sh` is the single owner of the remote job child's `PATH` and builds it by filesystem discovery rather than by evaluating shell startup files.
 The authorized child sees `<remote-root>/bin` first, then a genuine account `~/.local/bin`, the nvm default version bin, asdf shims and install bins, mise shims and install bins, Nix directories, Homebrew directories, and the system tail `/usr/bin:/bin:/usr/sbin:/sbin`.
+When that child runs `fm-spawn.sh`, the ordinary launch contract in [`configuration.md`](configuration.md#harness-support) exports this same explicit value into the remote Herdr pane rather than inheriting the Herdr server's environment.
 Nvm selection follows the filesystem `alias/default` chain and chooses the highest matching installed semantic version, falling back to the highest installed semantic version when the alias is absent or has no installed match.
 An nvm `system` default adds no nvm version bin, so the later system directories provide Node.
 The Nix and package-manager order after version-manager discovery is `~/.nix-profile/bin`, `/etc/profiles/per-user/<account>/bin`, `/run/current-system/sw/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
