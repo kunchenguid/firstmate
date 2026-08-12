@@ -26,6 +26,11 @@ COUNT_FILE="$RESP/.count"
   printf '\n'
 } >> "$LOG"
 
+if [ "${1:-}" = inspect ] && [ "${2:-}" = agent-parent-for-test ]; then
+  printf '{"model":"test/provider-model"}\n'
+  exit 0
+fi
+
 if [ "${1:-}" = status ]; then
   if [ -f "$RESP/status.exit" ]; then
     exit "$(cat "$RESP/status.exit")"
@@ -74,6 +79,8 @@ FAKEBIN=$(make_paseo_fakebin "$SETUP_DIR")
 export PATH="$FAKEBIN:$PATH"
 export FM_PASEO_LOG="$SETUP_DIR/paseo.log"
 export FM_PASEO_RESPONSES="$SETUP_DIR/responses"
+# Explicit fallback models are required when the fake parent has no inspectable identity.
+export PASEO_MODEL_FALLBACK="test/provider-model"
 
 reset_responses() {
   rm -f "$FM_PASEO_RESPONSES"/* "$FM_PASEO_RESPONSES"/.count "$FM_PASEO_RESPONSES"/.exit
@@ -151,7 +158,8 @@ run_paseo_create_task_test() {
   echo "Task instructions" > "$brief_file"
   export FM_FAKE_WORKTREE="$TMP_ROOT/wt-paseo-1"
 
-  # Call 1: paseo run
+  # Parent identity is supplied by the runtime; the run response is call 1.
+  export PASEO_AGENT_ID="agent-parent-for-test"
   printf '{"id":"paseo-agent-001"}\n' > "$FM_PASEO_RESPONSES/1.out"
 
   out=$(fm_backend_paseo_create_task "fm-test-task" "$proj_dir" "$brief_file" "$task_tmp" "traceparent-123")
@@ -181,7 +189,7 @@ EOF
   else
     fail "unexpected secondmate task creation output: '$out_sm'"
   fi
-  unset FM_FAKE_WORKTREE
+  unset FM_FAKE_WORKTREE PASEO_AGENT_ID
 }
 run_paseo_create_task_test
 
@@ -385,6 +393,7 @@ run_paseo_spawn_test() {
   export FM_HOME="$TMP_ROOT/fm-home"
   export FM_ROOT="$ROOT"
   export FM_FAKE_WORKTREE="$spawn_wt"
+  export PASEO_AGENT_ID="agent-parent-for-test"
   mkdir -p "$FM_HOME/state" "$FM_HOME/data/paseo-task-1"
   printf 'Test brief instructions\n' > "$FM_HOME/data/paseo-task-1/brief.md"
 
@@ -419,7 +428,7 @@ run_paseo_spawn_test() {
   else
     fail "fm-spawn.sh failed with exit code $rc: $out"
   fi
-  unset FM_FAKE_WORKTREE
+  unset FM_FAKE_WORKTREE PASEO_AGENT_ID
 }
 run_paseo_spawn_test
 

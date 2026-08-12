@@ -2072,7 +2072,8 @@ EOF
     if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
       freshen_spawn_worktree_base "$WT" || exit 1
     fi
-    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$WT" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND") || exit 1
+    PASEO_LAUNCH_CONTRACT="$LAUNCH"
+    PASEO_SPAWN_OUT=$(fm_backend_paseo_create_task "$W" "$WT" "$BRIEF" "$TASK_TMP" "${SPAWN_TRACEPARENT:-}" "$KIND" "${MODEL:-}" "${EFFORT:-}" "$PASEO_LAUNCH_CONTRACT") || exit 1
     read -r PASEO_AGENT_ID WT_OUT <<EOF
 $PASEO_SPAWN_OUT
 EOF

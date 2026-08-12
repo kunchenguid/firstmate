@@ -81,12 +81,47 @@ fm_backend_paseo_parent_id() {
   return 1
 }
 
+# Resolve the model from Paseo's authoritative parent identity. The explicit
+# fallback is intentionally opt-in: an unavailable identity must never turn
+# into an accidental Paseo default model.
+fm_backend_paseo_parent_model() {
+  local parent info model provider name
+  parent=$(fm_backend_paseo_parent_id) || return 1
+  info=$(paseo inspect "$parent" --json 2>/dev/null) || return 1
+  model=$(printf '%s' "$info" | jq -r '.model // .model.id // .model.name // empty' 2>/dev/null)
+  if [ -n "$model" ] && [ "$model" != null ]; then
+    printf '%s' "$model"
+    return 0
+  fi
+  provider=$(printf '%s' "$info" | jq -r '.provider // .model.provider // empty' 2>/dev/null)
+  name=$(printf '%s' "$info" | jq -r '.modelName // .model.name // empty' 2>/dev/null)
+  if [ -n "$provider" ] && [ -n "$name" ] && [ "$provider" != null ] && [ "$name" != null ]; then
+    printf '%s/%s' "$provider" "$name"
+    return 0
+  fi
+  return 1
+}
+
+fm_backend_paseo_resolve_model() {
+  local model
+  model=$(fm_backend_paseo_parent_model 2>/dev/null || true)
+  if [ -z "$model" ]; then
+    model=${PASEO_MODEL_FALLBACK:-}
+  fi
+  [ -n "$model" ] || {
+    echo "error: could not resolve the Paseo parent model; inspect the parent or set documented PASEO_MODEL_FALLBACK" >&2
+    return 1
+  }
+  printf '%s' "$model"
+}
+
 # 2. fm_backend_paseo_create_task: Allocates treehouse worktree, spawns Paseo subagent
 # (paseo run --background --cwd <wt> ...), passes brief, GOTMPDIR, trace context, and
 # operational instructions.
-fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [traceparent] [kind]
+fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [traceparent] [kind] [model] [effort] [launch_contract]
   local label=$1 target_dir=$2 brief_path=${3:-} task_tmp=${4:-} traceparent=${5:-} kind=${6:-}
-  local wt prompt out agent_id
+  local requested_model=${7:-} effort=${8:-} launch_contract=${9:-}
+  local wt prompt out agent_id model
 
   if [ "$kind" = "secondmate" ] || [ -f "$target_dir/.fm-secondmate-home" ] || [ -f "$target_dir/.git" ]; then
     wt="$target_dir"
@@ -107,14 +142,26 @@ fm_backend_paseo_create_task() {  # <label> <proj_dir> [brief_path] [task_tmp] [
     mkdir -p "$task_tmp/gotmp"
   fi
 
+  model=$(fm_backend_paseo_resolve_model) || return 1
+  if [ -n "$requested_model" ] && [ "$requested_model" != default ] && [ "$requested_model" != "$model" ]; then
+    echo "error: requested Paseo model '$requested_model' does not match parent model '$model'" >&2
+    return 1
+  fi
+  case "${effort:-}" in
+    ''|default) effort= ;;
+    low|medium|high|xhigh|max) ;;
+    *) echo "error: invalid Paseo thinking level '$effort'" >&2; return 1 ;;
+  esac
   if [ -n "$brief_path" ] && [ -f "$brief_path" ]; then
     prompt="Read the brief at $brief_path and follow it exactly."
   else
     prompt="Follow instructions for task $label in working directory $wt."
   fi
+  prompt="$prompt Firstmate launch contract: ${launch_contract:-harness=paseo} model=$model effort=${effort:-default}. Do not substitute another model."
 
   local -a args
-  args=(run --background --cwd "$wt" --title "$label" --label "firstmate_task=$label")
+  args=(run --background --cwd "$wt" --title "$label" --label "firstmate_task=$label" --model "$model")
+  [ -z "$effort" ] || args+=(--thinking "$effort")
   if [ -n "$task_tmp" ]; then
     args+=(--env "GOTMPDIR=$task_tmp/gotmp")
   fi
@@ -172,8 +219,11 @@ fm_backend_paseo_send_key() {  # <target> <key> [expected-label]
     Escape|escape|Esc|esc|C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|ctrl-c)
       paseo stop "$target" >/dev/null 2>&1
       ;;
+    Enter|enter|C-m|c-m|return|Return|C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|ctrl-u)
+      paseo send "$target" --no-wait --key "$key" >/dev/null 2>&1
+      ;;
     *)
-      paseo send "$target" --no-wait -- "" >/dev/null 2>&1
+      return 1
       ;;
   esac
 }
