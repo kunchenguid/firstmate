@@ -237,6 +237,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-checked-submit-lib.sh
+. "$SCRIPT_DIR/fm-checked-submit-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -661,6 +663,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_ENDPOINT_LOCK_HELD=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -771,6 +774,10 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ "$SPAWN_ENDPOINT_LOCK_HELD" = 1 ]; then
+    SPAWN_ENDPOINT_LOCK_HELD=0
+    fm_backend_endpoint_lock_release || true
   fi
   return "$status"
 }
@@ -2058,22 +2065,39 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+spawn_endpoint_lock_acquire() {
+  fm_backend_endpoint_lock_acquire "$BACKEND" "$1" "$W" || return 1
+  SPAWN_ENDPOINT_LOCK_HELD=1
+}
+spawn_endpoint_lock_release() {
+  SPAWN_ENDPOINT_LOCK_HELD=0
+  fm_backend_endpoint_lock_release
+}
 spawn_send_text_line() {  # <target> <text>
+  local target=$1 rc=0
+  spawn_endpoint_lock_acquire "$target" || return 1
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_text_line "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    tmux) fm_backend_tmux_send_text_line "$1" "$2" || rc=$? ;;
+    herdr) fm_backend_herdr_send_text_line "$1" "$2" || rc=$? ;;
+    zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" || rc=$? ;;
+    orca) fm_backend_orca_send_text_line "$1" "$2" || rc=$? ;;
+    cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" || rc=$? ;;
   esac
+  spawn_endpoint_lock_release
+  return "$rc"
 }
 spawn_current_path() {  # <target>
+  local target=$1 rc=0 path
+  spawn_endpoint_lock_acquire "$target" || return 1
   case "$BACKEND" in
-    tmux) fm_backend_tmux_current_path "$1" ;;
-    herdr) fm_backend_herdr_current_path "$1" ;;
-    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+    tmux) path=$(fm_backend_tmux_current_path "$target") || rc=$? ;;
+    herdr) path=$(fm_backend_herdr_current_path "$target") || rc=$? ;;
+    zellij) path=$(fm_backend_zellij_current_path "$target" "$W") || rc=$? ;;
+    cmux) path=$(fm_backend_cmux_current_path "$target" "$W") || rc=$? ;;
   esac
+  spawn_endpoint_lock_release
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s\n' "$path"
 }
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
@@ -2730,6 +2754,10 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+spawn_endpoint_lock_acquire "$T" || {
+  echo "error: could not lock $W's endpoint before launch submission" >&2
+  exit 1
+}
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -2737,6 +2765,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+spawn_endpoint_lock_release
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
