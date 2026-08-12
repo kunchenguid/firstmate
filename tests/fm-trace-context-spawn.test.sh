@@ -98,7 +98,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   id=$name-z1
   mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf 'brief for %s\nSurface contract: non-web\n' "$id" > "$home/data/$id/brief.md"
   printf '%s\n' "$home|$proj|$wt|$fakebin|$launchlog|$id"
 }
 
@@ -498,8 +498,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   fm_git_worktree "$proj_a" "$wt_a" wt-routed-a
   fm_git_worktree "$proj_b" "$wt_b" wt-routed-b
   mkdir -p "$sm/data/$id_a" "$sm/data/$id_b"
-  printf 'brief a\n' > "$sm/data/$id_a/brief.md"
-  printf 'brief b\n' > "$sm/data/$id_b/brief.md"
+  printf 'brief a\nSurface contract: non-web\n' > "$sm/data/$id_a/brief.md"
+  printf 'brief b\nSurface contract: non-web\n' > "$sm/data/$id_b/brief.md"
   log_a="$base/launch-a.log"
   log_b="$base/launch-b.log"
 

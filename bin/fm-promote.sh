@@ -163,12 +163,14 @@ fi
 awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
   BEGIN { inserted_surface = 0; inserted_gate = 0 }
   /^# Definition of done$/ && !inserted_surface {
-    if (surface_line_count == 0) print "Surface contract: " surface
     print
     if (web == 1 && gate_line_count == 0) {
-      print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
       while ((getline line < gate) > 0) print line
       close(gate)
+    }
+    if (surface_line_count == 0) print "Surface contract: " surface
+    if (web == 1 && gate_line_count == 0) {
+      print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
     }
     inserted_surface = 1
     next
