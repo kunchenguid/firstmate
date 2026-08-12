@@ -38,7 +38,7 @@ A real integration check remains an explicit future operator action.
 ```console
 $ bash tests/fm-feishu-channel.test.sh
 ok - native Pi steering, all-origin Assistant mirroring, durable state, and TUI-equivalent tool path
-ok - local Pi bridge keeps only status and durable disable controls
+ok - local Pi bridge converges after delayed ownership and keeps only status and durable disable controls
 ok - secure config parsing and automatic Feishu lifecycle converge silently and fail closed
 ok - official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized outbound
 ```
@@ -48,6 +48,12 @@ It proves that the extension registers no TUI input, message-end, turn-start, or
 It proves that native TUI and ordinary Firstmate operational input do not enter Feishu state.
 It proves that accepted Feishu text is durably recorded and offered to Pi through native steer delivery with an exact session and generation fence.
 It proves marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.` exclusion, non-Assistant exclusion, restart deduplication, URL-preserving chunking, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
+
+The bridge lifecycle section reproduces the startup-order failure through the real Pi extension factories and their public lifecycle handlers.
+The initiating trigger is Pi's initial `session_start`; the masking condition is that Firstmate lock ownership becomes valid only after the bridge's first callback has returned; the visible symptom is an absent loaded marker with no pairing, binding, or transport.
+The real turn-end/session-start extension then acquires fixture ownership through its operational startup hook and emits the shared process-local settled event.
+The test proves that the bridge converges the exact current persisted session at that boundary, publishes its marker, and starts one transport; repeated settled and `agent_start` boundaries remain idempotent.
+It also proves that `/reload` cannot repair a missing owner because reload does not rerun the ownership-acquiring startup digest, that wrong-owner reload and `agent_start` remain inert, that a later owned `agent_start` can retry safely, and that disabled configuration creates no channel state or transport.
 
 The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-check`, `bin/fm-feishu-lifecycle.mjs reconcile`, the real pairing and binding state owner, verified process-owner stop, and the mocked official SDK boundary.
 It proves absent-config inertness without private state creation, strict key parsing, missing-field refusal, duplicate and unsupported-field refusal, exact `0600` enforcement, symlink and wrong-owner refusal, credential and P2P probing before binding mutation, silent first activation, unchanged-session idempotence, exact-session replacement with generation increment, prior-owner shutdown, stopped-transport recovery without generation churn, config-persisted disable, process-argument redaction, state-record redaction, and credential-rejection failure before binding state exists.

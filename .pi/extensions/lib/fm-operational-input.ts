@@ -15,6 +15,8 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "launch-brief",
 ] as const;
 
+export const FIRSTMATE_SESSION_START_SETTLED_EVENT = "firstmate:session-start-settled";
+
 export type FirstmateCurrentOperationalKind =
   (typeof FIRSTMATE_CURRENT_OPERATIONAL_KINDS)[number];
 

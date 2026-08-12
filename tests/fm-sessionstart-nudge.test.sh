@@ -302,6 +302,7 @@ const handlers = new Map();
 const messages = [];
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
+  events: { emit() {} },
   sendMessage(message) { messages.push(message); },
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);

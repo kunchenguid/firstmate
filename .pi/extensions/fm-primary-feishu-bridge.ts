@@ -19,6 +19,7 @@ import {
   firstmateSessionLockOwnership,
   registerFeishuNativeChannel,
 } from "./lib/fm-feishu-native-channel.ts";
+import { FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(extensionDir, "../..");
@@ -105,7 +106,12 @@ function markLoaded(): void {
 }
 
 export default function (pi: ExtensionAPI) {
-  registerFeishuNativeChannel(pi);
+  let stopListeningForSessionStart: (() => void) | undefined;
+  const listenForSessionStart = () => {
+    if (stopListeningForSessionStart) return;
+    stopListeningForSessionStart = pi.events.on(FIRSTMATE_SESSION_START_SETTLED_EVENT, markLoaded);
+  };
+  listenForSessionStart();
 
   pi.registerEntryRenderer<{ kind?: string; message?: string }>("fm-feishu-local-alert", (entry, _options, theme) => {
     const box = new Box(1, 0, (text) => theme.bg("toolErrorBg", text));
@@ -142,6 +148,15 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", () => markLoaded());
+  pi.on("session_start", () => {
+    listenForSessionStart();
+    markLoaded();
+  });
+  pi.on("agent_start", () => markLoaded());
+  pi.on("session_shutdown", () => {
+    stopListeningForSessionStart?.();
+    stopListeningForSessionStart = undefined;
+  });
+  registerFeishuNativeChannel(pi);
   markLoaded();
 }
