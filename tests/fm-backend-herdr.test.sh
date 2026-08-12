@@ -818,6 +818,7 @@ stale_record_responses() {  # <dir> <pane> <agent_status> <shell-pid> <mode>
 run_pane_agent_state() {  # <dir> <pane> [VAR=VAL]...
   local dir=$1 pane=$2 fb; shift 2
   fb=$(make_herdr_fakebin "$dir")
+  # shellcheck disable=SC2016  # $0/$1 are the inner bash's positional parameters, not caller expansions
   env PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" "$@" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest "$1"' "$ROOT" "$pane"
 }
@@ -830,7 +831,7 @@ test_pane_agent_state_downgrades_a_stale_done_record_over_a_proved_idle_shell() 
   local dir out bgpid
   dir="$TMP_ROOT/stale-done"; mkdir -p "$dir/responses"; : > "$dir/log"
   sleep 300 & bgpid=$!
-  stale_record_responses "$dir" w1:p2 done "$bgpid" idle-shell
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
   make_death_lab "$dir" "$bgpid"
   out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="$dir/ps")
   kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
@@ -885,7 +886,7 @@ test_pane_agent_state_keeps_live_when_a_real_agent_owns_the_foreground() {
   # "exited".
   local dir out
   dir="$TMP_ROOT/live-done"; mkdir -p "$dir/responses"; : > "$dir/log"
-  stale_record_responses "$dir" w1:p2 done 4242 agent-foreground
+  stale_record_responses "$dir" w1:p2 "done" 4242 agent-foreground
   out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="/nonexistent/ps")
   [ "$out" = live ] \
     || fail "a \`done\` record whose pane's foreground is owned by a real agent process must stay live, got '$out'"
@@ -903,14 +904,14 @@ test_pane_agent_state_keeps_live_when_the_process_read_is_inconclusive() {
   # must both leave the registered record's verdict exactly as it was.
   local dir out bgpid
   dir="$TMP_ROOT/live-unreadable"; mkdir -p "$dir/responses"; : > "$dir/log"
-  stale_record_responses "$dir" w1:p2 done 4242 unreadable
+  stale_record_responses "$dir" w1:p2 "done" 4242 unreadable
   out=$(run_pane_agent_state "$dir" w1:p2)
   [ "$out" = live ] \
     || fail "an unreadable process read must never downgrade a registered record, got '$out'"
 
   dir="$TMP_ROOT/live-shell-child"; mkdir -p "$dir/responses"; : > "$dir/log"
   sleep 300 & bgpid=$!
-  stale_record_responses "$dir" w1:p2 done "$bgpid" idle-shell
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
   make_death_lab "$dir" "$bgpid"
   # Same idle-shell process-info, but the OS process table shows the shell
   # still has a child, so the lone-idle-childless proof cannot succeed.
@@ -937,7 +938,7 @@ test_tab_is_husk_still_refuses_an_inconclusive_read() {
   # it may only ever return true for a POSITIVELY confirmed husk.
   local dir fb verdict bgpid
   dir="$TMP_ROOT/husk-inconclusive"; mkdir -p "$dir/responses"; : > "$dir/log"
-  stale_record_responses "$dir" w1:p2 done 4242 unreadable
+  stale_record_responses "$dir" w1:p2 "done" 4242 unreadable
   fb=$(make_herdr_fakebin "$dir")
   verdict=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT")
@@ -946,7 +947,7 @@ test_tab_is_husk_still_refuses_an_inconclusive_read() {
 
   dir="$TMP_ROOT/husk-proved"; mkdir -p "$dir/responses"; : > "$dir/log"
   sleep 300 & bgpid=$!
-  stale_record_responses "$dir" w1:p2 done "$bgpid" idle-shell
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
   verdict=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
@@ -965,7 +966,7 @@ test_agent_state_reports_dead_for_a_stale_record_over_a_proved_idle_shell() {
   local dir fb out bgpid
   dir="$TMP_ROOT/recovery-stale"; mkdir -p "$dir/responses"; : > "$dir/log"
   sleep 300 & bgpid=$!
-  stale_record_responses "$dir" w1:p2 done "$bgpid" idle-shell
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
@@ -976,7 +977,7 @@ test_agent_state_reports_dead_for_a_stale_record_over_a_proved_idle_shell() {
     || fail "REGRESSION: a stale record over a proved lone idle childless shell must read 'dead' so relaunch and exit can proceed, got '$out'"
 
   dir="$TMP_ROOT/recovery-live"; mkdir -p "$dir/responses"; : > "$dir/log"
-  stale_record_responses "$dir" w1:p2 done 4242 agent-foreground
+  stale_record_responses "$dir" w1:p2 "done" 4242 agent-foreground
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
