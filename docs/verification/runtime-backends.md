@@ -37,7 +37,7 @@ Sending literal `ESC .` through `pane send-text` changed Medium to High, and lit
 A second guarded lab established the complete adjacent sequence `low <-> medium <-> high <-> xhigh` and confirmed that the boundary levels do not move farther.
 The public `bin/fm-codex-effort.sh` interface then changed a fresh isolated Herdr Codex from High to Medium and updated its private fixture metadata only after the footer showed Medium.
 
-### tmux verification
+### tmux compatibility evidence
 
 The bounded reference-backend compatibility test used tmux 3.7b, one uniquely named detached session, and one scratch Git worktree.
 It did not change `config/backend`, inspect or migrate live tasks, or touch the preferred Herdr production path.
@@ -46,12 +46,14 @@ Before and after the input, the Codex thread id and rollout path matched, the fo
 The post-switch turn reproduced a context token created before the switch.
 The exact session was exited and killed after the bounded check.
 
-`bin/fm-codex-effort.sh` therefore uses literal `ESC .` and `ESC ,` on Herdr and semantic `M-.` and `M-,` keys on tmux.
-It supports only idle Codex tasks whose endpoint identity, live agent, current worktree, empty composer, and current model and effort footer are all verified.
-It checks each adjacent transition, revalidates the endpoint, and atomically updates only `effort=` after the final footer confirmation.
+`bin/fm-codex-effort.sh` uses literal `ESC .` and `ESC ,` on Herdr.
+It supports only idle Herdr Codex tasks whose endpoint identity, native agent state, live agent, current worktree, empty composer, and current model and effort footer are all verified.
+It treats tmux's observed `M-.` and `M-,` behavior as compatibility evidence only, because current Codex tmux workers have no verified semantic idle source and must refuse before any chord.
+It writes a durable recovery record before its first chord, checks each adjacent transition, revalidates the endpoint, and atomically updates only `effort=` after the final footer confirmation.
+If a chord is delivered before an interruption, unreadable UI, or metadata-write failure, the next locked invocation verifies the unchanged endpoint and reconciles the observed footer into metadata before it can send another chord.
 Zellij, Orca, and cmux remain refused because their current backend adapters return `unverified` from the recovery-grade agent-state interface, even though they have generic input and capture primitives.
 This is an evidence gap rather than a claim that their terminal transports cannot carry the keys.
-Quit and resume are no longer required for routine effort changes on the verified Herdr and tmux paths.
+Quit and resume remain the recovery fallback when the verified Herdr operation refuses.
 
 Behavior regression coverage is owned by:
 
@@ -59,7 +61,7 @@ Behavior regression coverage is owned by:
 tests/fm-codex-effort.test.sh
 ```
 
-The suite covers successful adjacent switching on Herdr and tmux, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, swallowed input, changed UI, unsupported backends, and no false success.
+The suite covers successful Herdr switching, tmux refusal without semantic idle evidence, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, structural footer confirmation, swallowed input, changed UI, durable post-send recovery, unsupported backends, and no false success.
 
 ## tmux
 

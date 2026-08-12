@@ -111,6 +111,8 @@ case "${1:-} ${2:-}" in
       printf 'Working (esc to interrupt)\n\n› \n\n  gpt-5.6-sol %s · %s\n' "$effort" "$FM_FAKE_WORKTREE"
     elif [ "${FM_FAKE_UI}" = misleading ]; then
       printf 'Model set to gpt-5.6-sol %s\n\n› \n\n  gpt-5.6-sol %s · %s\n' "$FM_FAKE_TARGET_EFFORT" "$effort" "$FM_FAKE_WORKTREE"
+    elif [ "${FM_FAKE_UI}" = scrollback-only ]; then
+      printf 'transcript copied from an earlier footer: gpt-5.6-sol %s · %s\n\n› \n' "$effort" "$FM_FAKE_WORKTREE"
     else
       printf '%s\n' "${FM_FAKE_UI}"
     fi
@@ -135,11 +137,24 @@ case "${1:-} ${2:-}" in
     if [ "${FM_FAKE_CHANGE_UI_AFTER_SEND:-0}" = 1 ]; then
       : > "$FM_FAKE_CHANGED_FILE"
     fi
+    if [ "${FM_FAKE_TERM_AFTER_SEND:-0}" = 1 ]; then
+      kill -TERM "$PPID"
+    fi
     ;;
   *) exit 8 ;;
 esac
 SH
   chmod +x "$dir/fakebin/herdr"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=${!#}
+if [ "${FM_FAKE_FAIL_META_MV:-0}" = 1 ] && [ "${last##*/}" = effort-task.meta ]; then
+  exit 1
+fi
+exec "${FM_FAKE_REAL_MV:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -203,6 +218,9 @@ run_case() {  # <dir> <effort>
     FM_FAKE_UI="${FM_FAKE_UI:-footer}" \
     FM_FAKE_SWALLOW="${FM_FAKE_SWALLOW:-0}" \
     FM_FAKE_CHANGE_UI_AFTER_SEND="${FM_FAKE_CHANGE_UI_AFTER_SEND:-0}" \
+    FM_FAKE_TERM_AFTER_SEND="${FM_FAKE_TERM_AFTER_SEND:-0}" \
+    FM_FAKE_FAIL_META_MV="${FM_FAKE_FAIL_META_MV:-0}" \
+    FM_FAKE_REAL_MV="$(command -v mv)" \
     PATH="$dir/fakebin:$PATH" \
     "$SWITCH" effort-task "$effort"
 }
@@ -223,15 +241,16 @@ test_success_changes_effort_in_place_and_then_metadata() {
   pass "fm-codex-effort: changes an idle Codex effort through the public interface without quit/resume"
 }
 
-test_tmux_reference_path_uses_semantic_reasoning_key() {
-  local dir out
-  dir=$(make_case tmux-success tmux)
-  out=$(run_case "$dir" medium) || fail "tmux effort switch failed: $out"
-  assert_contains "$out" "medium (tmux, session preserved)" "tmux success was not reported"
-  assert_grep "M-\\," "$dir/runtime.log" "tmux did not send its verified semantic Alt+, key"
-  assert_no_grep "/quit" "$dir/runtime.log" "tmux success exited Codex"
-  assert_grep "session_marker=keep-me" "$dir/home/state/effort-task.meta" "tmux success changed session identity metadata"
-  pass "fm-codex-effort: supports the verified tmux reference path"
+test_tmux_refuses_without_a_verified_semantic_idle_source() {
+  local dir before out rc
+  dir=$(make_case tmux-no-semantic-idle tmux)
+  before=$(cksum < "$dir/home/state/effort-task.meta")
+  out=$(run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "tmux effort switch was accepted without semantic idle evidence"
+  assert_contains "$out" "no verified semantic Codex idle source" "tmux idle-source refusal was unclear"
+  assert_no_grep "send-keys" "$dir/runtime.log" "tmux received an effort chord without semantic idle evidence"
+  [ "$(cksum < "$dir/home/state/effort-task.meta")" = "$before" ] || fail "tmux refusal changed metadata"
+  pass "fm-codex-effort: refuses tmux until Codex has a verified semantic idle source"
 }
 
 test_invalid_effort_and_wrong_harness_refuse_without_runtime_input() {
@@ -347,6 +366,57 @@ test_swallowed_input_and_changed_ui_never_report_success() {
   pass "fm-codex-effort: reports no false success when input is swallowed or the UI changes"
 }
 
+test_footer_requires_the_current_bottom_status_row() {
+  local dir before out rc
+  dir=$(make_case scrollback-footer)
+  before=$(cksum < "$dir/home/state/effort-task.meta")
+  out=$(FM_FAKE_UI=scrollback-only run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "footer-shaped scrollback was accepted as the current status row"
+  assert_contains "$out" "no verifiable Codex model/effort footer" "scrollback-only footer refusal was unclear"
+  assert_no_grep "pane send-text" "$dir/runtime.log" "scrollback-only footer delivered an effort chord"
+  [ "$(cksum < "$dir/home/state/effort-task.meta")" = "$before" ] || fail "scrollback-only footer changed metadata"
+  pass "fm-codex-effort: requires a structurally current footer instead of transcript prose"
+}
+
+test_post_send_failures_leave_a_durable_recoverable_record() {
+  local dir before out rc
+  dir=$(make_case recover-multi-step)
+  printf 'low\n' > "$dir/effort"
+  sed -i 's/^effort=high$/effort=low/' "$dir/home/state/effort-task.meta"
+  before=$(cksum < "$dir/home/state/effort-task.meta")
+  out=$(FM_FAKE_CHANGE_UI_AFTER_SEND=1 run_case "$dir" high 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "unreadable UI after the first multi-step input was accepted"
+  [ "$(cat "$dir/effort")" = medium ] || fail "first multi-step effort transition was not delivered"
+  [ "$(cksum < "$dir/home/state/effort-task.meta")" = "$before" ] || fail "failed multi-step switch changed metadata"
+  assert_present "$dir/home/state/effort-task.codex-effort-recovery" "post-send failure left no durable recovery record"
+  rm -f "$dir/changed-ui"
+  out=$(run_case "$dir" high) || fail "retry did not reconcile and complete a partially delivered multi-step switch: $out"
+  [ "$(cat "$dir/effort")" = high ] || fail "retry did not reach the requested multi-step effort"
+  [ "$(grep '^effort=' "$dir/home/state/effort-task.meta")" = effort=high ] || fail "retry did not reconcile metadata to the live effort"
+  [ ! -e "$dir/home/state/effort-task.codex-effort-recovery" ] || fail "successful retry retained the recovery record"
+
+  dir=$(make_case recover-signal)
+  out=$(FM_FAKE_TERM_AFTER_SEND=1 run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "interrupted effort switch reported success"
+  [ "$(cat "$dir/effort")" = medium ] || fail "signal fixture did not deliver the live effort transition"
+  [ "$(grep '^effort=' "$dir/home/state/effort-task.meta")" = effort=high ] || fail "interrupted switch updated metadata before recovery"
+  assert_present "$dir/home/state/effort-task.codex-effort-recovery" "signal interruption left no durable recovery record"
+  out=$(run_case "$dir" medium) || fail "retry did not reconcile a signal-interrupted effort switch: $out"
+  [ "$(grep '^effort=' "$dir/home/state/effort-task.meta")" = effort=medium ] || fail "signal retry did not reconcile metadata"
+  [ ! -e "$dir/home/state/effort-task.codex-effort-recovery" ] || fail "signal retry retained the recovery record"
+
+  dir=$(make_case recover-meta-write)
+  out=$(FM_FAKE_FAIL_META_MV=1 run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "metadata-write failure reported success"
+  [ "$(cat "$dir/effort")" = medium ] || fail "metadata-write fixture did not deliver the live effort transition"
+  [ "$(grep '^effort=' "$dir/home/state/effort-task.meta")" = effort=high ] || fail "metadata-write failure changed metadata"
+  assert_present "$dir/home/state/effort-task.codex-effort-recovery" "metadata-write failure left no recovery record"
+  out=$(run_case "$dir" medium) || fail "retry did not reconcile metadata-write failure: $out"
+  [ "$(grep '^effort=' "$dir/home/state/effort-task.meta")" = effort=medium ] || fail "metadata-write retry did not reconcile metadata"
+  [ ! -e "$dir/home/state/effort-task.codex-effort-recovery" ] || fail "metadata-write retry retained the recovery record"
+  pass "fm-codex-effort: durably recovers post-send multi-step, signal, and metadata-write failures"
+}
+
 test_unverified_backends_refuse_before_input() {
   local backend dir out rc
   for backend in zellij orca cmux; do
@@ -360,10 +430,12 @@ test_unverified_backends_refuse_before_input() {
 }
 
 test_success_changes_effort_in_place_and_then_metadata
-test_tmux_reference_path_uses_semantic_reasoning_key
+test_tmux_refuses_without_a_verified_semantic_idle_source
 test_invalid_effort_and_wrong_harness_refuse_without_runtime_input
 test_task_id_uses_current_creation_contract
 test_lifecycle_and_metadata_locks_refuse_before_runtime_input
 test_busy_and_ambiguous_runtime_states_refuse
 test_swallowed_input_and_changed_ui_never_report_success
+test_footer_requires_the_current_bottom_status_row
+test_post_send_failures_leave_a_durable_recoverable_record
 test_unverified_backends_refuse_before_input
