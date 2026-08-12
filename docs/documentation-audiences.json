@@ -257,6 +257,14 @@
       "audience": "operator-example"
     },
     {
+      "path": "tests/fixtures/codex-effort/codex-0.147-absolute-footer.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/codex-effort/codex-0.147-home-abbreviated-footer.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },
