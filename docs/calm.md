@@ -15,7 +15,7 @@ Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides routine thinking blocks by default, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
-An explicit Pi thinking expansion shows the original reasoning until it is collapsed again or Calm is reset for a new session lifetime.
+An explicit Pi thinking expansion shows the original reasoning until it is collapsed again, Calm is toggled, or a new session lifetime begins.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
@@ -32,7 +32,7 @@ These are supported-API boundaries rather than hidden-content failures.
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
 The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
-The current Pi 0.84.0 build is verified, while the adapters continue to avoid a numeric support ceiling.
+Calm's current adapter behavior is verified against Pi 0.84.0, while the adapters continue to avoid a numeric support ceiling.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
