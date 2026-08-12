@@ -83,6 +83,10 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# cursor-agent: busy footer shows "ctrl+c to stop" while a turn runs (verified
+# 2026-07-31 on cursor-agent v2026.07.23 in a herdr pane). Idle footer is
+# "Add a follow-up" without that cancel hint.
+FM_TMUX_CURSOR_AGENT_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -97,6 +101,7 @@ fm_busy_lines_match() {  # [harness]
       pi) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor-agent) regex=$FM_TMUX_CURSOR_AGENT_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

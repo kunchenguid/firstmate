@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|kimi|cursor-agent|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -42,10 +42,23 @@ detect_own() {
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ comm args base
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename "$comm")" in
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    base=$(basename "$comm")
+    # Cursor IDE primary (chat) — match process identity, not args substrings
+    # (Cursor tool wrappers embed prior command text and can mention cursor-agent).
+    case "$comm" in
+      'Cursor Helper'*|*'Cursor Helper (Plugin)'*|*/MacOS/Cursor|Cursor)
+        echo cursor-agent; return ;;
+    esac
+    case "$args" in
+      /Applications/Cursor.app/Contents/MacOS/Cursor*|*/Cursor.app/Contents/MacOS/Cursor*)
+        echo cursor-agent; return ;;
+    esac
+    case "$base" in
+      cursor-agent) echo cursor-agent; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -53,8 +66,10 @@ detect_own() {
       kimi) echo kimi; return ;;
       pi) echo pi; return ;;
       node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        # Bare interpreter: harness as argv token / path segment only.
+        if printf '%s' "$args" | grep -qE '(^|[ /])cursor-agent([ ]|$)'; then
+          echo cursor-agent; return
+        fi
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;

@@ -103,6 +103,15 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "Grok tracked background task" "grok recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "grok recovery line lost the arm command"
 
+  out=$("$RENDER" --harness cursor-agent)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "cursor-agent ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "Cursor Shell command" "cursor-agent ordinary-wake line lost Cursor Shell ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "cursor-agent ordinary-wake line lost the background arm command"
+  out=$("$RENDER" --harness cursor-agent --repair-line)
+  assert_contains "$out" "Cursor Shell command" "cursor-agent recovery line lost its Shell repair shape"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "cursor-agent recovery line lost the arm command"
+
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
@@ -139,6 +148,31 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_cursor_agent_is_background_notify() {
+  local out
+  out=$("$RENDER" --harness cursor-agent)
+  assert_contains "$out" "Mode: Cursor Agent background-notify supervision." "cursor-agent snippet missing background-notify mode"
+  assert_contains "$out" "primary harness: cursor-agent" "cursor-agent heading missing"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "cursor-agent snippet missing watcher arm"
+  assert_contains "$out" "shell-task completion" "cursor-agent snippet missing Cursor wake delivery shape"
+  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder"
+  assert_not_contains "$out" "foreground checkpoint" "cursor-agent snippet must not be Codex-style foreground checkpoint"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "cursor-agent must not fall through to unknown"
+  out=$("$RENDER" --harness cursor-agent --repair-line)
+  assert_contains "$out" "Cursor Shell command" "cursor-agent repair line is not Shell-shaped"
+  pass "cursor-agent supervision is background-notify via Cursor Shell wake"
+}
+
+test_cursor_agent_command_sources_effective_config() {
+  local home config out
+  home="$TMP_ROOT/cursor-agent-home"
+  config="$TMP_ROOT/cursor-agent-config"
+  mkdir -p "$home/state" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness cursor-agent --x-mode 1)
+  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; exec bin/fm-watch-arm.sh" "cursor-agent arm command did not use the effective x-mode config path"
+  pass "cursor-agent rendered command sources the effective x-mode config"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -162,4 +196,6 @@ test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_cursor_agent_is_background_notify
+test_cursor_agent_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

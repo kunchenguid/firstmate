@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, kimi, and cursor-agent.
 user-invocable: false
 metadata:
   internal: true
@@ -123,6 +123,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| cursor-agent | `--model <model>` | none | Verified 2026-07-31 on cursor-agent 3.12.17. No effort flag in CLI help; requested effort stays in meta only. |
 
 ### Model support discovery
 
@@ -137,6 +138,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi | Run `pi --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| cursor-agent | `cursor-agent --help` documents `--model <model>` examples (e.g. `gpt-5`, `sonnet-4`, `sonnet-4-thinking`); confirm against the logged-in account's picker when unsure. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
@@ -384,3 +386,32 @@ The spinner match covers the full moon-phase glyph set rather than one frame, bu
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal supplements the pane busy signature, whose locale- and emoji-font-sensitive limits still apply while a turn is running.
+
+## cursor-agent (VERIFIED 2026-07-31, cursor-agent 3.12.17 — applypass fork)
+
+Cursor Agent CLI (`cursor-agent`, also reachable as `cursor agent` via the editor CLI).
+Also the detection label used when firstmate runs as the **Cursor IDE chat** primary: ancestry matches `Cursor Helper (Plugin)` / `Cursor.app` and reports `cursor-agent`.
+
+| Fact | Value |
+|---|---|
+| Launch | `cursor-agent --force "$(encode launch-brief < brief)"` — positional prompt starts the interactive session. |
+| Autonomy | `--force` auto-allows tool commands (crew equivalent of claude `--dangerously-skip-permissions`). |
+| Models | `--model <model>` (help examples: `gpt-5`, `sonnet-4`, `sonnet-4-thinking`). |
+| Effort | None verified; omit from launch; record requested effort in meta only. |
+| Busy-pane signature | `ctrl+c to stop` (footer cancel hint while a turn runs; idle shows `Add a follow-up` without it). Verified 2026-07-31 on cursor-agent v2026.07.23 in herdr. |
+| Exit | Not yet fully catalogued; pane/process teardown works. |
+| Interrupt | `ctrl+c` while busy (footer advertises `ctrl+c to stop`). |
+| Env marker | None verified; IDE primary detection uses process identity (`Cursor Helper` / `Cursor.app`), CLI uses basename `cursor-agent`. |
+| Auth | `cursor-agent login` / `cursor-agent status` (must show logged in before dispatch). |
+| Startup dialog | **Workspace Trust Required** on first launch in a directory: press `a` to "Trust this workspace". Already-trusted worktrees skip it. `fm-spawn` polls and sends `a` when the banner is visible. |
+| Print-mode smoke | `cursor-agent -p --output-format text 'Reply with exactly: PONG'` returned `PONG` while authenticated (2026-07-31). |
+| Interactive smoke | Herdr pane launch with `--force` + trust `a` answered `READY` to a one-line prompt (2026-07-31). |
+
+**Detection hazard:** Cursor IDE tool wrappers embed prior command text in `zsh -c` args. Never treat a bare `cursor-agent` substring in args as harness identity — match CLI basename or IDE process identity only (see `bin/fm-session-lock-lib.sh`).
+
+**Primary turn-end / pre-arm / session-start nudge:** no Cursor-native Stop hook or session-start nudge is verified yet.
+Named supervision recipe: `docs/supervision-protocols/cursor-agent.md` — background-notify via sole `bin/fm-watch-arm.sh` Shell call; Cursor wakes on shell-task completion.
+Crew dispatch and lock ownership remain supported; turn-end is the live arm, not a Stop-hook backstop.
+
+**Skill invocation:** natural language (e.g. ask the agent to run no-mistakes); no verified slash-form yet.
+

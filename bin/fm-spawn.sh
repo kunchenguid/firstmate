@@ -59,10 +59,10 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|grok|kimi|cursor-agent) overrides it for this spawn
+#   (either kind). A non-flag string containing whitespace is treated as a RAW
+#   launch command - the escape hatch for verifying new adapters.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -388,7 +388,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok|kimi)
+    ''|claude|codex|opencode|pi|grok|kimi|cursor-agent)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -454,6 +454,12 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Cursor Agent CLI (`cursor-agent`). --force auto-approves tool commands
+    # (crew autonomy equivalent of claude --dangerously-skip-permissions).
+    # No verified effort flag; model via --model. Positional prompt starts the
+    # interactive session. Turn-end is pane/herdr busy for now (no Stop hook
+    # verified yet).
+    cursor-agent) printf '%s' 'cursor-agent --force __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -565,7 +571,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok|kimi)
+    claude|codex|opencode|pi|grok|kimi|cursor-agent)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1511,6 +1517,28 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = cursor-agent ]; then
+  # First launch in a worktree shows "Workspace Trust Required" with [a] Trust /
+  # [q] Quit. Already-trusted worktrees skip the dialog. Poll briefly and type
+  # a only when the trust banner is visible (verified 2026-07-31).
+  # Use literal text send, not spawn_send_key: backends' named-key path is for
+  # Enter/Escape/C-c; the trust UI accepts the letter key as typed input.
+  cursor_trust_deadline=$((SECONDS + 15))
+  while [ "$SECONDS" -lt "$cursor_trust_deadline" ]; do
+    cursor_tail=$(fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null || true)
+    case "$cursor_tail" in
+      *'Workspace Trust Required'*|*'Trust this workspace'*)
+        spawn_send_literal "$T" "a"
+        sleep 0.5
+        break
+        ;;
+      *'Cursor Agent'*|*'Add a follow-up'*|*Composing*)
+        break
+        ;;
+    esac
+    sleep 0.5
+  done
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified primary agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
+- A verified primary agent harness: Claude Code, Grok, Pi, Codex, OpenCode, or Cursor (IDE chat / `cursor-agent`).
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -73,6 +73,9 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+
+Cursor IDE chat (detected as `cursor-agent`) and the `cursor-agent` CLI are verified for crew launch and for primary supervision via background-notify Shell arms.
+No Cursor-native turn-end Stop hook is verified yet, so the live arm is the wake path.
 
 ### Install and launch
 
