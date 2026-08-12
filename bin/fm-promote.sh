@@ -149,8 +149,8 @@ if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_
   exit 1
 fi
 if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ]; then
-  existing_gate_count=$(grep -Ec '^Web gate contract:' "$BRIEF" || true)
-  existing_gate=$(sed -n 's/^Web gate contract: //p' "$BRIEF")
+  existing_gate_count=$(fm_web_gate_contract_count "$BRIEF")
+  existing_gate=$(fm_web_gate_unfenced_text "$BRIEF" | sed -n 's/^Web gate contract: //p')
   if [ "$existing_gate_count" -ne 1 ] \
     || [ "$existing_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
     || ! fm_web_gate_body_present "$BRIEF"; then
@@ -187,8 +187,8 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
   exit 1
 }
 if [ "$WEB" -eq 1 ]; then
-  promoted_gate_count=$(grep -Ec '^Web gate contract:' "$BRIEF" || true)
-  promoted_gate=$(sed -n 's/^Web gate contract: //p' "$BRIEF_TMP")
+  promoted_gate_count=$(fm_web_gate_contract_count "$BRIEF_TMP")
+  promoted_gate=$(fm_web_gate_unfenced_text "$BRIEF_TMP" | sed -n 's/^Web gate contract: //p')
   if [ "$promoted_gate_count" -ne 1 ] \
     || [ "$promoted_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
     || ! fm_web_gate_body_present "$BRIEF_TMP"; then

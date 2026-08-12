@@ -18,10 +18,21 @@ Do not append a done status or claim completion when any visual, marker, custom-
 EOF
 }
 
+fm_web_gate_unfenced_text() {
+  awk '
+    /^```/ { fenced = !fenced; next }
+    !fenced { print }
+  ' "$1"
+}
+
+fm_web_gate_contract_count() {
+  fm_web_gate_unfenced_text "$1" | grep -Fxc "$(fm_web_gate_contract)" || true
+}
+
 fm_web_gate_body_present() {
   local brief=$1 expected
   expected=$(fm_web_gate_body_text)
-  awk -v expected="$expected" '
+  fm_web_gate_unfenced_text "$brief" | awk -v expected="$expected" '
     BEGIN {
       wanted_count = split(expected, wanted, "\n")
       wanted_index = 1
