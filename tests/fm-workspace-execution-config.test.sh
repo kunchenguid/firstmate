@@ -53,6 +53,18 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+add_bsd_rm() {
+  local fakebin=$1
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = -- ] && exit 64
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+}
+
 write_workspace_config() {
   local home=$1 json=$2
   mkdir -p "$home/config"
@@ -175,6 +187,26 @@ test_unselected_optional_tools_are_silent() {
   pass 'unselected sbx and Crabbox remain silent under absent host/local config'
 }
 
+test_workspace_bootstrap_temp_cleanup_is_bsd_safe() {
+  local home="$TMP_ROOT/bsd-rm" fakebin tmpdir out leftover
+  fakebin=$(make_bootstrap_toolchain "$home" 0)
+  add_bsd_rm "$fakebin"
+  tmpdir="$home/tmp"
+  mkdir -p "$home/config" "$tmpdir"
+
+  out=$(TMPDIR="$tmpdir" run_bootstrap "$home" "$fakebin")
+  [ -z "$out" ] || fail "BSD-compatible rm fixture changed silent unselected output: $out"
+  leftover=$(find "$tmpdir" -type f -name 'fm-workspace-execution.*' -print -quit)
+  [ -z "$leftover" ] || fail "successful workspace config detection left its error file: $leftover"
+
+  printf '%s\n' '{' > "$home/config/workspace-execution.json"
+  out=$(TMPDIR="$tmpdir" run_bootstrap "$home" "$fakebin")
+  assert_one_workspace_diagnostic "$out" 'BSD-compatible invalid config cleanup' 'malformed JSON'
+  leftover=$(find "$tmpdir" -type f -name 'fm-workspace-execution.*' -print -quit)
+  [ -z "$leftover" ] || fail "failed workspace config detection left its error file: $leftover"
+  pass 'workspace bootstrap temp cleanup works with macOS BSD rm semantics'
+}
+
 test_inheritance_copies_workspace_config_exactly() {
   local home="$TMP_ROOT/inherit" dest src out items
   home="$home/primary"
@@ -215,4 +247,5 @@ test_empty_and_docker_kits_are_accepted_without_optional_tool_leakage
 test_invalid_configs_emit_one_actionable_diagnostic
 test_selected_missing_optional_tools_use_manual_diagnostics
 test_unselected_optional_tools_are_silent
+test_workspace_bootstrap_temp_cleanup_is_bsd_safe
 test_inheritance_copies_workspace_config_exactly

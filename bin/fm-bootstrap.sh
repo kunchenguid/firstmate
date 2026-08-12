@@ -1090,14 +1090,15 @@ workspace_execution_detect_tools() {
   local error error_file
 
   if error_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-workspace-execution.XXXXXX" 2>/dev/null); then
+    case "$error_file" in -*) error_file=./$error_file ;; esac
     if ! fm_workspace_execution_config_load "$CONFIG" 2>"$error_file"; then
       error=$(<"$error_file")
-      rm -f -- "$error_file"
+      rm -f "$error_file"
       error=${error#workspace-execution config: }
       echo "WORKSPACE_EXECUTION: invalid config/workspace-execution.json - $error"
       return 0
     fi
-    rm -f -- "$error_file"
+    rm -f "$error_file"
   elif ! fm_workspace_execution_config_load "$CONFIG" 2>/dev/null; then
     echo "WORKSPACE_EXECUTION: invalid config/workspace-execution.json - could not capture configuration error"
     return 0
