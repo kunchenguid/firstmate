@@ -302,7 +302,7 @@ Direct egress is a deterministic persisted-session projection rather than a seco
 After Pi persists a finalized Assistant message, the extension scans message entries strictly after the binding's history boundary and registers every non-empty Assistant text regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused it.
 Persisted session-entry identity, order, timestamp, session, binding generation, and text hash make restart capture converge without source provenance or transient turn ordinals.
 The exact `Captain, shipshape.` response stays local, and thinking, partial streams, tool calls/results, user/system/custom messages, and TUI-only alerts are excluded.
-Intent processing refuses the whole message before body persistence on a fixed credential pattern, applies deterministic URL-preserving chunking, and transfers each eligible response to the outbox.
+Intent processing refuses the whole message before body persistence on a fixed credential pattern, applies deterministic URL- and Markdown-construct-preserving chunking, and transfers each eligible response to the outbox.
 The transport always uses SDK `message.create` for the bound P2P chat and maps stable chunk identities to SDK `uuid`, durable pre-send attempts, receipts, bounded same-UUID ambiguous retries, and an explicit uncertain state after the platform window.
 
 The operator contract, supported MVP, local commands, scopes, and failure recovery live in [`docs/feishu-channel.md`](feishu-channel.md).
