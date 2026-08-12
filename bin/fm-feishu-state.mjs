@@ -416,7 +416,7 @@ function validateOutbound(outbox) {
   requireString(outbox.binding_id, "outbound binding", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(outbox.binding_generation, "outbound generation", { min: 1 });
   requireString(outbox.destination_chat_id, "outbound destination", CHAT_ID);
-  if (typeof outbox.text !== "string" || outbox.text.trim().length === 0 || isLocalRoutineAssistantText(outbox.text)) throw new Error("invalid Feishu outbound text");
+  if (typeof outbox.text !== "string" || outbox.text.trim().length === 0) throw new Error("invalid Feishu outbound text");
   if (outbox.text_hash !== `sha256:${sha(outbox.text)}`) throw new Error("Feishu outbound text hash mismatch");
   if (!Array.isArray(outbox.chunks) || outbox.chunks.length === 0) throw new Error("invalid Feishu outbound chunks");
   let combined = "";
@@ -1720,6 +1720,7 @@ function maxPendingOutbound(input = {}) {
 function assertOutboundPair(name, outbox, ledger, binding) {
   validateOutbound(outbox);
   validateOutboundLedger(ledger);
+  if (["pending", "retryable", "sending"].includes(ledger.state) && isLocalRoutineAssistantText(outbox.text)) throw new Error("invalid Feishu outbound text");
   if (name !== `${sha(outbox.event_id)}.json` || ledger.event_id !== outbox.event_id || ledger.binding_generation !== outbox.binding_generation || ledger.next_chunk > outbox.chunks.length) throw new Error("Feishu outbox and ledger identity do not match");
   if (binding && outbox.binding_generation === binding.generation && (outbox.binding_id !== binding.binding_id || outbox.session_id !== binding.session_id || outbox.destination_chat_id !== binding.chat_id)) throw new Error("Feishu outbox destination does not match the active binding");
 }
