@@ -223,6 +223,57 @@ test_every_live_key_carries_a_disposition() {
   pass "every distinct live key carries its own disposition and closed keys stay out"
 }
 
+test_active_hold_transferred_out_of_status_fold_stays_enumerated() {
+  local home json hold
+  home=$(make_home transferred-hold)
+  lane_meta "$home" lane-held
+  printf 'needs-decision [key=route]: choose north or south\nworking: continuing\n' \
+    > "$home/state/lane-held.status"
+  hold=$(run_decisions "$home" hold lane-held route \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the transferable captain hold"
+  [ "$hold" = "lane-held-decision-route" ] || fail "the transferable hold identity was not deterministic"
+  run_decisions "$home" complete lane-held route >/dev/null \
+    || fail "could not transfer the held status key to its captain hold"
+  json=$(run_ledger "$home") || fail "ledger failed after transferring a key to its captain hold"
+
+  printf '%s' "$json" | jq -e '
+    .status_open_decision_keys == 0
+    and .captain_holds_active == 1
+    and .open_decision_keys == 1
+    and (.open_decisions | length) == 1
+    and (.open_decisions | any(
+      .task == "lane-held" and .key == "route"
+      and .disposition == "captain-hold-active"
+      and (.origins | sort) == ["captain-hold", "folded-status-key"]
+    ))
+  ' >/dev/null || fail "a transferred active captain hold was omitted or lost its status-key lineage: $json"
+  pass "an active captain hold remains an origin-labelled ledger row after status closure"
+}
+
+test_active_hold_without_status_key_stays_enumerated() {
+  local home json hold
+  home=$(make_home hold-without-status)
+  lane_meta "$home" backlog-only
+  printf 'working: hold created before a status decision was recorded\n' > "$home/state/backlog-only.status"
+  hold=$(run_decisions "$home" hold backlog-only route \
+    --title "Choose the backlog-only route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register a backlog-only captain hold"
+  [ "$hold" = "backlog-only-decision-route" ] || fail "the backlog-only hold identity was not deterministic"
+  json=$(run_ledger "$home") || fail "ledger rejected an active captain hold without a status key"
+
+  printf '%s' "$json" | jq -e '
+    .keys_opened_distinct == 0
+    and .status_open_decision_keys == 0
+    and .captain_holds_active == 1
+    and .open_decision_keys == 1
+    and (.open_decisions | length) == 1
+    and (.open_decisions[0] | .task == "backlog-only" and .key == "route"
+      and .disposition == "captain-hold-active" and .origins == ["captain-hold"])
+  ' >/dev/null || fail "a backlog-only active captain hold was not separately enumerated: $json"
+  pass "an active captain hold without a status key remains an origin-labelled ledger row"
+}
+
 test_unclassifiable_state_is_disclosed_not_hidden() {
   local home json bjson
   home=$(build_coverage_home undetermined)
@@ -235,8 +286,14 @@ EOF
   printf '%s' "$json" | jq -e '
     .complete == false
     and (.open_decisions | length) == .open_decision_keys
-    and (.open_decisions | all(.disposition == "undetermined"))
-    and (.open_decisions | all(.detail != ""))
+    and ([.open_decisions[] | select(.disposition == "undetermined")] | length) == 3
+    and (.open_decisions | all(
+      .disposition == "undetermined" or .disposition == "captain-hold-active"
+    ))
+    and (.open_decisions | all(
+      if .disposition == "undetermined" then .detail != "" else .detail == "" end
+    ))
+    and (.open_decisions | any(.task == "lane-held" and .disposition == "captain-hold-active"))
   ' >/dev/null || fail "an unclassifiable hold state was not disclosed per key: $json"
 
   bjson=$(run_bearings "$home") || fail "bearings failed with an incomplete ledger"
@@ -284,5 +341,7 @@ EOF
 test_only_fold_recognized_lines_become_figures
 test_raw_events_never_become_the_open_decision_count
 test_every_live_key_carries_a_disposition
+test_active_hold_transferred_out_of_status_fold_stays_enumerated
+test_active_hold_without_status_key_stays_enumerated
 test_unclassifiable_state_is_disclosed_not_hidden
 test_bearings_publishes_the_ledger_and_refuses_an_unbacked_count

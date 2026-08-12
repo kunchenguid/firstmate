@@ -22,11 +22,12 @@
 # from the fixed vocabulary below, and the script refuses to emit a row without
 # one. Nothing is dropped, capped, or summarized away.
 #
-# The open set itself is NOT recomputed here. It comes from fm-classify-lib.sh's
-# authoritative status_open_decisions fold, through its scan_open_decisions
-# wrapper, so this surface can never drift from the fold every other consumer uses.
-# Per-key dispositions come from `fm-decision-hold.sh state`, the one classifier
-# for a hold identity's durable state.
+# The open set is the deduplicated union of fm-classify-lib.sh's authoritative
+# status_open_decisions fold and the canonical backlog's actionable captain holds.
+# The two origins stay visible on every merged row and their separate figures stay
+# separate, so moving a key from its status fold to its hold never hides it or turns
+# the raw event counter into an open-decision figure. Per-key dispositions come from
+# `fm-decision-hold.sh state`, the one classifier for a hold identity's durable state.
 #
 # Dispositions:
 #   captain-hold-active     durably held for the captain in this home's backlog
@@ -75,6 +76,7 @@ command -v jq >/dev/null 2>&1 || { echo "fm-decision-ledger: jq not found" >&2; 
 
 NOW=${FM_LEDGER_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 HOLD="$SCRIPT_DIR/fm-decision-hold.sh"
+FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -119,14 +121,39 @@ $(grep -F -e needs-decision -e blocked -e "$resolve_verb" -e "$held_verb" "$f" |
 EOF
 done
 opened_distinct=$(printf '%s' "$opened_pairs" | sed '/^$/d' | LC_ALL=C sort -u | grep -c '' || true)
+OPENED_ROWS=$(printf '%s' "$opened_pairs" | jq -R -s '
+  [split("\n")[] | select(length > 0) | split("\t") | {task:.[0], key:.[1]}] | unique')
 
-# The authoritative fold. scan_open_decisions prints "<task>\t<key>\t<verb>\t<note>".
+# The authoritative status fold. scan_open_decisions prints
+# "<task>\t<key>\t<verb>\t<note>".
 OPEN=$(scan_open_decisions "$STATE")
+
+# Use the same normalized actionable-hold inventory that Bearings projects.
+# A malformed active hold remains a disclosed undetermined row rather than being
+# dropped from the union.
+SNAP=$($FLEET --json 2>/dev/null) || {
+  echo "fm-decision-ledger: canonical backlog inventory could not be produced" >&2
+  exit 1
+}
+HOLD_ROWS=$(printf '%s' "$SNAP" | jq -ce '
+  [ .backlog.records[]?
+    | select(.structured and .captain_actionable == true)
+    | {
+        hold_id: .id,
+        task: ([.body_lines[]? | select(startswith("Origin: ")) | ltrimstr("Origin: ")][0] // null),
+        key: ([.body_lines[]? | select(startswith("Decision key: ")) | ltrimstr("Decision key: ")][0] // null),
+        summary: (.title // "captain decision pending")
+      }
+  ]') || {
+  echo "fm-decision-ledger: canonical backlog inventory was malformed" >&2
+  exit 1
+}
+active_hold_count=$(printf '%s' "$HOLD_ROWS" | jq 'length')
 
 # Per-key disposition. Keys are grouped by task so the hold classifier is invoked
 # once per owning lane rather than once per key.
 ROWS=''
-open_count=0
+status_open_count=0
 stale_count=0
 undetermined_count=0
 current_task=''
@@ -204,7 +231,7 @@ EOF
 
 while IFS=$'\t' read -r task key verb note; do
   [ -n "$task" ] || continue
-  open_count=$((open_count + 1))
+  status_open_count=$((status_open_count + 1))
   note=${note//	/ }
   if [ "$task" != "$current_task" ]; then
     if [ -n "$current_task" ]; then
@@ -224,7 +251,7 @@ if [ -n "$current_task" ]; then
   emit_task_rows
 fi
 
-superseded=$((opened_distinct - open_count))
+superseded=$((opened_distinct - status_open_count))
 [ "$superseded" -ge 0 ] || superseded=0
 complete=true
 [ "$undetermined_count" -eq 0 ] || complete=false
@@ -239,16 +266,41 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
   --argjson opened_distinct "$opened_distinct" \
   --argjson superseded "$superseded" \
   --argjson stale "$stale_count" \
+  --argjson status_open "$status_open_count" \
+  --argjson active_holds "$active_hold_count" \
+  --argjson holds "$HOLD_ROWS" \
+  --argjson opened "$OPENED_ROWS" \
   --argjson complete "$complete" '
   def trunc($n): if (length > $n) then (.[:$n] + "…") else . end;
   [ split("\n")[] | select(length > 0) | split("\t")
     | {task:.[0], key:.[1], verb:.[2], disposition:.[3],
-       detail:(.[4] // ""), summary:((.[5] // "") | trunc(160))} ] as $rows
+       detail:(.[4] // ""), summary:((.[5] // "") | trunc(160)),
+       hold_id:(.[0] + "-decision-" + .[1]), origins:["folded-status-key"]} ] as $status_rows
+  | ($holds | map(. as $hold |
+      if (.task | type) == "string" and (.task | length) > 0
+         and (.key | type) == "string" and (.key | length) > 0 then
+        {task, key, verb:"captain-hold", disposition:"captain-hold-active", detail:"",
+         summary:(.summary | trunc(160)), hold_id,
+         origins:((if any($opened[]; .task == $hold.task and .key == $hold.key)
+                   then ["folded-status-key"] else [] end) + ["captain-hold"])}
+      else
+        {task:null, key:.hold_id, verb:"captain-hold", disposition:"undetermined",
+         detail:"active captain hold has no readable Origin and Decision key record",
+         summary:(.summary | trunc(160)), hold_id:.hold_id, origins:["captain-hold"]}
+      end
+    )) as $hold_rows
+  | ($status_rows + $hold_rows
+     | group_by(.hold_id)
+     | map(reduce .[] as $row ({};
+         . * $row
+         | .origins = ((.origins // []) + ($row.origins // []) | unique)
+         | .detail = ([.detail, $row.detail] | map(select(. != "")) | unique | join("; "))
+       ))) as $rows
   | {
       schema: "fm-decision-ledger.v1",
       home: $home,
       generated: $now,
-      complete: $complete,
+      complete: ($complete and ($rows | all(.disposition != "undetermined"))),
       raw_decision_events: {
         needs_decision: $needs_decision,
         blocked: $blocked,
@@ -260,6 +312,8 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
       keys_opened_distinct: $opened_distinct,
       keys_superseded: $superseded,
       keys_stale: $stale,
+      status_open_decision_keys: $status_open,
+      captain_holds_active: $active_holds,
       open_decision_keys: ($rows | length),
       open_decisions: $rows,
       definitions: {
@@ -267,8 +321,10 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
         keys_opened_distinct: "distinct task+key decisions ever opened, however many events each took.",
         keys_superseded: "distinct keys that were opened and have since been closed.",
         keys_stale: "open keys whose owning lane already finished; they are still counted open and still carry a disposition.",
-        open_decision_keys: "the authoritative open-decision count: distinct still-open keys from fm-classify-lib.sh status_open_decisions. Always equal to the length of open_decisions.",
-        open_decisions: "one row per distinct open key, each with a disposition. No key is omitted, capped, or left blank.",
+        status_open_decision_keys: "distinct still-open keys from fm-classify-lib.sh status_open_decisions. This is a folded status-key figure, not a raw event count.",
+        captain_holds_active: "actionable captain backlog rows with -decision- hold identities. This is a held-backlog-row figure, not a status-key or raw-event count.",
+        open_decision_keys: "the deduplicated union of folded status keys and actionable captain holds. Always equal to the length of open_decisions; its origin-labelled rows keep the source figures readable.",
+        open_decisions: "one row per distinct live decision identity, each with a disposition and origins. No key or captain hold is omitted, capped, or left blank.",
         complete: "false when any row is undetermined, so a partially classified ledger can never read as a fully accounted one."
       }
     }') || { echo "fm-decision-ledger: ledger assembly failed" >&2; exit 1; }
@@ -287,10 +343,12 @@ printf '%s' "$LEDGER" | jq -e '
     error("a live decision key carries a disposition outside the fixed vocabulary")
   elif (.open_decisions | any(.disposition == "undetermined" and (.detail // "") == "")) then
     error("an undetermined disposition carries no reason")
+  elif (.open_decisions | any((.origins | type) != "array" or (.origins | length) == 0)) then
+    error("a live decision identity carries no origin")
   elif (.complete == true and (.open_decisions | any(.disposition == "undetermined"))) then
     error("a ledger with undetermined rows claims completeness")
-  elif .keys_opened_distinct < .open_decision_keys then
-    error("more keys are open than were ever opened")
+  elif .keys_opened_distinct < .status_open_decision_keys then
+    error("more status keys are open than were ever opened")
   else . end' >/dev/null \
   || { echo "fm-decision-ledger: coverage invariants failed; refusing to emit" >&2; exit 1; }
 
