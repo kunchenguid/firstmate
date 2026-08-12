@@ -424,7 +424,8 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
   [ ! -e "$dir/wt/.claude/settings.local.json" ] \
     || fail "the previous harness's per-task wiring must be cleared on a switch"
-  assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
+  grep -q '; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex .*encode launch-brief' "$dir/fake/literal" \
+    || fail "the replacement launch should execute the new harness after the PATH handoff"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"

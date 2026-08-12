@@ -68,18 +68,6 @@ case "${1:-}" in
       printf '%s' "$payload" > "$FM_FAKE_PANE_LAUNCH"
       exit 0
     fi
-    case "$payload" in
-      'export PATH='*)
-        pane_path=$(cat "$FM_FAKE_PANE_PATH_FILE")
-        next=$(PANE_PATH="$pane_path" PAYLOAD="$payload" /bin/sh -c '
-          PATH=$PANE_PATH
-          export PATH
-          eval "$PAYLOAD"
-          printf "%s" "$PATH"
-        ') || exit 1
-        printf '%s' "$next" > "$FM_FAKE_PANE_PATH_FILE"
-        ;;
-    esac
     if [ "$enter" -eq 1 ] && [ -z "$payload" ] && [ -s "$FM_FAKE_PANE_LAUNCH" ]; then
       pane_path=$(cat "$FM_FAKE_PANE_PATH_FILE")
       launch=$(cat "$FM_FAKE_PANE_LAUNCH")
@@ -94,12 +82,16 @@ SH
 }
 
 make_spawn_case() { # <name> [provider-path]
-  local name=$1 provider_path=${2:-/usr/bin:/bin:/usr/sbin:/sbin} base home project worktree fakebin id
+  local name=$1 provider_path=${2:-} base home project worktree fakebin id
   base="$TMP_ROOT/$name"
   home="$base/home"
   project="$base/project"
   worktree="$base/worktree"
   fakebin=$(fm_fakebin "$base/controller")
+  if [ -z "$provider_path" ]; then
+    provider_path="$base/provider-empty"
+    mkdir -p "$provider_path"
+  fi
   id="$name-z1"
   mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$base/pane-home"
   printf 'Delivery contract: mode=no-mistakes\n' > "$home/data/$id/brief.md"
@@ -163,8 +155,8 @@ SH
 SH
   chmod +x "$CASE_BASE/probe.sh"
 
-  if PATH='/usr/bin:/bin:/usr/sbin:/sbin' command -v node >/dev/null 2>&1 \
-     || PATH='/usr/bin:/bin:/usr/sbin:/sbin' command -v npx >/dev/null 2>&1; then
+  if PATH=$(cat "$CASE_BASE/pane.path") command -v node >/dev/null 2>&1 \
+     || PATH=$(cat "$CASE_BASE/pane.path") command -v npx >/dev/null 2>&1; then
     fail "the fake provider baseline unexpectedly resolves node or npx"
   fi
   caller_path="$versioned:$quoted:$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
