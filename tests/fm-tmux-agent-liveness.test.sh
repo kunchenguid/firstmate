@@ -75,7 +75,7 @@ ln -s "$SLEEP_BIN" "$LAB/bin/agent"
 # to /usr/bin/sleep and would not model the structural proof under test.
 mkdir -p "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809"
 if [ -n "$CC_BIN" ] &&
-  printf '%s\n' '#include <stdio.h>' '#include <string.h>' '#include <unistd.h>' 'int main(int argc,char **argv){if(argc > 1 && strcmp(argv[1],"--help") == 0){puts("Start the Cursor Agent");return 0;}for(;;)sleep(60);return 0;}' > "$LAB/cursor-spin.c" &&
+  printf '%s\n' '#include <stdio.h>' '#include <string.h>' '#include <unistd.h>' 'int main(int argc,char **argv){if(argc > 1 && strcmp(argv[1],"--help") == 0){puts("Usage: cursor-agent [OPTIONS]");puts("Start the Cursor Agent");puts("CURSOR_API_ENDPOINT  override api2.cursor.sh");return 0;}for(;;)sleep(60);return 0;}' > "$LAB/cursor-spin.c" &&
   "$CC_BIN" -o "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" "$LAB/cursor-spin.c" 2>/dev/null; then
   ln -s "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" \
     "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/agent"
@@ -387,7 +387,7 @@ pass "tmux liveness: a bare MainThread exec name without cursor-agent path is no
 
 CURSOR_BINARY="$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent"
 if [ -x "$CURSOR_BINARY" ]; then
-  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorargv0 bash -c "FM_CURSOR_EXECUTABLE='$CURSOR_BINARY' exec -a '$CURSOR_BINARY' '$CURSOR_BINARY' 30"
+  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorargv0 bash -c "CURSOR_AGENT=1 exec -a '$CURSOR_BINARY' '$CURSOR_BINARY' 30"
   wait_for_state "$SESSION:cursorargv0" alive 2>/dev/null \
     || fail "a Cursor install-path argv0 must classify alive"
   pass "tmux liveness: a validated Cursor install path classifies alive"
@@ -404,7 +404,7 @@ pass "tmux liveness: a decoy cursor-agent basename does not classify alive"
 
 CURSOR_ALIAS="$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/agent"
 if [ -x "$CURSOR_ALIAS" ]; then
-  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "FM_CURSOR_EXECUTABLE='$CURSOR_ALIAS' exec -a '$CURSOR_ALIAS' '$CURSOR_ALIAS' 30"
+  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "CURSOR_AGENT=1 exec -a '$CURSOR_ALIAS' '$CURSOR_ALIAS' 30"
   wait_for_state "$SESSION:cursoralias" alive 2>/dev/null \
     || fail "a legacy agent alias inside Cursor's install tree must classify alive"
   "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursoralias" 2>/dev/null || true

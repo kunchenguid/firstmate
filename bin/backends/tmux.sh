@@ -373,8 +373,12 @@ EOF
     [ -n "$pane_argv0" ] && current_argv0=$pane_argv0
     [ -n "$pane_args" ] && current_args=$pane_args
   fi
-  if [ -n "$current_pid" ] \
-     && [ "$(fm_backend_tmux_classify_process_name "$current_comm" "$current_argv0" "$current_args" "$current_pid")" = agent ]; then
+  # The pane's own command name stays a first-class signal even when the tty
+  # process table cannot be read (no pid resolved): a named harness like codex
+  # still classifies alive by name. Cursor is unaffected - its identity rule
+  # needs a pid, so a bare `agent` name without one never reads as alive.
+  [ -n "$current_comm" ] || current_comm=$comm
+  if [ "$(fm_backend_tmux_classify_process_name "$current_comm" "$current_argv0" "$current_args" "$current_pid")" = agent ]; then
     printf 'alive'
     return 0
   fi

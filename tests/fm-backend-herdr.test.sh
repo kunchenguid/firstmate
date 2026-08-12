@@ -4703,7 +4703,12 @@ test_cursor_spawn_herdr_unconfirmed_close_retains_recoverable_state() {
   proj="$dir/project"
   wt="$dir/wt"
   fb=$(make_herdr_statefake "$dir")
-  fm_fake_exit0 "$fb" treehouse cursor-agent
+  fm_fake_exit0 "$fb" treehouse
+  # A probe-passing cursor-agent in Cursor's own versioned install tree: the
+  # resolver verifies the executable before launch, so a bare exit-0 stub would
+  # refuse the spawn before any endpoint exists (and a host with a real
+  # cursor-agent installed would silently pass instead).
+  fm_fake_cursor_alias_symlinked "$fb" cursor-agent "$dir/cursor-install"
   fm_git_worktree "$proj" "$wt" "wt-cursor-herdr-rollback"
   mkdir -p "$dir/home/data/$id" "$dir/home/state" "$dir/home/config"
   printf 'cursor\n' > "$dir/home/config/crew-harness"

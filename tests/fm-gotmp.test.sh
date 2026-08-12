@@ -83,6 +83,10 @@ make_fake_root() {
   # fm-process-identity-lib.sh: teardown sources it for the shared
   # process-identity parse behind the recorded-pid reapers.
   ln -s "$ROOT/bin/fm-process-identity-lib.sh" "$fake/bin/fm-process-identity-lib.sh"
+  # fm-cursor-lib.sh (and its bounded-probe dependency): teardown sources it
+  # for Cursor endpoint identity.
+  ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -163,6 +167,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   ln -s "$ROOT/bin/fm-process-identity-lib.sh" "$fake/bin/fm-process-identity-lib.sh"
+  # fm-cursor-lib.sh (and its bounded-probe dependency): teardown sources it
+  # for Cursor endpoint identity.
+  ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

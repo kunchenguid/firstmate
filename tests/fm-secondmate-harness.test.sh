@@ -996,6 +996,7 @@ test_spawn_cursor_secondmate_env_reaches_agent() {
 cat > "$w/home/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Usage: cursor-agent [options] [prompt...]'
   printf '%s\n' 'Start the Cursor Agent'
   printf '%s\n' 'CURSOR_API_ENDPOINT https://api2.cursor.sh'
   exit 0
@@ -1061,6 +1062,7 @@ test_spawn_cursor_secondmate_worker_absent_rolls_back_completely() {
   cat > "$w/home/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Usage: cursor-agent [options] [prompt...]'
   printf '%s\n' 'Start the Cursor Agent'
   printf '%s\n' 'CURSOR_API_ENDPOINT https://api2.cursor.sh'
   exit 0
