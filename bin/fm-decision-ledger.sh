@@ -40,15 +40,16 @@
 #                           and sets complete=false, so it is disclosed, never hidden
 #
 # Usage: fm-decision-ledger.sh [--json]
-# Output contract: `fm-decision-ledger.v1` JSON on stdout. Read-only: no locks, no
-# mutation, no network. Exits non-zero when its own coverage invariants do not hold.
+# Output contract: `fm-decision-ledger.v1` JSON on stdout. Read-only: no locks or
+# mutation. It uses the canonical bounded snapshot inventory, including its
+# disclosed cross-home reads, so it never duplicates the backlog grammar. Exits
+# non-zero when its own coverage invariants do not hold.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -77,6 +78,7 @@ command -v jq >/dev/null 2>&1 || { echo "fm-decision-ledger: jq not found" >&2; 
 
 NOW=${FM_LEDGER_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 HOLD="$SCRIPT_DIR/fm-decision-hold.sh"
+SNAPSHOT="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -129,65 +131,40 @@ OPENED_ROWS=$(printf '%s' "$opened_pairs" | jq -R -s '
 OPEN=$(scan_open_decisions "$STATE")
 status_open_count=$(printf '%s\n' "$OPEN" | grep -c . || true)
 
-[ -f "$DATA/backlog.md" ] && [ -r "$DATA/backlog.md" ] && [ ! -L "$DATA/backlog.md" ] \
-  || { echo "fm-decision-ledger: local backlog is missing, unreadable, or symlinked" >&2; exit 1; }
+LEDGER_SECONDMATES=${FM_LEDGER_SECONDMATES:-20}
+LEDGER_SECONDMATE_TIMEOUT=${FM_LEDGER_SECONDMATE_TIMEOUT:-8}
+LEDGER_SECONDMATE_MAX_BYTES=${FM_LEDGER_SECONDMATE_MAX_BYTES:-262144}
+for bound in LEDGER_SECONDMATES LEDGER_SECONDMATE_TIMEOUT LEDGER_SECONDMATE_MAX_BYTES; do
+  value=${!bound}
+  case "$value" in
+    ''|*[!0-9]*|0)
+      echo "fm-decision-ledger: $bound must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
+done
 
-HOLD_TSV=$(awk '
-  function metadata(line, label, text) {
-    text = line
-    sub("^.*\\(" label ":[[:space:]]*", "", text)
-    if (text == line) return ""
-    sub("\\).*$", "", text)
-    return text
-  }
-  function emit() {
-    if (id != "") {
-      done[id] = (section == "Done")
-      if (section == "Queued" && id ~ /-decision-/ && kind == "captain" && hold_kind == "captain" && hold_reason != "") {
-        candidate_count++
-        candidate_id[candidate_count] = id
-        candidate_origin[candidate_count] = origin
-        candidate_key[candidate_count] = key
-        candidate_summary[candidate_count] = summary
-        candidate_blockers[candidate_count] = blockers
-      }
-    }
-  }
-  /^## / { emit(); section = substr($0, 4); id = origin = key = kind = hold_kind = hold_reason = summary = ""; next }
-  /^[-*][[:space:]]+\[[ xX]\][[:space:]]+/ {
-    emit(); id = origin = key = kind = hold_kind = hold_reason = summary = blockers = ""
-    summary = $0
-    sub(/^[-*][[:space:]]+\[[ xX]\][[:space:]]+/, "", summary)
-    id = summary
-    sub(/[[:space:]]+-[[:space:]].*$/, "", id)
-    sub(/^[^[:space:]]+[[:space:]]+-[[:space:]]+/, "", summary)
-    kind = metadata($0, "kind")
-    hold_kind = metadata($0, "hold-kind")
-    hold_reason = metadata($0, "hold")
-    rest = $0
-    while (match(rest, /blocked-by:[[:space:]]+[^[:space:])]+/)) {
-      blocker = substr(rest, RSTART, RLENGTH)
-      sub(/^blocked-by:[[:space:]]+/, "", blocker)
-      blockers = blockers (blockers == "" ? "" : SUBSEP) blocker
-      rest = substr(rest, RSTART + RLENGTH)
-    }
-    next
-  }
-  /^[[:space:]]+Origin: / { if (id != "") { sub(/^[[:space:]]+Origin: /, ""); origin = $0 }; next }
-  /^[[:space:]]+Decision key: / { if (id != "") { sub(/^[[:space:]]+Decision key: /, ""); key = $0 }; next }
-  END {
-    emit()
-    for (i = 1; i <= candidate_count; i++) {
-      actionable = 1
-      blocker_count = split(candidate_blockers[i], candidate_blocker, SUBSEP)
-      for (j = 1; j <= blocker_count; j++)
-        if (candidate_blocker[j] != "" && done[candidate_blocker[j]] != 1) actionable = 0
-      if (actionable)
-        print candidate_id[i] "\t" candidate_origin[i] "\t" candidate_key[i] "\t" candidate_summary[i]
-    }
-  }
-' "$DATA/backlog.md") || {
-  echo "fm-decision-ledger: local backlog could not be parsed" >&2
+# The canonical snapshot owns the backlog grammar and actionability predicate.
+# Its bounded cross-home read is preferable to a divergent second parser; child
+# unavailability is disclosed by the snapshot and never removes main-home holds.
+SNAPSHOT_JSON=$(FM_SNAPSHOT_SECONDMATES="$LEDGER_SECONDMATES" \
+  FM_SNAPSHOT_SECONDMATE_TIMEOUT="$LEDGER_SECONDMATE_TIMEOUT" \
+  FM_SNAPSHOT_SECONDMATE_MAX_BYTES="$LEDGER_SECONDMATE_MAX_BYTES" \
+  "$SNAPSHOT" --json) || {
+  echo "fm-decision-ledger: canonical captain-hold inventory unavailable" >&2
+  exit 1
+}
+HOLD_TSV=$(printf '%s' "$SNAPSHOT_JSON" | jq -er '
+  if .backlog.present != true then error("canonical backlog unavailable")
+  elif (.backlog.records | type) != "array" then error("canonical backlog records unavailable")
+  else .backlog.records[]
+    | select(.structured == true and .captain_actionable == true)
+    | [ .id, (.body_lines[]? | select(startswith("Origin: ")) | ltrimstr("Origin: ")),
+        (.body_lines[]? | select(startswith("Decision key: ")) | ltrimstr("Decision key: ")),
+        (.title // "captain decision pending") ]
+    | @tsv
+  end') || {
+  echo "fm-decision-ledger: canonical captain-hold inventory unavailable" >&2
   exit 1
 }
 HOLD_INPUT=''

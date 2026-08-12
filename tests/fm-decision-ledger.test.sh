@@ -49,6 +49,13 @@ run_ledger() {  # <home> [args...]
     FM_LEDGER_NOW=2026-08-06T12:00:00Z "$LEDGER" "$@"
 }
 
+run_snapshot() {  # <home>
+  local home=$1
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SNAPSHOT_NOW=2026-08-06T12:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json
+}
+
 run_bearings() {  # <home> [script-override]
   local home=$1 script=${2:-$BEARINGS}
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-06T12:00:00Z \
@@ -301,32 +308,26 @@ test_blocked_captain_hold_is_not_an_actionable_source() {
   pass "a blocked captain hold stays out of the actionable current-source set"
 }
 
-test_local_hold_predicate_matches_canonical_summary() {
+test_canonical_hold_set_reaches_ledger() {
   local home json canonical malformed
   home=$(build_coverage_home canonical-hold-predicate)
-  canonical=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
-    || fail "could not produce the canonical local-home summary"
+  canonical=$(run_snapshot "$home") || fail "could not produce the canonical inventory"
   json=$(run_ledger "$home") || fail "ledger failed on the canonical predicate fixture"
   printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
-    .captain_holds_active == ([ $canonical.decisions_open[]
-      | select(.source == "backlog" and .verb == "captain-hold") ] | length)
-  ' >/dev/null || fail "local captain-hold predicate diverged from the canonical summary: $json"
+    .captain_holds_active == ([ $canonical.backlog.records[]
+      | select(.structured == true and .captain_actionable == true) ] | length)
+  ' >/dev/null || fail "ledger captain-hold set diverged from the canonical inventory: $json"
 
   malformed=$(sed 's/ (hold: captain route choice pending)//' "$home/data/backlog.md")
   printf '%s\n' "$malformed" > "$home/data/backlog.md"
-  canonical=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
-    || fail "could not produce canonical output for a malformed captain row"
+  canonical=$(run_snapshot "$home") || fail "could not produce canonical output for a malformed captain row"
   json=$(run_ledger "$home") || fail "ledger failed on a malformed captain row"
   printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
     .captain_holds_active == 0
-    and .captain_holds_active == ([ $canonical.decisions_open[]
-      | select(.source == "backlog" and .verb == "captain-hold") ] | length)
+    and .captain_holds_active == ([ $canonical.backlog.records[]
+      | select(.structured == true and .captain_actionable == true) ] | length)
   ' >/dev/null || fail "a captain row without hold reason diverged from canonical actionability: $json"
-  pass "the local captain-hold predicate matches canonical actionability"
+  pass "the ledger consumes canonical captain-hold actionability"
 }
 
 test_unreadable_backlog_refuses_the_ledger() {
@@ -336,30 +337,30 @@ test_unreadable_backlog_refuses_the_ledger() {
   if run_ledger "$home" > "$home/ledger.out" 2> "$home/ledger.err"; then
     fail "ledger emitted a zero-hold result without a readable backlog"
   fi
-  assert_grep "local backlog is missing, unreadable, or symlinked" "$home/ledger.err" \
+  assert_grep "canonical captain-hold inventory unavailable" "$home/ledger.err" \
     "missing backlog did not fail closed"
-  pass "a missing local backlog refuses instead of silently dropping captain holds"
+  pass "a missing canonical backlog inventory refuses instead of silently dropping captain holds"
 }
 
-test_ledger_reads_no_cross_home_snapshot() {
-  local home json shadow saved_ledger
-  home=$(build_coverage_home local-only)
-  shadow="$home/shadow"
-  cp -R "$ROOT/bin" "$shadow"
-  cat > "$shadow/fm-fleet-snapshot.sh" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${FM_HOME:?}/fleet-invoked"
-exit 99
-EOF
-  chmod +x "$shadow/fm-fleet-snapshot.sh"
-  saved_ledger=$LEDGER
-  LEDGER="$shadow/fm-decision-ledger.sh"
-  json=$(run_ledger "$home") || fail "ledger attempted a fleet snapshot instead of reading local captain holds"
-  LEDGER=$saved_ledger
-  [ ! -e "$home/fleet-invoked" ] || fail "ledger invoked a fleet snapshot: $(cat "$home/fleet-invoked")"
-  printf '%s' "$json" | jq -e '.captain_holds_active == 1 and .open_decision_keys == 4' >/dev/null \
-    || fail "local-only ledger output changed while avoiding fleet aggregation: $json"
-  pass "the ledger reads local captain holds without a fleet snapshot"
+test_bold_captain_hold_reaches_the_union() {
+  local home json canonical
+  home=$(build_coverage_home bold-captain-hold)
+  sed 's/^- \[ \] lane-held-decision-route - /- **lane-held-decision-route** - /' \
+    "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  canonical=$(run_snapshot "$home") || fail "could not inventory the bold captain hold"
+  json=$(run_ledger "$home") || fail "ledger omitted the bold captain hold"
+  printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
+    ([ $canonical.backlog.records[]
+       | select(.id == "lane-held-decision-route" and .captain_actionable == true) ] | length) == 1
+    and .captain_holds_active == ([ $canonical.backlog.records[]
+       | select(.structured == true and .captain_actionable == true) ] | length)
+    and (.open_decisions | any(
+      .hold_id == "lane-held-decision-route"
+      and (.current_sources | index("captain-hold"))
+    ))
+  ' >/dev/null || fail "the bold canonical captain hold did not reach the ledger union: $json"
+  pass "a canonical bold captain hold reaches the ledger union"
 }
 
 test_unclassifiable_state_is_disclosed_not_hidden() {
@@ -425,8 +426,8 @@ test_every_live_key_carries_a_disposition
 test_active_hold_transferred_out_of_status_fold_stays_enumerated
 test_active_hold_without_status_key_stays_enumerated
 test_blocked_captain_hold_is_not_an_actionable_source
-test_local_hold_predicate_matches_canonical_summary
+test_canonical_hold_set_reaches_ledger
 test_unreadable_backlog_refuses_the_ledger
-test_ledger_reads_no_cross_home_snapshot
+test_bold_captain_hold_reaches_the_union
 test_unclassifiable_state_is_disclosed_not_hidden
 test_bearings_publishes_the_ledger_and_refuses_an_unbacked_count
