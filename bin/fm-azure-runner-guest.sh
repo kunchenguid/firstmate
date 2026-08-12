@@ -156,7 +156,8 @@ systemd-run --quiet --wait --collect --unit "$UNIT" --property=Type=exec --prope
   --property=PrivateNetwork=yes --property=RestrictAddressFamilies=AF_UNIX --property=IPAddressDeny=any \
   --property=PrivateTmp=yes --property=PrivateDevices=yes --property=ProtectSystem=strict --property=ProtectHome=yes \
   --property=ProtectKernelTunables=yes --property=ProtectKernelModules=yes --property=ProtectControlGroups=yes \
-  --property=RestrictRealtime=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes --property=CapabilityBoundingSet= \
+  --property=RestrictRealtime=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes \
+  --property='CapabilityBoundingSet=CAP_SETUID CAP_SETGID' --property=AmbientCapabilities= \
   --property="ReadWritePaths=/work $OUTPUT" /usr/bin/python3 "$EXECUTOR" "$REQUEST" /work/repo "$OUTPUT" "$RUNNER_UID" "$RUNNER_GID" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID"
 EXECUTOR_STATUS=$?
 set -e

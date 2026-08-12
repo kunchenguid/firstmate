@@ -21,8 +21,8 @@ The first live invocation remains blocked until the foundation and this code are
 
 ## Request and snapshot contract
 
-`prepare` refuses a detached HEAD, tracked changes, untracked files, and any origin other than a credential-free public GitHub HTTPS URL.
-It records the exact named-branch `HEAD` commit and tree object IDs and binds that public origin into the request.
+`prepare` refuses a detached HEAD, tracked changes, untracked files, any origin other than a credential-free public GitHub HTTPS URL, and any commit not reachable from a freshly advertised and fetched `refs/heads/main` default head.
+The proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; it binds the remote, default ref/head, candidate commit, and tree and repeats immediately before compute creation and retry.
 No live worktree, primary home, provider account home, browser profile, or peer storage is mounted or copied.
 
 The canonical `fm.azure-command/v1` request binds these fields:
@@ -62,7 +62,8 @@ The untrusted child receives a fixed allowlisted environment with no ambient hos
 
 The command child runs as the dedicated unprivileged `fmrunner` uid with no supplemental groups, capabilities, sudo, setuid elevation, host network namespace, IMDS route, private-endpoint route, Internet route, control-plane mount, or bootstrap credential.
 A root-owned trusted executor opens protected logs and drops only its child to `fmrunner`.
-The systemd unit applies `CPUQuota`, `MemoryMax`, zero swap, `TasksMax`, `RuntimeMaxSec`, no-new-privileges, private temporary and device namespaces, strict system/home/kernel/control-group protection, an empty capability bounding set, and control-group process cleanup.
+The systemd trusted broker applies `CPUQuota`, `MemoryMax`, zero swap, `TasksMax`, `RuntimeMaxSec`, no-new-privileges, private temporary and device namespaces, strict system/home/kernel/control-group protection, and a bounding set containing only `CAP_SETUID` and `CAP_SETGID` so it can create the unprivileged child.
+After dropping uid, gid, and supplemental groups, the child proves its effective, permitted, and ambient capability sets are empty and no-new-privileges is active before executing repository code.
 A loop-mounted ext4 filesystem bounds all untrusted repository, dependency, temporary, and artifact writes independently of the root filesystem.
 The VM SKU and OS disk remain outer hard bounds even if a guest mechanism fails.
 
@@ -113,7 +114,7 @@ There is no queue daemon and no warm runner compute.
 An empty local queue means zero runner VMs.
 Every invocation receives a separate VM, so two admitted shards run concurrently without sharing process, memory, disk, temp, or task state.
 
-Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact container role, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
+Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact effective container role including inherited/group expansion, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
 It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, current retail rate, and active runner count.
 The software cap is four active runner VMs and may be configured only from one through eight, while live regional and per-family free-vCPU gates can impose a lower effective cap.
 The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
@@ -123,6 +124,7 @@ The 60-second lock has a 10-second call deadline, monotonic last-success certifi
 Any renewal exception permanently fails that owner, and synchronous owner/fence/ETag renewal immediately before compute creation prevents an expired, hung, or stale writer from creating a VM.
 Each invocation reserves its complete first-day worst-case dollar bound as a separately named, exactly tagged, zero-cost UAMI resource before compute creation.
 Listing and summing those management resources survives controller restart without packed tag ledgers or a reachable storage data plane.
+Every creation, admission list/reread, immediate pre-create proof, cleanup marker, and reconciliation/deletion proves each reservation principal has zero direct, group-derived, or inherited effective RBAC assignments, and runner VM inventory refuses any attached reservation identity.
 The reservation survives controller restart and fenced retry lineage.
 It is marked cleanup-verified only after exact compute absence, and is deleted only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
 

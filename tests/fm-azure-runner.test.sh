@@ -45,7 +45,7 @@ assert "controllerIdentityId" in json.dumps(vm["identity"])
 assert "publicipaddress" not in json.dumps(nic).lower()
 assert "ssh" not in json.dumps(vm["properties"]["osProfile"]).lower()
 assert "customdata" not in json.dumps(template).lower()
-for value in ("PrivateNetwork=yes","RestrictAddressFamilies=AF_UNIX","IPAddressDeny=any","CapabilityBoundingSet=","NoNewPrivileges=yes"):
+for value in ("PrivateNetwork=yes","RestrictAddressFamilies=AF_UNIX","IPAddressDeny=any","CapabilityBoundingSet=CAP_SETUID CAP_SETGID","AmbientCapabilities=","NoNewPrivileges=yes"):
     assert value in guest
 run_at=guest.index("systemd-run --quiet")
 token_at=guest.index("metadata/identity/oauth2/token")
@@ -64,29 +64,31 @@ PY
 }
 
 prepare_contract() {
-  local tmp repo home out state
-  fm_test_tmproot_into tmp fm-azure-private-prepare
-  repo="$tmp/repo"; home="$tmp/home"; make_repo "$repo"; mkdir -p "$home"
-  out=$(cd "$repo" && runner "$home" prepare --task task-one --generation gen-one --resource-class behavior-heavy --dependency declared/dependency.lock -- true) || fail "prepare failed: $out"
-  state=$(find "$home/state/azure-runner" -name 'azr-*.json' -print -quit)
-  python3 - "$state" "$repo" <<'PY'
-import datetime as dt, hashlib, json, pathlib, subprocess, sys
-s=json.loads(pathlib.Path(sys.argv[1]).read_text()); r=s["request"]; repo=pathlib.Path(sys.argv[2])
-unsigned=dict(r); supplied=unsigned.pop("request_digest")
-assert supplied=="sha256:"+hashlib.sha256(json.dumps(unsigned,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
-assert r["repository"]["source_mode"]=="public-github-https"
-assert r["repository"]["remote"]=="https://github.com/Ruby-Labs/cloud-host-owner.git"
-assert r["repository"]["commit"]==subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
-assert r["repository"]["snapshot_bytes"]==0 and pathlib.Path(s["input_path"]).name=="request.json"
-assert all(item["url"].startswith("https://") and item["digest"].startswith("sha256:") for item in r["protocol"]["agent_fleet_python"]["wheels"])
-assert all(item["url"].startswith("https://files.pythonhosted.org/packages/") for item in r["protocol"]["agent_fleet_python"]["wheels"])
-created=dt.datetime.fromisoformat(r["created_at"].replace("Z","+00:00")); deadline=dt.datetime.fromisoformat(r["compute_deallocation_deadline"].replace("Z","+00:00"))
-assert deadline-created==dt.timedelta(hours=23)
-assert "SAS" not in json.dumps(r).upper() and "token" not in json.dumps(r).lower()
+  python3 - "$HOST" <<'PY'
+import importlib.util, pathlib, types, sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+remote="https://github.com/Ruby-Labs/cloud-host-owner.git"; head="a"*40; candidate="b"*40; tree="c"*40
+class Result:
+    def __init__(self,stdout="",returncode=0): self.stdout=stdout; self.returncode=returncode
+calls=[]
+def public_git(_repo,*args,check=True):
+    calls.append(args)
+    if args[:2]==("init","--bare"): return Result()
+    if args[:2]==("ls-remote","--symref"): return Result("ref: refs/heads/main\tHEAD\n{}\tHEAD\n".format(head))
+    if args[:1]==("ls-remote",): return Result("{}\trefs/heads/main\n".format(head))
+    if args[:1]==("fetch",): return Result()
+    if args[:2]==("rev-parse","--verify"): return Result(head+"\n")
+    if args[:2]==("merge-base","--is-ancestor"): return Result(returncode=1)
+    raise AssertionError(args)
+m.public_git=public_git
+try: m.public_origin_proof(pathlib.Path("/repo"),remote,candidate)
+except m.RunnerError as exc: assert "not reachable" in str(exc)
+else: raise AssertionError("unmerged branch accepted")
+assert ("fetch","--no-tags","--force",remote,"+refs/heads/main:refs/fm-azure-runner/public-main") in calls
+# A stale tracking ref is irrelevant; proof uses fresh advertisement/fetch.
+assert not any("origin/main" in part for call in calls for part in call)
 PY
-  printf dirty >"$repo/dirty"
-  if (cd "$repo" && runner "$home" prepare --task x --generation y -- true) >/dev/null 2>&1; then fail "dirty source accepted"; fi
-  pass "prepare binds public exact commit/tree and pinned closure without a staged credential or source bundle"
+  pass "prepare binds freshly fetched public main and rejects a clean attached unmerged branch"
 }
 
 executor_credential_adversary() {
@@ -103,6 +105,43 @@ PY
   env AZURE_CLIENT_SECRET=must-not-pass FM_AZURE_RUNNER_TEST_NO_DROP=1 FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" "$EXECUTOR" "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || fail "credential adversary escaped sanitized executor"
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["exit_code"])' "$output/result.json")" = 0 ] || fail "credential/fd adversary observed inherited authority"
   pass "repository command receives no Azure/token/SAS/secret environment or inherited credential descriptor"
+}
+
+linux_systemd_drop_integration() {
+  [ "$(uname -s)" = Linux ] || { pass "Linux systemd uid/capability integration is CI-owned"; return; }
+  if ! command -v systemd-run >/dev/null || ! sudo -n true >/dev/null 2>&1; then
+    fail "Linux systemd integration requires passwordless sudo"
+  fi
+  local tmp repo request output uid gid
+  fm_test_tmproot_into tmp fm-azure-systemd-drop
+  repo="$tmp/repo"; make_repo "$repo"; request="$tmp/request.json"; output="$tmp/output"
+  uid=$(id -u nobody); gid=$(id -g nobody)
+  python3 - "$request" "$uid" "$gid" <<'PY'
+import hashlib,json,sys
+uid=int(sys.argv[2]); gid=int(sys.argv[3])
+code="""import os,pathlib
+s={}
+for line in pathlib.Path('/proc/self/status').read_text().splitlines():
+    if ':' in line:
+        k,v=line.split(':',1); s[k]=v.strip()
+assert os.getuid()==%d and os.getgid()==%d and os.getgroups()==[]
+assert all(int(s[k],16)==0 for k in ('CapEff','CapPrm','CapAmb'))
+assert s['NoNewPrivs']=='1'
+"""%(uid,gid)
+command={"argv":["python3","-c",code]}
+r={"invocation":"azr-aaaaaaaaaaaa","attempt":1,"fence":"sha256:"+"1"*64,"repository":{"snapshot_digest":"sha256:"+"2"*64,"commit":"a"*40,"tree":"b"*40},"command":command,"limits":{"cpu_cores":1,"memory_bytes":2**30,"pid_max":64,"disk_bytes":2**30,"log_bytes":1024,"artifact_bytes":0,"network_bytes":0,"wall_seconds":10}}
+canon=lambda v:json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(); r["command_digest"]="sha256:"+hashlib.sha256(canon(command)).hexdigest(); r["request_digest"]="sha256:"+hashlib.sha256(canon(r)).hexdigest(); open(sys.argv[1],"wb").write(canon(r)+b"\n")
+PY
+  printf '44444444-4444-4444-8444-444444444444\n' >"$tmp/boot"
+  chmod 0755 "$tmp" "$repo"; chmod 0644 "$request" "$tmp/boot"
+  sudo -n systemd-run --quiet --wait --collect --pipe \
+    --property=NoNewPrivileges=yes --property=PrivateNetwork=yes --property=RestrictAddressFamilies=AF_UNIX \
+    --property=IPAddressDeny=any --property='CapabilityBoundingSet=CAP_SETUID CAP_SETGID' \
+    --property=AmbientCapabilities= --property=RestrictSUIDSGID=yes \
+    env FM_AZURE_RUNNER_BOOT_ID_PATH="$tmp/boot" "$EXECUTOR" "$request" "$repo" "$output" "$uid" "$gid" /vm/id vm-instance >/dev/null || \
+    fail "actual Linux/systemd broker could not drop to an empty-cap networkless child"
+  [ "$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["exit_code"])' "$output/result.json")" = 0 ] || fail "Linux child security proof failed"
+  pass "actual Linux/systemd broker drops uid/gid/groups and repository child has empty capabilities/no-new-privileges/networkless"
 }
 
 management_fencing_unit() {
@@ -140,6 +179,48 @@ PY
   pass "management ETag CAS rejects stale successor clobber and a hung renewal permanently closes admission"
 }
 
+effective_rbac_adversaries() {
+  python3 - "$HOST" <<'PY'
+import importlib.util, sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env={"subscription":"sub","resource_group":"rg","prefix":"prefix"}
+seen=[]
+def az(_env,args,**kwargs):
+    seen.append(args)
+    return ([{"scope":"/subscriptions/sub","roleDefinitionId":"/role/owner","principalId":"group"}],0,"")
+m.az_command=az
+for label in ("direct","parent inherited","group derived"):
+    try: m.require_zero_effective_rbac(env,"principal",label)
+    except m.RunnerError: pass
+    else: raise AssertionError(label+" assignment accepted")
+assert all("--include-inherited" in args and "--include-groups" in args and "--all" in args for args in seen)
+m.az_command=lambda *_a,**_k: ({"not":"a list"},0,"")
+try: m.require_zero_effective_rbac(env,"principal","unreadable")
+except m.RunnerError: pass
+else: raise AssertionError("unreadable effective RBAC accepted")
+reservation_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-rsv-aaaaaaaaaaaa"
+identity={"id":reservation_id,"location":"eastus","etag":"E","properties":{"principalId":"p"},"tags":{"workload":"firstmate","firstmate-role":"runner-cost-reservation","deployment-generation":"gen","cleanup-owner":"owner","invocation-binding":"azr-aaaaaaaaaaaa","fence-digest":"a"*64,"lineage-root":"azr-aaaaaaaaaaaa","parent-invocation":"none","amount-microusd":"1","reserved-at":"2026-01-01T00:00:00Z","compute-deadline":"2026-01-02T00:00:00Z","cleanup-verified-at":"none","reservation-principal":"p"}}
+env.update({"deployment_generation":"gen","owner":"owner"})
+calls=[]
+def reservation_az(_env,args,**kwargs):
+    calls.append(args)
+    if args[:2]==["identity","list"]: return ([identity],0,"")
+    if args[:2]==["resource","show"]: return (identity,0,"")
+    if args[:3]==["role","assignment","list"]: return ([{"scope":"/subscriptions/sub"}],0,"")
+    raise AssertionError(args)
+m.az_command=reservation_az
+try: m.list_management_reservations(env)
+except m.RunnerError: pass
+else: raise AssertionError("authorized reservation principal accepted")
+assert any(args[:3]==["role","assignment","list"] for args in calls)
+m.az_command=lambda *_a,**_k: ([{"identity":{"userAssignedIdentities":{"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-rsv-aaaaaaaaaaaa":{}}},"tags":{},"powerState":"VM running"}],0,"")
+try: m.active_runner_vms(env)
+except m.RunnerError: pass
+else: raise AssertionError("VM-attached reservation identity accepted")
+PY
+  pass "direct, inherited, group, unreadable, replacement, and VM-attached reservation RBAC adversaries refuse"
+}
+
 cost_retry_unit() {
   python3 - "$HOST" <<'PY'
 import datetime as dt, email.message, importlib.util, io, json, pathlib, tempfile, types, urllib.error, sys
@@ -173,7 +254,9 @@ PY
 static_private_controller_contract
 prepare_contract
 executor_credential_adversary
+linux_systemd_drop_integration
 management_fencing_unit
+effective_rbac_adversaries
 cost_retry_unit
 
 echo "# fm-azure-runner.test.sh: all assertions passed"

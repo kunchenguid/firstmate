@@ -157,7 +157,7 @@ def sha256_file(path):
             digest.update(chunk)
 
 
-def run(command, cwd=None, check=True, capture=True, timeout_seconds=LOCAL_COMMAND_TIMEOUT_SECONDS):
+def run(command, cwd=None, check=True, capture=True, timeout_seconds=LOCAL_COMMAND_TIMEOUT_SECONDS, env=None):
     try:
         result = subprocess.run(
             command,
@@ -166,6 +166,7 @@ def run(command, cwd=None, check=True, capture=True, timeout_seconds=LOCAL_COMMA
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
             timeout=timeout_seconds,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         raise RunnerError("command exceeded its bounded {}-second deadline: {}".format(
@@ -181,6 +182,59 @@ def run(command, cwd=None, check=True, capture=True, timeout_seconds=LOCAL_COMMA
 
 def git(repo, *args, check=True):
     return run(["git", "-C", str(repo)] + list(args), check=check)
+
+
+def public_git(repo, *args, check=True):
+    git_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+        "SSH_ASKPASS": "/bin/false",
+    }
+    command = [
+        "git", "-c", "credential.helper=", "-c", "http.extraHeader=",
+        "-c", "protocol.file.allow=never", "-C", str(repo),
+    ] + list(args)
+    return run(command, check=check, env=git_env)
+
+
+def public_origin_proof(repo, remote, candidate_commit, expected=None):
+    if not SAFE_PUBLIC_GIT_REMOTE.match(remote) or "@" in remote:
+        raise RunnerError("Azure private controller requires a credential-free public GitHub HTTPS origin")
+    with tempfile.TemporaryDirectory(prefix="fm-azure-public-proof-") as temporary:
+        proof_repo = Path(temporary)
+        public_git(proof_repo, "init", "--bare")
+        advertised = public_git(proof_repo, "ls-remote", "--symref", remote, "HEAD").stdout.splitlines()
+        symrefs = [line.split("\t", 1)[0][5:] for line in advertised if line.startswith("ref: ") and line.endswith("\tHEAD")]
+        heads = [line.split("\t", 1)[0] for line in advertised if line.endswith("\tHEAD") and not line.startswith("ref: ")]
+        if symrefs != ["refs/heads/main"] or len(heads) != 1 or not re.match(r"^[0-9a-f]{40,64}$", heads[0]):
+            raise RunnerError("public origin must advertise one exact refs/heads/main default")
+        default_ref = symrefs[0]
+        remote_head = heads[0]
+        exact = public_git(proof_repo, "ls-remote", remote, default_ref).stdout.splitlines()
+        if exact != ["{}\t{}".format(remote_head, default_ref)]:
+            raise RunnerError("public origin default-head advertisement changed or is ambiguous")
+        fetched_ref = "refs/fm-azure-runner/public-main"
+        public_git(proof_repo, "fetch", "--no-tags", "--force", remote, "+{}:{}".format(default_ref, fetched_ref))
+        fetched_head = public_git(proof_repo, "rev-parse", "--verify", fetched_ref).stdout.strip()
+        if fetched_head != remote_head:
+            raise RunnerError("fresh public default-head fetch differs from its advertisement")
+        if expected is not None and expected != {
+            "remote": remote, "default_ref": default_ref, "default_head": remote_head,
+        }:
+            raise RunnerError("public origin/default head changed after request preparation")
+        if public_git(proof_repo, "merge-base", "--is-ancestor", candidate_commit, fetched_ref, check=False).returncode != 0:
+            raise RunnerError("candidate commit is not reachable from the exact public origin/main head")
+        if public_git(proof_repo, "cat-file", "-t", candidate_commit).stdout.strip() != "commit":
+            raise RunnerError("candidate public object is not an exact commit")
+        tree = public_git(proof_repo, "rev-parse", "{}^{{tree}}".format(candidate_commit)).stdout.strip()
+        if not re.match(r"^[0-9a-f]{40,64}$", tree) or public_git(proof_repo, "cat-file", "-t", tree).stdout.strip() != "tree":
+            raise RunnerError("candidate public commit tree identity is malformed")
+        return {"remote": remote, "default_ref": default_ref, "default_head": remote_head, "tree": tree}
 
 
 def now_utc():
@@ -535,12 +589,9 @@ def prepare(env, args, parent_state=None):
     if branch.returncode != 0:
         raise RunnerError("repository must be on a named committed branch")
     commit = git(repo, "rev-parse", "HEAD").stdout.strip()
-    tree = git(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
-    if not re.match(r"^[0-9a-f]{40,64}$", commit) or not re.match(r"^[0-9a-f]{40,64}$", tree):
-        raise RunnerError("repository commit/tree identity is malformed")
     remote = git(repo, "remote", "get-url", "origin").stdout.strip()
-    if not SAFE_PUBLIC_GIT_REMOTE.match(remote) or "@" in remote:
-        raise RunnerError("Azure private controller requires a credential-free public GitHub HTTPS origin")
+    public = public_origin_proof(repo, remote, commit)
+    tree = public["tree"]
 
     task = require_identifier("task", args.task)
     generation = require_identifier("generation", args.generation)
@@ -566,7 +617,13 @@ def prepare(env, args, parent_state=None):
         raise RunnerError("invocation payload directory already exists")
     payload_dir.mkdir(parents=True, mode=0o700)
     os.chmod(payload_dir, 0o700)
-    source_identity = {"remote": remote, "commit": commit, "tree": tree}
+    source_identity = {
+        "remote": remote,
+        "default_ref": public["default_ref"],
+        "default_head": public["default_head"],
+        "commit": commit,
+        "tree": tree,
+    }
     snapshot_digest = "sha256:" + sha256_bytes(canonical_bytes(source_identity))
 
     dependencies = []
@@ -614,6 +671,8 @@ def prepare(env, args, parent_state=None):
         "repository": {
             "source_mode": "public-github-https",
             "remote": remote,
+            "default_ref": public["default_ref"],
+            "default_head": public["default_head"],
             "commit": commit,
             "tree": tree,
             "snapshot_digest": snapshot_digest,
@@ -691,6 +750,21 @@ def prepare(env, args, parent_state=None):
     return state
 
 
+def reprove_public_request(state):
+    repository = state["request"]["repository"]
+    repo = Path(state["repository_root"]).resolve()
+    proof = public_origin_proof(
+        repo, repository["remote"], repository["commit"],
+        expected={
+            "remote": repository["remote"],
+            "default_ref": repository["default_ref"],
+            "default_head": repository["default_head"],
+        },
+    )
+    if proof["tree"] != repository["tree"]:
+        raise RunnerError("public request tree changed after preparation")
+
+
 def az_command(env, args, check=True, parse_json=True, timeout_seconds=LOCAL_COMMAND_TIMEOUT_SECONDS):
     record_azure_operation(env, args)
     command = ["az"] + list(args) + ["--subscription", env["subscription"], "--only-show-errors"]
@@ -723,6 +797,22 @@ def verify_foundation_tags(env, resource, label):
     tags = resource.get("tags") or {}
     if tags.get("workload") != "firstmate" or tags.get("deployment-generation") != env["deployment_generation"] or tags.get("cleanup-owner") != env["owner"]:
         raise RunnerError("foundation {} owner/generation identity is not exact".format(label))
+
+
+def effective_role_assignments(env, principal_id):
+    assignments, _, _ = az_command(env, [
+        "role", "assignment", "list", "--assignee-object-id", principal_id, "--all",
+        "--include-inherited", "--include-groups",
+    ])
+    if not isinstance(assignments, list):
+        raise RunnerError("effective RBAC assignment expansion is unreadable")
+    return assignments
+
+
+def require_zero_effective_rbac(env, principal_id, label):
+    assignments = effective_role_assignments(env, principal_id)
+    if assignments:
+        raise RunnerError("{} must have zero direct, group, and inherited effective RBAC assignments".format(label))
 
 
 def foundation_gate(env):
@@ -803,10 +893,14 @@ def foundation_gate(env):
     client_id = controller_identity.get("properties", {}).get("clientId") or controller_identity.get("clientId")
     if str(controller_identity.get("id", "")).lower() != controller_identity_id.lower() or controller_identity.get("location") != "eastus" or not principal_id or not client_id:
         raise RunnerError("runner controller UAMI identity is not exact")
-    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--assignee-object-id", principal_id, "--all"])
+    assignments = effective_role_assignments(env, principal_id)
     expected_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe".format(env["subscription"])
-    direct = [item for item in assignments if str(item.get("principalId", "")).lower() == str(principal_id).lower()]
-    if len(direct) != 1 or str(direct[0].get("scope", "")).lower() != validation_container_id.lower() or str(direct[0].get("roleDefinitionId", "")).lower() != expected_role.lower():
+    if (
+        len(assignments) != 1
+        or str(assignments[0].get("principalId", "")).lower() != str(principal_id).lower()
+        or str(assignments[0].get("scope", "")).lower() != validation_container_id.lower()
+        or str(assignments[0].get("roleDefinitionId", "")).lower() != expected_role.lower()
+    ):
         raise RunnerError("runner controller UAMI must have only exact validation container data scope")
     env["controller_identity_client_id"] = client_id
 
@@ -1369,6 +1463,7 @@ def list_management_reservations(env):
         ])
         parsed = parse_management_reservation(env, exact)
         if parsed is not None:
+            require_zero_effective_rbac(env, parsed["principal_id"], "cost reservation principal")
             reservations.append(parsed)
     return reservations
 
@@ -1392,6 +1487,7 @@ def reconcile_management_reservations(env, reservations):
         cost_query(env, forecast=False, invocation=entry["invocation-binding"], reserved_at=entry["reserved-at"])
         reread, _, _ = az_command(env, ["resource", "show", "--ids", entry["id"], "--api-version", "2023-01-31"])
         exact = parse_management_reservation(env, reread)
+        require_zero_effective_rbac(env, exact["principal_id"], "reconciled cost reservation principal")
         if exact["principal_id"] != entry["principal_id"]:
             raise RunnerError("reconciled cost reservation immutable identity changed")
         delete_args = ["rest", "--method", "delete", "--url", resource_url(entry["id"], "2023-01-31")]
@@ -1439,6 +1535,7 @@ def reserve_budget_management(env, state, lease, limits):
     parsed = parse_management_reservation(env, reread)
     if parsed is None or parsed["fence-digest"] != tags["fence-digest"]:
         raise RunnerError("durable cost reservation changed before compute admission")
+    require_zero_effective_rbac(env, parsed["principal_id"], "new cost reservation principal")
     lease.assert_held()
     return cost
 
@@ -1452,6 +1549,7 @@ def mark_management_reservation_cleanup_verified(env, state):
         expected_fence = state["request"]["fence"].split(":", 1)[1]
         if entry is None or entry["fence-digest"] != expected_fence or entry["cleanup-verified-at"] != "none":
             raise RunnerError("cost reservation cleanup binding is not exact")
+        require_zero_effective_rbac(env, entry["principal_id"], "cleanup cost reservation principal")
         tags = dict(identity.get("tags") or {})
         tags["cleanup-verified-at"] = iso_utc()
         update_args = [
@@ -1465,10 +1563,19 @@ def mark_management_reservation_cleanup_verified(env, state):
         lease.renew_and_assert()
 
 
+def verify_all_reservation_rbac_zero(env):
+    for reservation in list_management_reservations(env):
+        require_zero_effective_rbac(env, reservation["principal_id"], "pre-create cost reservation principal")
+
+
 def active_runner_vms(env):
     vms, _, _ = az_command(env, ["vm", "list", "--resource-group", env["resource_group"], "--show-details"])
     active = []
     for vm in vms:
+        assigned = list((vm.get("identity") or {}).get("userAssignedIdentities", {}))
+        reservation_fragment = "/userAssignedIdentities/id-{}-rsv-".format(env["prefix"]).lower()
+        if any(reservation_fragment in str(identity_id).lower() for identity_id in assigned):
+            raise RunnerError("runner VM attaches a cost reservation identity")
         tags = vm.get("tags") or {}
         if tags.get("firstmate-role") != "validation-shard":
             continue
@@ -2173,6 +2280,8 @@ def dispatch_prepared(env, state, confirm_subscription):
                 cost=cost, reservation_recorded=True,
             )
             foundation_gate(env)
+            reprove_public_request(state)
+            verify_all_reservation_rbac_zero(env)
             lease.renew_and_assert()
             create_vm(env, state)
             lease.assert_held()
@@ -2253,6 +2362,7 @@ def retry(env, old_state, args):
     current = Path(old_state["repository_root"]).resolve()
     if git(current, "rev-parse", "HEAD").stdout.strip() != old_state["request"]["repository"]["commit"]:
         raise RunnerError("retry repository HEAD differs from the fenced old snapshot")
+    reprove_public_request(old_state)
     args.repo = str(current)
     args.task = old_state["request"]["task"]
     args.generation = old_state["request"]["generation"]
