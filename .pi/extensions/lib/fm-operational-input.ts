@@ -8,6 +8,7 @@ const operationalInputScript =
 
 export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "session-start",
+  "post-compact",
   "watcher",
   "turn-end-guard",
   "away-supervisor",

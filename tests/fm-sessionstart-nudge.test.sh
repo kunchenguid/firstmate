@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Behavior and tracked-registration tests for the native session-start nudge.
 set -u
+export LC_ALL=C LANG=C
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -14,6 +15,9 @@ NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
 fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \
   || fail "could not construct expected session-start nudge"
+POST_COMPACT_TEXT="Context was compacted. Before further action, re-read the complete contents of data/captain.md, data/captain-shared.md, data/learnings.md, and every active state/*.meta file. Do not run bin/fm-session-start.sh."
+fm_operational_input_encode post-compact "$POST_COMPACT_TEXT" POST_COMPACT_LINE \
+  || fail "could not construct expected post-compact nudge"
 fm_git_identity fmtest fmtest@example.invalid
 
 make_primary() {
@@ -26,7 +30,8 @@ make_primary() {
 
 run_nudge() {
   local root=$1
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  shift
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE" "$@"
 }
 
 expect_silent_zero() {
@@ -109,6 +114,50 @@ test_owned_lock_is_silent() {
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
 }
 
+test_owned_primary_post_compact_reanchors_read_only() {
+  local root="$TMP_ROOT/post-compact" out status=0
+  make_primary "$root"
+  printf '%s\n' "$$" > "$root/state/.lock"
+  cat > "$root/bin/fm-session-start.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "${FM_HOME:?}/state/session-start-ran"
+EOF
+  chmod +x "$root/bin/fm-session-start.sh"
+  out=$(run_nudge "$root" post-compact) || status=$?
+  expect_code 0 "$status" "owned primary post-compact nudge"
+  [ "$out" = "$POST_COMPACT_LINE" ] \
+    || fail "owned primary printed unexpected post-compact output: $out"
+  [ ! -e "$root/state/session-start-ran" ] \
+    || fail "post-compact nudge ran fm-session-start.sh instead of staying read-only"
+  pass "fm-sessionstart-nudge: an owned primary gets the bounded read-only post-compact re-anchor"
+}
+
+test_unknown_mode_is_silent() {
+  local root="$TMP_ROOT/unknown-mode"
+  make_primary "$root"
+  expect_silent_zero "unknown nudge mode" run_nudge "$root" unknown-mode
+  pass "fm-sessionstart-nudge: an unknown transport mode fails open"
+}
+
+test_claude_compact_hook_delivers_post_compact_reanchor() {
+  local root="$TMP_ROOT/claude-compact" command out status=0
+  make_primary "$root"
+  mkdir -p "$root/.claude"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
+  printf '%s\n' "$$" > "$root/state/.lock"
+  command=$(jq -r \
+    '.hooks.SessionStart[] | select(.matcher == "compact") | .hooks[0].command // empty' \
+    "$ROOT/.claude/settings.json")
+  [ -n "$command" ] || fail "Claude compact SessionStart hook is not registered"
+  out=$(CLAUDE_PROJECT_DIR="$root" sh -c "$command") || status=$?
+  expect_code 0 "$status" "Claude compact hook"
+  [ "$out" = "$POST_COMPACT_LINE" ] \
+    || fail "Claude compact hook printed unexpected output: $out"
+  pass "Claude compact SessionStart hook delivers the exact post-compact re-anchor"
+}
+
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
@@ -155,4 +204,7 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_owned_primary_post_compact_reanchors_read_only
+test_unknown_mode_is_silent
+test_claude_compact_hook_delivers_post_compact_reanchor
 test_opencode_plugin_delivers_exact_nudge_once

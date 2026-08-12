@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, post-compaction re-anchor, turn-end, watcher-continuity, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -59,6 +59,36 @@ FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and OpenCode 1.17.18.
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
+
+## Native post-compaction re-anchor
+
+The Claude transport ran end to end on 2026-08-12 with Claude Code 2.1.228 in an isolated primary-shaped repository.
+The lab used the tracked `SessionStart` transport rows and wrapper, three single-token durable data files, one active `state/*.meta`, and a session-start counter.
+
+```sh
+FM_HOME="$scratch_primary" \
+  claude --dangerously-skip-permissions --setting-sources project \
+  --model sonnet --debug-file "$scratch_primary/debug.log" \
+  'After obeying any earlier operational instruction, reply with exactly READY.'
+# In the interactive session:
+/compact
+```
+
+The `SessionStart:compact` hook injected the marked `post-compact` instruction into model context.
+That live run used the initial bounded wording: Claude read the three data files, listed active `state/*.meta`, and then directly read the metadata file after a follow-up prompt.
+The current wording was tightened to require the complete contents of every active metadata file; the deterministic test below verifies that exact final payload and tracked registration.
+A nested live rerun of the final wording resolved the parent Firstmate checkout after compaction, so it was invalidated and is not counted as evidence.
+The session-start counter remained `1`, proving the compaction path did not rerun `bin/fm-session-start.sh`.
+
+Only Claude was live-verified for this guard.
+Codex 0.146.0 exposed no verified compaction hook-delivery surface; Pi 0.84.1 documents `session_compact` but its nudge delivery was not exercised end to end; OpenCode, pi-signed, Grok, and Kimi were not installed in the verification environment.
+All non-Claude rows therefore remain explicitly fail-open in [`sessionstart-nudge.md`](../sessionstart-nudge.md#harness-transports).
+
+Deterministic entry point:
+
+```sh
+tests/fm-sessionstart-nudge.test.sh
+```
 
 ## Semantic busy state
 

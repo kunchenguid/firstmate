@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Print the one-line session-start instruction only for a genuine firstmate
-# primary whose current harness session has not already acquired the home lock.
+# Print the one-line session-start or post-compaction instruction only for a
+# genuine firstmate primary. Session start stays silent once this harness owns
+# the home lock; post-compaction is a bounded read-only re-anchor and never runs
+# the session-start command.
 # Every silence and error path exits 0 because Claude SessionStart exit 2 blocks
 # session initialization.
 set -u
@@ -36,10 +38,22 @@ lock_is_in_ancestry() {
   return 1
 }
 
-lock_is_in_ancestry && exit 0
+mode=${1:-session-start}
+[ "$#" -le 1 ] || exit 0
 nudge=
-fm_operational_input_encode session-start \
-  "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
-  nudge || exit 0
+case "$mode" in
+  session-start)
+    lock_is_in_ancestry && exit 0
+    fm_operational_input_encode session-start \
+      "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
+      nudge || exit 0
+    ;;
+  post-compact)
+    fm_operational_input_encode post-compact \
+      "Context was compacted. Before further action, re-read the complete contents of data/captain.md, data/captain-shared.md, data/learnings.md, and every active state/*.meta file. Do not run bin/fm-session-start.sh." \
+      nudge || exit 0
+    ;;
+  *) exit 0 ;;
+esac
 printf '%s\n' "$nudge"
 exit 0
