@@ -458,6 +458,7 @@ EOF
 test_hold_retry_matches_quoted_title() {
   local home origin title hold retry show
   home=$(make_home quoted-title-retry)
+  fm_fake_exit0 "$home/fakebin" jq
   origin=sample-budget-review
   title='Is sample "budget-bucket" computation local at C:\edge\site, or central?'
   mkdir -p "$home/data/$origin"

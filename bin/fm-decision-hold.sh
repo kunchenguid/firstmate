@@ -132,7 +132,43 @@ show_string_field() {  # <show-output> <field>
   local value
   value=$(show_field "$1" "$2")
   case "$value" in
-    \"*\") printf '%s\n' "$value" | jq -Rer 'fromjson | select(type == "string")' ;;
+    \"*\")
+      printf '%s\n' "$value" | awk '
+        function hex_value(hex,    digits, value, i, digit) {
+          digits = "0123456789abcdef"
+          hex = tolower(hex)
+          value = 0
+          for (i = 1; i <= 4; i++) {
+            digit = index(digits, substr(hex, i, 1)) - 1
+            if (digit < 0) return -1
+            value = value * 16 + digit
+          }
+          return value
+        }
+        {
+          if (length($0) < 2 || substr($0, 1, 1) != "\"" || substr($0, length($0), 1) != "\"") exit 1
+          decoded = ""
+          for (i = 2; i < length($0); i++) {
+            char = substr($0, i, 1)
+            if (char != "\\") {
+              decoded = decoded char
+              continue
+            }
+            escape = substr($0, ++i, 1)
+            if (escape == "\\" || escape == "\"") decoded = decoded escape
+            else if (escape == "n") decoded = decoded "\n"
+            else if (escape == "r") decoded = decoded "\r"
+            else if (escape == "t") decoded = decoded "\t"
+            else if (escape == "u") {
+              code = hex_value(substr($0, i + 1, 4))
+              if (code < 0 || code > 31) exit 1
+              decoded = decoded sprintf("%c", code)
+              i += 4
+            } else exit 1
+          }
+          print decoded
+        }
+      ' ;;
     *) printf '%s\n' "$value" ;;
   esac
 }
