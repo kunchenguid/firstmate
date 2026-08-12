@@ -23,7 +23,10 @@
 # Repository membership alone does not prove isolation, so the self-hosted
 # cases cover the configuration where firstmate IS the project: a firstmate home
 # there is a linked worktree of the project's own repository, so it shares the
-# project's git common directory and must be refused on its own terms. A project
+# project's git common directory and must be refused on its own terms. One case
+# per signal that identifies such a home - the active home, the firstmate repo,
+# the seeded-home marker, and the fleet's operational directories - so no
+# recognition path is claimed without being driven. A project
 # directory nested inside another repository is refused for the mirror-image
 # reason - it inherits an identity it does not own. Two cases assert that
 # legitimate worktrees still spawn, including in the self-hosted shape, so the
@@ -105,6 +108,8 @@ SH
 # an unrelated reason.
 seed_case_home() {
   local id=$1
+  CASE_FM_ROOT=
+  CASE_STATE=
   mkdir -p "$CASE_HOME/data/$id" "$CASE_HOME/projects" "$CASE_HOME/state" "$CASE_HOME/config"
   printf 'codex\n' > "$CASE_HOME/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$CASE_HOME/data/$id/brief.md"
@@ -141,19 +146,21 @@ make_selfhosted_case() {
   CASE_PROJ="$CASE_DIR/project"
   CASE_WT="$CASE_DIR/wt"
   CASE_SUB_HOME="$CASE_DIR/sub-home"
+  CASE_ALT_HOME="$CASE_DIR/alt-home"
   CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
   # Real firstmate homes gitignore their private state and their seed marker, so
   # ignore both here: an untracked operational directory would otherwise let a
   # later, unrelated check (the base-freshen cleanliness refusal) stop these
   # cases, and what the isolation assertion itself decides is what they measure.
   fm_git_init_commit "$CASE_PROJ"
-  printf '%s\n' 'data/' 'state/' 'config/' 'projects/' '.fm-secondmate-home' > "$CASE_PROJ/.gitignore"
+  printf '%s\n' 'data/' 'state/' 'config/' 'projects/' 'bin' '.fm-secondmate-home' > "$CASE_PROJ/.gitignore"
   git -C "$CASE_PROJ" add .gitignore
   git -C "$CASE_PROJ" commit -qm gitignore
   fm_git_add_origin "$CASE_PROJ" "$CASE_PROJ.origin.git"
   git -C "$CASE_PROJ" worktree add --quiet -b "wt-$name" "$CASE_WT"
   git -C "$CASE_PROJ" worktree add --quiet -b "home-$name" "$CASE_HOME"
   git -C "$CASE_PROJ" worktree add --quiet -b "sub-home-$name" "$CASE_SUB_HOME"
+  git -C "$CASE_PROJ" worktree add --quiet -b "alt-home-$name" "$CASE_ALT_HOME"
   printf '%s\n' "$id" > "$CASE_SUB_HOME/.fm-secondmate-home"
   seed_case_home "$id"
 }
@@ -178,11 +185,14 @@ make_nested_project_case() {
 
 # run_identity_spawn <id> <pane-path>: drive one spawn whose pane reports
 # <pane-path>, echoing combined output. FM_FAKE_GIT_COMMON_DIR_MODE (and its
-# garbage value) pass through for the unreadable-identity cases.
+# garbage value) pass through for the unreadable-identity cases. CASE_FM_ROOT
+# and CASE_STATE let a case move the firstmate repo and the fleet's state
+# directory off the default home, which is what makes the home signals that the
+# active-home comparison would otherwise shadow reachable at all.
 run_identity_spawn() {
   local id=$1 pane=$2
-  FM_ROOT_OVERRIDE='' FM_HOME="$CASE_HOME" \
-    FM_STATE_OVERRIDE="$CASE_HOME/state" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+  FM_ROOT_OVERRIDE="${CASE_FM_ROOT:-}" FM_HOME="$CASE_HOME" \
+    FM_STATE_OVERRIDE="${CASE_STATE:-$CASE_HOME/state}" FM_DATA_OVERRIDE="$CASE_HOME/data" \
     FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$pane" \
@@ -391,6 +401,59 @@ test_selfhosted_project_worktree_still_spawns() {
   pass "an isolated worktree still spawns when firstmate's own homes share that repository"
 }
 
+# The firstmate repository itself is a home boundary too, and it is not always
+# the same directory as the active home: a fleet can run from one checkout of
+# the firstmate repo while the project names another. Point FM_ROOT at a linked
+# worktree of the project's repository and sit the pane there, so the case
+# reaches that boundary rather than the active-home one.
+test_selfhosted_firstmate_root_is_refused() {
+  local id out status
+  id=identity-selfhosted-root-ic
+  make_selfhosted_case identity-selfhosted-root "$id"
+  ln -s "$ROOT/bin" "$CASE_ALT_HOME/bin"
+  CASE_FM_ROOT="$CASE_ALT_HOME"
+
+  out=$(run_identity_spawn "$id" "$CASE_ALT_HOME")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the firstmate repository root as the task worktree"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "firstmate home" "refusal did not name the firstmate home boundary"
+  assert_contains "$out" "firstmate repository root" \
+    "refusal did not name the firstmate repository root as what identified it"
+  assert_not_contains "$out" "belongs to a different repository" \
+    "the firstmate repo was refused as a foreign repository rather than on the isolation boundary"
+  assert_not_contains "$out" "spawned $id" "spawn launched a worker into the firstmate repository root"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing the firstmate repository root"
+  pass "the firstmate repository root is refused even when it belongs to the project's repository"
+}
+
+# A home is also identifiable by the operational directories the running fleet
+# actually reads and writes, which is the signal left when the home is neither
+# the active FM_HOME nor seeded with a marker. Point the fleet's state directory
+# into a linked worktree of the project's repository and sit the pane there.
+test_selfhosted_operational_home_is_refused() {
+  local id out status
+  id=identity-selfhosted-operational-id
+  make_selfhosted_case identity-selfhosted-operational "$id"
+  mkdir -p "$CASE_ALT_HOME/state"
+  touch "$CASE_ALT_HOME/state/.last-watcher-beat"
+  CASE_STATE="$CASE_ALT_HOME/state"
+
+  out=$(run_identity_spawn "$id" "$CASE_ALT_HOME")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the directory holding the fleet's operational state as the task worktree"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "firstmate home" "refusal did not name the firstmate home boundary"
+  assert_contains "$out" "operational directory" \
+    "refusal did not name the operational directory as what identified the home"
+  assert_not_contains "$out" "belongs to a different repository" \
+    "the operational home was refused as a foreign repository rather than on the isolation boundary"
+  assert_not_contains "$out" "spawned $id" \
+    "spawn launched a worker into the directory holding the fleet's operational state"
+  assert_absent "$CASE_ALT_HOME/state/$id.meta" \
+    "spawn recorded task metadata after refusing the fleet's operational home"
+  pass "a directory holding the running fleet's operational state is refused as a home"
+}
+
 # A project directory that is not its repository's top level has no repository
 # identity of its own to compare against: it inherits the enclosing
 # repository's, which would accept any worktree of that enclosing repository.
@@ -454,6 +517,8 @@ test_project_without_repository_identity_is_refused
 test_project_worktree_still_spawns
 test_selfhosted_firstmate_home_is_refused
 test_selfhosted_seeded_home_is_refused
+test_selfhosted_firstmate_root_is_refused
+test_selfhosted_operational_home_is_refused
 test_selfhosted_project_worktree_still_spawns
 test_nested_project_directory_is_refused
 if command -v node >/dev/null 2>&1; then

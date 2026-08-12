@@ -1717,13 +1717,18 @@ real_path_or_raw() {  # <path>
 # worktree of it share this path, and no other repository does. Empty output
 # with a non-zero return means the identity could not be established (not a
 # repository, git failed, empty or unexpected output, unresolvable path), which
-# every caller must treat as a refusal rather than a pass. --path-format=absolute
-# keeps git from answering relative to <dir> (the same form bin/fm-ff-lib.sh's
-# fetch_once asks for), while the cd still resolves symlinks that flag leaves.
+# every caller must treat as a refusal rather than a pass. `git -C` runs with
+# <dir> as its cwd, so a relative answer is relative to <dir>; joining it here
+# rather than asking git for an absolute one keeps this fail-closed gate working
+# on every git that ships rev-parse, with no version floor of its own.
 git_common_dir_real() {  # <dir>
   local dir=$1 common
-  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
   [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
   (cd "$common" 2>/dev/null && pwd -P) || return 1
 }
 

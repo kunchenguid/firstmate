@@ -204,6 +204,8 @@ ok - a project whose repository identity cannot be established refuses the launc
 ok - a legitimate worktree of the project's repository still spawns
 ok - a firstmate home that belongs to the project's own repository is still refused
 ok - a seeded firstmate home in the project's own repository is refused
+ok - the firstmate repository root is refused even when it belongs to the project's repository
+ok - a directory holding the running fleet's operational state is refused as a home
 ok - an isolated worktree still spawns when firstmate's own homes share that repository
 ok - a project nested inside another repository refuses the launch instead of borrowing its identity
 ok - an Orca worktree belonging to another repository is refused
@@ -213,6 +215,7 @@ ok - an Orca worktree of the project's own repository still spawns
 The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
 The self-hosted cases and the nested-project case were each run against the unfixed assertion first, where all three spawned instead of refusing, reporting `worktree=<firstmate home>`, `worktree=<seeded home>`, and `worktree=<enclosing repository's worktree>` respectively.
 The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, the seeded-home marker, or a directory holding the running fleet's operational directories.
+Each of those four signals has its own case, so the enumeration claims nothing that is not driven through the executable.
 The Orca cases need `node`, which the Orca adapter's JSON helpers require, and report themselves as not run when it is absent.
 
 ## Composer classification matrix
