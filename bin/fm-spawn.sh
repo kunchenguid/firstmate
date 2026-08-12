@@ -837,7 +837,11 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
+    if [ "$path" = "$state/$id.omp-session-evidence" ]; then
+      rm -rf -- "$path" || return 1
+    else
+      rm -f -- "$path" || return 1
+    fi
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
@@ -2419,8 +2423,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
-  rm -f "$STATE_REAL/$ID.omp-session-run" "$STATE_REAL/$ID.omp-session-stop" \
-    "$STATE_REAL/$ID.omp-session-evidence"
+  rm -f "$STATE_REAL/$ID.omp-session-run" "$STATE_REAL/$ID.omp-session-stop"
+  rm -rf "$STATE_REAL/$ID.omp-session-evidence"
 fi
 if [ "$KIND" != secondmate ] || { [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; }; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -2584,10 +2588,10 @@ EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { execFile } from "node:child_process";
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
-const SESSION_EVIDENCE = "$STATE_REAL/$ID.omp-session-evidence";
+const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
 let runToken = "";
 let idlePublishedToken = "";
 let runSequence = 0;
@@ -2609,16 +2613,28 @@ const atomicWrite = (path: string, value: string) => {
     throw error;
   }
 };
+const ensureEvidenceDirectory = () => {
+  try {
+    mkdirSync(SESSION_EVIDENCE_DIR, { recursive: true, mode: 0o700 });
+  } catch {
+    try { unlinkSync(SESSION_EVIDENCE_DIR); } catch {}
+    mkdirSync(SESSION_EVIDENCE_DIR, { recursive: true, mode: 0o700 });
+  }
+};
+const evidencePath = (token: string) => SESSION_EVIDENCE_DIR + "/" + token;
 const writeRunEvidence = (record: {
   token: string;
   startedAt: number;
   lastEventAt: number;
   stoppedAt: number;
-}) => atomicWrite(
-  SESSION_EVIDENCE,
-  record.token + " " + String(record.startedAt) + " " +
-    String(record.lastEventAt) + " " + String(record.stoppedAt) + "\\n",
-);
+}) => {
+  ensureEvidenceDirectory();
+  atomicWrite(
+    evidencePath(record.token),
+    record.token + " " + String(record.startedAt) + " " +
+      String(record.lastEventAt) + " " + String(record.stoppedAt) + "\\n",
+  );
+};
 const parseRunEvidence = (line: string) => {
   const fields = line.trim().split(/\s+/);
   if (fields.length !== 4) return null;
@@ -2675,7 +2691,7 @@ const persistedRun = () => {
     if (!busyFields.has("gen=$BUSY_GEN") || !busyFields.has("state=busy")) return null;
     const token = runLines[0];
     if (!/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
-    const evidence = parseRunEvidence(readFileSync(SESSION_EVIDENCE, "utf8"));
+    const evidence = parseRunEvidence(readFileSync(evidencePath(token), "utf8"));
     if (!evidence || evidence.token !== token || evidence.stoppedAt > 0) return null;
     return evidence;
   } catch {

@@ -327,6 +327,36 @@ switch (process.env.MODE) {
     }
     break;
   }
+  case "settle-older-then-reload": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    await fire("agent_start");
+    const olderToken = readFileSync(runPath, "utf8").trim();
+    await fire("agent_start");
+    const currentToken = readFileSync(runPath, "utf8").trim();
+    await fire("session_stop", {
+      run_token: olderToken,
+      last_assistant_message: { timestamp: Date.now() },
+    });
+    if (!busyState().includes("state=busy") || readFileSync(runPath, "utf8").trim() !== currentToken) {
+      throw new Error("settling the older run changed the active persisted pointer");
+    }
+    break;
+  }
+  case "settle-current-then-reload": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    await fire("agent_start");
+    const olderToken = readFileSync(runPath, "utf8").trim();
+    await fire("agent_start");
+    const currentToken = readFileSync(runPath, "utf8").trim();
+    await fire("session_stop", {
+      run_token: currentToken,
+      last_assistant_message: { timestamp: Date.now() },
+    });
+    if (!busyState().includes("state=busy") || readFileSync(runPath, "utf8").trim() !== olderToken) {
+      throw new Error("settling the current run did not advance the active persisted pointer");
+    }
+    break;
+  }
   case "ambiguous-session-shutdown":
     await fire("agent_start");
     await fire("agent_start");
@@ -483,6 +513,75 @@ test_omp_extension_recovers_stale_current_pointer() {
   [ -e "$state/$id.turn-ended" ] \
     || fail "the surviving run must publish turn-end evidence after pointer advance"
   pass "omp terminal correlation advances the current run after an explicit sibling settles"
+}
+
+test_omp_extension_scopes_evidence_per_run() {
+  local rec id=busy-omp-evidence out state ext evidence_dir older_token current_token
+  local older_evidence current_evidence
+  rec=$(make_spawn_case omp-evidence omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  evidence_dir="$state/$id.omp-session-evidence"
+  out=$(drive_omp_ext "$ext" settle-older-then-reload "$state" "$id") \
+    || fail "older-run settlement drive failed: $out"
+  current_token=$(cat "$state/$id.omp-session-run")
+  older_token=$(find "$evidence_dir" -maxdepth 1 -type f -print | sort | head -n 1 | xargs -n 1 basename)
+  [ "$older_token" != "$current_token" ] || fail "sibling settlement did not leave separate run evidence"
+  older_evidence=$(cat "$evidence_dir/$older_token")
+  current_evidence=$(cat "$evidence_dir/$current_token")
+  [ "$(printf '%s\n' "$older_evidence" | awk '{ print $1 }')" = "$older_token" ] \
+    || fail "settled evidence is not keyed by its own run token"
+  [ "$(printf '%s\n' "$older_evidence" | awk '{ print $4 }')" -gt 0 ] \
+    || fail "settled sibling evidence did not retain stop evidence"
+  [ "$(printf '%s\n' "$current_evidence" | awk '{ print $1 }')" = "$current_token" ] \
+    || fail "surviving evidence was overwritten by the settled sibling"
+  [ "$(printf '%s\n' "$current_evidence" | awk '{ print $4 }')" = 0 ] \
+    || fail "surviving run was incorrectly marked stopped"
+
+  printf '%s\n' "$older_evidence" > "$evidence_dir/$current_token"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "stale evidence reload drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "mismatched per-run evidence must not settle the current run, got '$out'"
+  printf '%s\n' "$current_evidence" > "$evidence_dir/$current_token"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "valid surviving-run reload drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "reload did not recover the surviving run, got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "fresh run after reload drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "fresh run did not reopen busy, got '$out'"
+  pass "omp persists independent evidence for settled and surviving runs"
+}
+
+test_omp_extension_rejects_settled_sibling_after_reload() {
+  local rec id=busy-omp-sibling-stale out state ext evidence_dir older_token current_token
+  rec=$(make_spawn_case omp-sibling-stale omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  evidence_dir="$state/$id.omp-session-evidence"
+  out=$(drive_omp_ext "$ext" settle-current-then-reload "$state" "$id") \
+    || fail "current-run settlement drive failed: $out"
+  current_token=$(cat "$state/$id.omp-session-run")
+  older_token=$(find "$evidence_dir" -maxdepth 1 -type f -print | sort | tail -n 1 | xargs -n 1 basename)
+  [ "$older_token" != "$current_token" ] || fail "current-run settlement did not preserve the older pointer"
+  out=$(EVENT_TOKEN="$older_token" drive_omp_ext "$ext" explicit-session-shutdown "$state" "$id") \
+    || fail "settled sibling reload drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a settled sibling token must not settle the surviving run, got '$out'"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "surviving-run reload drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "the surviving run did not settle after stale-token denial, got '$out'"
+  pass "omp rejects settled sibling tokens after reload and settles the survivor"
 }
 
 test_omp_extension_reloads_and_reconciles_persisted_run() {
@@ -814,6 +913,8 @@ test_omp_session_shutdown_requires_one_active_run
 test_omp_extension_persistent_run_correlation
 test_omp_extension_rejects_overlapping_timestamped_runs
 test_omp_extension_recovers_stale_current_pointer
+test_omp_extension_scopes_evidence_per_run
+test_omp_extension_rejects_settled_sibling_after_reload
 test_omp_extension_reloads_and_reconciles_persisted_run
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy

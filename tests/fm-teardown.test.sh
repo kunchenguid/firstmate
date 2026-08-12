@@ -1338,7 +1338,8 @@ test_teardown_removes_per_task_adapter_extensions() {
   printf '// generated omp extension\n' > "$case_dir/state/task-x1.omp-ext.ts"
   printf 'g1.test\n' > "$case_dir/state/task-x1.omp-session-run"
   printf 'g1\n' > "$case_dir/state/task-x1.omp-session-stop"
-  printf 'g1.test 1 1 0\n' > "$case_dir/state/task-x1.omp-session-evidence"
+  mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
+  printf 'g1.test 1 1 0\n' > "$case_dir/state/task-x1.omp-session-evidence/g1.test"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"

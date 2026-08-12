@@ -2263,10 +2263,10 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.omp-session-run" \
       "$sub_state/$child_id.omp-session-stop" \
-      "$sub_state/$child_id.omp-session-evidence" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
+    rm -rf "$sub_state/$child_id.omp-session-evidence"
   done
 }
 
@@ -2546,11 +2546,11 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.omp-session-run" \
   "$STATE/$ID.omp-session-stop" \
-  "$STATE/$ID.omp-session-evidence" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+rm -rf "$STATE/$ID.omp-session-evidence"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
