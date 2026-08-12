@@ -1078,6 +1078,36 @@ test_reply_work_ack_requires_matching_durable_link() {
   pass "fm-x-reply posts a work acknowledgement only after a matching durable task link"
 }
 
+test_reply_private_audience_transport_drift_refuses() {
+  local home out rc err context now
+  home="$TMP_ROOT/reply-private-drift"; mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state/x-context"
+  context="$home/state/x-context/req-private-answer.json"
+  now=$(date +%s)
+  jq -cn --argjson now "$now" '{request_id:"req-private-answer",platform:"discord",reply_max_chars:1900,reply_audience:"private-trusted",recorded_at:$now}' > "$context"
+  chmod 600 "$context"
+  err="$home/err.txt"
+
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_AUDIENCE=public "$ROOT/bin/fm-x-reply.sh" req-private-answer \
+    "Private answer." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "private initial-answer drift exit"
+  [ -z "$out" ] || fail "a private initial-answer refusal must echo nothing"
+  assert_grep "private-trusted reply requires" "$err" \
+    "a private initial-answer refusal must explain the disclosure guard"
+  assert_absent "$home/state/x-outbox/req-private-answer.json" \
+    "a private initial answer must refuse public preview transport drift"
+
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_AUDIENCE=public "$ROOT/bin/fm-x-reply.sh" req-legacy-public \
+    "Legacy public answer." 2>"$err"); rc=$?
+  expect_code 0 "$rc" "legacy missing-audience answer exit"
+  [ "$out" = req-legacy-public ] || fail "a legacy answer must retain public behavior"
+  assert_present "$home/state/x-outbox/req-legacy-public.json" \
+    "a legacy missing audience must remain publishable as public"
+  pass "fm-x-reply enforces private initial-answer audience at publication"
+}
+
 test_reply_dry_run_from_env_file() {
   local home fakebin log out rc
   home="$TMP_ROOT/reply-dry-env"; mkdir -p "$home"
@@ -2840,6 +2870,37 @@ test_followup_private_audience_transport_drift_refuses() {
   pass "fm-x-followup refuses private-to-public transport drift and preserves the binding for recovery"
 }
 
+test_followup_publisher_rechecks_private_audience_after_wrapper_drift() {
+  local home fake_root out rc meta err
+  home="$TMP_ROOT/fu-publisher-private-drift"; mkdir -p "$home/state"
+  fake_root="$home/fake-root"; mkdir -p "$fake_root/bin"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-private-drift\nFMX_RELAY_URL=http://127.0.0.1:8787\nFMX_REPLY_AUDIENCE=private-trusted\nFMX_DRY_RUN=1\n' > "$home/.env"
+  mk_linked_task "$home" task-publisher-private req-publisher-private 1700000000 0 private-trusted
+  meta="$home/state/task-publisher-private.meta"
+  cat > "$fake_root/bin/fm-x-reply.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'FMX_PAIRING_TOKEN=tok-private-drift\nFMX_RELAY_URL=https://relay.test\nFMX_REPLY_AUDIENCE=public\nFMX_DRY_RUN=1\n' > "$FM_HOME/.env"
+exec "$REAL_ROOT/bin/fm-x-reply.sh" "$@"
+SH
+  chmod +x "$fake_root/bin/fm-x-reply.sh"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" REAL_ROOT="$ROOT" \
+    FMX_NOW_OVERRIDE=1700003600 "$ROOT/bin/fm-x-followup.sh" task-publisher-private - \
+    <<<"Private detail after wrapper check." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "follow-up publisher-boundary drift exit"
+  [ -z "$out" ] || fail "a publisher-boundary refusal must echo nothing"
+  assert_grep "private-trusted reply requires" "$err" \
+    "the publisher must independently reject wrapper-to-subprocess drift"
+  assert_absent "$home/state/x-outbox/req-publisher-private.json" \
+    "publisher-boundary drift must create no preview"
+  assert_grep "x_request=req-publisher-private" "$meta" \
+    "publisher-boundary refusal must preserve the task link"
+  assert_grep "x_followups=0" "$meta" \
+    "publisher-boundary refusal must preserve the follow-up counter"
+  pass "fm-x-reply rechecks private follow-up audience inside the publisher subprocess"
+}
+
 test_followup_post_forwards_image_to_reply_client() {
   local home fakebin log out rc meta data img expected
   home="$TMP_ROOT/fu-post-image"; mkdir -p "$home/state"
@@ -3051,6 +3112,7 @@ test_reply_whitespace_text_rejected
 test_reply_dry_run_records_not_posts
 test_reply_dry_run_needs_no_token
 test_reply_work_ack_requires_matching_durable_link
+test_reply_private_audience_transport_drift_refuses
 test_reply_dry_run_from_env_file
 test_reply_empty_env_dry_run_overrides_env_file
 test_reply_dry_run_fails_when_outbox_unwritable
@@ -3116,6 +3178,7 @@ test_followup_post_final_clears_link_immediately
 test_followup_budget_reserves_the_third_slot_for_final
 test_followup_reserved_final_refuses_live_nonfinal
 test_followup_private_audience_transport_drift_refuses
+test_followup_publisher_rechecks_private_audience_after_wrapper_drift
 test_followup_post_forwards_image_to_reply_client
 test_followup_post_failure_keeps_link
 test_followup_post_record_failure_clears_link
