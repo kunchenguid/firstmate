@@ -6,6 +6,64 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Codex model-qualified max-effort profile
+
+This record was refreshed on 2026-08-12 with codex-cli 0.147.0.
+
+The installed CLI version was checked with:
+
+```sh
+codex --version
+```
+
+Observed output:
+
+```text
+codex-cli 0.147.0
+```
+
+The authoritative catalog was queried and reduced to model slugs and advertised reasoning levels with:
+
+```sh
+codex debug models 2>/dev/null | jq -r '.models[] | select(.slug == "gpt-5.6-sol" or .slug == "gpt-5.6-sol-wm" or .slug == "gpt-5.6-terra" or .slug == "gpt-5.6-luna" or .slug == "gpt-5.3-codex-spark" or .slug == "codex-auto-review") | [.slug, ([.supported_reasoning_levels[]?.effort] | join(","))] | @tsv'
+```
+
+Observed output:
+
+```text
+gpt-5.6-sol	low,medium,high,xhigh,max,ultra
+gpt-5.6-sol-wm	low,medium,high,xhigh,max,ultra
+gpt-5.6-terra	low,medium,high,xhigh,max,ultra
+gpt-5.6-luna	low,medium,high,xhigh,max
+gpt-5.3-codex-spark	low,medium,high,xhigh
+codex-auto-review	low,medium,high,xhigh,max
+```
+
+The catalog therefore advertises `max` for the five known Firstmate-supported model slugs and does not advertise `max` for `gpt-5.3-codex-spark`.
+
+Firstmate launch rendering and pre-launch refusal behavior were checked with:
+
+```sh
+bash tests/fm-spawn-dispatch-profile.test.sh
+```
+
+The relevant observed output was:
+
+```text
+ok - codex receives model_reasoning_effort max and records the requested effort
+ok - Codex Spark max refuses before metadata or launch
+ok - unknown Codex max capability refuses before metadata or launch
+# all fm-spawn-dispatch-profile tests passed
+```
+
+The rendering assertion matched this command fragment:
+
+```text
+codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort="max"' --dangerously-bypass-approvals-and-sandbox
+```
+
+This evidence verifies the installed catalog, Firstmate command rendering, and unsupported or unknown model refusal boundaries, but it does not claim that a live interactive Codex model session was started here.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

@@ -466,6 +466,18 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  fm_profile_validate_effort_capability "$harness" "$model" "$effort" || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id profile harness=$harness model=${model#-} effort=$effort is not supported; refusing before readiness or inheritance" >&2
+    return 1
+  }
+  remote_expected_effort=$(fm_profile_effective_effort "$harness" "$effort") || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id profile harness=$harness model=${model#-} effort=$effort has an unverifiable effective effort; refusing before readiness or inheritance" >&2
+    return 1
+  }
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -578,13 +590,6 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  remote_expected_effort=$(fm_profile_effective_effort "$harness" "$effort") || {
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: could not resolve the effective remote effort for profile harness=$harness effort=$effort; preserving the remote route for reconciliation" >&2
-    return 1
-  }
   [ -n "$remote_target" ] \
     && [ "$(fm_profile_normalize_harness "$remote_harness")" = "$(fm_profile_normalize_harness "$harness")" ] \
     && [ "$remote_model" = "$(fm_profile_normalize_model "$model")" ] \

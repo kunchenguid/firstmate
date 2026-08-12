@@ -741,6 +741,29 @@ cmp -s "$remote_route_meta_before_reuse" "$REMOTE_HOME/state/parent-route/ios.me
   || fail "an exact remote profile reuse changed the live remote profile record"
 pass "remote secondmate exact profile reuse preserves the live endpoint and both records"
 
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-profile-preflight.meta"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-profile-preflight.meta"
+cp "$PARENT/state/.remote-inherit-ios.generation" "$TMP_ROOT/remote-inherit-ios-before-profile-preflight.generation"
+ssh_before_profile_preflight=$(cat "$SSH_COUNT")
+set +e
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness grok --model grok-4 --effort max 2>&1)
+profile_preflight_rc=$?
+set -e
+[ "$profile_preflight_rc" -ne 0 ] \
+  || fail "remote parent accepted an unverifiable profile after inheritance"
+assert_contains "$out" 'before readiness or inheritance' \
+  "remote parent profile preflight did not identify its side-effect boundary"
+[ "$(cat "$SSH_COUNT")" = "$ssh_before_profile_preflight" ] \
+  || fail "remote parent profile refusal reached readiness or inheritance SSH"
+cmp -s "$TMP_ROOT/parent-ios-before-profile-preflight.meta" "$PARENT/state/ios.meta" \
+  || fail "remote parent profile refusal changed parent metadata"
+cmp -s "$TMP_ROOT/remote-ios-before-profile-preflight.meta" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "remote parent profile refusal changed the live endpoint metadata"
+cmp -s "$TMP_ROOT/remote-inherit-ios-before-profile-preflight.generation" \
+  "$PARENT/state/.remote-inherit-ios.generation" \
+  || fail "remote parent profile refusal advanced inheritance generation"
+pass "remote parent profile preflight refuses before readiness or inheritance"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-default-profile.meta"
 set_remote_profile() {
