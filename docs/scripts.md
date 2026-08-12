@@ -38,6 +38,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared session-lock harness identity, including narrowed Cursor ancestry, for lock ownership and liveness consumers |
 | `fm-cursor-lib.sh`       | Single owner of Cursor executable resolution, legacy-alias proof, process identity, and renderer normalization |
+| `fm-cursor-launch-boundary.sh` | In-pane Cursor launch wrapper recording the token-proved worker-server pid and process identity teardown reaps |
 | `fm-process-identity-lib.sh` | Shared spawn/teardown process-reuse identity (`starttime=` / `lstart=`) and the one exact PID+identity termination primitive (`fm_process_record_terminate`, cursor worker-server reap) |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
