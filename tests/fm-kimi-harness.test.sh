@@ -262,16 +262,17 @@ EOF
 }
 
 test_kimi_hook_recovers_only_one_exact_unmarked_block() {
-  local altered before body config duplicate exact marked normal out rc seed
+  local altered before body config decoy duplicate exact marked normal out rc seed
   seed="$TMP_ROOT/config-unmarked-seed"
   exact="$TMP_ROOT/config-unmarked-exact"
   altered="$TMP_ROOT/config-unmarked-altered"
   duplicate="$TMP_ROOT/config-unmarked-duplicate"
+  decoy="$TMP_ROOT/config-unmarked-decoy"
   normal="$TMP_ROOT/config-unmarked-normal"
   marked="$seed/marked.toml"
   body="$seed/body.toml"
   mkdir -p "$seed/.kimi-code" "$exact/.kimi-code" "$altered/.kimi-code" \
-    "$duplicate/.kimi-code" "$normal/.kimi-code"
+    "$duplicate/.kimi-code" "$decoy/.kimi-code" "$normal/.kimi-code"
   printf 'default_model = "test"\n' > "$seed/.kimi-code/config.toml"
   HOME="$seed" "$KIMI_HOOK" install || fail "seed Kimi hook install failed"
   cp "$seed/.kimi-code/config.toml" "$marked"
@@ -314,6 +315,27 @@ test_kimi_hook_recovers_only_one_exact_unmarked_block() {
     "duplicate unmarked Kimi hook refusal lost the ambiguity reason"
   cmp -s "$before" "$duplicate/.kimi-code/config.toml" \
     || fail "duplicate unmarked Kimi hook refusal changed config bytes"
+
+  {
+    printf "decoy = '''\n"
+    cat "$body"
+    printf "'''\n\n"
+    printf '%s\n' \
+      '[[hooks]]' \
+      'event = "\u0053top"' \
+      'matcher = "\u005e$"' \
+      'command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || tru\u0065"' \
+      'timeout = 1'
+  } > "$decoy/.kimi-code/config.toml"
+  before="$decoy/before.toml"
+  cp "$decoy/.kimi-code/config.toml" "$before"
+  rc=0
+  out=$(HOME="$decoy" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "literal-string decoy was recovered instead of the canonical top-level hook"
+  assert_contains "$out" "is not the canonical top-level hook block" \
+    "literal-string decoy refusal lost the parsed-object binding reason"
+  cmp -s "$before" "$decoy/.kimi-code/config.toml" \
+    || fail "literal-string decoy refusal changed config bytes"
 
   config="$normal/.kimi-code/config.toml"
   printf 'default_model = "normal"\n' > "$config"

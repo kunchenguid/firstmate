@@ -193,6 +193,13 @@ def locate_unmarked_block(data: bytes, parsed):
     start = data.find(body)
     if start != 0 and data[start - 1 : start] != b"\n":
         refuse("the unmarked Firstmate hook block is not at a line boundary.")
+    remainder = data[:start] + data[start + len(body) :]
+    parsed_remainder = parse_toml(remainder, "config.toml without the unmarked Firstmate hook block")
+    if any(item == expected for item in parsed_remainder.get("hooks", [])):
+        refuse("the byte-identical unmarked Firstmate hook text is not the canonical top-level hook block.")
+    remarked = data[:start] + block(BEGIN) + data[start + len(body) :]
+    if parse_toml(remarked, "re-marked config.toml") != parsed:
+        refuse("re-marking the unmarked Firstmate hook block changes config.toml semantics.")
     return start, start + len(body)
 
 
