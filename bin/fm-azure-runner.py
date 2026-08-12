@@ -42,6 +42,9 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
 SAFE_ARTIFACT = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/+@:-]{1,240}$")
 LOCAL_COMMAND_TIMEOUT_SECONDS = 300
+LEASE_DURATION_SECONDS = 60
+LEASE_RENEW_TIMEOUT_SECONDS = 10
+LEASE_SAFETY_MARGIN_SECONDS = 15
 MAX_STAGING_INPUT_BYTES = 512 * 1024**2
 MAX_BOOTSTRAP_NETWORK_BYTES = 16 * 1024**3
 MAX_RESULT_UPLOAD_BYTES = 600 * 1024**2
@@ -781,12 +784,12 @@ def prepare(env, args, parent_state=None):
     return state
 
 
-def az_command(env, args, check=True, parse_json=True):
+def az_command(env, args, check=True, parse_json=True, timeout_seconds=LOCAL_COMMAND_TIMEOUT_SECONDS):
     record_azure_operation(env, args)
     command = ["az"] + list(args) + ["--subscription", env["subscription"], "--only-show-errors"]
     if parse_json and "--output" not in command and "-o" not in command:
         command += ["--output", "json"]
-    result = run(command, check=check)
+    result = run(command, check=check, timeout_seconds=timeout_seconds)
     if not parse_json:
         return result.stdout.strip(), result.returncode, result.stderr.strip()
     if result.returncode != 0:
@@ -1390,6 +1393,9 @@ class AdmissionLease:
         self.stop = threading.Event()
         self.failed = threading.Event()
         self.thread = None
+        self.renew_lock = threading.Lock()
+        self.expiry_lock = threading.Lock()
+        self.expires_at = {"admission": 0.0, "reservation": 0.0}
 
     def _lease_args(self, operation, blob_name, lease_id):
         args = [
@@ -1402,14 +1408,25 @@ class AdmissionLease:
             args += ["--lease-id", lease_id]
         return args
 
+    def _lease_call(self, operation, blob_name, lease_id):
+        return az_command(
+            self.env, self._lease_args(operation, blob_name, lease_id), check=False,
+            timeout_seconds=LEASE_RENEW_TIMEOUT_SECONDS,
+        )
+
+    def _record_success(self, label):
+        with self.expiry_lock:
+            self.expires_at[label] = time.monotonic() + LEASE_DURATION_SECONDS
+
     def __enter__(self):
         ensure_admission_blob(self.env, self.state)
         acquired = False
         for _ in range(7):
-            _, rc, _ = az_command(self.env, self._lease_args(
+            _, rc, _ = self._lease_call(
                 "acquire", self.state["staging"]["admission_blob"], self.admission_lease_id
-            ), check=False)
+            )
             if rc == 0:
+                self._record_success("admission")
                 acquired = True
                 break
             time.sleep(10)
@@ -1417,15 +1434,20 @@ class AdmissionLease:
             raise RunnerError("runner admission lock is busy or unreachable")
         try:
             ensure_reservation_blob(self.env, self.state)
-            _, reservation_rc, _ = az_command(self.env, self._lease_args(
+            _, reservation_rc, _ = self._lease_call(
                 "acquire", self.state["staging"]["reservation_blob"], self.reservation_lease_id
-            ), check=False)
+            )
             if reservation_rc != 0:
                 raise RunnerError("cost reservation ledger lease is busy or unreachable")
+            self._record_success("reservation")
+            self.renew_and_assert()
         except Exception:
-            az_command(self.env, self._lease_args(
-                "release", self.state["staging"]["admission_blob"], self.admission_lease_id
-            ), check=False)
+            for blob_name, lease_id in (
+                (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
+                (self.state["staging"]["admission_blob"], self.admission_lease_id),
+            ):
+                with contextlib.suppress(RunnerError):
+                    self._lease_call("release", blob_name, lease_id)
             raise
         self.thread = threading.Thread(target=self._renew, daemon=True)
         self.thread.start()
@@ -1433,18 +1455,42 @@ class AdmissionLease:
 
     def _renew(self):
         while not self.stop.wait(25):
-            for blob_name, lease_id in (
-                (self.state["staging"]["admission_blob"], self.admission_lease_id),
-                (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
-            ):
-                _, rc, _ = az_command(self.env, self._lease_args("renew", blob_name, lease_id), check=False)
-                if rc != 0:
-                    self.failed.set()
-                    return
+            try:
+                self.renew_and_assert()
+            except Exception:
+                self.failed.set()
+                return
+
+    def renew_and_assert(self):
+        try:
+            with self.renew_lock:
+                for blob_name, lease_id, label in (
+                    (self.state["staging"]["admission_blob"], self.admission_lease_id, "admission"),
+                    (self.state["staging"]["reservation_blob"], self.reservation_lease_id, "reservation"),
+                ):
+                    _, rc, stderr = self._lease_call("renew", blob_name, lease_id)
+                    if rc != 0:
+                        raise RunnerError("runner {} lease renewal failed: {}".format(label, stderr))
+                    self._record_success(label)
+        except Exception:
+            self.failed.set()
+            raise
+        self.assert_held()
 
     def assert_held(self):
         if self.failed.is_set():
             raise RunnerError("runner admission lease renewal failed; no command was started")
+        with self.expiry_lock:
+            remaining = {
+                label: expiry - time.monotonic()
+                for label, expiry in self.expires_at.items()
+            }
+        stale = [label for label, seconds in remaining.items() if seconds <= LEASE_SAFETY_MARGIN_SECONDS]
+        if stale:
+            self.failed.set()
+            raise RunnerError("runner lease expiry safety margin exhausted for {}; no command was started".format(
+                ", ".join(sorted(stale))
+            ))
 
     def __exit__(self, exc_type, exc, traceback):
         self.stop.set()
@@ -1454,7 +1500,8 @@ class AdmissionLease:
             (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
             (self.state["staging"]["admission_blob"], self.admission_lease_id),
         ):
-            az_command(self.env, self._lease_args("release", blob_name, lease_id), check=False)
+            with contextlib.suppress(RunnerError):
+                self._lease_call("release", blob_name, lease_id)
 
 
 def storage_upload(env, local_path, blob, overwrite=False):
@@ -2115,7 +2162,7 @@ def dispatch_prepared(env, state, confirm_subscription):
             input_url = blob_sas(env, state["staging"]["input_blob"], "r", expiry)
             output_url = blob_sas(env, state["staging"]["output_blob"], "cw", expiry)
             foundation_gate(env)
-            lease.assert_held()
+            lease.renew_and_assert()
             create_vm(env, state)
             lease.assert_held()
         create_run_command(env, state, input_url, output_url)

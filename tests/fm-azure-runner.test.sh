@@ -604,6 +604,7 @@ class FakeLease:
     def __enter__(self): return self
     def __exit__(self, *args): pass
     def assert_held(self): sequence.append("lease-held")
+    def renew_and_assert(self): sequence.append("lease-renewed")
 module.AdmissionLease = FakeLease
 state = {
     "invocation": "azr-aaaaaaaaaaaa", "parent_invocation": None,
@@ -623,8 +624,25 @@ else:
     raise AssertionError("dispatch fixture did not stop")
 assert sequence[sequence.index("reservation-write") + 1] == "foundation"
 create_index = sequence.index("create-vm")
-assert sequence[create_index - 1] == "lease-held"
+assert sequence[create_index - 1] == "lease-renewed"
 assert sequence[create_index + 1] == "lease-held"
+
+# An expired or unrenewable admission owner is rejected synchronously before
+# the first compute mutation, even if its background renewal thread failed late.
+sequence.clear()
+class ExpiredLease(FakeLease):
+    def renew_and_assert(self):
+        raise module.RunnerError("runner lease expiry safety margin exhausted")
+module.AdmissionLease = ExpiredLease
+expired_state = json.loads(json.dumps(state))
+expired_state["phase"] = "prepared"
+try:
+    module.dispatch_prepared({"subscription": "sub", "max_concurrency": 1}, expired_state, "sub")
+except module.RunnerError as exc:
+    assert "expiry safety margin" in str(exc)
+else:
+    raise AssertionError("expired lease reached compute creation")
+assert "create-vm" not in sequence
 PY
   pass "foundation exact owner/resource/subnet/NSG/NAT/private-endpoint/DNS matrix and mutation-boundary reproof pass"
 }
@@ -637,6 +655,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("runner_host", sys.argv[1])
@@ -794,11 +813,13 @@ reservation_env = {
 # The real admission owner acquires and releases independent admission and
 # reservation-object leases with non-interchangeable IDs.
 lease_calls = []
+lease_timeouts = []
 module.ensure_admission_blob = lambda *args: None
 module.ensure_reservation_blob = lambda *args: None
 def lease_az(env_arg, args, **kwargs):
     if args[0:3] == ["storage", "blob", "lease"]:
         lease_calls.append(list(args))
+        lease_timeouts.append(kwargs.get("timeout_seconds"))
         return ({}, 0, "")
     raise AssertionError("unexpected dual-lease Azure call: {}".format(args))
 module.az_command = lease_az
@@ -807,8 +828,45 @@ with module.AdmissionLease(reservation_env, lease_state) as dual_lease:
     assert dual_lease.admission_lease_id != dual_lease.reservation_lease_id
 assert [(args[3], args[args.index("--blob-name") + 1]) for args in lease_calls] == [
     ("acquire", "admission.lock"), ("acquire", "reservations.json"),
+    ("renew", "admission.lock"), ("renew", "reservations.json"),
     ("release", "reservations.json"), ("release", "admission.lock"),
 ]
+assert lease_timeouts == [module.LEASE_RENEW_TIMEOUT_SECONDS] * len(lease_calls)
+
+# Every lease call has a bound shorter than the lease lifetime. A timeout from
+# either renewal is sticky, and an independently expired certificate cannot be
+# mistaken for current Azure ownership.
+hung_lease = module.AdmissionLease(reservation_env, lease_state)
+hung_lease._record_success("admission")
+hung_lease._record_success("reservation")
+hung_lease._lease_call = lambda *args, **kwargs: (_ for _ in ()).throw(
+    module.RunnerError("command exceeded bounded renewal deadline")
+)
+try:
+    hung_lease.renew_and_assert()
+except module.RunnerError as exc:
+    assert "bounded renewal deadline" in str(exc)
+else:
+    raise AssertionError("hung renewal retained admission authority")
+assert hung_lease.failed.is_set()
+try:
+    hung_lease.assert_held()
+except module.RunnerError as exc:
+    assert "renewal failed" in str(exc)
+else:
+    raise AssertionError("renewal timeout was not sticky")
+
+expired_lease = module.AdmissionLease(reservation_env, lease_state)
+expired_lease.expires_at = {
+    "admission": time.monotonic() - 1,
+    "reservation": time.monotonic() - 1,
+}
+try:
+    expired_lease.assert_held()
+except module.RunnerError as exc:
+    assert "expiry safety margin exhausted" in str(exc)
+else:
+    raise AssertionError("expired local lease certificate was accepted")
 reservation_ledger = module.empty_reservation_ledger(reservation_env)
 reservation_lock = threading.Lock()
 real_load_reservation_ledger = module.load_reservation_ledger

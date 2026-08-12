@@ -123,6 +123,8 @@ A short renewable Azure Blob lease serializes count-and-create admission across 
 Lease loss stops before repository execution and retains exact state for reconciliation.
 The controller also acquires and renews an independent lease on the reservation-ledger blob itself.
 Every ledger read and write carries that exact object lease ID, so a controller that loses admission ownership cannot overwrite a successor's reservation even if its stale write was already in flight.
+Both 60-second leases use a 10-second renewal-call deadline and an independent monotonic last-success expiry certificate with a 15-second safety margin.
+Any renewal exception permanently fails that admission owner, and the controller synchronously renews and verifies both leases immediately before the compute deployment call, so an expired or hung renewal cannot authorize VM creation.
 Under those leases, the controller stores a subscription/resource-group/storage/generation-bound reservation ledger in the private control container.
 Each invocation reserves its complete first-day worst-case dollar bound before staging or compute creation, and admission adds every non-reconciled reservation to the greater of actual or forecast cost.
 The reservation survives controller restart and fenced retry lineage.
