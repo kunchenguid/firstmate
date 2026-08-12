@@ -261,13 +261,29 @@ function fetchReviewRequests() {
       let requestedAt = null;
       if (repository && result.number && index < REVIEW_REQUEST_TIMELINE_LIMIT) {
         try {
+          const requestedReviewers = JSON.parse(run("gh", [
+            "api", "--method", "GET", `repos/${repository}/pulls/${result.number}/requested_reviewers`,
+          ]));
+          const viewerIsRequested = (requestedReviewers.users ?? [])
+            .some((reviewer) => reviewer.login === viewer);
+          const requestedTeamKeys = new Set((requestedReviewers.teams ?? []).flatMap((team) =>
+            [team.id == null ? null : String(team.id), team.slug, team.name].filter(Boolean),
+          ));
           const timeline = JSON.parse(run("gh", [
             "api", "--method", "GET", `repos/${repository}/issues/${result.number}/timeline`, "-f", "per_page=100",
           ]));
           const events = (Array.isArray(timeline) ? timeline : [])
-            .filter((event) =>
-              event.event === "review_requested" && event.requested_reviewer?.login === viewer && event.created_at,
-            )
+            .filter((event) => {
+              const requestedTeam = event.requested_team;
+              const teamMatches = requestedTeam && [
+                requestedTeam.id == null ? null : String(requestedTeam.id),
+                requestedTeam.slug,
+                requestedTeam.name,
+              ].filter(Boolean).some((key) => requestedTeamKeys.has(key));
+              return event.event === "review_requested" && event.created_at && (
+                (viewerIsRequested && event.requested_reviewer?.login === viewer) || teamMatches
+              );
+            })
             .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
           requestedAt = events[0]?.created_at ?? null;
         } catch {
@@ -1310,7 +1326,8 @@ function recapNeedsPedroLabel(recap) {
 }
 
 function visibleBucketItems(bucket, showAll) {
-  if (showAll || bucket.key === "review-obligations") return bucket.items;
+  // PR checks and waiting state stay visible because this section replaces a GitHub status trip.
+  if (showAll || ["ours-in-review", "review-obligations"].includes(bucket.key)) return bucket.items;
   return bucket.items.filter((item) =>
     ["yellow", "red"].includes(item.markerKey) && !["aged", "answered"].includes(item.attentionClass),
   );

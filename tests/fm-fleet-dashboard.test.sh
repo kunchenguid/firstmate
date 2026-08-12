@@ -83,10 +83,16 @@ if [ "${1:-}" = "api" ]; then
       printf 'pedromuller-del\n'
       ;;
     *" repos/monalee/artemis/issues/930/timeline "*)
-      printf '[{"event":"review_requested","created_at":"2026-07-20T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      printf '[{"event":"review_requested","created_at":"2026-07-20T00:00:00Z","requested_team":{"name":"webdev","slug":"webdev"}}]'
       ;;
     *" repos/monalee/artemis/issues/912/timeline "*)
       printf '[{"event":"review_requested","created_at":"2026-07-31T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      ;;
+    *" repos/monalee/artemis/pulls/930/requested_reviewers "*)
+      printf '{"users":[],"teams":[{"name":"webdev","slug":"webdev"}]}'
+      ;;
+    *" repos/monalee/artemis/pulls/912/requested_reviewers "*)
+      printf '{"users":[{"login":"pedromuller-del"}],"teams":[]}'
       ;;
     *)
       printf '[]'
@@ -531,9 +537,13 @@ test_default_rows_are_one_line_with_a_fresh_recap() {
   assert_not_contains "$title_line" "for " "default row includes age detail"
   assert_contains "$out" "PR 4003 | local checks unknown | readiness unknown (unregistered)" \
     "actionable PR row omits established status"
-  assert_not_contains "$out" "PR 4001 | checks green" \
-    "non-actionable unknown PR stayed on the default screen"
-  assert_contains "$out" "3 other PRs" "collapsed PRs are not counted and reachable"
+  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
+    "default screen hides established PR checks and review state"
+  assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
+    "default screen hides a PR waiting on review"
+  assert_contains "$out" "PR 4002 | local checks unknown | readiness unknown (unregistered)" \
+    "default screen hides a PR whose state remains unknown"
+  assert_not_contains "$out" "other PRs" "default screen still collapses our PR status rows"
   assert_not_contains "$out" "$OUR_PR" "default list leaked a PR link"
   assert_contains "$out" "github status checked just now" "cached forge facts lost their explicit age"
   [ "${#title_line}" -le 80 ] || fail "fixed terminal measure exceeded 80 columns"
@@ -708,7 +718,7 @@ test_ignored_operational_directories_are_never_output_targets() {
   pass "dashboard refuses data, state, and config output roots"
 }
 
-test_default_screen_collapses_every_non_actionable_row_without_dropping_it() {
+test_default_screen_collapses_deferred_rows_without_hiding_our_prs() {
   local home fakebin out all
   home=$(make_home minimal-default)
   write_live_fixture "$home"
@@ -716,8 +726,12 @@ test_default_screen_collapses_every_non_actionable_row_without_dropping_it() {
 
   out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) || fail "minimal render failed"
   assert_contains "$out" "2 deferred decisions" "aged and answered-looking holds have no counted affordance"
-  assert_contains "$out" "3 other PRs" "non-actionable PR rows have no counted affordance"
   assert_contains "$out" "3 review relationships" "review work in progress has no counted affordance"
+  assert_contains "$out" "PR 4001 | checks green | changes requested by reviewer-two" \
+    "default minimalism hid the PR checks Pedro uses to avoid a GitHub trip"
+  assert_contains "$out" "PR 4004 | local checks unknown | waiting on local-reviewer" \
+    "default minimalism hid what an open PR is waiting on"
+  assert_not_contains "$out" "other PRs" "our PR rows remain behind a collapsed affordance"
   assert_not_contains "$out" "Renew the signing certificate" "aged hold stayed on the default screen"
   assert_not_contains "$out" "Pick the flake-fix destination" "answered-looking hold stayed on the default screen"
   assert_not_contains "$out" "sources backlog" "non-actionable source inventory stayed on the default screen"
@@ -726,7 +740,7 @@ test_default_screen_collapses_every_non_actionable_row_without_dropping_it() {
   assert_contains "$all" "Renew the signing certificate" "--all cannot reach an aged hold"
   assert_contains "$all" "Pick the flake-fix destination" "--all cannot reach an answered-looking hold"
   assert_contains "$all" "PR 4188" "--all cannot reach a collapsed review relationship"
-  pass "default screen is minimal and every collapsed row remains counted and reachable"
+  pass "default screen collapses deferred work without hiding our PR status"
 }
 
 test_readable_ids_survive_colliding_rows_and_support_prefix_lookup() {
@@ -911,7 +925,7 @@ test_html_page_renders_minimal_sections_with_reachable_detail
 test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
 test_ignored_operational_directories_are_never_output_targets
-test_default_screen_collapses_every_non_actionable_row_without_dropping_it
+test_default_screen_collapses_deferred_rows_without_hiding_our_prs
 test_readable_ids_survive_colliding_rows_and_support_prefix_lookup
 test_detail_contract_uses_report_evidence_and_slow_quota_without_fabrication
 test_review_obligations_are_distinct_and_oldest_first
