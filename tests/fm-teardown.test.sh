@@ -71,6 +71,9 @@ SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 # Minimal endpoint inventory for the exact task window used by these fixtures.
+if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+fi
 if [ "${1:-}" = list-windows ]; then
   case " $* " in
     *"#{window_id}|#{session_name}:#{window_name}"*) printf '%s\n' '@1|firstmate:fm-task-x1' ;;
@@ -299,7 +302,7 @@ run_teardown() {
   FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-$case_dir/state}" \
   FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-$case_dir/config}" \
   FM_FAKE_TMUX_REPLACE_META="${FM_FAKE_TMUX_REPLACE_META:-}" \
-  FM_FAKE_TMUX_PATH="$case_dir/wt" \
+  FM_FAKE_TMUX_PATH="${FM_FAKE_TMUX_PATH:-$case_dir/wt}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1542,7 +1545,14 @@ case "$cmd $sub" in
     jq --arg pane "$pane" '.panes |= [.[] | select(.pane_id != $pane)]' "$state" > "$tmp"
     mv "$tmp" "$state"
     ;;
-  "agent get") printf '%s\n' '{"error":{"code":"agent_not_found"}}' ;;
+  "agent get")
+    if [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ]; then
+      jq -n --arg status "$FM_FAKE_HERDR_AGENT_STATUS" \
+        '{result:{agent:{agent:"grok",agent_status:$status}}}'
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    fi
+    ;;
   *) exit 0 ;;
 esac
 SH
@@ -1646,6 +1656,74 @@ test_projection_teardown_refuses_missing_identity() {
   pass "projection teardown refuses to close a pane without bound identity"
 }
 
+test_projection_teardown_closes_owned_live_pane() {
+  local case_dir rc worker_pid
+  case_dir=$(make_case projection-live-owned)
+  write_meta "$case_dir" local-only ship
+  sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w9' \
+    'herdr_tab_id=w9:t2' \
+    'display_label=fm-task-x1' \
+    'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
+  make_herdr_teardown_fake "$case_dir"
+  : > "$case_dir/herdr.log"
+  env -i PATH="$PATH" FM_AGENT_TASK=task-x1 FM_AGENT_ROLE=crewmate \
+    FM_AGENT_OWNER_HOME="$case_dir" sh -c 'cd "$1" && exec sleep 30' sh "$case_dir/wt" &
+  worker_pid=$!
+  trap 'kill "$worker_pid" 2>/dev/null || true' RETURN
+  set +e
+  (
+    export FM_HERDR_LOG="$case_dir/herdr.log"
+    export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
+    export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
+    export FM_FAKE_HERDR_AGENT_STATUS=working
+    run_teardown "$case_dir" --force
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  kill "$worker_pid" 2>/dev/null || true
+  wait "$worker_pid" 2>/dev/null || true
+  trap - RETURN
+  expect_code 0 "$rc" "projection-live-owned: valid live task teardown should succeed"
+  assert_contains "$(cat "$case_dir/herdr.log")" 'pane close w9:p2' \
+    "projection-live-owned: valid live task pane was not closed"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "projection-live-owned: task metadata survived successful teardown"
+  pass "projection teardown closes a live pane with complete task ownership proof"
+}
+
+test_endpoint_recovery_uses_stable_window_id() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-stable-id)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:stale-name' \
+    'window_id=@1' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'spawn_state=aborted' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    export FM_FAKE_TMUX_PATH="$case_dir/project"
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "endpoint-recovery-stable-id: teardown should retire a valid recovery endpoint"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-stable-id: recovery metadata survived endpoint retirement"
+  assert_contains "$(cat "$case_dir/tmux.log")" 'kill-window -t @1' \
+    "endpoint-recovery-stable-id: teardown did not kill the immutable window id"
+  pass "endpoint recovery consumes the immutable tmux window id"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_reconciles_consumed_presentation_receipt
@@ -1686,3 +1764,5 @@ test_nested_secondmate_teardown_handoffs_archived_resolution
 test_nested_secondmate_teardown_failure_keeps_active_reply
 test_projection_journal_retires_before_worktree_return
 test_projection_teardown_refuses_missing_identity
+test_projection_teardown_closes_owned_live_pane
+test_endpoint_recovery_uses_stable_window_id

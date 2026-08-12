@@ -670,7 +670,7 @@ EOF
 fm_backend_herdr_projection_close_bound_pane() {
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local expected_workspace=${4:-} expected_tab=${5:-} expected_label=${6:-} expected_harness=${7:-}
-  local expected_task=${8:-} expected_path=${9:-} expected_home=${10:-}
+  local expected_task=${8:-} expected_path=${9:-} expected_home=${10:-} pane_info
   [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ] || return 1
   [ -n "$expected_workspace" ] && [ -n "$expected_tab" ] \
     && [ -n "$expected_label" ] || return 1
@@ -678,7 +678,15 @@ fm_backend_herdr_projection_close_bound_pane() {
     "$session" "$expected_workspace" "$expected_tab" "$pane_id" \
     "$expected_label" "$expected_harness" "$required_agent_state" \
     "$expected_task" "$expected_path" "$expected_home" || return 1
-  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$pane_info" | jq -e --arg workspace "$expected_workspace" \
+    --arg tab "$expected_tab" --arg pane "$pane_id" '
+      .result.pane.workspace_id == $workspace
+      and .result.pane.tab_id == $tab
+      and .result.pane.pane_id == $pane
+    ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
 }
 
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [workspace] [tab] [label] [harness] [task] [path] [home]

@@ -395,6 +395,7 @@ spawn_endpoint_recovery_meta() {
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
   {
     printf 'window=%s\n' "$T"
+    printf 'window_id=%s\n' "$WID"
     printf 'project=%s\n' "$PROJ_ABS"
     printf 'harness=%s\n' "${HARNESS:-unknown}"
     printf 'kind=%s\n' "${KIND:-ship}"
@@ -894,7 +895,7 @@ spawn_abort_cleanup() {
          && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ] \
          && [ "${SPAWN_WORKTREE_LEASED:-0}" != 1 ] \
          && [ "$(grep '^endpoint_recovery=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = 1 ] \
-         && [ "$(grep '^window=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = "$T" ]; then
+         && [ "$(grep '^window_id=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = "$WID" ]; then
         rm -f "$STATE/$ID.meta" || echo "warning: spawn abort removed the endpoint but could not remove its recovery record" >&2
         [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ] || SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=0
       fi
@@ -1603,6 +1604,7 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state old_slot_state
+  local old_endpoint_recovery old_window_id old_window_name
   local old_worktree old_slot_returned old_slot_returning old_slot_holder old_lease_generation target_session target_pane
   HERDR_RECOVERY_BACKEND=""
   HERDR_RECOVERY_WORKSPACE_ID=""
@@ -1625,6 +1627,25 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   fi
   old_backend=$(fm_backend_of_meta "$meta")
   old_target=$(fm_backend_target_of_meta "$meta")
+  old_endpoint_recovery=$(awk -F= '$1 == "endpoint_recovery" { print $2; exit }' "$meta" 2>/dev/null || true)
+  old_window_id=$(awk -F= '$1 == "window_id" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  if [ "$old_endpoint_recovery" = 1 ] && [ "$old_backend" = tmux ]; then
+    if [[ "$old_window_id" =~ ^@[0-9]+$ ]]; then
+      old_target=$old_window_id
+    else
+      echo "error: existing task $ID has an invalid endpoint recovery window id; refusing duplicate launch" >&2
+      return 1
+    fi
+    if old_window_name=$(fm_backend_task_name tmux "$old_target" 2>/dev/null); then
+      [ "$old_window_name" = "fm-$ID" ] || {
+        echo "error: existing endpoint recovery window for $ID is not task-bound; refusing duplicate launch" >&2
+        return 1
+      }
+      echo "error: existing task $ID still has its endpoint recovery window; reconcile it before retrying" >&2
+      return 1
+    fi
+    return 0
+  fi
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
     return 1

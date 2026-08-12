@@ -141,6 +141,17 @@ T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 fm_backend_validate "$BACKEND" || exit 1
+ENDPOINT_RECOVERY=$(grep '^endpoint_recovery=' "$META" | tail -1 | cut -d= -f2- || true)
+ENDPOINT_RECOVERY_WINDOW_ID=$(grep '^window_id=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$ENDPOINT_RECOVERY" = 1 ]; then
+  [ "$BACKEND" = tmux ] || { echo "REFUSED: unsupported endpoint recovery backend for $ID" >&2; exit 1; }
+  if [[ "$ENDPOINT_RECOVERY_WINDOW_ID" =~ ^@[0-9]+$ ]]; then
+    T=$ENDPOINT_RECOVERY_WINDOW_ID
+  else
+    echo "REFUSED: endpoint recovery for $ID has no stable tmux window id" >&2
+    exit 1
+  fi
+fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root;
@@ -381,7 +392,9 @@ fi
 # mismatch, and would leave an aborted spawn's record permanently unretirable.
 if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ] \
    && [ "$TOP_SLOT_UNRESOLVED_LEASE" != 1 ]; then
-  fm_assert_task_branch_matches_meta "$ID" "$META" "REFUSED" || exit 1
+  if [ "$ENDPOINT_RECOVERY" != 1 ]; then
+    fm_assert_task_branch_matches_meta "$ID" "$META" "REFUSED" || exit 1
+  fi
 fi
 
 default_branch() {
@@ -721,6 +734,33 @@ teardown_backend_endpoint() {
       esac
       ;;
     *) fm_backend_kill "$backend" "$target" ;;
+  esac
+}
+
+teardown_endpoint_recovery_identity_proven() {
+  local id=$1 stable=$2 name path command stable_again name_again path_again command_again
+  [ "$stable" = "$ENDPOINT_RECOVERY_WINDOW_ID" ] || return 1
+  name=$(fm_backend_task_name tmux "$stable") || return 1
+  [ "$name" = "fm-$id" ] || return 1
+  path=$(fm_backend_current_path tmux "$stable") || return 1
+  fm_agent_paths_same "$path" "$PROJ" || return 1
+  command=$(fm_backend_tmux_current_command "$stable") || return 1
+  command=${command#-}
+  case "$command" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
+    *) return 1 ;;
+  esac
+  stable_again=$(fm_agent_tmux_window_id "$stable") || return 1
+  [ "$stable_again" = "$stable" ] || return 1
+  name_again=$(fm_backend_task_name tmux "$stable") || return 1
+  [ "$name_again" = "fm-$id" ] || return 1
+  path_again=$(fm_backend_current_path tmux "$stable") || return 1
+  fm_agent_paths_same "$path_again" "$PROJ" || return 1
+  command_again=$(fm_backend_tmux_current_command "$stable") || return 1
+  command_again=${command_again#-}
+  case "$command_again" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
+    *) return 1 ;;
   esac
 }
 
@@ -1626,8 +1666,27 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
+teardown_remove_task_tmp_identity_bound() {
+  local target=$1 parent=$2 base=$3 parent_identity=$4 target_identity child
+  target_identity=$(teardown_directory_identity "$target") || return 1
+  (
+    cd -- "$parent" || exit 1
+    [ "$(teardown_directory_identity .)" = "$parent_identity" ] || exit 1
+    cd -- "./$base" || exit 1
+    [ "$(teardown_directory_identity .)" = "$target_identity" ] || exit 1
+    for child in ./* ./.[!.]* ./..?*; do
+      [ -e "$child" ] || [ -L "$child" ] || continue
+      rm -rf -- "$child" || exit 1
+    done
+    cd .. || exit 1
+    [ "$(teardown_directory_identity .)" = "$parent_identity" ] || exit 1
+    [ "$(teardown_directory_identity "./$base")" = "$target_identity" ] || exit 1
+    rmdir -- "./$base"
+  )
+}
+
 teardown_remove_task_tmp() {
-  local target=$1 parent base marker expected marker_content parent_identity
+  local target=$1 parent base marker expected marker_content parent_identity removal_lock rc
   [ -n "$target" ] || return 0
   if [ ! -e "$target" ] && [ ! -L "$target" ]; then
     return 0
@@ -1644,7 +1703,22 @@ teardown_remove_task_tmp() {
   expected=$(printf 'task=%s\npath=%s' "$ID" "$target")
   marker_content=$(cat "$marker" 2>/dev/null || true)
   [ "$marker_content" = "$expected" ] || return 1
-  safe_rm_rf "$target" "task temp" "$parent_identity"
+  removal_lock="$STATE/.tasktmp-$ID.lock"
+  fm_lock_acquire_wait "$removal_lock" || return 1
+  rc=0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || rc=1
+  if [ "$rc" -eq 0 ] && [ "$(teardown_directory_identity "$parent")" != "$parent_identity" ]; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] && { [ ! -d "$target" ] || [ -L "$target" ]; }; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] && ! teardown_remove_task_tmp_identity_bound \
+    "$target" "$parent" "$base" "$parent_identity"; then
+    rc=1
+  fi
+  fm_lock_release "$removal_lock" || rc=1
+  return "$rc"
 }
 
 safe_rm_rf_child_worktree() {
@@ -2453,6 +2527,28 @@ teardown_release_top_slot_lock() {
   fi
 }
 trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true; secondmate_registry_transaction_restore || true' EXIT
+if [ "$ENDPOINT_RECOVERY" = 1 ]; then
+  if fm_backend_task_name tmux "$T" >/dev/null 2>&1; then
+    teardown_endpoint_recovery_identity_proven "$ID" "$T" || {
+      echo "REFUSED: could not prove the endpoint recovery window for $ID; preserving its recovery record" >&2
+      exit 1
+    }
+    teardown_backend_endpoint tmux "$T" || {
+      echo "REFUSED: could not close the endpoint recovery window for $ID; preserving its recovery record" >&2
+      exit 1
+    }
+  fi
+  teardown_meta_identity_matches || {
+    echo "error: endpoint recovery metadata changed before retirement for $ID" >&2
+    exit 1
+  }
+  rm -f -- "$META" || {
+    echo "error: could not retire endpoint recovery metadata for $ID" >&2
+    exit 1
+  }
+  echo "teardown $ID retired endpoint recovery window $T"
+  exit 0
+fi
 if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
   teardown_acquire_herdr_presentation_lock "$T" || {
     echo "REFUSED: could not acquire the Herdr presentation lock for $ID; preserving task state and worktree" >&2
