@@ -31,9 +31,9 @@
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> review readiness -> deliverable acceptance -> /no-mistakes pipeline -> PR -> configured merge authority
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
-#   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, firstmate merges to local main
+#   direct-PR    implement -> review readiness -> deliverable acceptance -> push + PR + CI -> configured merge authority
+#   local-only   implement -> review readiness -> deliverable acceptance -> full local checks (no push/PR);
+#                report ready, then configured merge authority approves the guarded local merge
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -394,7 +394,9 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When you believe it is complete, run only the targeted builds, regressions, and smoke tests needed to make the result safe and credible to review (not necessarily the full suite), then append \`done: {summary}\` to the status file and stop.
+This \`done:\` milestone means implementation and review evidence are ready, not that the branch has been pushed - firstmate decides when to instruct you to push and open the PR, normally after the captain accepts the deliverable unless risk or an explicit instruction requires opening it sooner.
+After firstmate instructs you, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -408,6 +410,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+After deliverable acceptance, firstmate may request one run of the project's full local checks on the final branch before the configured merge authority decides.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;

@@ -32,10 +32,13 @@ The goal is captain judgment without captain supervision: firstmate owns routing
    The package shows the result and how to exercise it, the evidence each applicable lens requires, decisions or tradeoffs discovered during implementation, and known limitations relevant to acceptance.
    The captain reviews the product experience, concepts, architecture, and corrected behavior - not merely whether the code passes its checks.
    Coordinate each feedback round, rerun targeted validation, and refresh the package. Continue until the captain explicitly accepts the deliverable.
-6. **Run full validation.** After deliverable acceptance, run the complete validation, review, CI, and external-backstop pipeline (the no-mistakes ship path, or the project's equivalent).
+6. **Reach ship readiness by selected mode.** Normally after deliverable acceptance, complete the selected delivery path's full readiness stage.
+   For `no-mistakes`, run the complete pipeline: review, tests, documentation, lint, push, PR, and CI.
+   For `direct-PR`, push the branch, open the PR, and reach CI green; the deliverable gate normally runs at review readiness before push, but risk may require opening the PR early just as it may require validating early.
+   For `local-only`, run the project's full local checks once on the final branch - the full test suite and lint, or the project's documented equivalent - and treat those checks being green as ship readiness before the existing guarded local merge under the configured merge authority.
    Fix findings autonomously when they remain within accepted intent and existing authority (`ask-user-authority`).
    If a fix materially changes the accepted experience, behavior, or architecture, refresh the evidence and reopen the deliverable gate (step 5) before continuing.
-7. **Ship.** Once the deliverable is accepted and full validation is green, proceed under the existing merge authority (AGENTS.md section 7's selected delivery path and approval authority; this workflow never invents a second one).
+7. **Ship.** Once the deliverable is accepted and the selected mode's ship-readiness stage is green, proceed under the existing merge authority (AGENTS.md section 7's selected delivery path and approval authority; this workflow never invents a second one).
 
 ## Review lenses
 
@@ -64,11 +67,11 @@ A change being technical is not sufficient by itself to skip review: if its beha
 Validation has two stages:
 
 - **Review readiness** - fast, targeted checks that make the deliverable credible and safe to review (step 4).
-- **Ship readiness** - the full validation pipeline, run after the captain accepts the deliverable (step 6).
+- **Ship readiness** - the selected delivery mode's full readiness stage, normally run after the captain accepts the deliverable (step 6).
 
 This ordering avoids repeatedly paying for full validation while product feedback is still changing the work.
 It does not weaken safety requirements, CI, external review, or merge authority: the bars that stay untouched are full review for product-facing UI, browser or equivalent regressions with evidence for visual changes, never merging red, and captain ownership of the merge.
-Run full validation earlier than step 6 when risk warrants it - this ordering is a default, not a rule that overrides judgment about genuine risk.
+Start the selected readiness stage earlier than step 6 when risk warrants it - this ordering is a default, not a rule that overrides judgment about genuine risk.
 
 ## Simple-ship acceleration
 
