@@ -18,7 +18,9 @@ This skill performs that pull for the running main firstmate and every secondmat
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
+It never forces, never creates a merge commit, and never stashes.
+For local targets, uncommitted paths block only when they collide with the incoming change set; collisions are reported by path, unclassifiable states fail closed, and unrelated modified or untracked paths proceed safely.
+Remote targets retain their clean-tree guard, and any target that is diverged, offline, or on the wrong branch is skipped and reported.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -50,12 +52,14 @@ This touches only the firstmate repo and its own worktrees, never anything under
 4. **Report to the captain in plain outcomes.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
-   Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+   Surface any skipped target whose reason needs the captain's attention - for instance a diverged home or local edits that collide with the incoming update, which were left untouched on purpose.
 
 ## Safety
 
 - **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  A target that has diverged, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  A local target also skips on a reported uncommitted-path collision or any working-tree state the updater cannot classify; unrelated modified and untracked paths do not block it.
+  A remote target remains subject to its clean-tree guard.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
