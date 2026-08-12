@@ -370,6 +370,16 @@ LIVE_PREFIX=${SESSION%?}
   || fail "a recorded session that only prefixes a live session must classify unreadable, never alive or missing"
 pass "tmux liveness: a session name that only prefixes a live session classifies unreadable"
 
+# The same prefix, but the one live session it binds holds NO window of the
+# recorded name: the endpoint is then definitively gone, so refusing recovery
+# would strand a dead worker. tmux refuses a prefix matching more than one
+# session, so the list this probe returns describes exactly one session.
+tmux list-windows -t "$LIVE_PREFIX" -F '#{window_name}' 2>/dev/null | grep -Fqx no-such-window \
+  && fail "the prefix-matched live session unexpectedly holds the recorded window, so this case proves nothing"
+[ "$(fm_backend_agent_state tmux "$LIVE_PREFIX:no-such-window")" = missing ] \
+  || fail "a prefix-matched live session that lacks the recorded window must classify missing, so a dead worker is still recoverable"
+pass "tmux liveness: a prefix-matched live session lacking the recorded window still classifies missing"
+
 [ "$(fm_backend_agent_state tmux "no-such-session:agent")" = missing ] \
   || fail "a recorded session matching nothing at all must still classify missing"
 pass "tmux liveness: a session matching nothing at all still classifies missing"

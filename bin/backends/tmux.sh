@@ -258,10 +258,14 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # tmux's `=` exact-match prefix, because a plain `-t` resolves a session name by
 # fnmatch and by prefix, so a recorded sess:fm-x otherwise binds a live
 # sess2:fm-x's same-named window. An exact-absent session and a truly absent one
-# answer identically, so when the exact probe fails the fuzzy form is tried once:
-# if it succeeds a prefix-matching session is live and the verdict is
-# `unreadable`, never `missing`, since only `dead` and `missing` license
-# recovery.
+# answer identically, so when the exact probe fails the fuzzy form is tried once
+# and its own inventory settles the verdict: tmux refuses a prefix matching more
+# than one session, so a successful fuzzy probe has bound exactly one live
+# session, and that session either holds the recorded window name - the renamed
+# but running agent, `unreadable`, because relaunching it could duplicate an
+# agent on a live worktree - or it does not, which proves the recorded endpoint
+# gone and reports `missing`. A fuzzy probe that also fails is `missing`, which
+# is what a prefix matching several live sessions still reports.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -270,7 +274,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+  local target=$1 comm session window windows fuzzy_windows inventory_status
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
@@ -287,7 +291,8 @@ fm_backend_tmux_agent_state() {  # <target>
   if [ "$inventory_status" -ne 0 ]; then
     case "$windows" in
       *"can't find session:"*)
-        if LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' >/dev/null 2>&1; then
+        if fuzzy_windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) \
+          && printf '%s\n' "$fuzzy_windows" | grep -Fqx "$window"; then
           printf 'unreadable'
         else
           printf 'missing'

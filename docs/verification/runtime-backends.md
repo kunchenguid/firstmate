@@ -122,7 +122,26 @@ can't find session: nosuch (exit 1)
 ```
 
 Row 2 is the same prefix bug on a session-only target, and row 4 shows `=` removes it there too.
-Rows 4 to 6 are also why the exit status and the message alone cannot classify the failure: an exact-absent session that a prefix still binds and a wholly absent session answer identically, so the classifier re-probes once with the plain form and treats a success there as `unreadable` rather than `missing`.
+Rows 4 to 6 are also why the exit status and the message alone cannot classify the failure: an exact-absent session that a prefix still binds and a wholly absent session answer identically, so the classifier re-probes once with the plain form and reads that probe's own window list.
+
+What makes that list trustworthy is that a prefix binds at most one session. With two live sessions `fmtest1` (window `win-a`) and `fmtest2` (window `win-b`), on the same tmux and host on 2026-08-12:
+
+```sh
+tmux list-windows -t fmtest -F '#{window_name}'
+tmux list-windows -t fmtest1 -F '#{window_name}'
+tmux list-windows -t '=fmtest' -F '#{window_name}'
+```
+
+Observed output:
+
+```text
+can't find session: fmtest (exit 1)
+win-a (exit 0)
+can't find session: fmtest (exit 1)
+```
+
+tmux REFUSES an ambiguous prefix rather than binding one session arbitrarily, so a successful fuzzy re-probe describes exactly one live session and its window list is meaningful: holding the recorded window name means a renamed-but-running agent and reads `unreadable`, lacking it proves the recorded endpoint gone and reads `missing`.
+An ambiguous prefix takes the failing branch and still reads `missing`, as it did before any of this work.
 
 ### Agent liveness name sources
 

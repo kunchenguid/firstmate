@@ -50,7 +50,8 @@ A target-existence check proves only that the recorded pane exists, and it must 
 The presence check therefore resolves a `session:window` target through `list-panes` with tmux's `=` exact-match prefix on both axes, which makes the exit status the whole answer: an endpoint that no longer resolves under exactly its recorded names reads dead, deliberately, since matching a longer live name was never a guarantee.
 [Runtime backend verification](verification/runtime-backends.md#target-resolution) owns the evidence.
 The deeper tmux agent-liveness probe first verifies exact session and window membership, listing the recorded session's windows under the same `=` exact-match prefix and requiring the recorded window name among them, then reads process names to distinguish a running harness from a bare idle shell.
-When the exact session is gone but a prefix-matching live session exists, that inventory read is `unreadable` rather than `missing`, so an endpoint tmux could still bind to someone else's session never authorizes a relaunch.
+When the exact session is gone but a prefix-matching live session exists, that live session's own inventory settles the verdict: it is `unreadable` when the session holds the recorded window name, so a renamed-but-running agent never authorizes a relaunch, and `missing` when it does not, since the recorded endpoint is then definitively gone.
+A prefix that matches several live sessions is refused by tmux outright, so it still reports `missing`.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
