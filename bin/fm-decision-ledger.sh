@@ -129,6 +129,9 @@ OPENED_ROWS=$(printf '%s' "$opened_pairs" | jq -R -s '
 OPEN=$(scan_open_decisions "$STATE")
 status_open_count=$(printf '%s\n' "$OPEN" | grep -c . || true)
 
+[ -f "$DATA/backlog.md" ] && [ -r "$DATA/backlog.md" ] && [ ! -L "$DATA/backlog.md" ] \
+  || { echo "fm-decision-ledger: local backlog is missing, unreadable, or symlinked" >&2; exit 1; }
+
 HOLD_TSV=$(awk '
   function metadata(line, label, text) {
     text = line
@@ -140,7 +143,7 @@ HOLD_TSV=$(awk '
   function emit() {
     if (id != "") {
       done[id] = (section == "Done")
-      if (section == "Queued" && id ~ /-decision-/ && kind == "captain" && hold_kind == "captain") {
+      if (section == "Queued" && id ~ /-decision-/ && kind == "captain" && hold_kind == "captain" && hold_reason != "") {
         candidate_count++
         candidate_id[candidate_count] = id
         candidate_origin[candidate_count] = origin
@@ -150,9 +153,9 @@ HOLD_TSV=$(awk '
       }
     }
   }
-  /^## / { emit(); section = substr($0, 4); id = origin = key = kind = hold_kind = summary = ""; next }
+  /^## / { emit(); section = substr($0, 4); id = origin = key = kind = hold_kind = hold_reason = summary = ""; next }
   /^[-*][[:space:]]+\[[ xX]\][[:space:]]+/ {
-    emit(); id = origin = key = kind = hold_kind = summary = blockers = ""
+    emit(); id = origin = key = kind = hold_kind = hold_reason = summary = blockers = ""
     summary = $0
     sub(/^[-*][[:space:]]+\[[ xX]\][[:space:]]+/, "", summary)
     id = summary
@@ -160,6 +163,7 @@ HOLD_TSV=$(awk '
     sub(/^[^[:space:]]+[[:space:]]+-[[:space:]]+/, "", summary)
     kind = metadata($0, "kind")
     hold_kind = metadata($0, "hold-kind")
+    hold_reason = metadata($0, "hold")
     rest = $0
     while (match(rest, /blocked-by:[[:space:]]+[^[:space:])]+/)) {
       blocker = substr(rest, RSTART, RLENGTH)
@@ -182,7 +186,10 @@ HOLD_TSV=$(awk '
         print candidate_id[i] "\t" candidate_origin[i] "\t" candidate_key[i] "\t" candidate_summary[i]
     }
   }
-' "$DATA/backlog.md" 2>/dev/null)
+' "$DATA/backlog.md") || {
+  echo "fm-decision-ledger: local backlog could not be parsed" >&2
+  exit 1
+}
 HOLD_INPUT=''
 while IFS=$'\t' read -r hold_id task key summary; do
   [ -n "$hold_id" ] || continue

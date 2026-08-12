@@ -301,6 +301,46 @@ test_blocked_captain_hold_is_not_an_actionable_source() {
   pass "a blocked captain hold stays out of the actionable current-source set"
 }
 
+test_local_hold_predicate_matches_canonical_summary() {
+  local home json canonical malformed
+  home=$(build_coverage_home canonical-hold-predicate)
+  canonical=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "could not produce the canonical local-home summary"
+  json=$(run_ledger "$home") || fail "ledger failed on the canonical predicate fixture"
+  printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
+    .captain_holds_active == ([ $canonical.decisions_open[]
+      | select(.source == "backlog" and .verb == "captain-hold") ] | length)
+  ' >/dev/null || fail "local captain-hold predicate diverged from the canonical summary: $json"
+
+  malformed=$(sed 's/ (hold: captain route choice pending)//' "$home/data/backlog.md")
+  printf '%s\n' "$malformed" > "$home/data/backlog.md"
+  canonical=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "could not produce canonical output for a malformed captain row"
+  json=$(run_ledger "$home") || fail "ledger failed on a malformed captain row"
+  printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
+    .captain_holds_active == 0
+    and .captain_holds_active == ([ $canonical.decisions_open[]
+      | select(.source == "backlog" and .verb == "captain-hold") ] | length)
+  ' >/dev/null || fail "a captain row without hold reason diverged from canonical actionability: $json"
+  pass "the local captain-hold predicate matches canonical actionability"
+}
+
+test_unreadable_backlog_refuses_the_ledger() {
+  local home
+  home=$(build_coverage_home unreadable-backlog)
+  mv "$home/data/backlog.md" "$home/data/backlog.saved"
+  if run_ledger "$home" > "$home/ledger.out" 2> "$home/ledger.err"; then
+    fail "ledger emitted a zero-hold result without a readable backlog"
+  fi
+  assert_grep "local backlog is missing, unreadable, or symlinked" "$home/ledger.err" \
+    "missing backlog did not fail closed"
+  pass "a missing local backlog refuses instead of silently dropping captain holds"
+}
+
 test_ledger_reads_no_cross_home_snapshot() {
   local home json shadow saved_ledger
   home=$(build_coverage_home local-only)
@@ -385,6 +425,8 @@ test_every_live_key_carries_a_disposition
 test_active_hold_transferred_out_of_status_fold_stays_enumerated
 test_active_hold_without_status_key_stays_enumerated
 test_blocked_captain_hold_is_not_an_actionable_source
+test_local_hold_predicate_matches_canonical_summary
+test_unreadable_backlog_refuses_the_ledger
 test_ledger_reads_no_cross_home_snapshot
 test_unclassifiable_state_is_disclosed_not_hidden
 test_bearings_publishes_the_ledger_and_refuses_an_unbacked_count
