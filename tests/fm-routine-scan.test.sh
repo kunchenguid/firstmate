@@ -157,6 +157,28 @@ SH
     || fail "an outer watcher timeout did not produce an actionable check line"
   pass "routine check bounds and reports scanner timeouts"
 }
+test_watcher_surfaces_missing_registry_as_a_check_wake() {
+  local home fakebin rc
+  home=$(make_home missing-registry)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = list-windows ] && exit 0
+exit 1
+SH
+  chmod 0755 "$fakebin/tmux"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the missing-registry fixture"
+  rm -f -- "$home/data/routines.md"
+
+  run_bounded_watcher "$home" "$home/watch.out" "$fakebin"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the watcher treated a missing registry as a fatal receipt failure"
+  grep -q 'routine-check-error: scanner exited 1' "$home/watch.out" \
+    || fail "the missing registry did not surface as an actionable check wake"
+  pass "watcher surfaces a missing routine registry as a check wake"
+}
 test_daily_fires_once_per_local_day() {
   local home out
   home=$(make_home daily)
@@ -750,6 +772,7 @@ test_check_surfaces_registry_diagnostics() {
 test_bootstrap_seeds_and_arms_private_routine
 test_setup_persists_canonical_path_overrides
 test_routine_check_enforces_timeout
+test_watcher_surfaces_missing_registry_as_a_check_wake
 test_daily_fires_once_per_local_day
 test_weekly_fires_only_on_matching_weekday
 test_weekday_is_derived_from_captured_local_date

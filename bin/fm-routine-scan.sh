@@ -96,8 +96,11 @@ if [ "$ROUTINE_ACK" -eq 0 ]; then
   if [ -e "$REGISTRY" ]; then
     [ -f "$REGISTRY" ] \
       || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
-  elif [ "$ROUTINE_DEFER_FIRE" -ne 1 ] || [ ! -e "$PENDING" ]; then
+  elif [ "$ROUTINE_DEFER_FIRE" -ne 1 ]; then
     exit 0
+  elif [ ! -e "$PENDING" ]; then
+    routine_error "routine registry is unavailable: $REGISTRY"
+    exit 1
   fi
 fi
 # shellcheck source=bin/fm-pr-lib.sh
