@@ -272,6 +272,84 @@ fm_composer_strip_ghost() {
   '
 }
 
+
+# --- Delivery-only rendered busy footers (backend-agnostic) -------------------
+#
+# These live here, in the ONE shared composer/delivery owner, rather than in any
+# single backend adapter, because every backend needs them for the SAME job:
+# proving a submitted Enter actually landed. Keeping them in bin/fm-tmux-lib.sh
+# made cursor's signature reachable only from tmux, even though herdr, zellij,
+# cmux, and orca run the same harnesses and face the same acknowledgement
+# problem.
+#
+# This is a DELIVERY guard, deliberately NOT a worker-state source. The semantic
+# busy contract - what firstmate records and supervises on - is owned by
+# bin/fm-busy-lib.sh, which forbids classifying a harness from rendered text.
+# Matching a footer to confirm a keystroke landed is a different question from
+# asking what a worker is doing, and the two must not be conflated.
+# Delivery-only rendered busy footers per harness. claude/codex: "esc to
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# Claude's current spinner has a rotating glyph and word, but every active-turn
+# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
+# signature separate from the shared default because that shape is not generic
+# enough to classify arbitrary harness output safely.
+# Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
+# ordinary output must not classify another harness as busy. Leading whitespace is
+# OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
+# captured spinner row had it. A zero-whitespace form has NEVER been observed and
+# is deliberately not matched. The line end is intentionally unanchored because
+# rotating tip text follows and is not required to be present. The idle status
+# bar's lowercase `thinking` label and independently rotating tip text are not
+# busy signals on their own.
+# The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
+# exposes no stable ASCII busy token.
+# The harness-less default is the UNION of the per-harness tokens below, used
+# when a caller has no recorded harness for the pane (the submit cores read the
+# baseline and the post-Enter transition this way). cursor's `ctrl+c to stop` is
+# part of that union for the same reason the others are: without it a cursor
+# submit could never be acknowledged, because cursor parks its terminal cursor
+# outside its composer and the composer verdict is therefore always `unknown`.
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
+FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
+FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
+FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+# cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
+# same version rendered both `Working` and `Running` beside its braille spinner
+# in two consecutive turns, while `ctrl+c to stop` was present for the whole
+# turn and absent the instant it ended (verified live, 2026.08.11-e8db854).
+# This is a DELIVERY guard only - it acknowledges a submit and gates away-mode
+# injection. Cursor's recorded worker state comes from its transcript fold in
+# bin/fm-busy-lib.sh, never from this row.
+FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+
+fm_busy_lines_match() {  # [harness]
+  local harness=${1:-} lines regex
+  IFS= read -r -d '' lines || true
+  if [ -n "${FM_BUSY_REGEX:-}" ]; then
+    regex=$FM_BUSY_REGEX
+  else
+    case "$harness" in
+      claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
+      codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
+      opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
+      pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
+      grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
+      kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
+      *)
+        # A supplied harness must never borrow another harness's signature.
+        # Register its verified signature explicitly before classifying it busy.
+        regex=
+        ;;
+    esac
+  fi
+  [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
+}
+
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
 # SHELL glyphs are one only INSIDE a composer container; on a bare row they are
