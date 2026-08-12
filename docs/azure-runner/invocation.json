@@ -25,6 +25,9 @@
     "subnetId": {
       "type": "string"
     },
+    "controllerIdentityId": {
+      "type": "string"
+    },
     "vmSize": {
       "type": "string",
       "allowedValues": [
@@ -98,6 +101,10 @@
       "location": "[parameters('region')]",
       "zones": ["1"],
       "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": "[createObject(parameters('controllerIdentityId'), createObject())]"
+      },
       "dependsOn": [
         "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
       ],

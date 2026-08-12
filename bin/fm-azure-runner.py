@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Host-side controller for one-shot private Azure command runners.
 
-The script packages a clean committed Git snapshot, binds it to a canonical
-command request, stages exact input/output blobs, creates one identity-less VM,
-drives it through Azure Managed Run Command, verifies the result, and removes
-only resources whose recorded identities match the invocation.
+The script binds a clean public committed Git snapshot to a canonical command
+request, creates one private controller VM with a container-scoped UAMI, drives
+an isolated networkless child through Azure Managed Run Command, verifies the
+bounded result, and removes only resources whose recorded identities match the
+invocation.
 
 See docs/azure-runner.md and `bin/fm-azure-runner.sh help` for the operator
 contract. This file intentionally uses only the Python standard library and the
@@ -12,8 +13,10 @@ installed Azure CLI.
 """
 
 import argparse
+import base64
 import contextlib
 import datetime as dt
+import email.utils
 import fcntl
 import hashlib
 import json
@@ -23,12 +26,12 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
-import uuid
+import urllib.error
 import urllib.request
+import uuid
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,12 +39,17 @@ TEMPLATE = ROOT / "docs" / "azure-runner" / "invocation.json"
 GUEST = ROOT / "bin" / "fm-azure-runner-guest.sh"
 EXECUTOR = ROOT / "bin" / "fm-azure-runner-exec.py"
 CONTAINER = "validation-shards"
+CONTROL_CONTAINER = "runner-control"
 SCHEMA = "fm.azure-command/v1"
 RESULT_SCHEMA = "fm.azure-command-result/v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
 SAFE_ARTIFACT = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/+@:-]{1,240}$")
+SAFE_PUBLIC_GIT_REMOTE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$")
 LOCAL_COMMAND_TIMEOUT_SECONDS = 300
+COST_QUERY_TIMEOUT_SECONDS = 60
+COST_RETRY_DEADLINE_SECONDS = 900
+COST_CACHE_MAX_AGE_SECONDS = 4 * 60 * 60
 LEASE_DURATION_SECONDS = 60
 LEASE_RENEW_TIMEOUT_SECONDS = 10
 LEASE_SAFETY_MARGIN_SECONDS = 15
@@ -245,6 +253,8 @@ def environment():
         "subscription": subscription,
         "prefix": prefix,
         "storage": storage,
+        "control_storage": "st{}ctl01".format(prefix),
+        "controller_identity": "id-{}-validation-shards".format(prefix),
         "owner": owner,
         "deployment_generation": generation,
         "resource_group": resource_group,
@@ -446,70 +456,8 @@ def new_invocation(attempt=1):
     return base
 
 
-def download_pinned(url, destination, expected_digest, expected_bytes):
-    temp = destination.with_name(destination.name + ".tmp")
-    request = urllib.request.Request(url, headers={"User-Agent": "firstmate-azure-runner/1"})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, open(temp, "xb") as handle:
-            remaining = expected_bytes
-            while True:
-                chunk = response.read(min(1024 * 1024, remaining + 1))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                if remaining < 0:
-                    raise RunnerError("pinned tool download exceeds its exact byte contract")
-                handle.write(chunk)
-        if remaining != 0 or sha256_file(temp) != expected_digest:
-            raise RunnerError("pinned tool download identity mismatch")
-        os.replace(str(temp), str(destination))
-        os.chmod(destination, 0o600)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temp.unlink()
 
-
-def prepare_tool_closure(payload_dir):
-    cache = Path(os.environ.get("FM_AZURE_RUNNER_TOOL_CACHE", str(Path(tempfile.gettempdir()) / "fm-azure-runner-tools")))
-    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(cache, 0o700)
-    lock_path = cache / ".lock"
-    tools = (
-        (
-            "shellcheck.tar.xz",
-            "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz",
-            "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
-            SHELLCHECK_ARCHIVE_BYTES,
-        ),
-        (
-            "uv.tar.gz",
-            "https://github.com/astral-sh/uv/releases/download/0.9.10/uv-x86_64-unknown-linux-gnu.tar.gz",
-            "440c4215b171e64061d65d16a23753dd25c29a7f7b1b0446c9e9aed0fa372f27",
-            UV_ARCHIVE_BYTES,
-        ),
-    )
-    with open(lock_path, "a+", encoding="utf-8") as lock:
-        os.chmod(lock_path, 0o600)
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        for name, url, digest, size in tools:
-            cached = cache / name
-            if not cached.exists() or cached.stat().st_size != size or sha256_file(cached) != digest:
-                with contextlib.suppress(FileNotFoundError):
-                    cached.unlink()
-                download_pinned(url, cached, digest, size)
-    destinations = []
-    for name, _, digest, size in tools:
-        source = cache / name
-        destination = payload_dir / name
-        shutil.copyfile(source, destination)
-        os.chmod(destination, 0o600)
-        if destination.stat().st_size != size or sha256_file(destination) != digest:
-            raise RunnerError("copied pinned tool closure identity mismatch")
-        destinations.append(destination)
-    return tuple(destinations)
-
-
-def prepare_locked_python_closure(repo, payload_dir):
+def locked_python_manifest(repo):
     lock_path = repo / "tools" / "agent-fleet" / "uv.lock"
     if not lock_path.is_file():
         raise RunnerError("locked Agent Fleet Python closure is absent from the exact snapshot")
@@ -534,6 +482,8 @@ def prepare_locked_python_closure(repo, payload_dir):
             selected = next((item for item in candidates if "manylinux2014_x86_64.whl" in item["url"]), None)
         if selected is None:
             raise RunnerError("locked Agent Fleet package has no reviewed Linux x86_64 wheel: {}".format(name))
+        if not re.match(r"^https://files\.pythonhosted\.org/packages/[A-Za-z0-9/_.-]+\.whl$", selected["url"]):
+            raise RunnerError("locked Agent Fleet wheel URL is outside the reviewed credential-free PyPI file origin")
         wheels.append({
             "name": name,
             "version": version_match.group(1),
@@ -544,36 +494,8 @@ def prepare_locked_python_closure(repo, payload_dir):
         })
     if {item["name"] for item in wheels} != {"iniconfig", "packaging", "pluggy", "pygments", "pytest", "ruff"}:
         raise RunnerError("locked Agent Fleet Linux wheel set differs from the reviewed closure")
-    cache = Path(os.environ.get(
-        "FM_AZURE_RUNNER_TOOL_CACHE", str(Path(tempfile.gettempdir()) / "fm-azure-runner-tools")
-    )) / "agent-fleet-wheels"
-    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(cache / ".lock", "a+", encoding="utf-8") as handle:
-        os.chmod(cache / ".lock", 0o600)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        for item in wheels:
-            destination = cache / item["file"]
-            digest = item["digest"].split(":", 1)[1]
-            if not destination.exists() or destination.stat().st_size != item["bytes"] or sha256_file(destination) != digest:
-                with contextlib.suppress(FileNotFoundError):
-                    destination.unlink()
-                download_pinned(item["url"], destination, digest, item["bytes"])
-    archive_path = payload_dir / "agent-fleet-wheelhouse.tar"
-    with tarfile.open(archive_path, "w", format=tarfile.PAX_FORMAT) as archive:
-        for item in sorted(wheels, key=lambda value: value["file"]):
-            source = cache / item["file"]
-            info = archive.gettarinfo(str(source), arcname=item["file"])
-            info.uid = info.gid = 0
-            info.uname = info.gname = "root"
-            info.mtime = 0
-            with open(source, "rb") as source_handle:
-                archive.addfile(info, source_handle)
-    return archive_path, {
-        "lock_digest": "sha256:" + sha256_file(lock_path),
-        "archive_digest": "sha256:" + sha256_file(archive_path),
-        "archive_bytes": archive_path.stat().st_size,
-        "wheels": [{key: item[key] for key in ("name", "version", "file", "digest", "bytes")} for item in wheels],
-    }
+    return lock_path, wheels
+
 
 
 def tree_digest(repo, relative):
@@ -616,6 +538,9 @@ def prepare(env, args, parent_state=None):
     tree = git(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
     if not re.match(r"^[0-9a-f]{40,64}$", commit) or not re.match(r"^[0-9a-f]{40,64}$", tree):
         raise RunnerError("repository commit/tree identity is malformed")
+    remote = git(repo, "remote", "get-url", "origin").stdout.strip()
+    if not SAFE_PUBLIC_GIT_REMOTE.match(remote) or "@" in remote:
+        raise RunnerError("Azure private controller requires a credential-free public GitHub HTTPS origin")
 
     task = require_identifier("task", args.task)
     generation = require_identifier("generation", args.generation)
@@ -641,12 +566,8 @@ def prepare(env, args, parent_state=None):
         raise RunnerError("invocation payload directory already exists")
     payload_dir.mkdir(parents=True, mode=0o700)
     os.chmod(payload_dir, 0o700)
-    bundle_path = payload_dir / "snapshot.bundle"
-    run(["git", "-C", str(repo), "bundle", "create", str(bundle_path), "HEAD"])
-    run(["git", "bundle", "verify", str(bundle_path)])
-    if bundle_path.stat().st_size > MAX_STAGING_INPUT_BYTES:
-        raise RunnerError("reachable committed snapshot history exceeds the bounded staging input allowance")
-    snapshot_digest = "sha256:" + sha256_file(bundle_path)
+    source_identity = {"remote": remote, "commit": commit, "tree": tree}
+    snapshot_digest = "sha256:" + sha256_bytes(canonical_bytes(source_identity))
 
     dependencies = []
     for relative in args.dependency or []:
@@ -666,7 +587,14 @@ def prepare(env, args, parent_state=None):
     if any("\x00" in value for value in command["argv"]):
         raise RunnerError("command argv contains NUL")
     command_digest = "sha256:" + sha256_bytes(canonical_bytes(command))
-    locked_python_path, locked_python = prepare_locked_python_closure(repo, payload_dir)
+    lock_path, wheel_manifest = locked_python_manifest(repo)
+    locked_python = {
+        "lock_digest": "sha256:" + sha256_file(lock_path),
+        "wheels": [
+            {key: item[key] for key in ("name", "version", "file", "url", "digest", "bytes")}
+            for item in wheel_manifest
+        ],
+    }
     prepared_at = now_utc()
     expires_at = prepared_at + dt.timedelta(hours=TTL_SCHEDULE_HOURS_AFTER_PREPARATION)
     request = {
@@ -684,10 +612,12 @@ def prepare(env, args, parent_state=None):
         ),
         "fence": fence,
         "repository": {
+            "source_mode": "public-github-https",
+            "remote": remote,
             "commit": commit,
             "tree": tree,
             "snapshot_digest": snapshot_digest,
-            "snapshot_bytes": bundle_path.stat().st_size,
+            "snapshot_bytes": 0,
         },
         "command": command,
         "command_digest": command_digest,
@@ -710,31 +640,10 @@ def prepare(env, args, parent_state=None):
     request_path = payload_dir / "request.json"
     request_path.write_bytes(canonical_bytes(request) + b"\n")
     os.chmod(request_path, 0o600)
-    executor_path = payload_dir / "runner-exec.py"
-    shutil.copyfile(EXECUTOR, executor_path)
-    os.chmod(executor_path, 0o600)
-    shellcheck_path, uv_archive_path = prepare_tool_closure(payload_dir)
-    input_path = payload_dir / "input.tar.gz"
-    with tarfile.open(input_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-        for source, name in (
-            (request_path, "request.json"),
-            (bundle_path, "snapshot.bundle"),
-            (executor_path, "runner-exec.py"),
-            (shellcheck_path, "shellcheck.tar.xz"),
-            (uv_archive_path, "uv.tar.gz"),
-            (locked_python_path, "agent-fleet-wheelhouse.tar"),
-        ):
-            info = archive.gettarinfo(str(source), arcname=name)
-            info.uid = 0
-            info.gid = 0
-            info.uname = "root"
-            info.gname = "root"
-            info.mtime = 0
-            with open(source, "rb") as handle:
-                archive.addfile(info, handle)
-    if input_path.stat().st_size > MAX_STAGING_INPUT_BYTES:
-        raise RunnerError("staged snapshot and pinned tool closure exceed the bounded input allowance")
-    input_digest = "sha256:" + sha256_file(input_path)
+    request_bytes = request_path.read_bytes()
+    if len(request_bytes) > 48 * 1024:
+        raise RunnerError("private controller request exceeds the bounded control-plane parameter allowance")
+    input_digest = "sha256:" + sha256_bytes(request_bytes)
     token = invocation.split("-")[1]
     vm_name = "vm-{}-run-{}".format(env["prefix"], token)
     nic_name = "nic-{}-run-{}".format(env["prefix"], token)
@@ -752,15 +661,13 @@ def prepare(env, args, parent_state=None):
         "request": request,
         "request_digest": request_digest,
         "input_digest": input_digest,
-        "input_bytes": input_path.stat().st_size,
-        "input_path": str(input_path),
+        "input_bytes": len(request_bytes),
+        "input_path": str(request_path),
         "repository_root": str(repo),
         "staging": {
             "container": CONTAINER,
-            "input_blob": staging_prefix + "/input.tar.gz",
             "output_blob": staging_prefix + "/result.tar.gz",
-            "admission_blob": "runner-control/admission.lock",
-            "reservation_blob": "runner-control/reservations.json",
+            "control_container": CONTROL_CONTAINER,
         },
         "resources": {
             "deployment": "fm-run-{}".format(token),
@@ -820,6 +727,9 @@ def verify_foundation_tags(env, resource, label):
 
 def foundation_gate(env):
     storage_id = exact_id(env, "Microsoft.Storage", "storageAccounts", env["storage"])
+    control_storage_id = exact_id(env, "Microsoft.Storage", "storageAccounts", env["control_storage"])
+    controller_identity_id = exact_id(env, "Microsoft.ManagedIdentity", "userAssignedIdentities", env["controller_identity"])
+    validation_container_id = storage_id + "/blobServices/default/containers/" + CONTAINER
     vnet_id = exact_id(env, "Microsoft.Network", "virtualNetworks", env["vnet"])
     subnet_id = vnet_id + "/subnets/" + env["subnet"]
     nsg_id = exact_id(env, "Microsoft.Network", "networkSecurityGroups", env["elastic_nsg"])
@@ -853,6 +763,52 @@ def foundation_gate(env):
         or network_acls.get("bypass") != "None"
     ):
         raise RunnerError("foundation storage identity/private-security contract is not exact")
+
+    control, _, _ = az_command(env, ["resource", "show", "--ids", control_storage_id, "--api-version", "2023-05-01"])
+    verify_foundation_tags(env, control, "runner control storage")
+    control_properties = control.get("properties", control)
+    control_acls = control_properties.get("networkAcls") or {}
+    if (
+        str(control.get("id", "")).lower() != control_storage_id.lower()
+        or control.get("location") != "eastus"
+        or control.get("kind") != "StorageV2"
+        or (control.get("sku") or {}).get("name") != "Standard_LRS"
+        or control_properties.get("publicNetworkAccess") != "Disabled"
+        or control_properties.get("allowSharedKeyAccess") is not False
+        or control_properties.get("allowBlobPublicAccess") is not False
+        or control_properties.get("defaultToOAuthAuthentication") is not True
+        or control_acls.get("defaultAction") != "Deny"
+        or control_acls.get("bypass") != "None"
+    ):
+        raise RunnerError("runner control storage exact zero-data security contract is not exact")
+    control_container, _, _ = az_command(env, [
+        "resource", "show", "--ids", runner_control_id(env), "--api-version", "2023-05-01",
+    ])
+    control_metadata = control_container.get("properties", {}).get("metadata") or {}
+    allowed_control_metadata = {"schema", "deploymentgeneration", "lockowner", "lockfence", "lockexpiry"}
+    if (
+        str(control_container.get("id", "")).lower() != runner_control_id(env).lower()
+        or control_container.get("properties", {}).get("publicAccess") != "None"
+        or control_metadata.get("schema") != "fm-azure-runner-control-v1"
+        or control_metadata.get("deploymentgeneration") != env["deployment_generation"]
+        or not set(control_metadata).issubset(allowed_control_metadata)
+        or not (control_container.get("etag") or control_container.get("properties", {}).get("etag"))
+    ):
+        raise RunnerError("runner control container identity/ETag contract is not exact")
+    controller_identity, _, _ = az_command(env, [
+        "resource", "show", "--ids", controller_identity_id, "--api-version", "2023-01-31",
+    ])
+    verify_foundation_tags(env, controller_identity, "runner controller identity")
+    principal_id = controller_identity.get("properties", {}).get("principalId") or controller_identity.get("principalId")
+    client_id = controller_identity.get("properties", {}).get("clientId") or controller_identity.get("clientId")
+    if str(controller_identity.get("id", "")).lower() != controller_identity_id.lower() or controller_identity.get("location") != "eastus" or not principal_id or not client_id:
+        raise RunnerError("runner controller UAMI identity is not exact")
+    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--assignee-object-id", principal_id, "--all"])
+    expected_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe".format(env["subscription"])
+    direct = [item for item in assignments if str(item.get("principalId", "")).lower() == str(principal_id).lower()]
+    if len(direct) != 1 or str(direct[0].get("scope", "")).lower() != validation_container_id.lower() or str(direct[0].get("roleDefinitionId", "")).lower() != expected_role.lower():
+        raise RunnerError("runner controller UAMI must have only exact validation container data scope")
+    env["controller_identity_client_id"] = client_id
 
     vnet, _, _ = az_command(env, ["resource", "show", "--ids", vnet_id, "--api-version", "2023-09-01"])
     verify_foundation_tags(env, vnet, "VNet")
@@ -1089,11 +1045,7 @@ def cost_query(env, forecast=False, invocation=None, reserved_at=None):
             "from": month_start.isoformat() + "T00:00:00Z",
             "to": month_end.isoformat() + "T00:00:00Z",
         }
-    path = write_private_json(env, ".cost-", body)
-    try:
-        result, _, _ = az_command(env, ["rest", "--method", "post", "--url", url, "--body", "@" + str(path)])
-    finally:
-        path.unlink(missing_ok=True)
+    result = cost_http_query(env, endpoint, url, body)
     properties = result.get("properties", result)
     columns = properties.get("columns", [])
     rows = properties.get("rows", [])
@@ -1105,6 +1057,143 @@ def cost_query(env, forecast=False, invocation=None, reserved_at=None):
         return float(rows[0][index])
     except (IndexError, TypeError, ValueError):
         raise RunnerError("Azure cost result did not contain a readable PreTaxCost")
+
+
+def cost_cache_path(env):
+    return env["state_dir"] / "cost-management-cache.json"
+
+
+def load_cost_cache(env, cache_key, endpoint, body_digest):
+    try:
+        cache = json.loads(cost_cache_path(env).read_text(encoding="utf-8"))
+        entry = cache["entries"][cache_key]
+        fetched = dt.datetime.fromisoformat(entry["fetched_at"].replace("Z", "+00:00"))
+        server = email.utils.parsedate_to_datetime(entry["server_date"])
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        cache.get("schema") != "fm.azure-cost-cache/v1"
+        or cache.get("subscription") != env["subscription"]
+        or cache.get("resource_group") != env["resource_group"]
+        or entry.get("endpoint") != endpoint
+        or entry.get("body_digest") != body_digest
+        or server.tzinfo is None
+        or fetched.tzinfo is None
+    ):
+        return None
+    now = now_utc()
+    if now < server or now - server > dt.timedelta(seconds=COST_CACHE_MAX_AGE_SECONDS):
+        return None
+    if now < fetched or now - fetched > dt.timedelta(seconds=COST_CACHE_MAX_AGE_SECONDS):
+        return None
+    return entry.get("result") if isinstance(entry.get("result"), dict) else None
+
+
+def save_cost_cache(env, cache_key, endpoint, body_digest, server_date, result):
+    path = cost_cache_path(env)
+    with state_lock(env):
+        try:
+            cache = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            cache = {
+                "schema": "fm.azure-cost-cache/v1",
+                "subscription": env["subscription"],
+                "resource_group": env["resource_group"],
+                "entries": {},
+            }
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunnerError("Cost Management cache is unreadable: {}".format(exc))
+        if (
+            cache.get("schema") != "fm.azure-cost-cache/v1"
+            or cache.get("subscription") != env["subscription"]
+            or cache.get("resource_group") != env["resource_group"]
+            or not isinstance(cache.get("entries"), dict)
+        ):
+            raise RunnerError("Cost Management cache binding is not exact")
+        cache["entries"][cache_key] = {
+            "endpoint": endpoint,
+            "body_digest": body_digest,
+            "server_date": server_date,
+            "fetched_at": iso_utc(),
+            "result": result,
+        }
+        save_private_json_atomic(path, cache)
+
+
+def retry_after_seconds(headers):
+    for name in (
+        "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after",
+        "x-ms-ratelimit-microsoft.consumption-retry-after",
+        "Retry-After",
+    ):
+        raw = headers.get(name)
+        if raw is None:
+            continue
+        try:
+            return max(1, min(3600, int(raw)))
+        except (TypeError, ValueError):
+            try:
+                when = email.utils.parsedate_to_datetime(raw)
+                return max(1, min(3600, int((when - now_utc()).total_seconds())))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def cost_http_query(env, endpoint, url, body):
+    body_bytes = canonical_bytes(body)
+    body_digest = "sha256:" + sha256_bytes(body_bytes)
+    cache_key = sha256_bytes((endpoint + "\0" + url + "\0" + body_digest).encode("utf-8"))
+    deadline = time.monotonic() + COST_RETRY_DEADLINE_SECONDS
+    while True:
+        record_azure_operation(env, ["cost-management", endpoint])
+        token_result = run([
+            "az", "account", "get-access-token", "--subscription", env["subscription"],
+            "--resource", "https://management.azure.com/", "--query", "accessToken",
+            "--output", "tsv", "--only-show-errors",
+        ], timeout_seconds=COST_QUERY_TIMEOUT_SECONDS)
+        token = token_result.stdout.strip()
+        if not token:
+            raise RunnerError("Azure CLI returned no management token for Cost Management")
+        request = urllib.request.Request(
+            url, data=body_bytes, method="POST",
+            headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        token = ""
+        try:
+            with urllib.request.urlopen(request, timeout=COST_QUERY_TIMEOUT_SECONDS) as response:
+                server_date = response.headers.get("Date")
+                if not server_date:
+                    raise RunnerError("Cost Management success omitted its authoritative server date")
+                try:
+                    result = json.loads(response.read().decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RunnerError("Cost Management returned malformed JSON: {}".format(exc))
+                if not isinstance(result, dict):
+                    raise RunnerError("Cost Management returned a non-object response")
+                save_cost_cache(env, cache_key, endpoint, body_digest, server_date, result)
+                return result
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429:
+                raise RunnerError("Cost Management {} failed with HTTP {}".format(endpoint, exc.code))
+            cached = load_cost_cache(env, cache_key, endpoint, body_digest)
+            wait_seconds = retry_after_seconds(exc.headers)
+            remaining = deadline - time.monotonic()
+            if wait_seconds is not None and wait_seconds <= remaining:
+                time.sleep(wait_seconds)
+                continue
+            if cached is not None:
+                return cached
+            detail = "missing server retry guidance" if wait_seconds is None else "server retry exceeds bounded deadline"
+            raise RunnerError(
+                "Cost Management {} remained throttled with no exact authoritative cache ({})".format(endpoint, detail)
+            )
+        except urllib.error.URLError as exc:
+            raise RunnerError("Cost Management {} transport failed closed: {}".format(endpoint, exc.reason))
 
 
 def retail_rate(env, sku):
@@ -1203,135 +1292,177 @@ def budget_gate(env, limits, outstanding_reservations=0.0):
     }
 
 
-def empty_reservation_ledger(env):
+
+def runner_control_id(env):
+    return (
+        "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Storage/storageAccounts/{}"
+        "/blobServices/default/containers/{}"
+    ).format(env["subscription"], env["resource_group"], env["control_storage"], CONTROL_CONTAINER)
+
+
+def reservation_name(env, invocation):
+    return "id-{}-rsv-{}".format(env["prefix"], require_invocation(invocation).split("-")[1])
+
+
+def reservation_id(env, invocation):
+    return exact_id(env, "Microsoft.ManagedIdentity", "userAssignedIdentities", reservation_name(env, invocation))
+
+
+def reservation_tags(env, state, amount_usd, reserved_at):
+    request = state["request"]
     return {
-        "schema": "fm.azure-cost-reservations/v1",
-        "subscription": env["subscription"],
-        "resource_group": env["resource_group"],
-        "storage": env["storage"],
-        "container": CONTAINER,
-        "deployment_generation": env["deployment_generation"],
-        "reservations": {},
+        "workload": "firstmate",
+        "firstmate-role": "runner-cost-reservation",
+        "deployment-generation": env["deployment_generation"],
+        "cleanup-owner": env["owner"],
+        "invocation-binding": state["invocation"],
+        "fence-digest": request["fence"].split(":", 1)[1],
+        "lineage-root": request["lineage_root_invocation"],
+        "parent-invocation": state.get("parent_invocation") or "none",
+        "amount-microusd": str(int(round(amount_usd * 1_000_000))),
+        "reserved-at": reserved_at,
+        "compute-deadline": request["compute_deallocation_deadline"],
+        "cleanup-verified-at": "none",
+        "reservation-principal": "pending",
     }
 
 
-def verify_reservation_ledger(env, ledger):
-    expected = empty_reservation_ledger(env)
-    for field in ("schema", "subscription", "resource_group", "storage", "container", "deployment_generation"):
-        if ledger.get(field) != expected[field]:
-            raise RunnerError("cost reservation ledger {} binding is not exact".format(field))
-    if not isinstance(ledger.get("reservations"), dict):
-        raise RunnerError("cost reservation ledger entries are malformed")
+def parse_management_reservation(env, identity):
+    tags = identity.get("tags") or {}
+    if tags.get("firstmate-role") != "runner-cost-reservation":
+        return None
+    invocation = tags.get("invocation-binding", "")
+    expected_id = reservation_id(env, invocation) if SAFE_INVOCATION.match(invocation) else ""
+    parent = tags.get("parent-invocation", "")
+    properties = identity.get("properties", identity)
+    principal_id = properties.get("principalId") or identity.get("principalId")
+    if (
+        str(identity.get("id", "")).lower() != expected_id.lower()
+        or identity.get("location") != "eastus"
+        or tags.get("workload") != "firstmate"
+        or tags.get("deployment-generation") != env["deployment_generation"]
+        or tags.get("cleanup-owner") != env["owner"]
+        or not re.match(r"^[0-9a-f]{64}$", tags.get("fence-digest", ""))
+        or not SAFE_INVOCATION.match(tags.get("lineage-root", ""))
+        or (parent != "none" and not SAFE_INVOCATION.match(parent))
+        or not tags.get("amount-microusd", "").isdigit()
+        or not principal_id
+        or tags.get("reservation-principal") != principal_id
+    ):
+        raise RunnerError("durable cost reservation identity/tags are not exact")
+    result = dict(tags)
+    result["id"] = identity["id"]
+    result["etag"] = identity.get("etag")
+    result["principal_id"] = principal_id
+    result["amount_usd"] = int(tags["amount-microusd"]) / 1_000_000
+    return result
 
 
-def load_reservation_ledger(env, state, lease):
-    lease.assert_held()
-    path = write_private_json(env, ".reservations-empty-", empty_reservation_ledger(env))
-    try:
-        _, rc, stderr = az_command(env, [
-            "storage", "blob", "download", "--auth-mode", "login", "--account-name", env["storage"],
-            "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-            "--file", str(path), "--overwrite", "true", "--lease-id", lease.reservation_lease_id,
-        ], check=False)
-        if rc != 0:
-            raise RunnerError("leased cost reservation ledger is unavailable: {}".format(stderr))
-        try:
-            ledger = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RunnerError("cost reservation ledger is unreadable: {}".format(exc))
-        verify_reservation_ledger(env, ledger)
-        return ledger
-    finally:
-        path.unlink(missing_ok=True)
-
-
-def save_reservation_ledger(env, state, ledger, lease):
-    lease.assert_held()
-    verify_reservation_ledger(env, ledger)
-    path = write_private_json(env, ".reservations-", ledger)
-    try:
-        az_command(env, [
-            "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
-            "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-            "--file", str(path), "--overwrite", "true", "--lease-id", lease.reservation_lease_id,
+def list_management_reservations(env):
+    identities, _, _ = az_command(env, ["identity", "list", "--resource-group", env["resource_group"]])
+    reservations = []
+    for item in identities:
+        if (item.get("tags") or {}).get("firstmate-role") != "runner-cost-reservation":
+            continue
+        exact, _, _ = az_command(env, [
+            "resource", "show", "--ids", item["id"], "--api-version", "2023-01-31",
         ])
-        lease.assert_held()
-    finally:
-        path.unlink(missing_ok=True)
+        parsed = parse_management_reservation(env, exact)
+        if parsed is not None:
+            reservations.append(parsed)
+    return reservations
 
 
-def reservation_is_reconciled(env, entry, actual, forecast):
-    invocation = entry.get("invocation")
-    if not invocation or entry.get("cleanup_verified_at") is None:
-        return False
-    try:
-        cleanup_at = dt.datetime.fromisoformat(entry["cleanup_verified_at"].replace("Z", "+00:00"))
-        state = load_state(env, invocation)
-    except (RunnerError, TypeError, ValueError):
-        return False
-    if state.get("phase") not in ("complete", "absent-fenced") or now_utc() < cleanup_at + dt.timedelta(hours=72):
-        return False
-    invocation_cost = cost_query(
-        env, forecast=False, invocation=invocation, reserved_at=entry["reserved_at"]
-    )
-    entry.update({
-        "status": "reconciled",
-        "reconciled_at": iso_utc(),
-        "reconciled_actual": actual,
-        "reconciled_forecast": forecast,
-        "reconciled_invocation_cost": invocation_cost,
-    })
-    return True
+def reconcile_management_reservations(env, reservations):
+    retained = []
+    for entry in reservations:
+        cleanup_text = entry.get("cleanup-verified-at")
+        if cleanup_text == "none":
+            retained.append(entry)
+            continue
+        try:
+            cleanup_at = dt.datetime.fromisoformat(cleanup_text.replace("Z", "+00:00"))
+            state = load_state(env, entry["invocation-binding"])
+        except (RunnerError, TypeError, ValueError):
+            retained.append(entry)
+            continue
+        if state.get("phase") not in ("complete", "absent-fenced") or now_utc() < cleanup_at + dt.timedelta(hours=72):
+            retained.append(entry)
+            continue
+        cost_query(env, forecast=False, invocation=entry["invocation-binding"], reserved_at=entry["reserved-at"])
+        reread, _, _ = az_command(env, ["resource", "show", "--ids", entry["id"], "--api-version", "2023-01-31"])
+        exact = parse_management_reservation(env, reread)
+        if exact["principal_id"] != entry["principal_id"]:
+            raise RunnerError("reconciled cost reservation immutable identity changed")
+        delete_args = ["rest", "--method", "delete", "--url", resource_url(entry["id"], "2023-01-31")]
+        if exact.get("etag"):
+            delete_args += ["--headers", "If-Match={}".format(exact["etag"])]
+        _, rc, stderr = az_command(env, delete_args, check=False)
+        if rc != 0:
+            raise RunnerError("reconciled cost reservation deletion failed: {}".format(stderr))
+    return retained
 
 
-def reserve_budget(env, state, lease, limits):
-    ledger = load_reservation_ledger(env, state, lease)
-    preliminary = budget_gate(env, limits)
-    for entry in ledger["reservations"].values():
-        if entry.get("status") == "reserved":
-            reservation_is_reconciled(env, entry, preliminary["actual"], preliminary["forecast"])
-    existing = ledger["reservations"].get(state["invocation"])
-    if existing is not None:
-        if (
-            existing.get("fence") != state["request"]["fence"]
-            or existing.get("lineage_root") != state["request"]["lineage_root_invocation"]
-        ):
+def reserve_budget_management(env, state, lease, limits):
+    lease.assert_held()
+    reservations = reconcile_management_reservations(env, list_management_reservations(env))
+    existing = [item for item in reservations if item["invocation-binding"] == state["invocation"]]
+    if len(existing) > 1:
+        raise RunnerError("durable cost reservation identity is ambiguous")
+    if existing:
+        expected_fence = state["request"]["fence"].split(":", 1)[1]
+        if existing[0]["fence-digest"] != expected_fence or existing[0]["lineage-root"] != state["request"]["lineage_root_invocation"]:
             raise RunnerError("cost reservation invocation/fence lineage is not exact")
-        return existing["cost_bound"]
-    outstanding = sum(
-        float(entry["amount_usd"])
-        for entry in ledger["reservations"].values()
-        if entry.get("status") == "reserved"
-    )
+        lease.assert_held()
+        return state.get("cost") or budget_gate(
+            env, limits, outstanding_reservations=sum(item["amount_usd"] for item in reservations if item["id"] != existing[0]["id"])
+        )
+    outstanding = sum(item["amount_usd"] for item in reservations)
     cost = budget_gate(env, limits, outstanding_reservations=outstanding)
-    ledger["reservations"][state["invocation"]] = {
-        "invocation": state["invocation"],
-        "fence": state["request"]["fence"],
-        "parent_invocation": state.get("parent_invocation"),
-        "lineage_root": state["request"]["lineage_root_invocation"],
-        "amount_usd": cost["max_increment"],
-        "status": "reserved",
-        "reserved_at": iso_utc(),
-        "compute_deallocation_deadline": state["request"]["compute_deallocation_deadline"],
-        "cost_bound": cost,
-    }
-    ledger["updated_at"] = iso_utc()
-    save_reservation_ledger(env, state, ledger, lease)
+    tags = reservation_tags(env, state, cost["max_increment"], iso_utc())
+    az_command(env, [
+        "identity", "create", "--resource-group", env["resource_group"], "--name", reservation_name(env, state["invocation"]),
+        "--location", "eastus", "--tags",
+    ] + ["{}={}".format(key, value) for key, value in sorted(tags.items())])
+    lease.renew_and_assert()
+    reread, _, _ = az_command(env, ["resource", "show", "--ids", reservation_id(env, state["invocation"]), "--api-version", "2023-01-31"])
+    principal_id = reread.get("properties", {}).get("principalId") or reread.get("principalId")
+    if not principal_id or (reread.get("tags") or {}) != tags:
+        raise RunnerError("durable cost reservation initial binding is not exact")
+    tags["reservation-principal"] = principal_id
+    az_command(env, [
+        "rest", "--method", "patch", "--url", resource_url(reread["id"], "2023-01-31"),
+        "--headers", "Content-Type=application/json",
+        "--body", json.dumps({"location": "eastus", "tags": tags}, separators=(",", ":")),
+    ])
+    reread, _, _ = az_command(env, ["resource", "show", "--ids", reservation_id(env, state["invocation"]), "--api-version", "2023-01-31"])
+    parsed = parse_management_reservation(env, reread)
+    if parsed is None or parsed["fence-digest"] != tags["fence-digest"]:
+        raise RunnerError("durable cost reservation changed before compute admission")
     lease.assert_held()
     return cost
 
 
-def mark_reservation_cleanup_verified(env, state):
-    with AdmissionLease(env, state) as lease:
-        ledger = load_reservation_ledger(env, state, lease)
-        entry = ledger["reservations"].get(state["invocation"])
-        if entry is None:
-            raise RunnerError("cost reservation is absent after compute cleanup")
-        if entry.get("fence") != state["request"]["fence"] or entry.get("status") != "reserved":
+def mark_management_reservation_cleanup_verified(env, state):
+    with ManagementAdmissionLease(env, state) as lease:
+        identity, _, _ = az_command(env, [
+            "resource", "show", "--ids", reservation_id(env, state["invocation"]), "--api-version", "2023-01-31",
+        ])
+        entry = parse_management_reservation(env, identity)
+        expected_fence = state["request"]["fence"].split(":", 1)[1]
+        if entry is None or entry["fence-digest"] != expected_fence or entry["cleanup-verified-at"] != "none":
             raise RunnerError("cost reservation cleanup binding is not exact")
-        entry["cleanup_verified_at"] = iso_utc()
-        ledger["updated_at"] = iso_utc()
-        save_reservation_ledger(env, state, ledger, lease)
+        tags = dict(identity.get("tags") or {})
+        tags["cleanup-verified-at"] = iso_utc()
+        update_args = [
+            "rest", "--method", "patch", "--url", resource_url(identity["id"], "2023-01-31"),
+            "--headers", "Content-Type=application/json",
+            "--body", json.dumps({"location": "eastus", "tags": tags}, separators=(",", ":")),
+        ]
+        if identity.get("etag"):
+            update_args[6:6] = ["If-Match={}".format(identity["etag"])]
+        az_command(env, update_args)
+        lease.renew_and_assert()
 
 
 def active_runner_vms(env):
@@ -1347,107 +1478,98 @@ def active_runner_vms(env):
     return active
 
 
-def ensure_admission_blob(env, state):
-    empty = env["state_dir"] / ".admission-empty"
-    empty.touch(mode=0o600, exist_ok=True)
-    args = [
-        "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", state["staging"]["admission_blob"], "--file", str(empty),
-        "--overwrite", "false",
-    ]
-    _, rc, _ = az_command(env, args, check=False)
-    if rc != 0:
-        exists, _, _ = az_command(env, [
-            "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-            "--container-name", CONTAINER, "--name", state["staging"]["admission_blob"],
-        ])
-        if not exists.get("exists"):
-            raise RunnerError("admission-lock blob could not be created or proven present")
 
+class ManagementAdmissionLease:
+    """Single management-resource CAS owner for admission and reservations."""
 
-def ensure_reservation_blob(env, state):
-    path = write_private_json(env, ".reservations-initial-", empty_reservation_ledger(env))
-    try:
-        _, rc, _ = az_command(env, [
-            "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
-            "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-            "--file", str(path), "--overwrite", "false",
-        ], check=False)
-        if rc != 0:
-            exists, _, _ = az_command(env, [
-                "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-                "--container-name", CONTAINER, "--name", state["staging"]["reservation_blob"],
-            ])
-            if not exists.get("exists"):
-                raise RunnerError("cost reservation ledger blob could not be created or proven present")
-    finally:
-        path.unlink(missing_ok=True)
-
-
-class AdmissionLease:
     def __init__(self, env, state):
         self.env = env
         self.state = state
-        self.admission_lease_id = str(uuid.uuid4())
-        self.reservation_lease_id = str(uuid.uuid4())
+        self.fence = state["request"]["fence"].split(":", 1)[1]
+        self.etag = None
         self.stop = threading.Event()
         self.failed = threading.Event()
         self.thread = None
         self.renew_lock = threading.Lock()
         self.expiry_lock = threading.Lock()
-        self.expires_at = {"admission": 0.0, "reservation": 0.0}
+        self.expires_at = 0.0
 
-    def _lease_args(self, operation, blob_name, lease_id):
-        args = [
-            "storage", "blob", "lease", operation, "--auth-mode", "login", "--account-name", self.env["storage"],
-            "--container-name", CONTAINER, "--blob-name", blob_name,
-        ]
-        if operation == "acquire":
-            args += ["--lease-duration", "60", "--proposed-lease-id", lease_id]
-        else:
-            args += ["--lease-id", lease_id]
-        return args
+    def _read(self):
+        resource, _, _ = az_command(self.env, [
+            "resource", "show", "--ids", runner_control_id(self.env), "--api-version", "2023-05-01",
+        ], timeout_seconds=LEASE_RENEW_TIMEOUT_SECONDS)
+        metadata = resource.get("properties", {}).get("metadata") or {}
+        allowed = {"schema", "deploymentgeneration", "lockowner", "lockfence", "lockexpiry"}
+        owner = metadata.get("lockowner", "")
+        fence = metadata.get("lockfence", "")
+        expiry = metadata.get("lockexpiry", "")
+        if (
+            metadata.get("schema") != "fm-azure-runner-control-v1"
+            or metadata.get("deploymentgeneration") != self.env["deployment_generation"]
+            or not set(metadata).issubset(allowed)
+            or bool(owner) != bool(fence) or bool(owner) != bool(expiry)
+            or (fence and not re.match(r"^[0-9a-f]{64}$", fence))
+            or (owner and not SAFE_INVOCATION.match(owner))
+        ):
+            raise RunnerError("runner management control resource binding is not exact")
+        etag = resource.get("etag") or resource.get("properties", {}).get("etag")
+        if not etag:
+            raise RunnerError("runner management control resource has no ETag")
+        return metadata, etag
 
-    def _lease_call(self, operation, blob_name, lease_id):
-        return az_command(
-            self.env, self._lease_args(operation, blob_name, lease_id), check=False,
-            timeout_seconds=LEASE_RENEW_TIMEOUT_SECONDS,
-        )
+    def _cas(self, etag, metadata):
+        body = {"properties": {"publicAccess": "None", "metadata": metadata}}
+        result, rc, stderr = az_command(self.env, [
+            "rest", "--method", "put", "--url", resource_url(runner_control_id(self.env), "2023-05-01"),
+            "--headers", "If-Match={}".format(etag), "Content-Type=application/json",
+            "--body", json.dumps(body, separators=(",", ":")),
+        ], check=False, timeout_seconds=LEASE_RENEW_TIMEOUT_SECONDS)
+        if rc != 0:
+            raise RunnerError("runner management lease CAS failed: {}".format(stderr))
+        response_etag = (result or {}).get("etag") or (result or {}).get("properties", {}).get("etag")
+        current_metadata, new_etag = self._read()
+        if current_metadata != metadata or (response_etag and response_etag != new_etag):
+            raise RunnerError("runner management lease CAS did not retain its exact metadata/ETag")
+        return new_etag
 
-    def _record_success(self, label):
+    def _record_success(self):
         with self.expiry_lock:
-            self.expires_at[label] = time.monotonic() + LEASE_DURATION_SECONDS
+            self.expires_at = time.monotonic() + LEASE_DURATION_SECONDS
 
     def __enter__(self):
-        ensure_admission_blob(self.env, self.state)
-        acquired = False
         for _ in range(7):
-            _, rc, _ = self._lease_call(
-                "acquire", self.state["staging"]["admission_blob"], self.admission_lease_id
-            )
-            if rc == 0:
-                self._record_success("admission")
-                acquired = True
-                break
-            time.sleep(10)
-        if not acquired:
-            raise RunnerError("runner admission lock is busy or unreachable")
+            metadata, etag = self._read()
+            expiry = metadata.get("lockexpiry")
+            busy = False
+            if metadata.get("lockowner") and expiry:
+                try:
+                    busy = now_utc() < dt.datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                except ValueError:
+                    raise RunnerError("runner management lock expiry is malformed")
+            if busy:
+                time.sleep(10)
+                continue
+            updated = {
+                "schema": "fm-azure-runner-control-v1",
+                "deploymentgeneration": self.env["deployment_generation"],
+                "lockowner": self.state["invocation"],
+                "lockfence": self.fence,
+                "lockexpiry": iso_utc(now_utc() + dt.timedelta(seconds=LEASE_DURATION_SECONDS)),
+            }
+            try:
+                self.etag = self._cas(etag, updated)
+            except RunnerError:
+                time.sleep(10)
+                continue
+            self._record_success()
+            break
+        else:
+            raise RunnerError("runner management admission lock is busy or unreachable")
         try:
-            ensure_reservation_blob(self.env, self.state)
-            _, reservation_rc, _ = self._lease_call(
-                "acquire", self.state["staging"]["reservation_blob"], self.reservation_lease_id
-            )
-            if reservation_rc != 0:
-                raise RunnerError("cost reservation ledger lease is busy or unreachable")
-            self._record_success("reservation")
             self.renew_and_assert()
         except Exception:
-            for blob_name, lease_id in (
-                (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
-                (self.state["staging"]["admission_blob"], self.admission_lease_id),
-            ):
-                with contextlib.suppress(RunnerError):
-                    self._lease_call("release", blob_name, lease_id)
+            with contextlib.suppress(RunnerError):
+                self._release()
             raise
         self.thread = threading.Thread(target=self._renew, daemon=True)
         self.thread.start()
@@ -1464,14 +1586,12 @@ class AdmissionLease:
     def renew_and_assert(self):
         try:
             with self.renew_lock:
-                for blob_name, lease_id, label in (
-                    (self.state["staging"]["admission_blob"], self.admission_lease_id, "admission"),
-                    (self.state["staging"]["reservation_blob"], self.reservation_lease_id, "reservation"),
-                ):
-                    _, rc, stderr = self._lease_call("renew", blob_name, lease_id)
-                    if rc != 0:
-                        raise RunnerError("runner {} lease renewal failed: {}".format(label, stderr))
-                    self._record_success(label)
+                metadata, etag = self._read()
+                if metadata.get("lockowner") != self.state["invocation"] or metadata.get("lockfence") != self.fence or etag != self.etag:
+                    raise RunnerError("runner management lease owner/fence/ETag changed")
+                metadata["lockexpiry"] = iso_utc(now_utc() + dt.timedelta(seconds=LEASE_DURATION_SECONDS))
+                self.etag = self._cas(etag, metadata)
+                self._record_success()
         except Exception:
             self.failed.set()
             raise
@@ -1479,77 +1599,26 @@ class AdmissionLease:
 
     def assert_held(self):
         if self.failed.is_set():
-            raise RunnerError("runner admission lease renewal failed; no command was started")
+            raise RunnerError("runner management lease renewal failed; no command was started")
         with self.expiry_lock:
-            remaining = {
-                label: expiry - time.monotonic()
-                for label, expiry in self.expires_at.items()
-            }
-        stale = [label for label, seconds in remaining.items() if seconds <= LEASE_SAFETY_MARGIN_SECONDS]
-        if stale:
+            remaining = self.expires_at - time.monotonic()
+        if remaining <= LEASE_SAFETY_MARGIN_SECONDS:
             self.failed.set()
-            raise RunnerError("runner lease expiry safety margin exhausted for {}; no command was started".format(
-                ", ".join(sorted(stale))
-            ))
+            raise RunnerError("runner management lease expiry safety margin exhausted; no command was started")
+
+    def _release(self):
+        metadata, etag = self._read()
+        if metadata.get("lockowner") != self.state["invocation"] or metadata.get("lockfence") != self.fence or etag != self.etag:
+            return
+        metadata.update({"lockowner": "", "lockfence": "", "lockexpiry": ""})
+        self.etag = self._cas(etag, metadata)
 
     def __exit__(self, exc_type, exc, traceback):
         self.stop.set()
         if self.thread:
             self.thread.join(timeout=2)
-        for blob_name, lease_id in (
-            (self.state["staging"]["reservation_blob"], self.reservation_lease_id),
-            (self.state["staging"]["admission_blob"], self.admission_lease_id),
-        ):
-            with contextlib.suppress(RunnerError):
-                self._lease_call("release", blob_name, lease_id)
-
-
-def storage_upload(env, local_path, blob, overwrite=False):
-    args = [
-        "storage", "blob", "upload", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", blob, "--file", str(local_path),
-        "--overwrite", "true" if overwrite else "false",
-    ]
-    az_command(env, args)
-
-
-def storage_download(env, blob, local_path):
-    az_command(env, [
-        "storage", "blob", "download", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", blob, "--file", str(local_path), "--overwrite", "true",
-    ])
-
-
-def storage_delete(env, blob):
-    exists, _, _ = az_command(env, [
-        "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", blob,
-    ])
-    if not exists.get("exists"):
-        return
-    _, rc, stderr = az_command(env, [
-        "storage", "blob", "delete", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", blob, "--delete-snapshots", "include",
-    ], check=False)
-    if rc != 0:
-        raise RunnerError("exact staging blob deletion failed: {}".format(stderr))
-    remains, _, _ = az_command(env, [
-        "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", blob,
-    ])
-    if remains.get("exists"):
-        raise RunnerError("exact staging blob remains after deletion")
-
-
-def blob_sas(env, blob, permissions, expiry):
-    stdout, rc, stderr = az_command(env, [
-        "storage", "blob", "generate-sas", "--as-user", "--auth-mode", "login", "--https-only",
-        "--account-name", env["storage"], "--container-name", CONTAINER, "--name", blob,
-        "--permissions", permissions, "--expiry", expiry, "--full-uri", "--output", "tsv",
-    ], parse_json=False)
-    if rc != 0 or not stdout.startswith("https://"):
-        raise RunnerError("object-scoped user-delegation SAS creation failed: {}".format(stderr))
-    return stdout
+        with contextlib.suppress(RunnerError):
+            self._release()
 
 
 def ownership_tags(env, state):
@@ -1595,6 +1664,7 @@ def deployment_parameters(env, state):
             "nicName": {"value": resources["nic_name"]},
             "osDiskName": {"value": resources["os_disk_name"]},
             "subnetId": {"value": subnet_id},
+            "controllerIdentityId": {"value": exact_id(env, "Microsoft.ManagedIdentity", "userAssignedIdentities", env["controller_identity"])},
             "vmSize": {"value": request["limits"]["sku"]},
             "expiryUtc": {"value": iso_utc(expiry)},
             "expiryTimeOfDay": {"value": expiry.strftime("%H%M")},
@@ -1659,6 +1729,8 @@ def adopt_vm_identity(env, state, vm):
     instance_id = vm_properties.get("vmId")
     nic_ids = [item.get("id") for item in vm_properties.get("networkProfile", {}).get("networkInterfaces", [])]
     os_disk_id = vm_properties.get("storageProfile", {}).get("osDisk", {}).get("managedDisk", {}).get("id")
+    expected_identity_id = exact_id(env, "Microsoft.ManagedIdentity", "userAssignedIdentities", env["controller_identity"])
+    assigned_identities = list((vm.get("identity") or vm_properties.get("identity") or {}).get("userAssignedIdentities", {}))
     if (
         not vm_id
         or not instance_id
@@ -1666,6 +1738,7 @@ def adopt_vm_identity(env, state, vm):
         or vm_id.lower() != resources["vm_id"].lower()
         or nic_ids[0].lower() != resources["nic_id"].lower()
         or str(os_disk_id).lower() != resources["os_disk_id"].lower()
+        or [item.lower() for item in assigned_identities] != [expected_identity_id.lower()]
     ):
         raise RunnerError("created VM identity inventory is incomplete or differs from the fenced plan")
     identities = {}
@@ -1729,7 +1802,7 @@ def create_vm(env, state):
     if not exists:
         raise RunnerError("runner deployment completed without its exact VM")
     adopt_vm_identity(env, state, vm)
-    transition(env, state, "vm-created", "exact identity-less VM/NIC/OS disk created")
+    transition(env, state, "vm-created", "exact private controller VM/UAMI/NIC/OS disk created")
 
 
 def managed_run_command_id(state):
@@ -1765,25 +1838,28 @@ def verify_ttl_schedule(state, resource):
         raise RunnerError("control-plane TTL schedule binding is not exact")
 
 
-def create_run_command(env, state, input_url, output_url):
+def create_run_command(env, state):
     current_guest_digest = "sha256:" + sha256_file(GUEST)
     if current_guest_digest != state["request"]["protocol"]["guest_digest"]:
         raise RunnerError("trusted guest protocol changed after request preparation")
     script = GUEST.read_text(encoding="utf-8")
+    request_b64 = base64.b64encode(Path(state["input_path"]).read_bytes()).decode("ascii")
+    executor_b64 = base64.b64encode(EXECUTOR.read_bytes()).decode("ascii")
     properties = {
         "location": "eastus",
         "tags": ownership_tags(env, state),
         "properties": {
             "source": {"script": script},
             "parameters": [
-                {"name": "input_digest", "value": state["input_digest"]},
+                {"name": "request_b64", "value": request_b64},
                 {"name": "vm_resource_id", "value": state["resources"]["vm_id"]},
                 {"name": "vm_instance_id", "value": state["resources"]["vm_instance_id"]},
                 {"name": "guest_digest", "value": state["request"]["protocol"]["guest_digest"]},
-            ],
-            "protectedParameters": [
-                {"name": "input_url", "value": input_url},
-                {"name": "output_url", "value": output_url},
+                {"name": "storage_account", "value": env["storage"]},
+                {"name": "container", "value": CONTAINER},
+                {"name": "output_blob", "value": state["staging"]["output_blob"]},
+                {"name": "identity_client_id", "value": env["controller_identity_client_id"]},
+                {"name": "executor_b64", "value": executor_b64},
             ],
             "asyncExecution": False,
             "timeoutInSeconds": state["request"]["limits"]["wall_seconds"] + 1200,
@@ -1838,66 +1914,29 @@ def poll_run_command(env, state):
             error = str(view.get("error", ""))
             if execution != "Succeeded":
                 raise RunnerError("managed run command failed ({}, {}): {}".format(execution, provisioning, error[-1000:]))
-            marker = re.search(r"FM_AZURE_RESULT\s+(sha256:[0-9a-f]{64})\s+boot=([0-9a-f-]{36})", output)
+            marker = re.search(r"FM_AZURE_RESULT\s+(sha256:[0-9a-f]{64})\s+boot=([0-9a-f-]{36})\s+result=([A-Za-z0-9+/=]+)", output)
             if not marker:
                 raise RunnerError("managed run command completed without a valid result identity marker")
             state["expected_result_digest"] = marker.group(1)
             state["expected_boot_id"] = marker.group(2)
+            try:
+                state["control_plane_result"] = json.loads(base64.b64decode(marker.group(3), validate=True))
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise RunnerError("managed run command returned malformed bounded result: {}".format(exc))
             transition(env, state, "result-published", "guest published digest-bound output")
             return
         time.sleep(10)
     raise RunnerError("managed run command exceeded its control-plane completion bound")
 
 
-def safe_extract_result(archive_path, destination):
-    allowed = {"result.json", "stdout.log", "stderr.log"}
-    with tarfile.open(archive_path, "r:gz") as archive:
-        members = archive.getmembers()
-        for member in members:
-            name = member.name
-            if name in allowed or name == "artifacts":
-                pass
-            elif name.startswith("artifacts/") and require_artifact(name[len("artifacts/"):]):
-                pass
-            else:
-                raise RunnerError("result archive contains an undeclared path: {}".format(name))
-            if member.issym() or member.islnk() or member.isdev():
-                raise RunnerError("result archive contains a link/device")
-            target = (destination / name).resolve()
-            if destination.resolve() not in target.parents and target != destination.resolve():
-                raise RunnerError("result archive path escapes destination")
-        archive.extractall(str(destination), members=members)
-
 
 def collect_result(env, state):
     result_dir = env["state_dir"] / "results" / state["invocation"]
     if result_dir.exists():
         raise RunnerError("result destination already exists; collection will not overwrite it")
-    work_dir = result_dir.with_name(".{}.{}.tmp".format(result_dir.name, uuid.uuid4().hex))
-    work_dir.mkdir(parents=True, mode=0o700)
-    try:
-        result = verify_downloaded_result(env, state, work_dir)
-        os.replace(str(work_dir), str(result_dir))
-    except Exception:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise
-    state["result"] = result
-    state["result_path"] = str(result_dir)
-    state["result_digest"] = state["expected_result_digest"]
-    transition(env, state, "result-collected", "result identity and every returned digest verified")
-    return result
-
-
-def verify_downloaded_result(env, state, result_dir):
-    archive_path = result_dir / "result.tar.gz"
-    storage_download(env, state["staging"]["output_blob"], archive_path)
-    digest = "sha256:" + sha256_file(archive_path)
-    if digest != state.get("expected_result_digest"):
-        raise RunnerError("retrieved result digest does not match the control-plane publication marker")
-    extracted = result_dir / "extracted"
-    extracted.mkdir(mode=0o700)
-    safe_extract_result(archive_path, extracted)
-    result = json.loads((extracted / "result.json").read_text(encoding="utf-8"))
+    result = state.get("control_plane_result")
+    if not isinstance(result, dict):
+        raise RunnerError("bounded control-plane result is absent")
     checks = {
         "schema": RESULT_SCHEMA,
         "request_digest": state["request_digest"],
@@ -1914,35 +1953,19 @@ def verify_downloaded_result(env, state, result_dir):
     }
     for key, expected in checks.items():
         if result.get(key) != expected:
-            raise RunnerError("result identity mismatch: {}".format(key))
-    for log_name, field in (("stdout.log", "stdout_digest"), ("stderr.log", "stderr_digest")):
-        actual = "sha256:" + sha256_file(extracted / log_name)
-        if result.get(field) != actual:
-            raise RunnerError("result log integrity mismatch: {}".format(log_name))
-    declared = state["request"].get("artifacts", [])
-    records = result.get("artifacts")
-    if not isinstance(records, list):
-        raise RunnerError("result artifact manifest is malformed")
-    seen = set()
-    for record in records:
-        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
-            raise RunnerError("result artifact record is malformed")
-        relative = require_artifact(record["path"])
-        if relative in seen or not any(relative == item or relative.startswith(item.rstrip("/") + "/") for item in declared):
-            raise RunnerError("result returned an undeclared or duplicate artifact: {}".format(relative))
-        seen.add(relative)
-        artifact_path = extracted / "artifacts" / relative
-        if not artifact_path.is_file() or artifact_path.is_symlink():
-            raise RunnerError("result artifact file is absent or linked: {}".format(relative))
-        if artifact_path.stat().st_size != record.get("bytes") or "sha256:" + sha256_file(artifact_path) != record.get("digest"):
-            raise RunnerError("result artifact integrity mismatch: {}".format(relative))
-    returned_files = set()
-    artifact_root = extracted / "artifacts"
-    if artifact_root.exists():
-        returned_files = {path.relative_to(artifact_root).as_posix() for path in artifact_root.rglob("*") if path.is_file()}
-    if returned_files != seen:
-        raise RunnerError("result archive and artifact manifest disagree")
+            raise RunnerError("bounded result identity mismatch: {}".format(key))
+    if not isinstance(result.get("artifacts"), list):
+        raise RunnerError("bounded result artifact manifest is malformed")
+    result_dir.mkdir(parents=True, mode=0o700)
+    result_path = result_dir / "result.json"
+    result_path.write_bytes(canonical_bytes(result) + b"\n")
+    os.chmod(result_path, 0o600)
+    state["result"] = result
+    state["result_path"] = str(result_dir)
+    state["result_digest"] = state["expected_result_digest"]
+    transition(env, state, "result-collected", "result identity and every returned digest verified")
     return result
+
 
 
 def get_vm(env, state):
@@ -2109,22 +2132,16 @@ def cleanup(env, state):
         transition(env, state, "cleanup-retained", "compute cleanup ambiguous; staging retained")
         raise
     transition(env, state, "compute-removed", "exact invocation VM/NIC/OS disk absent")
-    try:
-        storage_delete(env, state["staging"]["input_blob"])
-        storage_delete(env, state["staging"]["output_blob"])
-    except RunnerError:
-        transition(env, state, "cleanup-retained", "staging cleanup ambiguous after compute removal")
-        raise
     payload_dir = Path(state["input_path"]).parent
     if payload_dir.parent == env["state_dir"] / "payloads":
         shutil.rmtree(payload_dir, ignore_errors=False)
     if state.get("reservation_recorded"):
         try:
-            mark_reservation_cleanup_verified(env, state)
+            mark_management_reservation_cleanup_verified(env, state)
         except RunnerError:
             transition(env, state, "cleanup-retained", "cost reservation reconciliation marker is ambiguous")
             raise
-    transition(env, state, "complete", "verified result retained locally; invocation compute and staging are zero")
+    transition(env, state, "complete", "verified bounded result retained locally; private result archive retained; invocation compute is zero")
 
 
 def dispatch_prepared(env, state, confirm_subscription):
@@ -2143,29 +2160,23 @@ def dispatch_prepared(env, state, confirm_subscription):
         cost = budget_gate(env, limits)
         foundation_gate(env)
         transition(env, state, "admission-checked", "scope, quota, SKU, budget, and exact foundation gates passed", cost=cost)
-        with AdmissionLease(env, state) as lease:
+        with ManagementAdmissionLease(env, state) as lease:
             foundation_gate(env)
             sku_quota_gate(env, limits)
             active = active_runner_vms(env)
             if len(active) >= env["max_concurrency"]:
                 raise RunnerError("runner queue is at its bounded concurrency limit ({})".format(env["max_concurrency"]))
-            cost = reserve_budget(env, state, lease, limits)
+            cost = reserve_budget_management(env, state, lease, limits)
             transition(
                 env, state, "cost-reserved",
                 "durable worst-case cost reserved under the admission lease",
                 cost=cost, reservation_recorded=True,
             )
             foundation_gate(env)
-            storage_upload(env, state["input_path"], state["staging"]["input_blob"], overwrite=False)
-            transition(env, state, "input-staged", "exact private input object uploaded")
-            expiry = (now_utc() + dt.timedelta(seconds=limits["wall_seconds"] + 1800)).strftime("%Y-%m-%dT%H:%MZ")
-            input_url = blob_sas(env, state["staging"]["input_blob"], "r", expiry)
-            output_url = blob_sas(env, state["staging"]["output_blob"], "cw", expiry)
-            foundation_gate(env)
             lease.renew_and_assert()
             create_vm(env, state)
             lease.assert_held()
-        create_run_command(env, state, input_url, output_url)
+        create_run_command(env, state)
         poll_run_command(env, state)
         result = collect_result(env, state)
         cleanup(env, state)
@@ -2178,22 +2189,12 @@ def dispatch_prepared(env, state, confirm_subscription):
 
 
 def print_logs_and_summary(state, result):
-    extracted = Path(state["result_path"]) / "extracted"
-    stdout = (extracted / "stdout.log").read_text(encoding="utf-8", errors="replace")
-    stderr = (extracted / "stderr.log").read_text(encoding="utf-8", errors="replace")
-    if stdout:
-        sys.stdout.write(stdout)
-        if not stdout.endswith("\n"):
-            sys.stdout.write("\n")
-    if stderr:
-        sys.stderr.write(stderr)
-        if not stderr.endswith("\n"):
-            sys.stderr.write("\n")
     print(
-        "azure-runner: invocation={} exit={} timeout={} signal={} stdout_truncated={} stderr_truncated={} max_cost=${:.2f}".format(
+        "azure-runner: invocation={} exit={} timeout={} signal={} stdout_truncated={} stderr_truncated={} private_archive={} max_cost=${:.2f}".format(
             state["invocation"], result["exit_code"], str(result["timed_out"]).lower(),
             result.get("signal") if result.get("signal") is not None else "none",
             str(result["stdout_truncated"]).lower(), str(result["stderr_truncated"]).lower(),
+            state["staging"]["output_blob"],
             state.get("cost", {}).get("max_increment", 0.0),
         ),
         file=sys.stderr,
@@ -2217,37 +2218,15 @@ def resume(env, state):
         print_logs_and_summary(state, state["result"])
         return int(state["result"]["exit_code"])
     if phase in (
-        "prepared", "admission-checked", "cost-reserved", "input-staged", "vm-created", "command-submitted", "failed-retained"
+        "prepared", "admission-checked", "cost-reserved", "vm-created", "command-submitted", "failed-retained"
     ):
-        output_exists, _, _ = az_command(env, [
-            "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-            "--container-name", CONTAINER, "--name", state["staging"]["output_blob"],
-        ])
         vm_exists, vm = get_vm(env, state)
-        if output_exists.get("exists") and state.get("expected_result_digest"):
-            result = collect_result(env, state)
-            cleanup(env, state)
-            print_logs_and_summary(state, result)
-            return int(result["exit_code"])
         if vm_exists:
             foundation_gate(env)
             adopt_vm_identity(env, state, vm)
             command_exists, _ = run_command_exists(env, state)
             if not command_exists:
-                if output_exists.get("exists"):
-                    raise RunnerError("output exists without a durable Managed Run Command digest marker; state is retained")
-                input_exists, _, _ = az_command(env, [
-                    "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-                    "--container-name", CONTAINER, "--name", state["staging"]["input_blob"],
-                ])
-                if not input_exists.get("exists"):
-                    raise RunnerError("VM exists but exact staged input is absent; state is retained")
-                expiry = (
-                    now_utc() + dt.timedelta(seconds=state["request"]["limits"]["wall_seconds"] + 1800)
-                ).strftime("%Y-%m-%dT%H:%MZ")
-                input_url = blob_sas(env, state["staging"]["input_blob"], "r", expiry)
-                output_url = blob_sas(env, state["staging"]["output_blob"], "cw", expiry)
-                create_run_command(env, state, input_url, output_url)
+                create_run_command(env, state)
             else:
                 transition(env, state, "command-submitted", "existing Managed Run Command adopted without resubmission")
             poll_run_command(env, state)
@@ -2255,18 +2234,10 @@ def resume(env, state):
             cleanup(env, state)
             print_logs_and_summary(state, result)
             return int(result["exit_code"])
-        if output_exists.get("exists"):
-            raise RunnerError("VM is absent but an unverified result object remains; retry is unsafe")
         cleanup_partial_capacity(env, state)
-        input_exists, _, _ = az_command(env, [
-            "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-            "--container-name", CONTAINER, "--name", state["staging"]["input_blob"],
-        ])
-        if input_exists.get("exists"):
-            storage_delete(env, state["staging"]["input_blob"])
-        transition(env, state, "absent-fenced", "VM and invocation staging absence proven; same invocation will never be rerun", old_lease_absent=True)
+        transition(env, state, "absent-fenced", "VM absence proven; same invocation will never be rerun", old_lease_absent=True)
         if state.get("reservation_recorded"):
-            mark_reservation_cleanup_verified(env, state)
+            mark_management_reservation_cleanup_verified(env, state)
         raise RunnerError("runner VM is absent without a verified result; retry requires a new fenced attempt")
     raise RunnerError("invocation phase {} cannot be resumed automatically".format(phase))
 
@@ -2277,15 +2248,7 @@ def retry(env, old_state, args):
         raise RunnerError("retry requires old invocation absence to be proven by resume/reconcile")
     scope_gate(env)
     vm_exists, _ = get_vm(env, old_state)
-    input_exists, _, _ = az_command(env, [
-        "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", old_state["staging"]["input_blob"],
-    ])
-    output_exists, _, _ = az_command(env, [
-        "storage", "blob", "exists", "--auth-mode", "login", "--account-name", env["storage"],
-        "--container-name", CONTAINER, "--name", old_state["staging"]["output_blob"],
-    ])
-    if vm_exists or input_exists.get("exists") or output_exists.get("exists"):
+    if vm_exists:
         raise RunnerError("old invocation absence no longer holds; retry is fenced")
     current = Path(old_state["repository_root"]).resolve()
     if git(current, "rev-parse", "HEAD").stdout.strip() != old_state["request"]["repository"]["commit"]:

@@ -21,32 +21,30 @@ The first live invocation remains blocked until the foundation and this code are
 
 ## Request and snapshot contract
 
-`prepare` refuses a detached HEAD, tracked changes, and untracked files.
-It creates a Git bundle for the exact named-branch `HEAD`, records the commit and tree object IDs, verifies the bundle, and hashes the complete bundle.
+`prepare` refuses a detached HEAD, tracked changes, untracked files, and any origin other than a credential-free public GitHub HTTPS URL.
+It records the exact named-branch `HEAD` commit and tree object IDs and binds that public origin into the request.
 No live worktree, primary home, provider account home, browser profile, or peer storage is mounted or copied.
 
 The canonical `fm.azure-command/v1` request binds these fields:
 
 - SHA-256 home binding derived from the canonical `FM_HOME` path, without sending that path to Azure.
 - Task, task generation, deployment generation, invocation, fenced attempt, and optional parent attempt.
-- Exact commit, tree, Git-bundle digest and bytes, command argv digest, and complete request digest.
+- Exact public origin, commit, tree, source-identity digest, command argv digest, and complete request digest.
 - Resource class, reviewed VM SKU, CPU, memory, PID, disk, per-stream log, artifact, network, and wall-time limits.
 - Declared repository-relative dependency paths and their file or tree digests.
 - Declared repository-relative result artifact paths.
 - Trusted guest-bootstrap and executor digests.
 
-The input object contains `request.json`, `snapshot.bundle`, the trusted executor, the pinned ShellCheck and uv archives, and the digest-bound locked Linux wheelhouse.
-The private `validation-shards` container stores it under a prefix bound to home, task, generation, invocation, and attempt.
-The host stages with Entra authentication and gives the VM root bootstrap one short-lived read SAS for the exact input blob and one create/write SAS for the exact output blob.
-The repository command never receives either capability.
-The controller principal has data access only to `validation-shards` plus Storage Blob Delegator authority, so its user-delegation SAS remains bounded by that data scope.
+The bounded request and trusted executor travel only as ordinary Managed Run Command parameters.
+Trusted root fetches the exact public commit and checksum-pinned ShellCheck, uv, and locked Linux wheels through the VNet NAT path, then verifies every digest before repository code starts.
+There is no staged input object, SAS, shared key, Git credential, or operator-host data-plane dependency.
 
 Declared dependency paths are rehashed after the VM clones the bundle.
 Package installation performed by a repository command must remain rootless and derive from committed lockfiles or the selected reviewed image.
 Missing toolchain capability fails the command rather than triggering a local retry or privileged repository-controlled bootstrap.
 The fixed root bootstrap installs a hard-coded Ubuntu transport and Linux test-tool package closure before repository code starts when the pinned Canonical image lacks it.
 Repository code cannot alter that privileged package list, all package and staging traffic is shaped to one megabit per second and ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
-The controller pre-stages the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 release archives plus the complete Linux x86_64 pytest/ruff wheel closure selected from the exact snapshot's Agent Fleet `uv.lock` inside the digest-bound input.
+The request records the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 releases plus the complete Linux x86_64 pytest/ruff wheel closure selected from the exact snapshot's Agent Fleet `uv.lock`.
 Trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and forces repository `uv run --locked` commands to use that already-synchronized offline environment.
 
 ## Private control and VM boundary
@@ -54,15 +52,15 @@ Trusted root verifies the lock, archive, file set, sizes, and hashes, creates th
 Every Azure operation carries `FM_AZURE_SUBSCRIPTION_ID` explicitly and first proves the exact enabled tenant/subscription.
 The invocation template creates one NIC in `snet-validation-shards`, one 96-GiB disposable OS disk, and one Trusted Launch Ubuntu VM.
 The NIC has no public IP configuration, the subnet inherits the foundation's deny-inbound NSG, and control uses Azure Managed Run Command.
-There is no SSH key, password, inbound listener, public load balancer, public NAT rule, or VM managed identity.
-The VM therefore has no GitHub, model-provider, browser, reviewer, author-account, control-home, peer-worker, or broad cloud identity.
+There is no SSH key, password, inbound listener, public load balancer, or public NAT rule.
+The VM has exactly the foundation `validation-shards` UAMI, whose sole direct role is Storage Blob Data Contributor on the exact `validation-shards` container and which has no ARM/control-plane role.
 
-Managed Run Command receives object SAS values as protected parameters.
-The guest root process downloads and verifies the exact input before creating the child.
-It clears capability variables, remounts `/proc` with `hidepid=2`, and starts repository code only after systemd installs deny-all IP networking for that command cgroup.
+The guest root process fetches and verifies the exact public source and pinned dependency closure before creating the child.
+It remounts `/proc` with `hidepid=2` and starts repository code in a systemd private network namespace restricted to `AF_UNIX` with deny-all IP policy.
+No managed-identity token exists before or during the child command.
 The untrusted child receives a fixed allowlisted environment with no ambient host variables.
 
-The command child runs as the dedicated unprivileged `fmrunner` uid with no supplemental groups, capabilities, sudo, setuid elevation, IP network route, control-plane mount, or bootstrap write access.
+The command child runs as the dedicated unprivileged `fmrunner` uid with no supplemental groups, capabilities, sudo, setuid elevation, host network namespace, IMDS route, private-endpoint route, Internet route, control-plane mount, or bootstrap credential.
 A root-owned trusted executor opens protected logs and drops only its child to `fmrunner`.
 The systemd unit applies `CPUQuota`, `MemoryMax`, zero swap, `TasksMax`, `RuntimeMaxSec`, no-new-privileges, private temporary and device namespaces, strict system/home/kernel/control-group protection, an empty capability bounding set, and control-group process cleanup.
 A loop-mounted ext4 filesystem bounds all untrusted repository, dependency, temporary, and artifact writes independently of the root filesystem.
@@ -95,15 +93,15 @@ Systemd control-group cleanup catches descendants that detach from the original 
 Root copies only declared regular artifacts after the command exits.
 Symlinks, devices, escaping paths, missing declared roots, and aggregate-size overflow fail result publication.
 The output is one bounded tar archive containing `result.json`, both logs, and the declared artifact tree.
-The guest hashes that complete archive, uploads it with the exact output capability, and returns the digest plus actual boot ID through Managed Run Command.
+Only after the child has exited, trusted root obtains a fresh storage token from IMDS for the exact UAMI, uploads the archive through the blob private endpoint, and verifies its digest metadata with a HEAD request.
+It deletes the token and returns the archive digest, actual boot ID, and a size-bounded canonical `result.json` through Managed Run Command.
 
-The host downloads the exact output object and verifies all of these before accepting the command outcome:
+The host validates the bounded control-plane result before accepting the command outcome; the full logs/artifacts remain private in the digest-bound archive for later private consumption:
 
 - Published archive digest.
 - Result schema, request digest, invocation, attempt, fence, snapshot, commit, tree, and command digest.
 - VM resource ID, immutable VM instance ID, and guest boot ID.
-- Both log digests.
-- Every artifact path, size, digest, declaration, and archive-manifest correspondence.
+- Both log digests and every declared artifact path, size, and digest are present in the trusted manifest.
 
 A transport or integrity failure exits 125 and is not rendered as the repository command's outcome.
 A verified command failure returns that command's exit code after safe collection and cleanup.
@@ -115,20 +113,21 @@ There is no queue daemon and no warm runner compute.
 An empty local queue means zero runner VMs.
 Every invocation receives a separate VM, so two admitted shards run concurrently without sharing process, memory, disk, temp, or task state.
 
-Immediately before staging and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
+Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact container role, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
 It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, current retail rate, and active runner count.
 The software cap is four active runner VMs and may be configured only from one through eight, while live regional and per-family free-vCPU gates can impose a lower effective cap.
 The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
-A short renewable Azure Blob lease serializes count-and-create admission across controllers without a machine-wide singleton daemon.
-Lease loss stops before repository execution and retains exact state for reconciliation.
-The controller also acquires and renews an independent lease on the reservation-ledger blob itself.
-Every ledger read and write carries that exact object lease ID, so a controller that loses admission ownership cannot overwrite a successor's reservation even if its stale write was already in flight.
-Both 60-second leases use a 10-second renewal-call deadline and an independent monotonic last-success expiry certificate with a 15-second safety margin.
-Any renewal exception permanently fails that admission owner, and the controller synchronously renews and verifies both leases immediately before the compute deployment call, so an expired or hung renewal cannot authorize VM creation.
-Under those leases, the controller stores a subscription/resource-group/storage/generation-bound reservation ledger in the private control container.
-Each invocation reserves its complete first-day worst-case dollar bound before staging or compute creation, and admission adds every non-reconciled reservation to the greater of actual or forecast cost.
+The separate `st<prefix>ctl01` account has public networking, shared keys, and public blobs disabled and stores no payload data.
+Its `runner-control` container is used only as a management resource: an ETag plus `If-Match` CAS fences lock owner, invocation fence, and expiry metadata.
+The 60-second lock has a 10-second call deadline, monotonic last-success certificate, and 15-second safety margin.
+Any renewal exception permanently fails that owner, and synchronous owner/fence/ETag renewal immediately before compute creation prevents an expired, hung, or stale writer from creating a VM.
+Each invocation reserves its complete first-day worst-case dollar bound as a separately named, exactly tagged, zero-cost UAMI resource before compute creation.
+Listing and summing those management resources survives controller restart without packed tag ledgers or a reachable storage data plane.
 The reservation survives controller restart and fenced retry lineage.
-It is marked cleanup-verified only after exact compute and staging absence, and is released only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
+It is marked cleanup-verified only after exact compute absence, and is deleted only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
+
+Cost Management 429 responses use a bounded fail-closed retry and honor Azure's QPU, Consumption, or standard retry guidance.
+Only a previously successful response bound to the exact subscription, resource group, endpoint, and body digest, carrying an authoritative server date and younger than four hours, may cover a retry interval beyond the bounded deadline; stale, mismatched, malformed, or absent cache data refuses admission.
 
 The normal budget limit is the active $1,000 target.
 An operator may select the commissioning ceiling of $1,500 through `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500` only during the approved commissioning window.
@@ -151,8 +150,8 @@ It never deletes an active VM, an uncollected result, an unfinished snapshot, or
 ## Restart, fencing, and retry
 
 Local state lives under `$FM_HOME/state/azure-runner` by default and is written mode 0600 through an atomic replace plus directory `fsync` under a per-home file lock.
-The state record never stores a SAS value.
-It records phase history, request and input digests, exact staging names, deployment, VM, NIC, OS disk, both Managed Run Commands, the control-plane TTL schedule, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, Run Command and schedule identities, durable cost reservation, boot, result, and cleanup identities.
+The state record stores no SAS or token.
+It records phase history, request/source digests, exact private result name, deployment, VM, NIC, OS disk, both Managed Run Commands, the control-plane TTL schedule, resource IDs/ETags, VM instance ID, NIC resourceGuid, disk uniqueId, Run Command and schedule identities, durable cost reservation, boot, result, and cleanup identities.
 The separate atomic operation ledger is retained at home scope so deleting or recreating a controller process cannot restore its Azure-call allowance.
 
 A controller restart runs `resume --invocation <id>`.
@@ -164,7 +163,7 @@ The old invocation ID is never reused.
 
 ## Cleanup
 
-Cleanup begins only after the complete result archive and every bound identity have been verified and retained locally.
+Cleanup begins only after the trusted wrapper has verified the complete private result archive, the host has accepted the bounded result identity, and every resource identity is bound.
 Before the first deletion, the controller inventories and classifies the complete disposable set, including every VM child regardless of its current tags, and re-reads every planned resource to compare the complete owner, role, home/task/task-generation, deployment-generation, invocation/attempt/fence, snapshot/command, SKU/class/cost, and cleanup-token tag set plus the recorded resource ID and ETag.
 The VM also must retain its immutable instance ID, the NIC its resourceGuid and exact VM parent, the disk its uniqueId and exact managedBy VM, and the Managed Run Command its recorded provisioning identity.
 The VM-absent path separately inventories all resources and Managed Run Commands in the group and refuses any unplanned or tagless VM child before deleting anything.
@@ -178,8 +177,7 @@ Cleanup removes resources in this exact scope and order:
 3. The exact recorded NIC, after a stable-identity detached transition is recorded.
 4. The exact recorded OS disk, after a stable-identity detached transition is recorded.
 5. The exact Azure-native TTL schedule, only after exact VM absence and detached capacity cleanup are proven.
-6. The exact input and output staging blobs.
-7. The local transient input payload, while retaining local verified result and state.
+6. The local transient request payload, while retaining local verified result/state and the private digest-bound output archive.
 
 A VM deletion failure, timeout, unreadable response, or ambiguous absence proof retains the TTL schedule untouched so the independent deallocation deadline remains enforceable while cleanup is reconciled.
 
@@ -189,11 +187,10 @@ The operator may retry only that exact cleanup.
 
 ## Foundation and operator setup
 
-The foundation adds `FM_AZURE_RUNNER_OPERATOR_OBJECT_ID` to the private operator environment.
-Its ARM template grants that exact principal Storage Blob Delegator at the pilot storage account and Storage Blob Data Contributor only on `validation-shards`.
-The runner VM itself receives no role assignment or managed identity.
-The operator host must have private data-plane reachability to the storage private endpoint, normally through the separately accepted private overlay.
-Failure to reach the private endpoint is a hard transport failure and never enables public storage or SSH as a shortcut.
+The foundation creates the exact `id-<prefix>-validation-shards` UAMI and grants it Storage Blob Data Contributor only on `validation-shards`.
+It also creates the private, zero-data admission-control account and management container.
+The operator host uses Azure management APIs only and needs no storage private-endpoint route.
+The command has no identity or network; the trusted wrapper alone retains VNet/PE/IMDS reachability for verified result publication.
 After the reviewed foundation apply and before the first runner admission, the operator must independently read and accept the exact deterministic blob private-endpoint NIC `resourceGuid`, then persist it as `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID` in the private operator configuration.
 Every foundation gate compares the live NIC and the mutable deployment output to that independent accepted value, so a same-name NIC replacement plus same-name deployment rerun cannot authorize itself.
 
