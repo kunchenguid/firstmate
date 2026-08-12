@@ -154,13 +154,13 @@ SNAPSHOT_JSON=$(FM_SNAPSHOT_SECONDMATES="$LEDGER_SECONDMATES" \
   echo "fm-decision-ledger: canonical captain-hold inventory unavailable" >&2
   exit 1
 }
-HOLD_TSV=$(printf '%s' "$SNAPSHOT_JSON" | jq -er '
+HOLD_TSV=$(printf '%s' "$SNAPSHOT_JSON" | jq -r '
   if .backlog.present != true then error("canonical backlog unavailable")
   elif (.backlog.records | type) != "array" then error("canonical backlog records unavailable")
   else .backlog.records[]
     | select(.structured == true and .captain_actionable == true)
-    | [ .id, (.body_lines[]? | select(startswith("Origin: ")) | ltrimstr("Origin: ")),
-        (.body_lines[]? | select(startswith("Decision key: ")) | ltrimstr("Decision key: ")),
+    | [ .id, ([.body_lines[]? | select(startswith("Origin: ")) | ltrimstr("Origin: ")][0] // "\u001e"),
+        ([.body_lines[]? | select(startswith("Decision key: ")) | ltrimstr("Decision key: ")][0] // "\u001e"),
         (.title // "captain decision pending") ]
     | @tsv
   end') || {
@@ -170,6 +170,8 @@ HOLD_TSV=$(printf '%s' "$SNAPSHOT_JSON" | jq -er '
 HOLD_INPUT=''
 while IFS=$'\t' read -r hold_id task key summary; do
   [ -n "$hold_id" ] || continue
+  [ "$task" != $'\036' ] || task=''
+  [ "$key" != $'\036' ] || key=''
   hold_state=undetermined
   case "$task" in ''|*[!A-Za-z0-9._-]*) ;; *)
     case "$key" in ''|*[!A-Za-z0-9._-]*) ;; *)
@@ -331,7 +333,11 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
                    then ["folded-status-key"] else [] end) + ["captain-hold"])}
       else
         {task:null, key:.hold_id, verb:"captain-hold", disposition:"undetermined",
-         detail:"active captain hold has no readable Origin and Decision key record",
+         detail:("active captain hold has no readable "
+           + (if .task == null then "Origin" else "" end)
+           + (if .task == null and .key == null then " or " else "" end)
+           + (if .key == null then "Decision key" else "" end)
+           + " record"),
          summary:(.summary | trunc(160)), hold_id:.hold_id, origins:["captain-hold"],
          current_sources:["captain-hold"]}
       end

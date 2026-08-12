@@ -342,6 +342,39 @@ test_unreadable_backlog_refuses_the_ledger() {
   pass "a missing canonical backlog inventory refuses instead of silently dropping captain holds"
 }
 
+test_empty_captain_hold_set_is_not_an_unavailable_inventory() {
+  local home json
+  home=$(make_home empty-captain-holds)
+  json=$(run_ledger "$home") || fail "ledger treated an empty captain-hold set as unavailable"
+  printf '%s' "$json" | jq -e '
+    .complete == true
+    and .captain_holds_active == 0
+    and .open_decision_keys == 0
+    and .open_decisions == []
+  ' >/dev/null || fail "an empty captain-hold set was not reported as empty: $json"
+  pass "an empty captain-hold set remains distinct from unavailable inventory"
+}
+
+test_malformed_captain_hold_lineage_is_disclosed() {
+  local home json field
+  for field in Origin 'Decision key'; do
+    home=$(build_coverage_home "missing-${field// /-}")
+    sed -E "/^[[:space:]]+$field: /d" "$home/data/backlog.md" > "$home/data/backlog.next"
+    mv "$home/data/backlog.next" "$home/data/backlog.md"
+    json=$(run_ledger "$home") || fail "ledger omitted a captain hold missing $field"
+    printf '%s' "$json" | jq -e --arg field "$field" '
+      .complete == false
+      and (.open_decision_keys == (.open_decisions | length))
+      and (.open_decisions | any(
+        .hold_id == "lane-held-decision-route"
+        and .disposition == "undetermined"
+        and (.detail | contains($field))
+      ))
+    ' >/dev/null || fail "a captain hold missing $field was hidden instead of disclosed: $json"
+  done
+  pass "malformed captain-hold lineage remains enumerated and undetermined"
+}
+
 test_bold_captain_hold_reaches_the_union() {
   local home json canonical
   home=$(build_coverage_home bold-captain-hold)
@@ -428,6 +461,8 @@ test_active_hold_without_status_key_stays_enumerated
 test_blocked_captain_hold_is_not_an_actionable_source
 test_canonical_hold_set_reaches_ledger
 test_unreadable_backlog_refuses_the_ledger
+test_empty_captain_hold_set_is_not_an_unavailable_inventory
+test_malformed_captain_hold_lineage_is_disclosed
 test_bold_captain_hold_reaches_the_union
 test_unclassifiable_state_is_disclosed_not_hidden
 test_bearings_publishes_the_ledger_and_refuses_an_unbacked_count
