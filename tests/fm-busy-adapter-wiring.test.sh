@@ -180,8 +180,10 @@ test_pi_extension_stale_incarnation_rejected() {
 # drive_omp_ext <ext-path> <mode>: load the generated OMP extension in a plain
 # Node host and fire one lifecycle handler or one terminal event sequence.
 drive_omp_ext() {
-  EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" TASK_ID="${4:-}" node --input-type=module 2>&1 <<'EOF'
+  EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" TASK_ID="${4:-}" \
+    BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
@@ -201,6 +203,33 @@ const removeMarker = (path) => {
 };
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
+  case "generation-mutation-guard": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    const stopPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-stop";
+    const evidenceDir = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-evidence";
+    const turnEndPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".turn-ended";
+    await fire("agent_start");
+    const oldRun = readFileSync(runPath, "utf8");
+    const oldStop = readFileSync(stopPath, "utf8");
+    const oldEvidence = readFileSync(evidenceDir + "/" + oldRun.trim(), "utf8");
+    removeMarker(turnEndPath);
+    const newGeneration = execFileSync(process.env.BUSY_EVENT_PATH, [
+      "arm", process.env.STATE_DIR, process.env.TASK_ID,
+    ], { encoding: "utf8" }).trim();
+    await fire("session_stop");
+    if (readFileSync(process.env.STATE_DIR + "/" + process.env.TASK_ID + ".busy-gen", "utf8").trim() !== newGeneration) {
+      throw new Error("generation replacement did not remain armed");
+    }
+    if (readFileSync(runPath, "utf8") !== oldRun || readFileSync(stopPath, "utf8") !== oldStop) {
+      throw new Error("a stale extension mutated OMP run markers");
+    }
+    if (readFileSync(evidenceDir + "/" + oldRun.trim(), "utf8") !== oldEvidence) {
+      throw new Error("a stale extension mutated per-run evidence");
+    }
+    if (markerPresent(turnEndPath)) throw new Error("a stale extension published turn-end evidence");
+    if (!busyState().includes("state=busy")) throw new Error("the replacement generation did not remain busy");
+    break;
+  }
   case "agent-end": await fire("agent_end"); break;
   case "agent-end-continuation":
     await fire("agent_start");
@@ -855,8 +884,8 @@ test_omp_extension_recovers_partial_persistence() {
   pass "omp extension recovers partial run, stop, idle, and turn-end persistence"
 }
 
-test_omp_extension_ignores_only_own_evidence_temps() {
-  local rec id=busy-omp-evidence-temp out state ext run_token evidence_dir
+test_omp_extension_preserves_unverified_evidence_temps() {
+  local rec id=busy-omp-evidence-temp out state ext run_token evidence_dir gen foreign_token
   rec=$(make_spawn_case omp-evidence-temp omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -865,12 +894,14 @@ test_omp_extension_ignores_only_own_evidence_temps() {
   ext="$state/$id.omp-ext.ts"
   out=$(drive_omp_ext "$ext" agent-start) || fail "evidence-temp agent_start drive failed: $out"
   run_token=$(cat "$state/$id.omp-session-run")
+  gen=$(cat "$state/$id.busy-gen")
   evidence_dir="$state/$id.omp-session-evidence"
-  printf '%s\n' "$run_token 1 1 0" > "$evidence_dir/$run_token.123.1.tmp"
-  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "owned evidence temp recovery drive failed: $out"
+  foreign_token="$gen.999999.1.1"
+  printf '%s\n' "$run_token 1 1 0" > "$evidence_dir/$foreign_token.123.1.tmp"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "unverified evidence temp recovery drive failed: $out"
   out=$(classify omp "$id" "$state")
-  [ "$out" = "idle omp-ext" ] || fail "the extension-owned evidence temp blocked recovery, got '$out'"
-  [ ! -e "$evidence_dir/$run_token.123.1.tmp" ] || fail "the extension-owned evidence temp was not cleaned"
+  [ "$out" = "idle omp-ext" ] || fail "a same-shaped evidence temp blocked recovery, got '$out'"
+  [ -e "$evidence_dir/$foreign_token.123.1.tmp" ] || fail "an unverified evidence temp was removed"
 
   rec=$(make_spawn_case omp-foreign-evidence-temp omp "$id")
   read_case_record "$rec"
@@ -885,7 +916,39 @@ test_omp_extension_ignores_only_own_evidence_temps() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy omp-ext" ] || fail "a foreign evidence temp was accepted, got '$out'"
   [ -e "$evidence_dir/foreign.123.1.tmp" ] || fail "a foreign evidence temp was silently removed"
-  pass "omp reload ignores only extension-owned evidence temporary files"
+  pass "omp reload preserves unverified evidence temporary files"
+}
+
+test_omp_extension_rejects_evidence_path_collisions() {
+  local rec id=busy-omp-evidence-path out state ext evidence_dir collision_target
+  rec=$(make_spawn_case omp-evidence-path omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp evidence-path collision spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  evidence_dir="$state/$id.omp-session-evidence"
+  collision_target="$state/$id.evidence-target"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "evidence-path agent_start drive failed: $out"
+  rm -rf "$evidence_dir"
+  printf '%s\n' foreign-file > "$evidence_dir"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "regular-file evidence-path recovery drive failed: $out"
+  [ -f "$evidence_dir" ] || fail "a regular evidence-path collision was replaced"
+  [ "$(cat "$evidence_dir")" = foreign-file ] || fail "a regular evidence-path collision was modified"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a regular evidence-path collision must preserve busy, got '$out'"
+
+  rm -f "$evidence_dir"
+  mkdir -p "$collision_target"
+  ln -s "$collision_target" "$evidence_dir"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "symlink evidence-path recovery drive failed: $out"
+  [ -L "$evidence_dir" ] || fail "a symlink evidence-path collision was replaced"
+  [ -d "$collision_target" ] || fail "a symlink evidence-path collision target changed"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a symlink evidence-path collision must preserve busy, got '$out'"
+  pass "omp evidence recovery rejects regular-file and symlink path collisions"
 }
 
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps() {
@@ -975,11 +1038,11 @@ test_omp_extension_stale_incarnation_rejected() {
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
-  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
-  out=$(drive_omp_ext "$ext" session-stop) || fail "stale session_stop drive failed: $out"
+  out=$(drive_omp_ext "$ext" generation-mutation-guard "$state" "$id") \
+    || fail "stale generation mutation drive failed: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
-  pass "omp extension events from a superseded incarnation are rejected as stale"
+  pass "omp extension events from a superseded incarnation cannot mutate persistence"
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
@@ -1163,7 +1226,8 @@ test_omp_extension_reloads_and_reconciles_persisted_run
 test_omp_extension_rejects_unproven_timestamp_after_reload
 test_omp_extension_adopts_pending_run_before_new_start
 test_omp_extension_recovers_partial_persistence
-test_omp_extension_ignores_only_own_evidence_temps
+test_omp_extension_preserves_unverified_evidence_temps
+test_omp_extension_rejects_evidence_path_collisions
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected

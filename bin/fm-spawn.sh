@@ -2575,10 +2575,11 @@ EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
+const BUSY_GEN_PATH = "$STATE_REAL/$ID.busy-gen";
 const TURNEND = "$TURNEND";
 const RUN_TOKEN_PREFIX = "$BUSY_GEN" + ".";
 let runToken = "";
@@ -2602,23 +2603,37 @@ const trimRunHistory = () => {
     runRecords.splice(inactiveIndex, 1);
   }
 };
-const atomicWrite = (path: string, value: string) => {
-  const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
+const generationIsCurrent = () => {
   try {
-    writeFileSync(temp, value, { encoding: "utf8", mode: 0o600 });
-    renameSync(temp, path);
-  } catch (error) {
-    try { unlinkSync(temp); } catch {}
-    throw error;
+    return readFileSync(BUSY_GEN_PATH, "utf8").trim() === "$BUSY_GEN";
+  } catch {
+    return false;
   }
 };
+const requireCurrentGeneration = () => {
+  if (!generationIsCurrent()) throw new Error("stale OMP extension generation");
+};
+const atomicWrite = (path: string, value: string) => {
+  requireCurrentGeneration();
+  const temp = path + "." + process.pid + "." + String(++tempSequence) + ".tmp";
+  requireCurrentGeneration();
+  writeFileSync(temp, value, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  requireCurrentGeneration();
+  renameSync(temp, path);
+};
 const ensureEvidenceDirectory = () => {
+  requireCurrentGeneration();
+  let stat;
   try {
-    mkdirSync(SESSION_EVIDENCE_DIR, { recursive: true, mode: 0o700 });
-  } catch {
-    try { unlinkSync(SESSION_EVIDENCE_DIR); } catch {}
-    mkdirSync(SESSION_EVIDENCE_DIR, { recursive: true, mode: 0o700 });
+    stat = lstatSync(SESSION_EVIDENCE_DIR);
+  } catch (error) {
+    if ((error as any)?.code !== "ENOENT") throw error;
+    requireCurrentGeneration();
+    mkdirSync(SESSION_EVIDENCE_DIR, { mode: 0o700 });
+    stat = lstatSync(SESSION_EVIDENCE_DIR);
   }
+  if (!stat.isDirectory()) throw new Error("OMP evidence path is not a directory");
+  requireCurrentGeneration();
 };
 const evidencePath = (token: string) => SESSION_EVIDENCE_DIR + "/" + token;
 const readOptional = (path: string) => {
@@ -2641,14 +2656,13 @@ const parseRunToken = (token: string) => {
   if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
   return { processId, startedAt, sequence };
 };
-const parseAtomicTempName = (name: string) => {
+const isAtomicTempName = (name: string) => {
   const match = /^(.*)\.([0-9]+)\.([0-9]+)\.tmp$/.exec(name);
-  if (!match || !parseRunToken(match[1])) return null;
+  if (!match || !parseRunToken(match[1])) return false;
   const processId = Number(match[2]);
   const sequence = Number(match[3]);
-  if (!Number.isSafeInteger(processId) || processId <= 0) return null;
-  if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
-  return match[1];
+  return Number.isSafeInteger(processId) && processId > 0 &&
+    Number.isSafeInteger(sequence) && sequence > 0;
 };
 const writeRunEvidence = (record: {
   token: string;
@@ -2656,7 +2670,9 @@ const writeRunEvidence = (record: {
   lastEventAt: number;
   stoppedAt: number;
 }) => {
+  requireCurrentGeneration();
   ensureEvidenceDirectory();
+  requireCurrentGeneration();
   atomicWrite(
     evidencePath(record.token),
     record.token + " " + String(record.startedAt) + " " +
@@ -2681,7 +2697,7 @@ const parseRunEvidence = (line: string) => {
 };
 const busyEvent = (token: string, state: string, event: string) =>
   new Promise<void>((resolve) => {
-    if (!token || token !== runToken) {
+    if (!generationIsCurrent() || !token || token !== runToken) {
       resolve();
       return;
     }
@@ -2693,13 +2709,17 @@ const busyEvent = (token: string, state: string, event: string) =>
   });
 const touchTurnEnd = (token: string) =>
   new Promise<void>((resolve) => {
-    if (token !== runToken) {
+    if (!generationIsCurrent() || token !== runToken) {
       resolve();
       return;
     }
     execFile("touch", [TURNEND], () => resolve());
   });
 const rotateRun = () => {
+  if (!generationIsCurrent()) {
+    runToken = "";
+    return "";
+  }
   const startedAt = Date.now();
   const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
   runToken = token;
@@ -2717,6 +2737,7 @@ const rotateRun = () => {
 };
 const persistedRuns = () => {
   try {
+    if (!generationIsCurrent()) return null;
     const runLines = readOptional(SESSION_RUN).split(/\r?\n/).filter(Boolean);
     const stop = readOptional(SESSION_STOP).trim();
     const busyFields = new Set(readFileSync("$STATE_REAL/$ID.busy-state", "utf8").trim().split(/\s+/));
@@ -2733,18 +2754,18 @@ const persistedRuns = () => {
     let pointerRepair = runLines.length === 0;
     let entries: any[] = [];
     try {
+      const directory = lstatSync(SESSION_EVIDENCE_DIR);
+      if (!directory.isDirectory()) return null;
       entries = readdirSync(SESSION_EVIDENCE_DIR, { withFileTypes: true });
     } catch (error) {
       if ((error as any)?.code !== "ENOENT") return null;
     }
     for (const entry of entries) {
-      if (!entry.isFile()) return null;
-      const tempToken = parseAtomicTempName(entry.name);
-      if (tempToken) {
-        try { unlinkSync(evidencePath(entry.name)); } catch { return null; }
+      if (entry.name.endsWith(".tmp")) {
+        if (!entry.isFile() || !isAtomicTempName(entry.name)) return null;
         continue;
       }
-      if (entry.name.endsWith(".tmp") || !parseRunToken(entry.name)) return null;
+      if (!entry.isFile() || !parseRunToken(entry.name)) return null;
       const record = parseRunEvidence(readFileSync(evidencePath(entry.name), "utf8"));
       if (!record || record.token !== entry.name) return null;
       evidence.set(record.token, record);
@@ -2799,6 +2820,10 @@ const persistedRuns = () => {
   }
 };
 const adoptCurrentRun = () => {
+  if (!generationIsCurrent()) {
+    runToken = "";
+    return "";
+  }
   if (runToken) return runToken;
   const persisted = persistedRuns();
   if (!persisted) return "";
@@ -2809,7 +2834,7 @@ const adoptCurrentRun = () => {
     else if (persisted.stopMissing) atomicWrite(SESSION_STOP, "pending\n");
     if (persisted.needsBusy) {
       execFileSync("$FM_ROOT/bin/fm-busy-event.sh", [
-        "apply", "$STATE_REAL", "$ID", "busy", "--current-gen",
+        "apply", "$STATE_REAL", "$ID", "busy", "--gen", "$BUSY_GEN",
         "--run-token", persisted.token, "--source", "omp-ext", "--event", "recover-busy",
       ], { stdio: "ignore" });
     }
@@ -2869,6 +2894,7 @@ const rememberRunTimestamp = (record: {
   stoppedAt: number;
   recovered?: boolean;
 }, timestamp: number | undefined) => {
+  if (!generationIsCurrent()) return false;
   if (timestamp === undefined) return true;
   if (!timestampMatchesRun({ ...record, recovered: false }, timestamp)) return false;
   record.lastEventAt = timestamp;
@@ -2876,6 +2902,7 @@ const rememberRunTimestamp = (record: {
   return true;
 };
 const advanceCurrentRun = () => {
+  if (!generationIsCurrent()) return null;
   const active = runRecords.filter((record) => record.active);
   if (!active.length) return null;
   const current = active[active.length - 1];
@@ -2919,6 +2946,7 @@ const resolveRunToken = (event: any) => {
   return resolveUniqueActiveRunToken();
 };
 const settleRun = async (token: string, event: string, timestamp?: number) => {
+  if (!generationIsCurrent()) return;
   if (!token) return;
   const record = runRecords.find((candidate) => candidate.token === token);
   if (!record?.active) return;
