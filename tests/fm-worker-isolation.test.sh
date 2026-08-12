@@ -370,6 +370,7 @@ test_reparented_markerless_worker_is_refused() {
 
 test_primary_origin_requires_state_attestation() {
   local primary_home token out fakebin
+  require_procfs || { pass "skip: this host has no readable procfs for primary attestation proof"; return 0; }
   primary_home=$(make_primary_home "$TMP_ROOT/attestation-required")
   fakebin=$(fm_fakebin "$TMP_ROOT/attestation-required")
   printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
@@ -410,6 +411,7 @@ test_primary_origin_requires_state_attestation() {
 
 test_primary_initialization_requires_explicit_bootstrap() {
   local primary_home fakebin out status
+  require_procfs || { pass "skip: this host has no readable procfs for primary bootstrap proof"; return 0; }
   primary_home=$(make_primary_home "$TMP_ROOT/initialization-path")
   fakebin=$(fm_fakebin "$TMP_ROOT/initialization-path")
   printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
@@ -693,12 +695,24 @@ make_launch_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_launch_fakebin "$case_dir/fake")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*|*args=*)
+    pid="${@: -1}"
+    [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf 'claude\n' || printf 'bash\n'
+    ;;
+  *ppid=*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
   primary="$case_dir/primary-root"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   make_primary_root "$primary"
   token="launch-$id"
   fm_test_write_primary_attestation "$primary" \
-    "$home/state/.primary-attestation" "$token"
+    "$home/state/.primary-attestation" "$token" "$RUN_TAG"
   printf '%s|codex:launch-thread|fallback\n' "$$" > "$home/state/.lock"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
@@ -718,6 +732,7 @@ EOF
 
 test_every_verified_harness_launches_with_its_home_declaration() {
   local harness id rec out status launch expected home_real pid
+  require_procfs || { pass "skip: this host has no readable procfs for harness launch proof"; return 0; }
   for harness in claude codex opencode pi grok; do
     id="declared-$harness-b1"
     rec=$(make_launch_case "launch-$harness" "$id")
@@ -727,6 +742,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
       HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
       CODEX_THREAD_ID=launch-thread \
+      FM_FAKE_HARNESS_PID="$RUN_TAG" \
       FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -775,6 +791,7 @@ test_primary_scope_requires_authoritative_primary_proof() {
   # Named primary_home, not home: the sourced libraries carry their own `home`
   # local, and reusing the name here makes shellcheck read the two as one.
   local primary_home out token fakebin
+  require_procfs || { pass "skip: this host has no readable procfs for primary scope proof"; return 0; }
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
   fakebin=$(fm_fakebin "$TMP_ROOT/scope-home")
   printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) pid="${@: -1}"; [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf claude || printf bash ;; *ppid=*) printf "%s" "$FM_FAKE_HARNESS_PID" ;; *) exit 1 ;; esac' > "$fakebin/ps"
@@ -1095,6 +1112,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   out=$(cd "$PRIMARY_ROOT" && env -u NO_MISTAKES_GATE \
     FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
     CODEX_THREAD_ID=launch-thread \
+    FM_FAKE_HARNESS_PID="$RUN_TAG" \
     FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1115,12 +1133,14 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
 
 test_spawn_does_not_promote_an_unproven_pane_path() {
   local rec id out status
+  require_procfs || { pass "skip: this host has no readable procfs for spawn proof"; return 0; }
   id="settle-hint-d4-$RUN_TAG"
   rec=$(make_launch_case settle-hint "$id")
   read_launch_record "$rec"
   out=$(cd "$PRIMARY_ROOT" && env -u NO_MISTAKES_GATE \
     FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
     CODEX_THREAD_ID=launch-thread \
+    FM_FAKE_HARNESS_PID="$RUN_TAG" \
     FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1480,6 +1500,7 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
 
 test_teardown_retires_a_contested_lease_even_with_force() {
   local rec fakebin out status stamp token pid
+  require_procfs || { pass "skip: this host has no readable procfs for teardown proof"; return 0; }
   rec=$(make_slot_world slot-teardown)
   read_slot_world "$rec"
   fakebin=$(make_launch_fakebin "$WORLD/fake")
