@@ -73,6 +73,32 @@ const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
 );
 const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
 
+// Classifying operational text runs bin/fm-operational-input.sh through spawnSync, so it
+// costs several milliseconds per call. The pending dock re-filters every queued message on
+// each repaint and Pi repaints on every queue mutation, which would otherwise block the
+// TUI event loop for that cost times the queue length on each frame. Classification is a
+// pure function of the exact message text, so the verdict is cached per text. The cache is
+// bounded and evicts in insertion order, since queued message text is attacker-independent
+// but unbounded in principle over a long session.
+const OPERATIONAL_CLASSIFICATION_CACHE_LIMIT = 256;
+
+function createOperationalInputClassifier(
+  classify: (text: string) => boolean,
+): (text: string) => boolean {
+  const cache = new Map<string, boolean>();
+  return (text: string): boolean => {
+    const cached = cache.get(text);
+    if (cached !== undefined) return cached;
+    const verdict = classify(text);
+    if (cache.size >= OPERATIONAL_CLASSIFICATION_CACHE_LIMIT) {
+      const oldest = cache.keys().next();
+      if (!oldest.done) cache.delete(oldest.value);
+    }
+    cache.set(text, verdict);
+    return verdict;
+  };
+}
+
 // The complete Pi-private InteractiveMode surface this adapter binds. Each name is probed
 // on the prototype at install time so a Pi upgrade that renames one fails loudly.
 const PRIVATE_INTERACTIVE_MODE_MEMBERS = [
@@ -115,12 +141,14 @@ export function installCalmOperationalUserLayout(): void {
     [key: symbol]: CalmOperationalUserLayoutPatch | undefined;
   };
   const hidesOperationalInput = (): boolean => calmPresentationHides("synthetic-user");
+  const classifyOperationalInput = createOperationalInputClassifier(
+    (text) =>
+      classifyFirstmateCurrentOperationalText(text) !== undefined ||
+      text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX),
+  );
   const isOperationalInput = (text: string): boolean => {
     if (!text.includes("\u2063")) return false;
-    return (
-      classifyFirstmateCurrentOperationalText(text) !== undefined ||
-      text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX)
-    );
+    return classifyOperationalInput(text);
   };
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {

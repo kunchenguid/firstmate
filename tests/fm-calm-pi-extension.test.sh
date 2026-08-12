@@ -364,6 +364,181 @@ JS
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
+test_pi_dock_repaint_reuses_operational_classification() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm dock classification-reuse test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/dock-classification-reuse"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  cat >"$fixture/classify-probe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
+SH
+  chmod +x "$fixture/classify-probe.sh"
+  : >"$fixture/calls"
+
+  out=$(cd "$fixture/project" && \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$fixture/classify-probe.sh" \
+    FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
+    FM_OPERATIONAL_INPUT_CALLS="$fixture/calls" \
+    CALLS_FILE="$fixture/calls" \
+    node --input-type=module 2>&1 <<'JS'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const callsFile = process.env.CALLS_FILE;
+const { initTheme } = await import(
+  pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href
+);
+initTheme("dark");
+const { InteractiveMode } = await import(pathToFileURL(`${packageRoot}/dist/index.js`).href);
+const operationalInput = await import("./.pi/extensions/lib/fm-operational-input.ts");
+const visibility = await import("./.pi/extensions/lib/fm-calm-visibility.ts");
+const layout = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+
+const classifyCalls = () => {
+  const raw = readFileSync(callsFile, "utf8").trim();
+  if (!raw) return 0;
+  return raw.split("\n").filter((line) => line === "kind").length;
+};
+
+const operational = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/reuse-probe.status",
+);
+const genuine = "CAPTAIN_QUEUED_REUSE_PROBE";
+
+layout.installCalmOperationalUserLayout();
+visibility.setCalmPresentation(true);
+
+const container = {
+  children: [],
+  clear() {
+    this.children = [];
+  },
+  addChild(component) {
+    this.children.push(component);
+  },
+};
+const mode = Object.create(InteractiveMode.prototype, {
+  pendingMessagesContainer: { value: container, writable: true },
+  session: {
+    value: {
+      getSteeringMessages: () => [operational],
+      getFollowUpMessages: () => [genuine, operational],
+    },
+    writable: true,
+  },
+  compactionQueuedMessages: { value: [], writable: true },
+  getAppKeyDisplay: { value: () => "Option+Up", writable: true },
+});
+const dockText = () =>
+  container.children.flatMap((component) => component.render?.(180) ?? []).join("\n");
+
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+const firstPaintCalls = classifyCalls();
+const firstPaintText = dockText();
+if (firstPaintCalls === 0) {
+  throw new Error("the dock filter never classified the queued operational message");
+}
+if (firstPaintText.includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("Calm left the operational row visible in the pending dock");
+}
+if (!firstPaintText.includes(genuine)) {
+  throw new Error("Calm hid the genuine queued captain message");
+}
+
+// Repaint the unchanged queue. Pi re-renders the dock on every queue mutation, so a
+// classifier subprocess per message per repaint would block the TUI event loop.
+writeFileSync(callsFile, "");
+for (let repaint = 0; repaint < 5; repaint += 1) {
+  mode.updatePendingMessagesDisplay();
+}
+const repaintCalls = classifyCalls();
+if (repaintCalls !== 0) {
+  throw new Error(
+    `repainting an unchanged pending dock re-ran the classifier ${repaintCalls} time(s) instead of reusing the cached verdict`,
+  );
+}
+if (dockText() !== firstPaintText) {
+  throw new Error("cached classification changed what the pending dock rendered");
+}
+
+// A message the cache has not seen must still be classified exactly once.
+const fresh = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/reuse-probe-2.status",
+);
+mode.session = {
+  getSteeringMessages: () => [operational, fresh],
+  getFollowUpMessages: () => [genuine],
+};
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+if (classifyCalls() !== 1) {
+  throw new Error(
+    `a newly queued operational message should be classified exactly once, saw ${classifyCalls()}`,
+  );
+}
+if (dockText().includes("reuse-probe-2")) {
+  throw new Error("Calm left the newly queued operational row visible in the pending dock");
+}
+
+// The cache must stay bounded: after evicting far more distinct messages than it can
+// hold, the oldest entry is recomputed rather than retained forever.
+const flood = [];
+for (let i = 0; i < 300; i += 1) {
+  flood.push(
+    operationalInput.encodeFirstmateOperationalInput("watcher", `FLOOD WAKE ${i}`),
+  );
+}
+mode.session = {
+  getSteeringMessages: () => flood,
+  getFollowUpMessages: () => [],
+};
+mode.updatePendingMessagesDisplay();
+mode.session = {
+  getSteeringMessages: () => [operational],
+  getFollowUpMessages: () => [],
+};
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+if (classifyCalls() !== 1) {
+  throw new Error(
+    `the classification cache is unbounded: the evicted entry should be recomputed once, saw ${classifyCalls()}`,
+  );
+}
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("an evicted-then-recomputed message stopped being hidden");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm dock classification-reuse failed: $out"
+  [ -z "$out" ] || fail "Pi calm dock classification-reuse printed output: $out"
+  pass "repainting the pending dock reuses cached operational classification, still classifies new messages once, and keeps the cache bounded"
+}
+
 test_pi_private_member_probe_fails_loudly() {
   local fixture out status
   if ! command -v node >/dev/null 2>&1; then
@@ -3880,6 +4055,7 @@ test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_pi_private_member_probe_fails_loudly
+test_pi_dock_repaint_reuses_operational_classification
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle

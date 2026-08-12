@@ -447,6 +447,9 @@ That was already true of the pre-existing `addMessageToChat` path; the dock work
 The adapter declares that surface in one list, probes every member by name at install time, and throws a named diagnostic when any is missing, so a Pi upgrade that renames one fails loudly instead of silently leaving operational rows visible.
 `getMarkdownTransformers` is part of that probed list rather than an optional call, because Pi's `UserMessageComponent` defaults `markdownTransformers` to `[]`: a silently absent member would strip extension markdown transformers from Calm-rendered operational rows while ordinary Pi-rendered rows kept them.
 A dedicated check deletes each of the five members from the real Pi prototype in turn and asserts that installation aborts with a diagnostic naming that member.
+Classifying operational text shells out to `bin/fm-operational-input.sh` through `spawnSync`, measured at roughly 9ms per call, and Pi repaints the dock on every queue mutation.
+Re-filtering each queued message on each repaint would therefore block the TUI event loop for that cost times the queue length, so the adapter caches the verdict per exact message text behind the existing U+2063 fast path.
+Classification is a pure function of that text, so the cache changes only how often the subprocess runs and never which rows are hidden; it is bounded at 256 entries and evicts in insertion order so a long session cannot grow it without limit.
 The real TUI regression holds an operational follow-up and a genuine Captain follow-up during an active run, proves only the operational dock row is hidden, and then verifies unchanged delivery, ordering, session persistence, restart behavior, Calm-off rendering, and export behavior.
 Claude, Codex, OpenCode, Grok, tmux, Herdr, Zellij, Orca, and cmux do not load this Pi-only presentation adapter, so their delivery and rendering surfaces remain unchanged.
 
@@ -454,6 +457,7 @@ The component-level dock check builds its fixture with `Object.create(Interactiv
 A plain object literal cannot stand in here: Pi's dock renderer calls that member on `this`, and `session` is a getter-only accessor on the prototype.
 The dock renders each queued message through a single-line `TruncatedText`, so the assertions match a first-line marker of the operational envelope rather than the whole multi-line string, and every dock assertion is gated on Pi's own dequeue hint so a missing repaint fails instead of passing vacuously.
 Removing only the two queue filters from the adapter makes `tests/fm-calm-pi-extension.test.sh` fail with `Calm did not filter current operational text from the pending-message dock`, and restoring them makes it pass, so the regression is genuinely covered.
+The classification-reuse check wraps the classifier script in a counting probe and drives the real dock renderer: it asserts the first paint hides the operational row, that five further repaints of an unchanged queue spawn the classifier zero times and render identically, that a newly queued message is still classified exactly once, and that flooding the cache past its bound forces the evicted entry to be recomputed while staying hidden.
 
 The commands below were run with `FM_PI_PACKAGE_DIR` pointed at the installed Pi 0.84.1 package so no Pi-dependent block was skipped.
 
