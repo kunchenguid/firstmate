@@ -151,6 +151,37 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_large_backlog_json_is_file_fed() {
+  local home out summary
+  home=$(make_home large-backlog)
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    printf '%s' '- [x] oversized-done - '
+    dd if=/dev/zero bs=1024 count=140 2>/dev/null | tr '\000' x
+    printf ' (repo: alpha) (kind: ship) (done 2026-08-12)\n'
+  } > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must accept backlog JSON larger than one argv entry"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == 1
+      and .backlog.records[0].id == "oversized-done"
+      and (.backlog.records[0].title | length) > 131072
+      and (.tasks | length) == 0
+  ' >/dev/null || fail "large-backlog snapshot output changed or truncated"
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "secondmate summary must accept backlog JSON larger than one argv entry"
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == true
+      and .counts.landed == 1
+      and (.landed | length) == 1
+      and .landed[0].id == "oversized-done"
+  ' >/dev/null || fail "large-backlog secondmate summary changed or truncated"
+  pass "fleet snapshot file-feeds backlog JSON larger than the argv limit"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -780,6 +811,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_large_backlog_json_is_file_fed
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
