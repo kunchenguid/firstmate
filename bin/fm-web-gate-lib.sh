@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
 # Shared sourced contract for website deployment completion evidence.
-# fm-brief.sh and fm-promote.sh write the canonical web gate into ship briefs,
-# while fm-spawn.sh validates its surface declaration and stamped gate before launch.
+# fm-brief.sh and fm-promote.sh write the canonical block into a ship brief's
+# Definition-of-done section, and fm-spawn.sh validates it there before launch.
 
-fm_web_gate_contract() {
-  printf '%s\n' 'Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot'
-}
-
-fm_web_gate_provenance_placeholder() {
-  printf '%s\n' 'Web gate provenance: surface=web sha256:pending'
-}
-
-fm_web_gate_body_text() {
+# The canonical gate lines a web ship brief carries directly under its surface
+# declaration. Sole owner of the accepted web completion evidence.
+fm_web_gate_text() {
   cat <<'EOF'
+Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot
 ## Website deployment completion gate
 This is a website or web-deployment ship task, so the task is not complete until firstmate can accept all of the following evidence together:
 - Verify the deployed revision against the real custom production domain, never only on a preview or staging URL.
@@ -25,85 +20,59 @@ Do not append a done status or claim completion when any visual, marker, custom-
 EOF
 }
 
-fm_web_gate_hash_stream() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{ print $1 }'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{ print $1 }'
-  else
-    return 1
-  fi
+# The whole operative declaration for a surface, written and validated as one unit.
+fm_web_gate_block() {  # <web|non-web>
+  printf 'Surface contract: %s\n' "$1"
+  [ "$1" = web ] && fm_web_gate_text
+  return 0
 }
 
-fm_web_gate_body_hash() {
-  fm_web_gate_body_text | fm_web_gate_hash_stream
-}
-
-fm_web_gate_body_present() {
-  local brief=$1 expected
-  expected=$(fm_web_gate_body_text)
-  awk -v expected="$expected" '
-    BEGIN {
-      wanted_count = split(expected, wanted, "\n")
-      wanted_index = 1
-      matches = 0
-    }
+# One fence-aware structural pass over a ship brief's operative Definition-of-done
+# section. Fenced lines and every line outside that section are ignored, so a
+# marker quoted in the task description or inside a code fence never satisfies the
+# gate and a whole-file match can no longer stand in for operative placement.
+#   check            prints the operative surface; fails when the brief has no
+#                    single unfenced "# Definition of done" heading, no single
+#                    operative "Surface contract:" line, an unknown surface, or a
+#                    web declaration not followed by the canonical gate lines.
+#   insert:<surface> reprints the brief with that canonical block added at the
+#                    operative boundary.
+fm_web_gate_scan() {  # <check|insert:web|insert:non-web> <brief>
+  awk -v mode="$1" '
+    NR == FNR { gate[++gn] = $0; next }
     {
-      if ($0 == wanted[wanted_index]) {
-        wanted_index++
-        if (wanted_index > wanted_count) {
-          matches++
-          wanted_index = 1
-        }
-      } else if ($0 == wanted[1]) {
-        wanted_index = 2
-      } else {
-        wanted_index = 1
-      }
+      raw[++ln] = $0
+      if ($0 ~ /^(```|~~~)/) { fenced[ln] = 1; fence = !fence; next }
+      fenced[ln] = fence
+      if (fence) next
+      if ($0 == "# Definition of done") { dod = ln; dods++ }
+      else if (dod && !stop && $0 ~ /^# /) stop = ln
     }
-    END { exit matches == 1 ? 0 : 1 }
-  ' "$brief"
-}
-
-fm_web_gate_stamp_file() {
-  local brief=$1 digest tmp
-  digest=$(fm_web_gate_body_hash) || return 1
-  tmp=$(mktemp "$brief.tmp.XXXXXX") || return 1
-  if ! sed "s/^Web gate provenance: .*/Web gate provenance: surface=web sha256:$digest/" "$brief" > "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  mv "$tmp" "$brief"
-}
-
-fm_web_gate_provenance_present() {
-  local brief=$1 count actual expected
-  count=$(grep -Ec '^Web gate provenance: surface=web sha256:[0-9a-fA-F]{64}$' "$brief" || true)
-  [ "$count" -eq 1 ] || return 1
-  fm_web_gate_body_present "$brief" || return 1
-  actual=$(sed -n 's/^Web gate provenance: //p' "$brief")
-  expected=$(fm_web_gate_body_hash) || return 1
-  [ "$actual" = "surface=web sha256:$expected" ]
-}
-
-fm_web_gate_surface_line_count() {
-  grep -Ec '^Surface contract:' "$1" || true
-}
-
-fm_web_gate_surface_contract() {
-  local brief=$1 count declared
-  count=$(fm_web_gate_surface_line_count "$brief")
-  if fm_web_gate_provenance_present "$brief"; then
-    [ "$count" -eq 1 ] || return 1
-    declared=$(sed -n 's/^Surface contract: //p' "$brief")
-    [ "$declared" = web ] || return 1
-    printf '%s\n' web
-    return 0
-  fi
-  [ "$count" -eq 1 ] || return 1
-  declared=$(sed -n 's/^Surface contract: //p' "$brief")
-  case "$declared" in
-    web|non-web) printf '%s\n' "$declared" ;;
-    *) return 1 ;;
-  esac
+    END {
+      if (dods != 1) exit 1
+      if (mode ~ /^insert:/) {
+        surface = substr(mode, 8)
+        for (i = 1; i <= ln; i++) {
+          print raw[i]
+          if (i != dod) continue
+          print "Surface contract: " surface
+          if (surface == "web") for (j = 1; j <= gn; j++) print gate[j]
+        }
+        exit 0
+      }
+      if (!stop) stop = ln + 1
+      for (i = dod + 1; i < stop; i++) if (!fenced[i]) operative[++n] = raw[i]
+      for (i = 1; i <= n; i++)
+        if (operative[i] ~ /^Surface contract: /) {
+          declarations++
+          at = i
+          surface = substr(operative[i], 19)
+        }
+      if (declarations != 1) exit 1
+      if (surface != "web" && surface != "non-web") exit 1
+      if (surface == "web")
+        for (j = 1; j <= gn; j++) if (operative[at + j] != gate[j]) exit 1
+      print surface
+    }
+  ' <(fm_web_gate_text) "$2"
 }

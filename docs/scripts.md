@@ -111,7 +111,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with explicit delivery mode and web or non-web surface declaration |
-| `fm-web-gate-lib.sh`     | Provide the canonical website deployment completion gate and its stamped brief validation helpers |
+| `fm-web-gate-lib.sh`     | Provide the canonical website deployment completion gate and the fence-aware structural check that keeps it operative |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |

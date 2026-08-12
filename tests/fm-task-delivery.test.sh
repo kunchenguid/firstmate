@@ -202,7 +202,8 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status
+  local home meta out status brief brief_before gate_line done_line
+  local web_bad_meta web_conflict_meta web_fenced_meta web_meta
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
@@ -247,62 +248,45 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_contains "$out" "ship mode=direct-PR yolo=on surface=non-web" "promotion output did not carry the decided surface"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
 
+  # A brief that declares web without the canonical gate is not repaired into one:
+  # the promotion refuses and leaves the brief exactly as it found it.
   web_bad_meta="$home/state/promote-web-bad-d2.meta"
   printf 'window=fm-promote-web-bad-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_bad_meta"
   mkdir -p "$home/data/promote-web-bad-d2"
-  printf '# Definition of done\nSurface contract: web\nWeb gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot\n' > "$home/data/promote-web-bad-d2/brief.md"
+  printf '# Definition of done\nSurface contract: web\nScout work complete.\n' > "$home/data/promote-web-bad-d2/brief.md"
+  brief_before=$(cat "$home/data/promote-web-bad-d2/brief.md")
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-bad-d2 --mode local-only --yolo off --web 2>&1)
   status=$?
-  expect_code 1 "$status" "promotion with an incomplete web gate body should fail"
-  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an incomplete web gate body"
+  expect_code 1 "$status" "promotion of a web declaration with no canonical gate should fail"
+  assert_contains "$out" "conflicting or incomplete surface contract" "promotion did not reject an incomplete web gate"
   assert_grep 'kind=scout' "$web_bad_meta" "incomplete web promotion changed the task record"
+  [ "$(cat "$home/data/promote-web-bad-d2/brief.md")" = "$brief_before" ] \
+    || fail "incomplete web promotion modified the brief"
 
-  web_contract_meta="$home/state/promote-web-contract-d2.meta"
-  printf 'window=fm-promote-web-contract-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_contract_meta"
-  mkdir -p "$home/data/promote-web-contract-d2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" promote-web-contract-d2 firstmate --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for promotion contract test should succeed"
-  sed -i 's/^Web gate contract:.*/Web gate contract: wrong/' "$home/data/promote-web-contract-d2/brief.md"
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-contract-d2 --mode no-mistakes --yolo off --web 2>&1)
+  web_conflict_meta="$home/state/promote-web-conflict-d2.meta"
+  printf 'window=fm-promote-web-conflict-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_conflict_meta"
+  mkdir -p "$home/data/promote-web-conflict-d2"
+  printf '# Definition of done\nSurface contract: non-web\nScout work complete.\n' > "$home/data/promote-web-conflict-d2/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-conflict-d2 --mode local-only --yolo off --web 2>&1)
   status=$?
-  expect_code 1 "$status" "promotion with an invalid web gate contract should fail"
-  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an invalid web gate contract"
-  assert_grep 'kind=scout' "$web_contract_meta" "invalid web contract promotion changed the task record"
+  expect_code 1 "$status" "promotion disagreeing with the brief's surface should fail"
+  assert_contains "$out" "disagrees with the brief's operative surface contract non-web" \
+    "promotion did not reject a surface disagreement"
+  assert_grep 'kind=scout' "$web_conflict_meta" "conflicting web promotion changed the task record"
 
-  web_provenance_meta="$home/state/promote-web-provenance-d2.meta"
-  printf 'window=fm-promote-web-provenance-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_provenance_meta"
-  mkdir -p "$home/data/promote-web-provenance-d2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" promote-web-provenance-d2 firstmate --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for promotion provenance test should succeed"
-  sed -i 's/^HTTP 200, a preview URL, or bare reachability alone is explicitly rejected/HTTP 200, a preview URL, or bare reachability alone is accepted/' "$home/data/promote-web-provenance-d2/brief.md"
-  brief_before=$(cat "$home/data/promote-web-provenance-d2/brief.md")
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-provenance-d2 --mode no-mistakes --yolo off --web 2>&1)
+  # A scout report that quotes the gate inside a fence has not declared anything:
+  # the promotion still writes a real operative declaration at the boundary.
+  web_fenced_meta="$home/state/promote-web-fenced-d2.meta"
+  printf 'window=fm-promote-web-fenced-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_fenced_meta"
+  mkdir -p "$home/data/promote-web-fenced-d2"
+  brief="$home/data/promote-web-fenced-d2/brief.md"
+  printf '# Task\n```markdown\nSurface contract: web\n```\n\n# Definition of done\nScout work complete.\n' > "$brief"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-fenced-d2 --mode local-only --yolo off --web 2>&1)
   status=$?
-  expect_code 1 "$status" "promotion with an edited web gate body should fail"
-  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an edited web gate body"
-  assert_grep 'kind=scout' "$web_provenance_meta" "edited web gate promotion changed the task record"
-  [ "$(cat "$home/data/promote-web-provenance-d2/brief.md")" = "$brief_before" ] \
-    || fail "invalid web provenance promotion modified the brief"
-
-  web_surface_meta="$home/state/promote-web-surface-d2.meta"
-  printf 'window=fm-promote-web-surface-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_surface_meta"
-  mkdir -p "$home/data/promote-web-surface-d2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" promote-web-surface-d2 firstmate --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for fenced surface test should succeed"
-  brief="$home/data/promote-web-surface-d2/brief.md"
-  sed -i '/^Web gate provenance:/d' "$brief"
-  awk '/^Surface contract: web$/ { print "```markdown"; print; print "```"; next } { print }' \
-    "$brief" > "$brief.tmp"
-  mv "$brief.tmp" "$brief"
-  brief_before=$(cat "$brief")
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-surface-d2 --mode no-mistakes --yolo off --web 2>&1)
-  status=$?
-  expect_code 1 "$status" "promotion with a fenced web surface and no provenance should fail"
-  assert_contains "$out" "lacks the canonical Web gate contract or body" \
-    "promotion did not reject a fenced web surface without provenance"
-  assert_grep 'kind=scout' "$web_surface_meta" "fenced web surface promotion changed the task record"
-  [ "$(cat "$brief")" = "$brief_before" ] \
-    || fail "fenced web surface promotion modified the brief"
+  expect_code 0 "$status" "promotion over a fenced quotation should succeed"
+  assert_grep 'kind=ship' "$web_fenced_meta" "fenced-quotation promotion did not restore ship teardown protection"
+  [ "$(grep -c '^Surface contract: web$' "$brief")" = 2 ] \
+    || fail "fenced-quotation promotion did not add its own operative declaration"
 
   web_meta="$home/state/promote-web-d2.meta"
   printf 'window=fm-promote-web-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_meta"

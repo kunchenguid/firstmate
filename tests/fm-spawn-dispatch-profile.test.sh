@@ -87,7 +87,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'Delivery contract: mode=no-mistakes\nSurface contract: non-web\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf 'Delivery contract: mode=no-mistakes\n# Definition of done\nSurface contract: non-web\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -132,143 +132,87 @@ run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
 }
 
-test_ship_spawn_rejects_missing_surface_contract() {
-  local rec id out status
+# The web gate is operative only inside the Definition-of-done section, so these
+# refusals are what stops a marker that merely exists somewhere in the brief.
+expect_web_gate_refusal() {  # <id> <label>
+  local out status
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$1" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "$2 must refuse the spawn"
+  assert_contains "$out" "must carry exactly one operative surface contract in its Definition of done section" \
+    "$2 refusal did not explain the operative boundary"
+  assert_absent "$HOME_DIR/state/$1.meta" "$2 refusal still wrote task metadata"
+}
+
+scaffold_web_brief() {  # <id> <label>
+  rm -f "$HOME_DIR/data/$1/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$1" website --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web brief scaffold for the $2 case should succeed"
+}
+
+test_ship_spawn_rejects_invalid_surface_contract() {
+  local id
   id=profile-missing-surface-z9
-  rec=$(make_spawn_case missing-surface claude "$id")
-  read_case_record "$rec"
-  printf 'Delivery contract: mode=no-mistakes\n' > "$HOME_DIR/data/$id/brief.md"
+  read_case_record "$(make_spawn_case missing-surface claude "$id")"
+  printf '# Definition of done\nDelivery contract: mode=no-mistakes\n' > "$HOME_DIR/data/$id/brief.md"
+  expect_web_gate_refusal "$id" "a ship brief with no surface contract"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "ship spawn with no surface contract must fail"
-  assert_contains "$out" "must contain exactly one Surface contract" \
-    "missing surface contract refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "missing surface contract refusal still wrote task metadata"
-  pass "fm-spawn: missing ship surface contract refuses before launch"
+  id=profile-duplicate-surface-z9
+  read_case_record "$(make_spawn_case duplicate-surface claude "$id")"
+  printf '# Definition of done\nSurface contract: non-web\nSurface contract: non-web\n' \
+    > "$HOME_DIR/data/$id/brief.md"
+  expect_web_gate_refusal "$id" "a ship brief declaring its surface twice"
+  pass "fm-spawn: missing or duplicated ship surface contract refuses before launch"
 }
 
-test_ship_spawn_rejects_stamped_web_without_surface_contract() {
-  local rec id out rc brief
-  id=profile-stamped-missing-surface-z9
-  rec=$(make_spawn_case stamped-missing-surface claude "$id")
-  read_case_record "$rec"
-  rm -f "$HOME_DIR/data/$id/brief.md"
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for stamped missing-surface test should succeed"
-  brief="$HOME_DIR/data/$id/brief.md"
-  sed -i '/^Surface contract: web$/d' "$brief"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  rc=$?
-  expect_code 1 "$rc" "stamped web brief without a surface contract must fail"
-  assert_contains "$out" "must contain exactly one Surface contract" \
-    "stamped missing surface refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "stamped missing surface refusal still wrote task metadata"
-  pass "fm-spawn: stamped web brief without surface contract refuses before launch"
-}
-
-test_ship_spawn_rejects_web_without_visual_gate_contract() {
-  local rec id out status
-  id=profile-missing-web-gate-z9
-  rec=$(make_spawn_case missing-web-gate claude "$id")
-  read_case_record "$rec"
-  printf 'Delivery contract: mode=no-mistakes\nSurface contract: web\n' > "$HOME_DIR/data/$id/brief.md"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "web ship spawn without its visual gate contract must fail"
-  assert_contains "$out" "declares web but lacks the canonical Web gate body" \
-    "web gate contract refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "web gate contract refusal still wrote task metadata"
-  pass "fm-spawn: web surface without visual gate contract refuses before launch"
-}
-
-test_ship_spawn_rejects_incomplete_web_gate_body() {
-  local rec id out status brief
-  id=profile-incomplete-web-gate-z9
-  rec=$(make_spawn_case incomplete-web-gate claude "$id")
-  read_case_record "$rec"
-  printf 'Delivery contract: mode=no-mistakes\nSurface contract: web\nWeb gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot\n' > "$HOME_DIR/data/$id/brief.md"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "ship spawn with an incomplete web gate body must fail"
-  assert_contains "$out" "lacks the canonical Web gate body" \
-    "incomplete web gate body refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "incomplete web gate body refusal still wrote task metadata"
-
-  id=profile-edited-web-provenance-z9
-  rec=$(make_spawn_case edited-web-provenance claude "$id")
-  read_case_record "$rec"
-  rm -f "$HOME_DIR/data/$id/brief.md"
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for provenance test should succeed"
-  brief="$HOME_DIR/data/$id/brief.md"
-  sed -i 's/^HTTP 200, a preview URL, or bare reachability alone is explicitly rejected/HTTP 200, a preview URL, or bare reachability alone is accepted/' "$brief"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "ship spawn with an edited web gate body must fail"
-  assert_contains "$out" "lacks the canonical Web gate body" \
-    "edited web gate body refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "edited web gate body refusal still wrote task metadata"
-
+# Whole-file matching accepted these: the declaration and the canonical gate text
+# are both present, just not where the worker's completion contract lives.
+test_ship_spawn_rejects_non_operative_web_markers() {
+  local id brief
   id=profile-fenced-web-gate-z9
-  rec=$(make_spawn_case fenced-web-gate claude "$id")
-  read_case_record "$rec"
-  rm -f "$HOME_DIR/data/$id/brief.md"
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for fenced-body test should succeed"
+  read_case_record "$(make_spawn_case fenced-web-gate claude "$id")"
+  scaffold_web_brief "$id" fenced-marker
   brief="$HOME_DIR/data/$id/brief.md"
-  sed -i '/^Web gate provenance:/d' "$brief"
   awk '
-    /^Surface contract: web$/ { print "```markdown"; print; print "```"; next }
+    /^Surface contract: web$/ { print "```markdown" }
+    /^Do not append a done status/ { print; print "```"; next }
     { print }
   ' "$brief" > "$brief.tmp"
   mv "$brief.tmp" "$brief"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "ship spawn with a fenced web surface and no provenance must fail"
-  assert_contains "$out" "lacks the canonical Web gate body" \
-    "fenced web surface refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "fenced web surface refusal still wrote task metadata"
+  expect_web_gate_refusal "$id" "a fully fenced web gate with otherwise valid text"
 
-  id=profile-missing-web-gate-body-z9
-  rec=$(make_spawn_case missing-web-gate-body claude "$id")
-  read_case_record "$rec"
-  rm -f "$HOME_DIR/data/$id/brief.md"
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for missing-body test should succeed"
+  id=profile-task-only-web-gate-z9
+  read_case_record "$(make_spawn_case task-only-web-gate claude "$id")"
+  scaffold_web_brief "$id" task-only-marker
   brief="$HOME_DIR/data/$id/brief.md"
-  awk '
-    /^## Website deployment completion gate$/ { skip = 1; next }
-    skip && /^Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing\.$/ { skip = 0; next }
-    !skip { print }
-  ' "$brief" > "$brief.tmp"
-  mv "$brief.tmp" "$brief"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "ship spawn with a missing web gate body must fail"
-  assert_contains "$out" "lacks the canonical Web gate body" \
-    "missing web gate body refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" "missing web gate body refusal still wrote task metadata"
-  pass "fm-spawn: incomplete web gate body refuses before launch"
+  sed -i '0,/^# Definition of done$/s//# Background the captain pasted/' "$brief"
+  printf '# Definition of done\nDelivery contract: mode=no-mistakes\nShip it.\n' >> "$brief"
+  expect_web_gate_refusal "$id" "a web gate quoted outside the Definition of done section"
+  pass "fm-spawn: fenced or task-description web markers never satisfy the gate"
+}
+
+test_ship_spawn_rejects_web_without_canonical_gate() {
+  local id brief
+  id=profile-missing-web-gate-z9
+  read_case_record "$(make_spawn_case missing-web-gate claude "$id")"
+  printf '# Definition of done\nSurface contract: web\nDelivery contract: mode=no-mistakes\n' \
+    > "$HOME_DIR/data/$id/brief.md"
+  expect_web_gate_refusal "$id" "a web declaration with no gate"
+
+  id=profile-edited-web-gate-z9
+  read_case_record "$(make_spawn_case edited-web-gate claude "$id")"
+  scaffold_web_brief "$id" edited-gate
+  brief="$HOME_DIR/data/$id/brief.md"
+  sed -i 's/^HTTP 200, a preview URL, or bare reachability alone is explicitly rejected/HTTP 200, a preview URL, or bare reachability alone is accepted/' "$brief"
+  expect_web_gate_refusal "$id" "a web gate whose evidence bar was weakened"
+  pass "fm-spawn: a web declaration without the canonical gate refuses before launch"
 }
 
 test_ship_spawn_accepts_compliant_web_gate() {
-  local rec id out status
+  local id out status
   id=profile-compliant-web-gate-z9
-  rec=$(make_spawn_case compliant-web-gate claude "$id")
-  read_case_record "$rec"
-  rm -f "$HOME_DIR/data/$id/brief.md"
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for spawn acceptance should succeed"
+  read_case_record "$(make_spawn_case compliant-web-gate claude "$id")"
+  scaffold_web_brief "$id" acceptance
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -1068,10 +1012,9 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
-test_ship_spawn_rejects_missing_surface_contract
-test_ship_spawn_rejects_stamped_web_without_surface_contract
-test_ship_spawn_rejects_web_without_visual_gate_contract
-test_ship_spawn_rejects_incomplete_web_gate_body
+test_ship_spawn_rejects_invalid_surface_contract
+test_ship_spawn_rejects_non_operative_web_markers
+test_ship_spawn_rejects_web_without_canonical_gate
 test_ship_spawn_accepts_compliant_web_gate
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout

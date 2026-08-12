@@ -41,9 +41,10 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
-# Ship briefs also record a fixed machine-readable "Surface contract: web|non-web"
-# line. bin/fm-spawn.sh refuses to launch a ship brief with a missing or invalid
-# surface contract.
+# Ship briefs also open their Definition of done with a fixed machine-readable
+# "Surface contract: web|non-web" line, and a web brief carries the canonical
+# website completion gate directly under it. bin/fm-spawn.sh refuses to launch a
+# ship brief whose declaration is missing, invalid, or not at that boundary.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -439,15 +440,9 @@ if [ "$WEB" -eq 1 ]; then
 else
   SURFACE=non-web
 fi
-DOD=${DOD/"Delivery contract: mode=$MODE"/"Delivery contract: mode=$MODE"$'\n'"Surface contract: $SURFACE"}
-if [ "$WEB" -eq 1 ]; then
-  DOD=${DOD/"Surface contract: web"/"Surface contract: web"$'\n'"$(fm_web_gate_contract)"}
-fi
-
-if [ "$WEB" -eq 1 ]; then
-  DOD=${DOD/"# Definition of done"/"# Definition of done"$'\n'"$(fm_web_gate_body_text)"}
-  DOD=${DOD/"Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot"/"Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot"$'\n'"$(fm_web_gate_provenance_placeholder)"}
-fi
+# The declaration goes at the Definition-of-done boundary, which is the only
+# placement bin/fm-spawn.sh accepts as operative.
+DOD=${DOD/"# Definition of done"/"# Definition of done"$'\n'"$(fm_web_gate_block "$SURFACE")"}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -501,7 +496,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-if [ "$WEB" -eq 1 ]; then
-  fm_web_gate_stamp_file "$BRIEF" || { echo "error: could not stamp the web gate provenance" >&2; exit 1; }
-fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

@@ -141,7 +141,7 @@ add_ship_task() {
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
-  printf '# brief for %s\n\nSurface contract: non-web\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  printf '# brief for %s\n\n# Definition of done\nSurface contract: non-web\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"

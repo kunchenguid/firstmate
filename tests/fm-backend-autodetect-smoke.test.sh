@@ -90,7 +90,7 @@ mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
 # Backend auto-detection is what is under test here, so opt out of the default-on
 # presentation projection and keep the assertions on the flat per-home workspace.
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
-printf 'trivial autodetect-smoke brief: nothing to do.\nSurface contract: non-web\n' > "$DATA/$ID/brief.md"
+printf 'trivial autodetect-smoke brief: nothing to do.\n# Definition of done\nSurface contract: non-web\n' > "$DATA/$ID/brief.md"
 
 PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"

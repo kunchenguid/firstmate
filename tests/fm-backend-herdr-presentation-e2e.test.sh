@@ -482,18 +482,18 @@ touch "$HOME_DIR/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
 printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
-printf 'Projection anchor fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/anchor/brief.md"
-printf 'Projection E2E fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/shape/brief.md"
-printf 'Projection ordering fixture A.\nSurface contract: non-web\n' > "$HOME_DIR/data/order-a/brief.md"
-printf 'Projection ordering fixture B.\nSurface contract: non-web\n' > "$HOME_DIR/data/order-b/brief.md"
-printf 'Projection ordering failure fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/order-fail/brief.md"
-printf 'Hi Bit-style projection restart fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/fm-hibit-resume-r1/brief.md"
-printf 'Wheelhouse-style projection restart fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/wheelhouse-healing-r1/brief.md"
-printf 'Projection active seeded fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/active-seeded/brief.md"
-printf 'Projection abort fixture A.\nSurface contract: non-web\n' > "$HOME_DIR/data/abort-a/brief.md"
-printf 'Projection abort fixture B.\nSurface contract: non-web\n' > "$HOME_DIR/data/abort-b/brief.md"
-printf 'Projection lock contention fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/lock-contended/brief.md"
-printf 'Projection default-on fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/default-on/brief.md"
+printf 'Projection anchor fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/anchor/brief.md"
+printf 'Projection E2E fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/shape/brief.md"
+printf 'Projection ordering fixture A.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/order-a/brief.md"
+printf 'Projection ordering fixture B.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/order-b/brief.md"
+printf 'Projection ordering failure fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/order-fail/brief.md"
+printf 'Hi Bit-style projection restart fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/fm-hibit-resume-r1/brief.md"
+printf 'Wheelhouse-style projection restart fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/wheelhouse-healing-r1/brief.md"
+printf 'Projection active seeded fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/active-seeded/brief.md"
+printf 'Projection abort fixture A.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/abort-a/brief.md"
+printf 'Projection abort fixture B.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/abort-b/brief.md"
+printf 'Projection lock contention fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/lock-contended/brief.md"
+printf 'Projection default-on fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/default-on/brief.md"
 make_project "$PROJECT_DIR"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
@@ -899,8 +899,8 @@ pass "real Herdr lab: concurrent projected cleanup is serialized and leaves acti
 # proves the shared presentation lock keeps concurrent operations composable.
 for ROUND in 1 2 3; do
   mkdir -p "$HOME_DIR/data/focus-$ROUND-a" "$HOME_DIR/data/focus-$ROUND-b"
-  printf 'Projection focus wave %s fixture A.\nSurface contract: non-web\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-a/brief.md"
-  printf 'Projection focus wave %s fixture B.\nSurface contract: non-web\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-b/brief.md"
+  printf 'Projection focus wave %s fixture A.\n# Definition of done\nSurface contract: non-web\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-a/brief.md"
+  printf 'Projection focus wave %s fixture B.\n# Definition of done\nSurface contract: non-web\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-b/brief.md"
   WAVE_LOG_START=$(log_line_count)
   WAVE_FOCUS_START=$(focus_audit_line_count)
   spawn_task "focus-$ROUND-a" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" &
@@ -1008,12 +1008,12 @@ assert_focus_is "$CAPTAIN_FOCUS" "multi-home captain focus"
 mkdir -p "$SECOND_HOME_A/data/a1" "$SECOND_HOME_A/data/a2" \
   "$SECOND_HOME_B/data/b1" "$SECOND_HOME_B/data/b2" \
   "$HOME_DIR/data/p1" "$HOME_DIR/data/p2"
-printf 'Primary multi-home fixture 1.\nSurface contract: non-web\n' > "$HOME_DIR/data/p1/brief.md"
-printf 'Primary multi-home fixture 2.\nSurface contract: non-web\n' > "$HOME_DIR/data/p2/brief.md"
-printf 'Secondmate A fixture 1.\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/a1/brief.md"
-printf 'Secondmate A fixture 2.\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/a2/brief.md"
-printf 'Secondmate B fixture 1.\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/b1/brief.md"
-printf 'Secondmate B fixture 2.\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/b2/brief.md"
+printf 'Primary multi-home fixture 1.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/p1/brief.md"
+printf 'Primary multi-home fixture 2.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/p2/brief.md"
+printf 'Secondmate A fixture 1.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/a1/brief.md"
+printf 'Secondmate A fixture 2.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/a2/brief.md"
+printf 'Secondmate B fixture 1.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/b1/brief.md"
+printf 'Secondmate B fixture 2.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/b2/brief.md"
 
 MULTI_FOCUS_START=$(focus_audit_line_count)
 spawn_task p1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p1.out" 2> "$TMP_ROOT/p1.err" \
@@ -1072,9 +1072,9 @@ pass "real Herdr lab: primary and two secondmate homes each own a top-level cont
 
 # Concurrent cross-home wave under the one session lock.
 mkdir -p "$HOME_DIR/data/pcw" "$SECOND_HOME_A/data/acw" "$SECOND_HOME_B/data/bcw"
-printf 'Cross-home concurrent primary.\nSurface contract: non-web\n' > "$HOME_DIR/data/pcw/brief.md"
-printf 'Cross-home concurrent A.\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/acw/brief.md"
-printf 'Cross-home concurrent B.\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/bcw/brief.md"
+printf 'Cross-home concurrent primary.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/pcw/brief.md"
+printf 'Cross-home concurrent A.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/acw/brief.md"
+printf 'Cross-home concurrent B.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/bcw/brief.md"
 WAVE_CROSS_FOCUS=$(focus_audit_line_count)
 spawn_task pcw "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/pcw.out" 2> "$TMP_ROOT/pcw.err" &
 PCW_PID=$!
@@ -1122,7 +1122,7 @@ CROSS_LOCK_PID=$!
 while [ ! -e "$CROSS_LOCK_READY" ] && kill -0 "$CROSS_LOCK_PID" 2>/dev/null; do sleep 0.01; done
 [ -e "$CROSS_LOCK_READY" ] || fail "could not hold the cross-home session presentation lock"
 mkdir -p "$SECOND_HOME_A/data/aflat"
-printf 'Flat fallback under session lock contention.\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/aflat/brief.md"
+printf 'Flat fallback under session lock contention.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/aflat/brief.md"
 if spawn_task aflat "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/aflat.out" 2> "$TMP_ROOT/aflat.err"; then
   AFLAT_STATUS=0
 else
@@ -1226,7 +1226,7 @@ pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume
 mkdir -p "$SECOND_HOME_A/data/$CROSS_RESTART_ID"
-printf 'Cross-home restart fixture.\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/$CROSS_RESTART_ID/brief.md"
+printf 'Cross-home restart fixture.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_A/data/$CROSS_RESTART_ID/brief.md"
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/cross-restart-first.out" 2> "$TMP_ROOT/cross-restart-first.err" \
   || fail "cross-home restart fixture failed: $(cat "$TMP_ROOT/cross-restart-first.err")"
 CROSS_RESTART_META="$SECOND_HOME_A/state/$CROSS_RESTART_ID.meta"
@@ -1263,8 +1263,8 @@ pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to th
 PRIMARY_WAVE_ID=resume-wave-primary
 BRAVO_WAVE_ID=resume-wave-bravo
 mkdir -p "$HOME_DIR/data/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/$BRAVO_WAVE_ID"
-printf 'Concurrent primary recovery fixture.\nSurface contract: non-web\n' > "$HOME_DIR/data/$PRIMARY_WAVE_ID/brief.md"
-printf 'Concurrent secondmate recovery fixture.\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/$BRAVO_WAVE_ID/brief.md"
+printf 'Concurrent primary recovery fixture.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/$PRIMARY_WAVE_ID/brief.md"
+printf 'Concurrent secondmate recovery fixture.\n# Definition of done\nSurface contract: non-web\n' > "$SECOND_HOME_B/data/$BRAVO_WAVE_ID/brief.md"
 spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/primary-wave-first.out" 2> "$TMP_ROOT/primary-wave-first.err" \
   || fail "primary recovery-wave fixture failed: $(cat "$TMP_ROOT/primary-wave-first.err")"
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bravo-wave-first.out" 2> "$TMP_ROOT/bravo-wave-first.err" \
@@ -1322,7 +1322,7 @@ FLAT_TAB_OUT=$(lab tab create --workspace "$(lab workspace list | jq -r '.result
   || fail "could not seed a flat secondmate child tab"
 FLAT_TAB_ID=$(printf '%s' "$FLAT_TAB_OUT" | jq -r '.result.tab.tab_id // empty')
 mkdir -p "$HOME_DIR/data/post-legacy"
-printf 'Post-legacy primary child.\nSurface contract: non-web\n' > "$HOME_DIR/data/post-legacy/brief.md"
+printf 'Post-legacy primary child.\n# Definition of done\nSurface contract: non-web\n' > "$HOME_DIR/data/post-legacy/brief.md"
 spawn_task post-legacy "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/post-legacy.out" 2> "$TMP_ROOT/post-legacy.err" \
   || fail "post-legacy projected spawn failed: $(cat "$TMP_ROOT/post-legacy.err")"
 remember_meta_worktree "$HOME_DIR/state/post-legacy.meta" >/dev/null

@@ -903,7 +903,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
-  printf 'brief\nSurface contract: non-web\n' > "$home/data/$id/brief.md"
+  printf 'brief\n# Definition of done\nSurface contract: non-web\n' > "$home/data/$id/brief.md"
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \

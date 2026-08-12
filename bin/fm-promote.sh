@@ -97,12 +97,10 @@ META_LOCK=
 META_LOCK_HELD=0
 TMP=
 BRIEF_TMP=
-WEB_GATE_TMP=
 promote_cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
   [ -z "$BRIEF_TMP" ] || rm -f -- "$BRIEF_TMP" 2>/dev/null || true
-  [ -z "$WEB_GATE_TMP" ] || rm -f -- "$WEB_GATE_TMP" 2>/dev/null || true
   if [ "$META_LOCK_HELD" = 1 ]; then
     META_LOCK_HELD=0
     fm_lock_release "$META_LOCK" || true
@@ -134,81 +132,28 @@ BRIEF="$DATA/$ID/brief.md"
 
 SURFACE=non-web
 [ "$WEB" -eq 1 ] && SURFACE=web
-surface_count=$(fm_web_gate_surface_line_count "$BRIEF")
-existing_surface=$(fm_web_gate_surface_contract "$BRIEF" 2>/dev/null || true)
-if [ "$surface_count" -gt 1 ] || { [ "$surface_count" -eq 1 ] && [ -z "$existing_surface" ]; }; then
-  echo "error: $BRIEF contains more than one Surface contract line" >&2
-  exit 1
-fi
-if [ -n "$existing_surface" ] && [ "$existing_surface" != "$SURFACE" ]; then
-  echo "error: promotion surface $SURFACE disagrees with the brief's Surface contract: $existing_surface" >&2
-  exit 1
-fi
-if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_surface" != non-web ]; then
-  echo "error: $BRIEF has an invalid Surface contract" >&2
-  exit 1
-fi
-if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ]; then
-  existing_gate_count=$(grep -Ec '^Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot$' "$BRIEF" || true)
-  if [ "$existing_gate_count" -ne 1 ] \
-    || ! fm_web_gate_provenance_present "$BRIEF"; then
-    echo "error: $BRIEF declares web but lacks the canonical Web gate contract or body; promotion refused" >&2
+# A scout brief carries no declaration yet, so promotion writes the canonical one
+# at the Definition-of-done boundary and then re-reads the result: a brief that
+# already declares an operative surface must simply agree.
+EXISTING_SURFACE=$(fm_web_gate_scan check "$BRIEF" 2>/dev/null || true)
+if [ -n "$EXISTING_SURFACE" ]; then
+  [ "$EXISTING_SURFACE" = "$SURFACE" ] || {
+    echo "error: promotion surface $SURFACE disagrees with the brief's operative surface contract $EXISTING_SURFACE" >&2
     exit 1
-  fi
-fi
-
-BRIEF_TMP="$STATE/.$ID.brief.promote.${BASHPID:-$$}"
-WEB_GATE_TMP="$STATE/.$ID.web-gate.promote.${BASHPID:-$$}"
-if [ "$WEB" -eq 1 ]; then
-  fm_web_gate_body_text > "$WEB_GATE_TMP"
-fi
-awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
-  BEGIN { inserted_surface = 0; inserted_gate = 0 }
-  /^# Definition of done$/ && !inserted_surface {
-    print
-    if (web == 1 && gate_line_count == 0) {
-      while ((getline line < gate) > 0) print line
-      close(gate)
-    }
-    if (surface_line_count == 0) print "Surface contract: " surface
-    if (web == 1 && gate_line_count == 0) {
-      print "Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot"
-      print "Web gate provenance: surface=web sha256:pending"
-    }
-    inserted_surface = 1
-    next
   }
-  { print }
-  END { exit inserted_surface ? 0 : 1 }
-' surface_line_count="$surface_count" gate_line_count="$(grep -Ec '^Web gate contract:' "$BRIEF" || true)" "$BRIEF" > "$BRIEF_TMP" || {
-  rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
-  echo "error: $BRIEF has no Definition of done section; promotion refused" >&2
-  exit 1
-}
-if [ "$WEB" -eq 1 ]; then
-  if grep -F 'Web gate provenance: surface=web sha256:pending' "$BRIEF_TMP" >/dev/null 2>&1; then
-    fm_web_gate_stamp_file "$BRIEF_TMP" || {
-      rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
-      BRIEF_TMP=
-      WEB_GATE_TMP=
-      echo "error: promoted web brief could not be stamped; promotion refused" >&2
-      exit 1
-    }
-  fi
-  promoted_gate_count=$(grep -Ec '^Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot$' "$BRIEF_TMP" || true)
-  if [ "$promoted_gate_count" -ne 1 ] \
-    || ! fm_web_gate_provenance_present "$BRIEF_TMP"; then
-    rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
-    BRIEF_TMP=
-    WEB_GATE_TMP=
-    echo "error: promoted web brief lacks the canonical Web gate contract or body; promotion refused" >&2
+else
+  BRIEF_TMP="$STATE/.$ID.brief.promote.${BASHPID:-$$}"
+  fm_web_gate_scan "insert:$SURFACE" "$BRIEF" > "$BRIEF_TMP" || {
+    echo "error: $BRIEF has no single Definition of done section to carry the surface contract; promotion refused" >&2
     exit 1
-  fi
+  }
+  [ "$(fm_web_gate_scan check "$BRIEF_TMP" 2>/dev/null || true)" = "$SURFACE" ] || {
+    echo "error: $BRIEF already carries a conflicting or incomplete surface contract; promotion refused" >&2
+    exit 1
+  }
+  mv "$BRIEF_TMP" "$BRIEF"
+  BRIEF_TMP=
 fi
-mv "$BRIEF_TMP" "$BRIEF"
-BRIEF_TMP=
-rm -f -- "$WEB_GATE_TMP"
-WEB_GATE_TMP=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"

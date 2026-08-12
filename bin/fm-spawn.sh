@@ -12,8 +12,9 @@
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. When
-#   a ship brief has no exactly-one valid "Surface contract: web|non-web" line, the
-#   spawn refuses before an endpoint exists. When
+#   a ship brief carries no single operative "Surface contract: web|non-web" line
+#   in its Definition of done section, the spawn refuses before an endpoint
+#   exists. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
@@ -1666,25 +1667,10 @@ if [ "$KIND" = ship ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
   fi
-  BRIEF_SURFACE=$(fm_web_gate_surface_contract "$BRIEF" 2>/dev/null || true)
-  if [ -z "$BRIEF_SURFACE" ]; then
-    echo "error: $BRIEF must contain exactly one Surface contract: web or Surface contract: non-web line; re-scaffold the ship brief with --web or --no-web" >&2
+  fm_web_gate_scan check "$BRIEF" >/dev/null 2>&1 || {
+    echo "error: $BRIEF must carry exactly one operative surface contract in its Definition of done section - Surface contract: non-web, or Surface contract: web followed by the canonical website completion gate; a marker quoted in the task text or inside a code fence does not count; re-scaffold the ship brief with --web or --no-web" >&2
     exit 1
-  fi
-  case "$BRIEF_SURFACE" in
-    non-web) ;;
-    web)
-      BRIEF_WEB_GATE_COUNT=$(grep -Ec '^Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot$' "$BRIEF" || true)
-      if [ "$BRIEF_WEB_GATE_COUNT" -ne 1 ] || ! fm_web_gate_provenance_present "$BRIEF"; then
-        echo "error: $BRIEF declares web but lacks the canonical Web gate body; re-scaffold the ship brief with --web" >&2
-        exit 1
-      fi
-      ;;
-    *)
-      echo "error: $BRIEF has an invalid surface contract; re-scaffold the ship brief with --web or --no-web" >&2
-      exit 1
-      ;;
-  esac
+  }
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
