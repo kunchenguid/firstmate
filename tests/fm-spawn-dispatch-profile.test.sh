@@ -181,6 +181,22 @@ test_ship_spawn_rejects_incomplete_web_gate_body() {
   assert_absent "$HOME_DIR/state/$id.meta" \
     "incomplete web gate body refusal still wrote task metadata"
 
+  id=profile-edited-web-provenance-z9
+  rec=$(make_spawn_case edited-web-provenance claude "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web brief scaffold for provenance test should succeed"
+  brief="$HOME_DIR/data/$id/brief.md"
+  sed -i 's/^Web gate provenance:.*/Web gate provenance: sha256:0000000000000000000000000000000000000000000000000000000000000000/' "$brief"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "ship spawn with an edited web provenance marker must fail"
+  assert_contains "$out" "lacks the canonical Web gate body" \
+    "edited web provenance refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "edited web provenance refusal still wrote task metadata"
+
   id=profile-fenced-web-gate-z9
   rec=$(make_spawn_case fenced-web-gate claude "$id")
   read_case_record "$rec"

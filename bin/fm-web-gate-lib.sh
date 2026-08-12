@@ -4,6 +4,10 @@ fm_web_gate_contract() {
   printf '%s\n' 'Web gate contract: custom-domain/interceptor/revision-marker/screenshot'
 }
 
+fm_web_gate_provenance_placeholder() {
+  printf '%s\n' 'Web gate provenance: sha256:pending'
+}
+
 fm_web_gate_body_text() {
   cat <<'EOF'
 ## Website deployment completion gate
@@ -18,42 +22,36 @@ Do not append a done status or claim completion when any visual, marker, custom-
 EOF
 }
 
-fm_web_gate_unfenced_text() {
-  awk '
-    /^```/ { fenced = !fenced; next }
-    !fenced { print }
-  ' "$1"
+fm_web_gate_hash_stream() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{ print $1 }'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{ print $1 }'
+  else
+    return 1
+  fi
 }
 
-fm_web_gate_contract_count() {
-  fm_web_gate_unfenced_text "$1" | grep -Fxc "$(fm_web_gate_contract)" || true
+fm_web_gate_hash_file_without_provenance() {
+  sed '/^Web gate provenance: /d' "$1" | fm_web_gate_hash_stream
 }
 
-fm_web_gate_body_present() {
-  local brief=$1 expected
-  expected=$(fm_web_gate_body_text)
-  fm_web_gate_unfenced_text "$brief" | awk -v expected="$expected" '
-    BEGIN {
-      wanted_count = split(expected, wanted, "\n")
-      wanted_index = 1
-      in_dod = 0
-      found = 0
-    }
-    {
-      if ($0 == "# Definition of done") {
-        in_dod = 1
-        next
-      }
-      if (in_dod && $0 == wanted[wanted_index]) {
-        wanted_index++
-        if (wanted_index > wanted_count) {
-          found = 1
-          exit
-        }
-        next
-      }
-      if (in_dod) exit 1
-    }
-    END { exit found ? 0 : 1 }
-  ' "$brief"
+fm_web_gate_stamp_file() {
+  local brief=$1 digest tmp
+  digest=$(fm_web_gate_hash_file_without_provenance "$brief") || return 1
+  tmp=$(mktemp "$brief.tmp.XXXXXX") || return 1
+  if ! sed "s/^Web gate provenance: .*/Web gate provenance: sha256:$digest/" "$brief" > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$brief"
+}
+
+fm_web_gate_provenance_present() {
+  local brief=$1 count actual expected
+  count=$(grep -Ec '^Web gate provenance: sha256:[0-9a-fA-F]{64}$' "$brief" || true)
+  [ "$count" -eq 1 ] || return 1
+  actual=$(sed -n 's/^Web gate provenance: //p' "$brief")
+  expected=$(fm_web_gate_hash_file_without_provenance "$brief") || return 1
+  [ "$actual" = "sha256:$expected" ]
 }

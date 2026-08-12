@@ -446,6 +446,7 @@ fi
 
 if [ "$WEB" -eq 1 ]; then
   DOD=${DOD/"# Definition of done"/"# Definition of done"$'\n'"$(fm_web_gate_body_text)"}
+  DOD=${DOD/"Web gate contract: custom-domain\/interceptor\/revision-marker\/screenshot"/"Web gate contract: custom-domain\/interceptor\/revision-marker\/screenshot"$'\n'"$(fm_web_gate_provenance_placeholder)"}
 fi
 
 cat > "$BRIEF" <<EOF
@@ -500,4 +501,7 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+if [ "$WEB" -eq 1 ]; then
+  fm_web_gate_stamp_file "$BRIEF" || { echo "error: could not stamp the web gate provenance" >&2; exit 1; }
+fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

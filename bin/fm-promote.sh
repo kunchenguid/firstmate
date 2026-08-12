@@ -149,11 +149,9 @@ if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_
   exit 1
 fi
 if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ]; then
-  existing_gate_count=$(fm_web_gate_contract_count "$BRIEF")
-  existing_gate=$(fm_web_gate_unfenced_text "$BRIEF" | sed -n 's/^Web gate contract: //p')
+  existing_gate_count=$(grep -Ec '^Web gate contract: custom-domain/interceptor/revision-marker/screenshot$' "$BRIEF" || true)
   if [ "$existing_gate_count" -ne 1 ] \
-    || [ "$existing_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
-    || ! fm_web_gate_body_present "$BRIEF"; then
+    || ! fm_web_gate_provenance_present "$BRIEF"; then
     echo "error: $BRIEF declares web but lacks the canonical Web gate contract or body; promotion refused" >&2
     exit 1
   fi
@@ -175,6 +173,7 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
     if (surface_line_count == 0) print "Surface contract: " surface
     if (web == 1 && gate_line_count == 0) {
       print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
+      print "Web gate provenance: sha256:pending"
     }
     inserted_surface = 1
     next
@@ -187,11 +186,18 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
   exit 1
 }
 if [ "$WEB" -eq 1 ]; then
-  promoted_gate_count=$(fm_web_gate_contract_count "$BRIEF_TMP")
-  promoted_gate=$(fm_web_gate_unfenced_text "$BRIEF_TMP" | sed -n 's/^Web gate contract: //p')
+  if grep -F 'Web gate provenance: sha256:pending' "$BRIEF_TMP" >/dev/null 2>&1; then
+    fm_web_gate_stamp_file "$BRIEF_TMP" || {
+      rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
+      BRIEF_TMP=
+      WEB_GATE_TMP=
+      echo "error: promoted web brief could not be stamped; promotion refused" >&2
+      exit 1
+    }
+  fi
+  promoted_gate_count=$(grep -Ec '^Web gate contract: custom-domain/interceptor/revision-marker/screenshot$' "$BRIEF_TMP" || true)
   if [ "$promoted_gate_count" -ne 1 ] \
-    || [ "$promoted_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
-    || ! fm_web_gate_body_present "$BRIEF_TMP"; then
+    || ! fm_web_gate_provenance_present "$BRIEF_TMP"; then
     rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
     BRIEF_TMP=
     WEB_GATE_TMP=
