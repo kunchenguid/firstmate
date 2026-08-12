@@ -96,9 +96,13 @@ CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
 TMP=
+BRIEF_TMP=
+WEB_GATE_TMP=
 promote_cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
+  [ -z "$BRIEF_TMP" ] || rm -f -- "$BRIEF_TMP" 2>/dev/null || true
+  [ -z "$WEB_GATE_TMP" ] || rm -f -- "$WEB_GATE_TMP" 2>/dev/null || true
   if [ "$META_LOCK_HELD" = 1 ]; then
     META_LOCK_HELD=0
     fm_lock_release "$META_LOCK" || true
@@ -182,18 +186,23 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
   echo "error: $BRIEF has no Definition of done section; promotion refused" >&2
   exit 1
 }
-mv "$BRIEF_TMP" "$BRIEF"
-rm -f -- "$WEB_GATE_TMP"
 if [ "$WEB" -eq 1 ]; then
   promoted_gate_count=$(grep -Ec '^Web gate contract:' "$BRIEF" || true)
-  promoted_gate=$(sed -n 's/^Web gate contract: //p' "$BRIEF")
+  promoted_gate=$(sed -n 's/^Web gate contract: //p' "$BRIEF_TMP")
   if [ "$promoted_gate_count" -ne 1 ] \
     || [ "$promoted_gate" != custom-domain/interceptor/revision-marker/screenshot ] \
-    || ! fm_web_gate_body_present "$BRIEF"; then
+    || ! fm_web_gate_body_present "$BRIEF_TMP"; then
+    rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
+    BRIEF_TMP=
+    WEB_GATE_TMP=
     echo "error: promoted web brief lacks the canonical Web gate contract or body; promotion refused" >&2
     exit 1
   fi
 fi
+mv "$BRIEF_TMP" "$BRIEF"
+BRIEF_TMP=
+rm -f -- "$WEB_GATE_TMP"
+WEB_GATE_TMP=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
