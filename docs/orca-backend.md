@@ -24,6 +24,29 @@ The first task for a project registers that repository with `orca repo add --pat
 No manual repository registration is required.
 When Orca returns a WSL UNC worktree path (`\\wsl.localhost\<Distro>\...`, `//wsl.localhost/...`, or `\\wsl$\...`), Firstmate normalizes it to the Linux absolute path before isolation checks and metadata; the opaque `orca_worktree_id` is left unchanged for Orca API calls.
 
+### WSL CLI bridge patch (quotes in `terminal send`)
+
+On Windows+WSL, Orca installs a managed launcher at `~/.local/bin/orca-ide` and a PowerShell bridge at `~/.local/share/orca/orca-wsl-bridge.ps1`.
+Stock bridges (at least through Orca 1.4.179) forward CLI arguments with Windows PowerShell 5.1's native splat, which **destroys ASCII double quotes** before `orca.exe` parses them ([stablyai/orca#12231](https://github.com/stablyai/orca/issues/12231)).
+That breaks Firstmate steers and harness launch lines that contain `"..."` (for example `grok --always-approve "$(...)"`).
+
+Firstmate ships a patched bridge under `bin/patches/orca-wsl/` and a status/apply helper:
+
+```sh
+bin/fm-orca-wsl-cli.sh status   # missing | stock | patched | foreign
+bin/fm-orca-wsl-cli.sh apply    # install patch (backs up first); --force overwrites foreign/already-patched
+```
+
+| `status` state | Meaning | Action |
+| --- | --- | --- |
+| `missing` | No managed WSL CLI files yet (new machine / never opened Orca WSL) | Open an Orca-managed WSL terminal once, or set `ORCA_WIN_LAUNCHER` and `apply` for a new install |
+| `stock` | Orca's unpatched bridge | `apply` |
+| `patched` | Firstmate patch marker present | Nothing unless Orca overwrote files after an app update |
+| `foreign` | Files exist but match neither stock nor this patch | Inspect, then `apply --force` only if intentional |
+
+`apply` prefers PowerShell 7 (`pwsh.exe`) when present, and keeps a PS 5.1 pre-escape path for hosts without PS7.
+Re-run `status` after every Orca update; app upgrades may rewrite the stock bridge and drop the patch.
+
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
@@ -75,6 +98,7 @@ It never raw-deletes an Orca worktree.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Worktree filesystem paths must resolve on the host that runs Firstmate.
   WSL UNC forms for in-distro paths are normalized; true Windows drive paths are not rewritten and still fail isolation closed.
+- On WSL, stock Orca bridges may still strip quotes from CLI args until Firstmate's `bin/fm-orca-wsl-cli.sh apply` patch is installed (or Orca ships a fixed bridge).
 - End-to-end WSL spawn, send, and teardown remain experimental relative to the macOS evidence in [`verification/runtime-backends.md`](verification/runtime-backends.md#orca).
 
 ## Regression entry points
@@ -83,6 +107,7 @@ It never raw-deletes an Orca worktree.
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+bin/fm-orca-wsl-cli.sh status
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
