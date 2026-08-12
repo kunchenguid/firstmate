@@ -283,6 +283,45 @@ test_active_hold_without_status_key_stays_enumerated() {
   pass "an active captain hold without a status key remains an origin-labelled ledger row"
 }
 
+test_blocked_captain_hold_is_not_an_actionable_source() {
+  local home json
+  home=$(build_coverage_home blocked-hold)
+  tasks_in "$home" add pending-gate "Finish the pending gate" --kind ship --repo sample >/dev/null \
+    || fail "could not create a pending blocker"
+  sed 's/lane-held-decision-route - Choose the sample route/lane-held-decision-route - Choose the sample route blocked-by: pending-gate/' \
+    "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  json=$(run_ledger "$home") || fail "ledger failed with a blocked captain hold"
+  printf '%s' "$json" | jq -e '
+    .captain_holds_active == 0
+    and ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length) == 0
+    and (.open_decisions | any(.task == "lane-held" and .disposition == "captain-hold-active"
+      and .current_sources == ["folded-status-key"]))
+  ' >/dev/null || fail "a blocked captain hold was counted as an actionable source: $json"
+  pass "a blocked captain hold stays out of the actionable current-source set"
+}
+
+test_ledger_reads_no_cross_home_snapshot() {
+  local home json shadow saved_ledger
+  home=$(build_coverage_home local-only)
+  shadow="$home/shadow"
+  cp -R "$ROOT/bin" "$shadow"
+  cat > "$shadow/fm-fleet-snapshot.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_HOME:?}/fleet-invoked"
+exit 99
+EOF
+  chmod +x "$shadow/fm-fleet-snapshot.sh"
+  saved_ledger=$LEDGER
+  LEDGER="$shadow/fm-decision-ledger.sh"
+  json=$(run_ledger "$home") || fail "ledger attempted a fleet snapshot instead of reading local captain holds"
+  LEDGER=$saved_ledger
+  [ ! -e "$home/fleet-invoked" ] || fail "ledger invoked a fleet snapshot: $(cat "$home/fleet-invoked")"
+  printf '%s' "$json" | jq -e '.captain_holds_active == 1 and .open_decision_keys == 4' >/dev/null \
+    || fail "local-only ledger output changed while avoiding fleet aggregation: $json"
+  pass "the ledger reads local captain holds without a fleet snapshot"
+}
+
 test_unclassifiable_state_is_disclosed_not_hidden() {
   local home json bjson
   home=$(build_coverage_home undetermined)
@@ -295,14 +334,7 @@ EOF
   printf '%s' "$json" | jq -e '
     .complete == false
     and (.open_decisions | length) == .open_decision_keys
-    and ([.open_decisions[] | select(.disposition == "undetermined")] | length) == 3
-    and (.open_decisions | all(
-      .disposition == "undetermined" or .disposition == "captain-hold-active"
-    ))
-    and (.open_decisions | all(
-      if .disposition == "undetermined" then .detail != "" else .detail == "" end
-    ))
-    and (.open_decisions | any(.task == "lane-held" and .disposition == "captain-hold-active"))
+    and (.open_decisions | all(.disposition == "undetermined" and .detail != ""))
   ' >/dev/null || fail "an unclassifiable hold state was not disclosed per key: $json"
 
   bjson=$(run_bearings "$home") || fail "bearings failed with an incomplete ledger"
@@ -352,5 +384,7 @@ test_raw_events_never_become_the_open_decision_count
 test_every_live_key_carries_a_disposition
 test_active_hold_transferred_out_of_status_fold_stays_enumerated
 test_active_hold_without_status_key_stays_enumerated
+test_blocked_captain_hold_is_not_an_actionable_source
+test_ledger_reads_no_cross_home_snapshot
 test_unclassifiable_state_is_disclosed_not_hidden
 test_bearings_publishes_the_ledger_and_refuses_an_unbacked_count

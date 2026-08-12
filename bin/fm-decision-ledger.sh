@@ -48,6 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -76,7 +77,6 @@ command -v jq >/dev/null 2>&1 || { echo "fm-decision-ledger: jq not found" >&2; 
 
 NOW=${FM_LEDGER_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 HOLD="$SCRIPT_DIR/fm-decision-hold.sh"
-FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -127,25 +127,82 @@ OPENED_ROWS=$(printf '%s' "$opened_pairs" | jq -R -s '
 # The authoritative status fold. scan_open_decisions prints
 # "<task>\t<key>\t<verb>\t<note>".
 OPEN=$(scan_open_decisions "$STATE")
+status_open_count=$(printf '%s\n' "$OPEN" | grep -c . || true)
 
-# Use the same normalized actionable-hold inventory that Bearings projects.
-# A malformed active hold remains a disclosed undetermined row rather than being
-# dropped from the union.
-SNAP=$($FLEET --json 2>/dev/null) || {
-  echo "fm-decision-ledger: canonical backlog inventory could not be produced" >&2
-  exit 1
-}
-HOLD_ROWS=$(printf '%s' "$SNAP" | jq -ce '
-  [ .backlog.records[]?
-    | select(.structured and .captain_actionable == true)
-    | {
-        hold_id: .id,
-        task: ([.body_lines[]? | select(startswith("Origin: ")) | ltrimstr("Origin: ")][0] // null),
-        key: ([.body_lines[]? | select(startswith("Decision key: ")) | ltrimstr("Decision key: ")][0] // null),
-        summary: (.title // "captain decision pending")
+HOLD_TSV=$(awk '
+  function metadata(line, label, text) {
+    text = line
+    sub("^.*\\(" label ":[[:space:]]*", "", text)
+    if (text == line) return ""
+    sub("\\).*$", "", text)
+    return text
+  }
+  function emit() {
+    if (id != "") {
+      done[id] = (section == "Done")
+      if (section == "Queued" && id ~ /-decision-/ && kind == "captain" && hold_kind == "captain") {
+        candidate_count++
+        candidate_id[candidate_count] = id
+        candidate_origin[candidate_count] = origin
+        candidate_key[candidate_count] = key
+        candidate_summary[candidate_count] = summary
+        candidate_blockers[candidate_count] = blockers
       }
-  ]') || {
-  echo "fm-decision-ledger: canonical backlog inventory was malformed" >&2
+    }
+  }
+  /^## / { emit(); section = substr($0, 4); id = origin = key = kind = hold_kind = summary = ""; next }
+  /^[-*][[:space:]]+\[[ xX]\][[:space:]]+/ {
+    emit(); id = origin = key = kind = hold_kind = summary = blockers = ""
+    summary = $0
+    sub(/^[-*][[:space:]]+\[[ xX]\][[:space:]]+/, "", summary)
+    id = summary
+    sub(/[[:space:]]+-[[:space:]].*$/, "", id)
+    sub(/^[^[:space:]]+[[:space:]]+-[[:space:]]+/, "", summary)
+    kind = metadata($0, "kind")
+    hold_kind = metadata($0, "hold-kind")
+    rest = $0
+    while (match(rest, /blocked-by:[[:space:]]+[^[:space:])]+/)) {
+      blocker = substr(rest, RSTART, RLENGTH)
+      sub(/^blocked-by:[[:space:]]+/, "", blocker)
+      blockers = blockers (blockers == "" ? "" : SUBSEP) blocker
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+    next
+  }
+  /^[[:space:]]+Origin: / { if (id != "") { sub(/^[[:space:]]+Origin: /, ""); origin = $0 }; next }
+  /^[[:space:]]+Decision key: / { if (id != "") { sub(/^[[:space:]]+Decision key: /, ""); key = $0 }; next }
+  END {
+    emit()
+    for (i = 1; i <= candidate_count; i++) {
+      actionable = 1
+      blocker_count = split(candidate_blockers[i], candidate_blocker, SUBSEP)
+      for (j = 1; j <= blocker_count; j++)
+        if (candidate_blocker[j] != "" && done[candidate_blocker[j]] != 1) actionable = 0
+      if (actionable)
+        print candidate_id[i] "\t" candidate_origin[i] "\t" candidate_key[i] "\t" candidate_summary[i]
+    }
+  }
+' "$DATA/backlog.md" 2>/dev/null)
+HOLD_INPUT=''
+while IFS=$'\t' read -r hold_id task key summary; do
+  [ -n "$hold_id" ] || continue
+  hold_state=undetermined
+  case "$task" in ''|*[!A-Za-z0-9._-]*) ;; *)
+    case "$key" in ''|*[!A-Za-z0-9._-]*) ;; *)
+      hold_state=$("$HOLD" state "$task" "$key" 2>/dev/null | awk -F'\t' 'NR == 1 { print $2 }') ;;
+    esac
+  esac
+  [ -n "$hold_state" ] || hold_state=undetermined
+  HOLD_INPUT="${HOLD_INPUT}${hold_id}"$'\t'"${task}"$'\t'"${key}"$'\t'"${summary}"$'\t'"${hold_state}"$'\n'
+done <<EOF
+$HOLD_TSV
+EOF
+HOLD_ROWS=$(printf '%s' "$HOLD_INPUT" | jq -R -s '
+  [ split("\n")[] | select(length > 0) | split("\t")
+    | {hold_id:.[0], task:(if .[1] == "" then null else .[1] end),
+       key:(if .[2] == "" then null else .[2] end), summary:(.[3] // "captain decision pending"),
+       state:(.[4] // "undetermined")} ]') || {
+  echo "fm-decision-ledger: local captain-hold records could not be read" >&2
   exit 1
 }
 active_hold_count=$(printf '%s' "$HOLD_ROWS" | jq 'length')
@@ -153,7 +210,6 @@ active_hold_count=$(printf '%s' "$HOLD_ROWS" | jq 'length')
 # Per-key disposition. Keys are grouped by task so the hold classifier is invoked
 # once per owning lane rather than once per key.
 ROWS=''
-status_open_count=0
 stale_count=0
 undetermined_count=0
 current_task=''
@@ -231,7 +287,6 @@ EOF
 
 while IFS=$'\t' read -r task key verb note; do
   [ -n "$task" ] || continue
-  status_open_count=$((status_open_count + 1))
   note=${note//	/ }
   if [ "$task" != "$current_task" ]; then
     if [ -n "$current_task" ]; then
@@ -280,7 +335,13 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
   | ($holds | map(. as $hold |
       if (.task | type) == "string" and (.task | length) > 0
          and (.key | type) == "string" and (.key | length) > 0 then
-        {task, key, verb:"captain-hold", disposition:"captain-hold-active", detail:"",
+        {task, key, verb:"captain-hold",
+         disposition:(if .state == "held" then "captain-hold-active"
+                      elif .state == "invalid" or .state == "absent" or .state == "resolved" or .state == "archived" then "hold-record-invalid"
+                      else "undetermined" end),
+         detail:(if .state == "held" then ""
+                 elif .state == "invalid" or .state == "absent" or .state == "resolved" or .state == "archived" then "active captain hold record is not durably held"
+                 else "backlog tool unavailable; hold state could not be classified" end),
          summary:(.summary | trunc(160)), hold_id, current_sources:["captain-hold"],
          origins:((if any($opened[]; .task == $hold.task and .key == $hold.key)
                    then ["folded-status-key"] else [] end) + ["captain-hold"])}
