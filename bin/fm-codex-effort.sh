@@ -50,9 +50,6 @@ fi
 task_id=$1
 requested_effort=$2
 
-case "$task_id" in
-  ''|*[!A-Za-z0-9._-]*) refuse "invalid task id." ;;
-esac
 case "$requested_effort" in
   low|medium|high|xhigh) ;;
   *) refuse "unsupported Codex effort '$requested_effort'; expected low, medium, high, or xhigh." ;;
@@ -65,12 +62,16 @@ esac
 STATE="$FM_HOME/state"
 meta="$STATE/$task_id.meta"
 [ -d "$STATE" ] || refuse "state directory does not exist at $STATE."
-[ -f "$meta" ] && [ ! -L "$meta" ] || refuse "task $task_id has no regular metadata at $meta."
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$ROOT/bin/fm-wake-lib.sh"
+
+fm_task_id_creation_valid "$task_id" || refuse "invalid task id."
+[ -f "$meta" ] && [ ! -L "$meta" ] || refuse "task $task_id has no regular metadata at $meta."
 
 control_lock="$STATE/.control-$task_id.lock"
 meta_lock=$(fm_meta_lock_path "$meta") \

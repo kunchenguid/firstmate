@@ -255,6 +255,24 @@ test_invalid_effort_and_wrong_harness_refuse_without_runtime_input() {
   pass "fm-codex-effort: refuses invalid effort and non-Codex tasks without side effects"
 }
 
+test_task_id_uses_current_creation_contract() {
+  local dir long_id out rc
+  dir=$(make_case invalid-id)
+  out=$(env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$SWITCH" .hidden medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a leading-dot task id was accepted"
+  assert_contains "$out" "invalid task id" "leading-dot task-id refusal was unclear"
+  [ ! -s "$dir/runtime.log" ] || fail "leading-dot task-id refusal contacted the runtime"
+
+  long_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  out=$(env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$SWITCH" "$long_id" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "an overlong task id was accepted"
+  assert_contains "$out" "invalid task id" "overlong task-id refusal was unclear"
+  [ ! -s "$dir/runtime.log" ] || fail "overlong task-id refusal contacted the runtime"
+  pass "fm-codex-effort: uses the current task-id creation boundary"
+}
+
 test_lifecycle_and_metadata_locks_refuse_before_runtime_input() {
   local dir lock out rc
   dir=$(make_case control-lock)
@@ -344,6 +362,7 @@ test_unverified_backends_refuse_before_input() {
 test_success_changes_effort_in_place_and_then_metadata
 test_tmux_reference_path_uses_semantic_reasoning_key
 test_invalid_effort_and_wrong_harness_refuse_without_runtime_input
+test_task_id_uses_current_creation_contract
 test_lifecycle_and_metadata_locks_refuse_before_runtime_input
 test_busy_and_ambiguous_runtime_states_refuse
 test_swallowed_input_and_changed_ui_never_report_success
