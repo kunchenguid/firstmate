@@ -429,7 +429,7 @@ if [ "${1:-}" = "--key" ]; then
       exit 1
     }
     trap 'fm_backend_endpoint_lock_release' EXIT
-    if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+    if ! fm_backend_send_key_unlocked "$TARGET_BACKEND" "$FM_BACKEND_ENDPOINT_TARGET" "$key" "$EXPECTED_LABEL"; then
       echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
     fi

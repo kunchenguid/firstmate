@@ -2076,12 +2076,13 @@ spawn_endpoint_lock_release() {
 spawn_send_text_line() {  # <target> <text>
   local target=$1 rc=0
   spawn_endpoint_lock_acquire "$target" || return 1
+  target=$FM_BACKEND_ENDPOINT_TARGET
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_text_line "$1" "$2" || rc=$? ;;
-    herdr) fm_backend_herdr_send_text_line "$1" "$2" || rc=$? ;;
-    zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" || rc=$? ;;
-    orca) fm_backend_orca_send_text_line "$1" "$2" || rc=$? ;;
-    cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" || rc=$? ;;
+    tmux) fm_backend_tmux_send_text_line "$target" "$2" || rc=$? ;;
+    herdr) fm_backend_herdr_send_text_line "$target" "$2" || rc=$? ;;
+    zellij) fm_backend_zellij_send_text_line "$target" "$2" "$W" || rc=$? ;;
+    orca) fm_backend_orca_send_text_line "$target" "$2" || rc=$? ;;
+    cmux) fm_backend_cmux_send_text_line "$target" "$2" "$W" || rc=$? ;;
   esac
   spawn_endpoint_lock_release
   return "$rc"
@@ -2089,6 +2090,7 @@ spawn_send_text_line() {  # <target> <text>
 spawn_current_path() {  # <target>
   local target=$1 rc=0 path
   spawn_endpoint_lock_acquire "$target" || return 1
+  target=$FM_BACKEND_ENDPOINT_TARGET
   case "$BACKEND" in
     tmux) path=$(fm_backend_tmux_current_path "$target") || rc=$? ;;
     herdr) path=$(fm_backend_herdr_current_path "$target") || rc=$? ;;
@@ -2758,13 +2760,14 @@ spawn_endpoint_lock_acquire "$T" || {
   echo "error: could not lock $W's endpoint before launch submission" >&2
   exit 1
 }
-spawn_send_literal "$T" "$LAUNCH"
+LAUNCH_TARGET=$FM_BACKEND_ENDPOINT_TARGET
+spawn_send_literal "$LAUNCH_TARGET" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+spawn_send_key "$LAUNCH_TARGET" Enter
 spawn_endpoint_lock_release
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

@@ -353,15 +353,16 @@ send_interrupt_keys() {
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
   fm_backend_endpoint_lock_acquire "$BACKEND" "$T" "$LABEL" \
     || die "could not acquire the endpoint lock before interrupting task $ID on $BACKEND"
+  local locked_target=$FM_BACKEND_ENDPOINT_TARGET
   while [ "$i" -lt "$repeat" ]; do
-    if ! fm_backend_send_key_unlocked "$BACKEND" "$T" "$key" "$LABEL"; then
+    if ! fm_backend_send_key_unlocked "$BACKEND" "$locked_target" "$key" "$LABEL"; then
       fm_backend_endpoint_lock_release
       die "interrupt key $key was not delivered to task $ID on $BACKEND"
     fi
     i=$((i + 1))
     [ "$i" -ge "$repeat" ] || sleep 0.2
   done
-  if [ -n "$clear" ] && ! fm_backend_send_key_unlocked "$BACKEND" "$T" "$clear" "$LABEL"; then
+  if [ -n "$clear" ] && ! fm_backend_send_key_unlocked "$BACKEND" "$locked_target" "$clear" "$LABEL"; then
     fm_backend_endpoint_lock_release
     die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
   fi
