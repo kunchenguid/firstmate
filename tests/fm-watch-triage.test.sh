@@ -123,6 +123,20 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+reap_bounded() {
+  local pid=$1 i=0
+  kill "$pid" 2>/dev/null || true
+  pkill -TERM -P "$pid" 2>/dev/null || true
+  while is_live_non_zombie "$pid" && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -1344,7 +1358,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
     reap "$pid"; fail "a 5-minute-old completed turn tripped the default busy-turn-age bound: $(cat "$out")"
   fi
   [ ! -e "$state/.stale-since-$key" ] || fail "a 5-minute-old completed turn started a wedge timer under the default bound"
-  reap "$pid"
+  reap_bounded "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional five-minute-bound stop"
 
   set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
@@ -1358,7 +1372,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
     reap "$pid"; fail "a 66-minute-old completed turn escalated before the wedge threshold under the default bound: $(cat "$out")"
   fi
   [ -s "$state/.stale-since-$key" ] || fail "a 66-minute-old completed turn did not start a wedge timer under the default bound (default is not 3600s)"
-  reap "$pid"
+  reap_bounded "$pid"
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
 }
 
