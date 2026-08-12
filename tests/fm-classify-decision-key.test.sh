@@ -148,6 +148,67 @@ test_malformed_stated_key_never_collapses_to_default() {
   pass "a malformed stated key is rejected in both positions, never folded as default"
 }
 
+# status_line_decision_transition is the accessor a counting consumer uses instead
+# of reading the key grammar itself. Its whole value is that it answers exactly
+# what the fold does, so this drives the REAL fold over each line and derives the
+# fold's verdict from folded output alone, then requires the accessor to match it.
+# A gate that reaches the fold and not the accessor fails here.
+test_transition_accessor_matches_the_fold_line_for_line() {
+  local dir row line want sentinel fold_a fold_b acted got
+  dir=$(case_dir transitions)
+  # <line>|<expected "key<TAB>verb", empty when the line is no transition at all>
+  for row in \
+    'needs-decision [key=api]: pick REST or RPC|api	needs-decision' \
+    'needs-decision: [key=api] pick REST or RPC|api	needs-decision' \
+    'blocked: waiting on a credential|default	blocked' \
+    'resolved [key=api]: settled on REST|api	resolved' \
+    'captain-held [key=api]: transferred to the captain|api	captain-held' \
+    'working: routine progress|' \
+    'done: finished anyway|' \
+    'needs-decision [key=bad key]: malformed slug|' \
+    'blocked [key=pending-reply-7]: an unrelated note|' \
+    'blocked [key=pending-reply-7]: pending-reply-7: waiting on the mate|pending-reply-7	blocked' \
+  ; do
+    line=${row%%|*}
+    want=${row#*|}
+    # The sentinel names the key under test and speaks any reserved namespace's
+    # vocabulary, so it opens for every row and a close is observable as removal.
+    sentinel=${want%%	*}
+    [ -n "$sentinel" ] || sentinel=probe
+    printf '%s\n' "$line" > "$dir/alone.status"
+    printf 'needs-decision [key=%s]: %s: sentinel\n%s\n' "$sentinel" "$sentinel" "$line" \
+      > "$dir/after-open.status"
+    fold_a=$(status_open_decisions "$dir/alone.status")
+    fold_b=$(status_open_decisions "$dir/after-open.status")
+
+    # The fold's own verdict, read only from what it folded.
+    if [ -n "$fold_a" ]; then
+      acted=yes
+    elif [ -z "$fold_b" ]; then
+      acted=yes
+    else
+      acted=no
+    fi
+
+    got=$(status_line_decision_transition "$line") || got=''
+    if [ "$acted" = yes ]; then
+      [ -n "$got" ] \
+        || fail "the fold acts on '$line' but the accessor reported no transition"
+    else
+      [ -z "$got" ] \
+        || fail "the fold ignores '$line' but the accessor reported '$got'"
+    fi
+    [ "$got" = "$want" ] \
+      || fail "accessor gave '$got' for '$line', expected '$want'"
+    # An opening line's key and verb must be the ones the fold itself recorded.
+    if [ -n "$fold_a" ]; then
+      [ "$(printf '%s' "$fold_a" | cut -f1,2)" = "$want" ] \
+        || fail "the fold recorded '$(printf '%s' "$fold_a" | cut -f1,2)' for '$line', accessor said '$want'"
+    fi
+  done
+  pass "the public transition accessor answers exactly what the fold does"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -179,3 +240,4 @@ test_two_colon_form_decisions_stay_distinct
 test_mid_note_prose_mention_is_not_a_stated_key
 test_malformed_stated_key_never_collapses_to_default
 test_incremental_agrees_with_full_fold_across_appends
+test_transition_accessor_matches_the_fold_line_for_line

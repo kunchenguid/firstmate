@@ -81,11 +81,14 @@ meta_value() {  # <meta> <key>
 }
 
 # One pass over every status log for the RAW event counts and the set of keys ever
-# opened. These are event measurements, deliberately kept separate from the fold.
-# The grep is a pure cost filter, never a second parser: a line whose parsed verb
-# is one of the four must contain that verb as a literal substring, so the filter
-# can only drop lines the authoritative parsers below would reject anyway, and
-# every surviving line is still classified by those parsers alone.
+# opened. These are event measurements, deliberately kept separate from the fold,
+# but they are not a second reading of what a decision line IS: every candidate is
+# classified by status_line_decision_transition, which answers with the fold's own
+# verdict, so a line the fold declines to treat as a transition can never be
+# counted here as a decision opened and then silently superseded.
+# The grep is a pure cost filter, never a parser: a line whose verb is one of the
+# four must contain that verb as a literal substring, so the filter can only drop
+# lines the accessor below would reject anyway.
 raw_needs_decision=0
 raw_blocked=0
 raw_resolved=0
@@ -99,19 +102,16 @@ for f in "$STATE"/*.status; do
   task=$(basename "$f"); task="${task%.status}"
   while IFS= read -r line || [ -n "$line" ]; do
     case "${line//[[:space:]]/}" in '') continue ;; esac
-    verb=$(status_line_verb "$line")
+    transition=$(status_line_decision_transition "$line") || continue
+    key=${transition%%	*}
+    verb=${transition#*	}
     case "$verb" in
-      needs-decision|blocked) : ;;
+      needs-decision) raw_needs_decision=$((raw_needs_decision + 1)) ;;
+      blocked) raw_blocked=$((raw_blocked + 1)) ;;
       "$resolve_verb") raw_resolved=$((raw_resolved + 1)); continue ;;
       "$held_verb") raw_captain_held=$((raw_captain_held + 1)); continue ;;
       *) continue ;;
     esac
-    key=$(status_line_decision_key "$line") || continue
-    if [ "$verb" = needs-decision ]; then
-      raw_needs_decision=$((raw_needs_decision + 1))
-    else
-      raw_blocked=$((raw_blocked + 1))
-    fi
     opened_pairs="${opened_pairs}${task}	${key}
 "
   done <<EOF
@@ -263,7 +263,7 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
       open_decision_keys: ($rows | length),
       open_decisions: $rows,
       definitions: {
-        raw_decision_events: "counts of individual status EVENT lines; a lane can open, close, and reopen the same decision many times. These are not open decisions and must never be reported as any number of them.",
+        raw_decision_events: "counts of individual status EVENT lines the fold treats as decision transitions; a lane can open, close, and reopen the same decision many times. These are not open decisions and must never be reported as any number of them.",
         keys_opened_distinct: "distinct task+key decisions ever opened, however many events each took.",
         keys_superseded: "distinct keys that were opened and have since been closed.",
         keys_stale: "open keys whose owning lane already finished; they are still counted open and still carry a disposition.",

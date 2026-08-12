@@ -246,11 +246,6 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
 }
-# Public accessor for the decision-key grammar owned by _fm_decision_key above,
-# for consumers that need one line's key without re-deriving the grammar.
-status_line_decision_key() {  # <status-line> -> key slug, or "default"
-  _fm_decision_key "$1"
-}
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -309,6 +304,21 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
   return 0
 }
 
+# The ONE statement of which verbs move a decision at all. Sets
+# _FM_DECISION_VERB_CLASS to opens|closes and returns 0, or returns 1 when the
+# verb is not a decision transition. Deliberately a plain call with a global
+# result, not a command substitution: it runs once per status line in the fold's
+# hot path, and it is shared with status_line_decision_transition below so a verb
+# can never move a decision in the fold and go uncounted by a consumer.
+_fm_decision_verb_class() {  # <verb> <resolve-verb> <held-verb>
+  case "$1" in
+    needs-decision|blocked) _FM_DECISION_VERB_CLASS=opens ;;
+    "$2"|"$3") _FM_DECISION_VERB_CLASS=closes ;;
+    *) _FM_DECISION_VERB_CLASS=''; return 1 ;;
+  esac
+  return 0
+}
+
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
   stripped=${line//[[:space:]]/}
@@ -317,19 +327,39 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
-  case "$verb" in
-    needs-decision|blocked)
+  _fm_decision_verb_class "$verb" "$resolve" "$held" \
+    || { printf '%s' "$open"; return 0; }
+  case "$_FM_DECISION_VERB_CLASS" in
+    opens)
       note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
       ;;
-    "$resolve"|"$held")
+    closes)
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
   esac
   printf '%s' "$open"
+}
+
+# Public accessor for ONE line's decision transition: prints "<key>\t<verb>" for
+# a line _fm_decision_fold_line above would act on, and fails for a line the fold
+# would leave the open set untouched by. It applies no rule of its own - the key
+# grammar, the reserved-namespace rule, and the verb class are the same three
+# predicates the fold itself gates on - so a consumer that must COUNT decision
+# events cannot report a decision opened, or later superseded, that the fold
+# never recognized. Every gate the fold gains belongs in one of those predicates.
+status_line_decision_transition() {  # <status-line> -> "<key>\t<verb>"
+  local line=$1 resolve held key verb
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  verb=$(status_line_verb "$line")
+  _fm_decision_verb_class "$verb" "$resolve" "$held" || return 1
+  key=$(_fm_decision_key "$line") || return 1
+  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || return 1
+  printf '%s\t%s' "$key" "$verb"
 }
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one

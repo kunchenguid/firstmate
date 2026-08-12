@@ -130,6 +130,41 @@ build_coverage_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+# The fold decides what a decision transition IS, and that rule grows: a reserved
+# key namespace only transitions when the note speaks its own vocabulary. A ledger
+# that counted lines by its own reading of the key grammar would report a decision
+# opened, and then silently superseded, that never existed. Both directions are
+# pinned here so the ledger cannot pass by ignoring reserved keys wholesale.
+test_only_fold_recognized_lines_become_figures() {
+  local home before after opened folded
+  home=$(build_coverage_home reserved-keys)
+  before=$(run_ledger "$home") || fail "ledger failed on the coverage home"
+
+  printf 'blocked [key=pending-reply-42]: waiting on something unrelated\n' \
+    >> "$home/state/lane-live.status"
+  folded=$(authoritative_open_count "$home")
+  [ "$folded" = "$(printf '%s' "$before" | jq -r '.open_decision_keys')" ] \
+    || fail "the fixture line was supposed to be invisible to the authoritative fold"
+  after=$(run_ledger "$home") || fail "ledger failed after the ignored line"
+  printf '%s' "$after" | jq -e --argjson b "$before" '
+    .raw_decision_events == $b.raw_decision_events
+    and .keys_opened_distinct == $b.keys_opened_distinct
+    and .keys_superseded == $b.keys_superseded
+    and .open_decision_keys == $b.open_decision_keys
+  ' >/dev/null || fail "a line the fold ignores still moved a ledger figure: $after"
+
+  printf 'blocked [key=pending-reply-42]: pending-reply-42: waiting on the mate\n' \
+    >> "$home/state/lane-live.status"
+  opened=$(run_ledger "$home") || fail "ledger failed after the recognized line"
+  printf '%s' "$opened" | jq -e --argjson b "$before" '
+    .raw_decision_events.blocked == ($b.raw_decision_events.blocked + 1)
+    and .keys_opened_distinct == ($b.keys_opened_distinct + 1)
+    and .open_decision_keys == ($b.open_decision_keys + 1)
+    and (.open_decisions | any(.key == "pending-reply-42" and .disposition != ""))
+  ' >/dev/null || fail "a line the fold does act on was not counted: $opened"
+  pass "only the lines the authoritative fold acts on become ledger figures"
+}
+
 test_raw_events_never_become_the_open_decision_count() {
   local home json open_keys rows raw authoritative
   home=$(build_coverage_home raw-vs-folded)
@@ -246,6 +281,7 @@ EOF
   pass "bearings publishes the ledger and refuses a count that no enumerated key backs"
 }
 
+test_only_fold_recognized_lines_become_figures
 test_raw_events_never_become_the_open_decision_count
 test_every_live_key_carries_a_disposition
 test_unclassifiable_state_is_disclosed_not_hidden

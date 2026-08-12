@@ -44,6 +44,7 @@ The projection remains read-only and does not inspect historical prose.
 
 `bin/fm-decision-ledger.sh` owns every decision FIGURE and its definition, so raw status-event counts cannot be published as open decisions.
 It folds the open set through `bin/fm-classify-lib.sh`'s `status_open_decisions` rather than counting events, classifies each key through `fm-decision-hold.sh state`, and refuses to emit unless the open-decision figure equals the length of an enumerated row list in which every key carries a disposition.
+Its raw event counts come from `status_line_decision_transition`, the public accessor that answers with the fold's own three gates - key grammar, reserved namespace, and verb class - so a line the fold declines to treat as a transition can never be counted as a decision opened and then superseded.
 Bearings projects that record into `decision_ledger` and the never-truncated `decision_keys`, and fails rather than publish an open-decision count that no enumerated key backs.
 
 ## Verification record
@@ -52,6 +53,7 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Archived-answer and decision-coverage verification date: 2026-08-06.
+Fold-agreeing transition-accessor verification date: 2026-08-11.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -59,6 +61,7 @@ The initial Bearings snapshot correctly has no open decision, and the new teardo
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 The archived-answer regression drives a decision through `resolve` and then `tasks-axi prune --keep 0`, so verification meets a key whose answer exists only in the archive, and pairs it with a collapsed row and a hollowed archive record that must both still refuse.
 The coverage regression builds one home carrying every disposition at once, with far more raw decision events than open keys.
+It also drives a reserved-namespace line the fold ignores and the same key's recognized form, so a counter that read the key grammar on its own would report a decision opened and superseded that never existed.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -77,10 +80,14 @@ ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 
 $ bash tests/fm-decision-ledger.test.sh
+ok - only the lines the authoritative fold acts on become ledger figures
 ok - raw decision events stay distinct and can never stand in for the open-key count
 ok - every distinct live key carries its own disposition and closed keys stay out
 ok - an unclassifiable hold state is disclosed per key and never silently dropped
 ok - bearings publishes the ledger and refuses a count that no enumerated key backs
+
+$ bash tests/fm-classify-decision-key.test.sh
+ok - the public transition accessor answers exactly what the fold does
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
