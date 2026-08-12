@@ -1023,7 +1023,7 @@ contradiction_section() {
 }
 
 test_record_contradictions_are_bounded_and_silent_when_consistent() {
-  local rec root home fakebin out contradictions consistent_rec consistent_root consistent_home consistent_fakebin consistent_out
+  local rec root home fakebin out contradictions meta_line consistent_rec consistent_root consistent_home consistent_fakebin consistent_out
   rec=$(new_world record-contradictions)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1045,12 +1045,14 @@ EOF
 - [ ] done-open-pr - Done task with an open pull request (repo: firstmate) (kind: ship)
 - [ ] held-flight - Held task (repo: firstmate) (kind: ship) (hold: wait) (hold-kind: future)
 - [ ] missing-meta - Missing runtime record (repo: firstmate) (kind: ship)
+- [x] complete-flight-meta - Checked in-flight task with live metadata (repo: firstmate) (kind: ship)
 
 ## Queued
 - [ ] queued-healthy - Queued work needs no runtime record (repo: firstmate) (kind: ship)
 
 ## Done
 - [x] completed-healthy - Completed work needs no runtime record (repo: firstmate) (kind: ship)
+- [x] complete-done-meta - Done task with live metadata (repo: firstmate) (kind: ship)
 EOF
   printf 'window=fm-sess:healthy\nkind=ship\npr=https://github.com/example/repo/pull/7\n' > "$home/state/healthy-live.meta"
   printf 'working: current work\n' > "$home/state/healthy-live.status"
@@ -1063,6 +1065,8 @@ EOF
   printf 'window=fm-sess:done-open\nkind=ship\npr=https://github.com/example/repo/pull/10\n' > "$home/state/done-open-pr.meta"
   printf 'done: falsely claimed landed\n' > "$home/state/done-open-pr.status"
   printf 'window=fm-sess:held\nkind=ship\n' > "$home/state/held-flight.meta"
+  printf 'window=fm-sess:complete-done\nkind=ship\n' > "$home/state/complete-done-meta.meta"
+  printf 'window=fm-sess:complete-flight\nkind=ship\n' > "$home/state/complete-flight-meta.meta"
   printf 'window=fm-sess:meta-only\nkind=ship\n' > "$home/state/meta-only.meta"
   printf 'window=fm-sess:secondmate\nkind=secondmate\n' > "$home/state/fleet-mate.meta"
   printf 'resolved: archival candidate\n' > "$home/state/stale-orphan.status"
@@ -1076,6 +1080,11 @@ EOF
 
   assert_contains "$contradictions" "RECORD CONTRADICTIONS" "startup digest omitted the contradiction section"
   assert_contains "$contradictions" "meta-without-backlog (1): meta-only" "startup digest missed metadata without a backlog row"
+  assert_contains "$contradictions" "complete-but-live-meta (2): complete-done-meta, complete-flight-meta" \
+    "startup digest did not distinguish checked backlog rows from absent backlog rows"
+  meta_line=$(printf '%s\n' "$contradictions" | awk '/^- meta-without-backlog / { print }')
+  assert_not_contains "$meta_line" "complete-done-meta" "a checked Done row was falsely labelled absent"
+  assert_not_contains "$meta_line" "complete-flight-meta" "a checked In-flight row was falsely labelled absent"
   assert_contains "$contradictions" "backlog-without-meta (1): missing-meta(state=in_flight)" "startup digest missed an in-flight row without metadata"
   assert_contains "$contradictions" "dead-working(status=working,endpoint=dead)" "startup digest trusted working status on a dead endpoint"
   assert_contains "$contradictions" "done-live(status=done,endpoint=alive)" "startup digest trusted done status on a live endpoint"
@@ -1094,7 +1103,7 @@ EOF
     FM_RECORD_CONTRADICTION_LIMIT=2 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   contradictions=$(printf '%s\n' "$out" | contradiction_section)
-  [ "$(printf '%s\n' "$contradictions" | awk '/^- / { count++ } END { print count + 0 }')" -le 6 ] \
+  [ "$(printf '%s\n' "$contradictions" | awk '/^- / { count++ } END { print count + 0 }')" -le 7 ] \
     || fail "bounded contradiction section exceeded one line per contradiction class: $contradictions"
   assert_contains "$contradictions" "+1 more" "bounded contradiction section omitted its hidden-finding count"
 

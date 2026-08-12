@@ -41,7 +41,7 @@ fm_record_contradiction_backlog_rows() {  # <backlog>
       sub(/^[ xX]\][[:space:]]+/, "", row)
       id = row
       sub(/[[:space:]].*$/, "", id)
-      if (state == "done" || checked ~ /[xX]/) next
+      complete = (state == "done" || checked ~ /[xX]/) ? "complete" : "active"
       hold_kind = ""
       if ($0 ~ /\(hold-kind:[[:space:]]*[^)]*\)/) {
         hold_kind = $0
@@ -50,18 +50,27 @@ fm_record_contradiction_backlog_rows() {  # <backlog>
         sub(/^[[:space:]]+/, "", hold_kind)
         sub(/[[:space:]]+$/, "", hold_kind)
       }
-      printf "%s\t%s\t%s\n", id, state, hold_kind
+      printf "%s\t%s\t%s\t%s\n", id, state, complete, hold_kind
     }
   ' "$backlog"
 }
 
-fm_record_contradiction_backlog_has() {  # <rows> <id>
-  local rows=$1 id=$2 row_id _
-  while IFS=$'\t' read -r row_id _; do
-    [ "$row_id" = "$id" ] && return 0
+fm_record_contradiction_backlog_state() {  # <rows> <id>
+  local rows=$1 id=$2 row_id row_state completion _ complete_found=0
+  while IFS=$'\t' read -r row_id row_state completion _; do
+    [ "$row_id" = "$id" ] || continue
+    if [ "$completion" = active ]; then
+      printf 'active'
+      return 0
+    fi
+    complete_found=1
   done <<EOF
 $rows
 EOF
+  if [ "$complete_found" -eq 1 ]; then
+    printf 'complete'
+    return 0
+  fi
   return 1
 }
 
@@ -128,6 +137,8 @@ fm_record_contradictions_init() {  # <data-dir>
   FM_RECORD_CONTRADICTION_COUNT=0
   FM_RECORD_CONTRADICTION_META_COUNT=0
   FM_RECORD_CONTRADICTION_META_ENTRIES=
+  FM_RECORD_CONTRADICTION_COMPLETE_COUNT=0
+  FM_RECORD_CONTRADICTION_COMPLETE_ENTRIES=
   FM_RECORD_CONTRADICTION_BACKLOG_COUNT=0
   FM_RECORD_CONTRADICTION_BACKLOG_ENTRIES=
   FM_RECORD_CONTRADICTION_STATUS_COUNT=0
@@ -151,6 +162,12 @@ fm_record_contradiction_append() {  # <kind> <entry>
       [ "$FM_RECORD_CONTRADICTION_META_COUNT" -le "$FM_RECORD_CONTRADICTION_LIMIT_EFFECTIVE" ] || return 0
       [ -z "$FM_RECORD_CONTRADICTION_META_ENTRIES" ] && separator= || separator=', '
       FM_RECORD_CONTRADICTION_META_ENTRIES="$FM_RECORD_CONTRADICTION_META_ENTRIES$separator$entry"
+      ;;
+    complete)
+      FM_RECORD_CONTRADICTION_COMPLETE_COUNT=$((FM_RECORD_CONTRADICTION_COMPLETE_COUNT + 1))
+      [ "$FM_RECORD_CONTRADICTION_COMPLETE_COUNT" -le "$FM_RECORD_CONTRADICTION_LIMIT_EFFECTIVE" ] || return 0
+      [ -z "$FM_RECORD_CONTRADICTION_COMPLETE_ENTRIES" ] && separator= || separator=', '
+      FM_RECORD_CONTRADICTION_COMPLETE_ENTRIES="$FM_RECORD_CONTRADICTION_COMPLETE_ENTRIES$separator$entry"
       ;;
     backlog)
       FM_RECORD_CONTRADICTION_BACKLOG_COUNT=$((FM_RECORD_CONTRADICTION_BACKLOG_COUNT + 1))
@@ -186,12 +203,15 @@ fm_record_contradiction_append() {  # <kind> <entry>
 }
 
 fm_record_contradictions_observe_meta() {  # <meta> <id> <endpoint> <state-dir>
-  local meta=$1 id=$2 endpoint=$3 state_dir=$4 kind status verb pr pr_remaining query_timeout result pr_state mergeable
+  local meta=$1 id=$2 endpoint=$3 state_dir=$4 kind backlog_state status verb pr pr_remaining query_timeout result pr_state mergeable
   case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
   kind=$(fm_meta_get "$meta" kind)
-  if [ "$kind" != secondmate ] \
-    && ! fm_record_contradiction_backlog_has "$FM_RECORD_CONTRADICTION_ROWS" "$id"; then
-    fm_record_contradiction_append meta "$id"
+  if [ "$kind" != secondmate ]; then
+    backlog_state=$(fm_record_contradiction_backlog_state "$FM_RECORD_CONTRADICTION_ROWS" "$id") || backlog_state=absent
+    case "$backlog_state" in
+      complete) fm_record_contradiction_append complete "$id" ;;
+      absent) fm_record_contradiction_append meta "$id" ;;
+    esac
   fi
 
   status="$state_dir/$id.status"
@@ -227,9 +247,10 @@ EOF
 }
 
 fm_record_contradictions_observe_backlog() {  # <state-dir>
-  local state_dir=$1 row_id row_state hold_kind
-  while IFS=$'\t' read -r row_id row_state hold_kind; do
+  local state_dir=$1 row_id row_state completion hold_kind
+  while IFS=$'\t' read -r row_id row_state completion hold_kind; do
     [ -n "$row_id" ] || continue
+    [ "$completion" = active ] || continue
     if [ "$row_state" = in_flight ] && [ ! -f "$state_dir/$row_id.meta" ]; then
       fm_record_contradiction_append backlog "$row_id(state=in_flight)"
     fi
@@ -268,6 +289,8 @@ fm_record_contradictions_format() {
   printf 'RECORD CONTRADICTIONS\n%s\n' '--------------------------------------------------------------------------------'
   fm_record_contradiction_print_kind meta-without-backlog \
     "$FM_RECORD_CONTRADICTION_META_COUNT" "$FM_RECORD_CONTRADICTION_META_ENTRIES"
+  fm_record_contradiction_print_kind complete-but-live-meta \
+    "$FM_RECORD_CONTRADICTION_COMPLETE_COUNT" "$FM_RECORD_CONTRADICTION_COMPLETE_ENTRIES"
   fm_record_contradiction_print_kind backlog-without-meta \
     "$FM_RECORD_CONTRADICTION_BACKLOG_COUNT" "$FM_RECORD_CONTRADICTION_BACKLOG_ENTRIES"
   fm_record_contradiction_print_kind status-endpoint \
