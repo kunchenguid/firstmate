@@ -68,9 +68,7 @@ Run `no-mistakes doctor` and use its reported data directory rather than assumin
 Use the exact run id from `no-mistakes axi status --run <run-id>` to locate exactly one gate worktree at `<data-directory>/worktrees/<repo-id>/<run-id>`.
 Refuse ambiguity, a missing gate worktree, or a repository id that differs between the worktree path and its resolved Git common directory.
 
-Resolve the gate worktree's Git common directory and require its canonical path to be `<data-directory>/repos/<repo-id>.git`.
-Resolve the status head as a commit inside that exact bare gate repository with `git cat-file -e <head>^{commit}` and `git rev-parse <head>^{commit}`.
-Resolve the gate worktree's `HEAD^{commit}` and require the full object id to equal the full status-head object id.
+Run `bin/fm-preserved-head-check.sh <data-directory> <repo-id> <run-id> <status-head>` and require it to print the resolved full commit id.
 This proves that the preserved head is a real commit in the matching gate repository and is still the exact run worktree head, rather than a stale status string or an object found in an unrelated repository.
 
 All of these checks are read-only.
