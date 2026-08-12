@@ -455,6 +455,47 @@ EOF
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
+test_hold_retry_matches_quoted_title() {
+  local home origin title hold retry show
+  home=$(make_home quoted-title-retry)
+  origin=sample-budget-review
+  title='Is sample budget-bucket computation done locally per edge site, or centrally with buckets shipped to edge Redis over Kafka?'
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review sample budget routing" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create quoted-title origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample budget review\n\nOne routing decision remains.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" bucket-route \
+    --title "$title" --reason "captain budget route pending" --repo sample) \
+    || fail "could not register quoted-title hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "title: \"$title\"" \
+    "quoted-title fixture must exercise tasks-axi's quoted rendering"
+
+  retry=$(run_decisions "$home" hold "$origin" bucket-route \
+    --title "$title" --reason "captain budget route pending" --repo sample) \
+    || fail "identical quoted-title hold retry failed"
+  [ "$retry" = "$hold" ] || fail "identical quoted-title retry changed task identity: $retry"
+  [ "$(grep -cE "^- \[ \] $hold -" "$home/data/backlog.md")" = 1 ] \
+    || fail "identical quoted-title retry duplicated the hold"
+
+  if run_decisions "$home" hold "$origin" bucket-route \
+    --title "Choose a different sample budget route" \
+    --reason "captain budget route pending" --repo sample \
+    > "$home/changed-title.out" 2> "$home/changed-title.err"; then
+    fail "quoted-title hold accepted a changed title for the same identity"
+  fi
+  assert_grep "has a different title" "$home/changed-title.err" \
+    "changed title must retain the identity-collision refusal"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "title: \"$title\"" "changed-title refusal altered the original title"
+  assert_contains "$show" "held: yes" "changed-title refusal released the captain hold"
+
+  pass "quoted-title hold retries preserve exact identity and reject changed titles"
+}
+
 # tasks-axi quotes multi-entry blocked_by values as "a,b,c". resolve must strip
 # those surrounding quotes before comma-boundary membership so the first and last
 # list elements match, not only middle elements.
@@ -559,4 +600,5 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_hold_retry_matches_quoted_title
 test_resolve_matches_quoted_blocked_by_edges

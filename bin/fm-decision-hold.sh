@@ -266,6 +266,10 @@ command_hold() {
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
+    # tasks-axi quotes punctuation-heavy titles in show output.
+    case "$existing_title" in
+      \"*\") existing_title=${existing_title#\"}; existing_title=${existing_title%\"} ;;
+    esac
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
