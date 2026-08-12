@@ -1140,7 +1140,10 @@ if (legacyOperationalComponent.render(100).length !== 0) {
 }
 const pendingUpdate = InteractiveMode.prototype.updatePendingMessagesDisplay;
 const pendingQueueReader = InteractiveMode.prototype.getAllQueuedMessages;
-if (typeof pendingUpdate === "function" && typeof pendingQueueReader === "function") {
+if (typeof pendingUpdate !== "function" || typeof pendingQueueReader !== "function") {
+  throw new Error("Pi no longer exposes the pending-message dock members the Calm adapter binds");
+}
+{
   const pendingContainer = {
     children: [],
     clear() {
@@ -1150,20 +1153,33 @@ if (typeof pendingUpdate === "function" && typeof pendingQueueReader === "functi
       this.children.push(component);
     },
   };
-  const pendingMode = {
-    pendingMessagesContainer: pendingContainer,
+  // Inherit from the real prototype so Pi's own getAllQueuedMessages resolves through
+  // `this`, exactly as it does on a live InteractiveMode instance. `session` is a
+  // getter-only accessor on that prototype, so define own properties rather than assign.
+  const pendingMode = Object.create(InteractiveMode.prototype, {
+    pendingMessagesContainer: { value: pendingContainer, writable: true },
     session: {
-      getSteeringMessages: () => [watcherMessage, "CAPTAIN_STEERING_PENDING"],
-      getFollowUpMessages: () => ["CAPTAIN_FOLLOW_UP_PENDING", watcherMessage],
+      value: {
+        getSteeringMessages: () => [watcherMessage, "CAPTAIN_STEERING_PENDING"],
+        getFollowUpMessages: () => ["CAPTAIN_FOLLOW_UP_PENDING", watcherMessage],
+      },
+      writable: true,
     },
-    compactionQueuedMessages: [],
-    getAppKeyDisplay: () => "Option+Up",
-  };
+    compactionQueuedMessages: { value: [], writable: true },
+    getAppKeyDisplay: { value: () => "Option+Up", writable: true },
+  });
   const pendingText = () => pendingContainer.children
     .flatMap((component) => component.render?.(180) ?? [])
     .join("\n");
+  // Pi renders each queued message through a single-line TruncatedText, so assert on a
+  // distinctive marker from the operational message's first line rather than the whole
+  // multi-line envelope, which the dock can never emit intact.
+  const operationalDockMarker = "FIRSTMATE WATCHER WAKE";
   pendingUpdate.call(pendingMode);
-  if (pendingText().includes(watcherMessage) || !pendingText().includes("CAPTAIN_FOLLOW_UP_PENDING")) {
+  if (!pendingText().includes("to edit all queued messages")) {
+    throw new Error("the pending-message dock did not render the queued messages at all");
+  }
+  if (pendingText().includes(operationalDockMarker) || !pendingText().includes("CAPTAIN_FOLLOW_UP_PENDING")) {
     throw new Error("Calm did not filter current operational text from the pending-message dock");
   }
   if (!pendingText().includes("CAPTAIN_STEERING_PENDING")) {
@@ -1171,12 +1187,12 @@ if (typeof pendingUpdate === "function" && typeof pendingQueueReader === "functi
   }
   await calmCommand.handler("", commandContext);
   pendingUpdate.call(pendingMode);
-  if (!pendingText().includes(watcherMessage)) {
+  if (!pendingText().includes(operationalDockMarker)) {
     throw new Error("Calm-off pending-message rendering did not restore operational text");
   }
   await calmCommand.handler("", commandContext);
   pendingUpdate.call(pendingMode);
-  if (pendingText().includes(watcherMessage)) {
+  if (pendingText().includes(operationalDockMarker)) {
     throw new Error("re-enabling Calm did not hide current operational pending text");
   }
 }
@@ -3322,15 +3338,12 @@ JS
     "pending-dock fixture did not start the long Calm run"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e watcher"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  active_screen_wait=0
-  while [ "$active_screen_wait" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$pending_snapshot"
-    if grep -Fq "operational-error" "$pending_snapshot"; then
-      break
-    fi
-    sleep 0.05
-    active_screen_wait=$((active_screen_wait + 1))
-  done
+  # Gate on Pi's own dequeue hint, which the pending dock renders only after it has
+  # actually repainted with at least one queued message. Waiting on the model name
+  # instead would satisfy before the follow-up was queued, making the negative
+  # assertion below pass even if Calm never filtered the operational row.
+  wait_for_text "$pending_snapshot" "to edit all queued messages" \
+    || fail "Pi's pending-message dock never rendered the queued operational follow-up"
   assert_not_contains "$(cat "$pending_snapshot")" "CURRENT_WATCHER_E2E" \
     "Calm left a current operational follow-up visible in Pi's pending-message dock"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-queue-genuine-e2e"

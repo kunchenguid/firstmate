@@ -249,7 +249,7 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi (verified 0.81.1 through 0.84.1) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking, operational-user layout, and pending-message dock boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
+| Pi (verified 0.81.1 through 0.84.1) | Partially feasible with two API-probed exported-class adapters, one of which binds Pi-private members. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws. The collapsed-thinking boundary uses the exported `AssistantMessageComponent.updateContent`. The operational-user layout and pending-message dock boundaries have no public equivalent, so they bind `InteractiveMode` members that Pi declares `private` (`addMessageToChat`, `getAllQueuedMessages`, `setHiddenThinkingLabel`, `updatePendingMessagesDisplay`); these are not stable API and a minor Pi upgrade may rename or remove them. Each is probed by name at install time and a miss fails loudly rather than degrading silently. Generic user, tool, and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -268,7 +268,7 @@ It asserts one persisted and rendered captain answer, exact user-role operationa
 The real Pi TUI pending-message fixture holds one operational follow-up and one genuine Captain follow-up during an active run, proves Calm hides only the operational dock row, and exercises the public dequeue path without changing either queued message.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
-`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
+`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations and reports that package version dynamically.
 
 The relevant commands are:
 
@@ -442,20 +442,28 @@ Escape aborted the run leaving `Operation aborted`, no boat, and no stale sprite
 
 Pi 0.84.1 added a visible pending-message dock for extension-queued follow-ups, which is a separate rendering path from delivered transcript rows.
 The Calm adapter now filters the same narrow operational-input classification at that presentation boundary while leaving the underlying steering and follow-up queues unchanged.
+Pi exposes no public renderer for either the transcript row or the dock, so this adapter binds `InteractiveMode` members that Pi's declarations mark `private`.
+That was already true of the pre-existing `addMessageToChat` path; the dock work extends the same private surface rather than introducing the dependency.
+The adapter declares that surface in one list, probes every member by name at install time, and throws a named diagnostic when any is missing, so a Pi upgrade that renames one fails loudly instead of silently leaving operational rows visible.
 The real TUI regression holds an operational follow-up and a genuine Captain follow-up during an active run, proves only the operational dock row is hidden, and then verifies unchanged delivery, ordering, session persistence, restart behavior, Calm-off rendering, and export behavior.
 Claude, Codex, OpenCode, Grok, tmux, Herdr, Zellij, Orca, and cmux do not load this Pi-only presentation adapter, so their delivery and rendering surfaces remain unchanged.
+
+The component-level dock check builds its fixture with `Object.create(InteractiveMode.prototype, ...)` so Pi's own `getAllQueuedMessages` resolves through `this`, exactly as on a live instance.
+A plain object literal cannot stand in here: Pi's dock renderer calls that member on `this`, and `session` is a getter-only accessor on the prototype.
+The dock renders each queued message through a single-line `TruncatedText`, so the assertions match a first-line marker of the operational envelope rather than the whole multi-line string, and every dock assertion is gated on Pi's own dequeue hint so a missing repaint fails instead of passing vacuously.
+Removing only the two queue filters from the adapter makes `tests/fm-calm-pi-extension.test.sh` fail with `Calm did not filter current operational text from the pending-message dock`, and restoring them makes it pass, so the regression is genuinely covered.
+
+The commands below were run with `FM_PI_PACKAGE_DIR` pointed at the installed Pi 0.84.1 package so no Pi-dependent block was skipped.
 
 ```text
 $ pi --version
 0.84.1
 
 $ tests/fm-calm-pi-extension.test.sh
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
 ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
-
-$ tests/fm-pi-primary-types.test.sh
-skip: tsc not found for Pi extension typecheck
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
@@ -463,3 +471,8 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 $ bin/fm-doc-audience-check.sh
 fm-doc-audience-check: ok surfaces=67 local_links=240
 ```
+
+`tests/fm-pi-primary-types.test.sh` skips unless `tsc` is on `PATH`.
+Running it with a TypeScript 5.9.3 compiler available reports one pre-existing error in `.pi/extensions/fm-calm.ts`, where Pi 0.84.1 narrowed `TerminalInputHandler` to return `{ consume?, data? } | undefined` rather than `void`.
+That error reproduces unchanged on the base commit, is unrelated to the pending-message dock, and is left for a separate focused change.
+The tracked `.pi/extensions/lib/` adapters, including this one, pass the same strict no-emit configuration cleanly.
