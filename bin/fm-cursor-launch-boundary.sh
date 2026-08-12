@@ -319,7 +319,10 @@ EOF
     current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
     current_sid=$(LC_ALL=C ps -p "$PID" -o sid= 2>/dev/null || true)
     current_sid=$(printf '%s' "$current_sid" | tr -d '[:space:]')
-    { [ "$current_pgid" = "$record_pgid" ] || [ -n "$record_sid" ] && [ "$current_sid" = "$record_sid" ]; } && FOUND=1
+    if [ "$current_pgid" = "$record_pgid" ] || \
+       { [ -n "$record_sid" ] && [ "$current_sid" = "$record_sid" ]; }; then
+      FOUND=1
+    fi
   done <<EOF
 $PIDS
 EOF

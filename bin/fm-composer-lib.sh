@@ -546,15 +546,17 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     printf 'unknown'; return 0
   fi
   # A bare prompt glyph on its own row.
-  case "$content" in
-    '→')
-      if fm_composer_cursor_arrow_ok "$bordered" "$harness"; then printf 'empty'; else printf 'unknown'; fi
-      return 0 ;;
-    '❯'|'›'|'⟩') printf 'empty'; return 0 ;;
-    '>'|'$'|'%'|'#')
-      if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
-      return 0 ;;
-  esac
+  if [ "$content" = '→' ]; then
+    if fm_composer_cursor_arrow_ok "$bordered" "$harness"; then printf 'empty'; else printf 'unknown'; fi
+    return 0
+  fi
+  if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
+    printf 'empty'; return 0
+  fi
+  if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
+    if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
+    return 0
+  fi
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
   # Strip ONE leading prompt glyph (Cursor's `→` included), then re-judge.

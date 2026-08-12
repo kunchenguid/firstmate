@@ -322,7 +322,7 @@ fm_cursor_process_launch_files_are_owned() {  # <identity-file> <launch-file> <t
   local record=$1 boundary_file=$2 token=$3 record_dir record_base id token_file meta expected_boundary recorded_token
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   [ -f "$boundary_file" ] && [ ! -L "$boundary_file" ] || return 1
-  case "$token" in ''|*[![:xdigit:]]) return 1 ;; esac
+  case "$token" in ''|*[![:xdigit:]]*) return 1 ;; esac
   record_dir=$(CDPATH='' cd -- "$(dirname -- "$record")" 2>/dev/null && pwd -P) || return 1
   record_base=$(basename -- "$record")
   case "$record_base" in
@@ -345,7 +345,7 @@ fm_cursor_process_launch_files_are_owned() {  # <identity-file> <launch-file> <t
 fm_cursor_process_launch_identity_matches() {  # <pid> <canonical-path>
   local pid=$1 expected=$2 record recorded process_token boundary_file
   process_token=$(fm_cursor_process_environment_value "$pid" FM_CURSOR_LAUNCH_TOKEN 2>/dev/null || true)
-  case "$process_token" in ''|*[![:xdigit:]]) return 1 ;; esac
+  case "$process_token" in ''|*[![:xdigit:]]*) return 1 ;; esac
   record=$(fm_cursor_process_environment_value "$pid" FM_CURSOR_IDENTITY_FILE 2>/dev/null || true)
   case "$record" in /*) ;; *) return 1 ;; esac
   boundary_file=$(fm_cursor_process_environment_value "$pid" FM_CURSOR_BOUNDARY_LAUNCH_FILE 2>/dev/null || true)
@@ -439,7 +439,7 @@ fm_cursor_process_has_identity() {  # <pid> <comm> <args> <argv0>
   case "$boundary_file" in /*) ;; *) return 1 ;; esac
   fm_cursor_process_has_launch_ancestor "$pid" "$boundary_file" || return 1
   process_token=$(fm_cursor_process_environment_value "$pid" FM_CURSOR_LAUNCH_TOKEN 2>/dev/null || true)
-  case "$process_token" in ''|*[![:xdigit:]]) return 1 ;; esac
+  case "$process_token" in ''|*[![:xdigit:]]*) return 1 ;; esac
   fm_cursor_process_launch_files_are_owned "$record" "$boundary_file" "$process_token" || return 1
   if observed=$(fm_cursor_process_executable_path "$pid"); then
     case "${observed##*/}" in
@@ -551,7 +551,7 @@ fm_cursor_launch_boundary_complete_file() {  # <launch-record> <completion-file>
   case "$launch_pid" in ''|*[!0-9]*) return 1 ;; esac
   case "$launch_identity" in starttime=*|lstart=*) ;; *) return 1 ;; esac
   IFS=$'\t' read -r launch_token launch_executable < <(sed -n '2p' "$launch_file")
-  case "$launch_token" in ''|*[![:xdigit:]]) return 1 ;; esac
+  case "$launch_token" in ''|*[![:xdigit:]]*) return 1 ;; esac
   worker_file="${launch_file%.launch}.worker"
   token_absent_file="${launch_file%.launch}.token.absent"
   tree_complete_file="${launch_file%.launch}.tree.complete"

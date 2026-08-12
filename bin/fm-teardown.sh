@@ -1462,7 +1462,7 @@ reap_cursor_worker_launch_token() {  # <state_dir> <id>
   [ -f "$token_file" ] || return 0
   marker="$state_dir/.$id.cursor-boundary."
   IFS= read -r token < "$token_file" || return 1
-  case "$token" in ''|*[![:xdigit:]]) return 1 ;; esac
+  case "$token" in ''|*[![:xdigit:]]*) return 1 ;; esac
   marker="${marker}${token}"
   proof="$marker.proof"
   while :; do
