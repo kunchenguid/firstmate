@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--web]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -24,6 +24,8 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
+#   --web is mandatory for website or web-deployment ship briefs.
+#   It adds the custom-domain, Interceptor, revision-marker, and screenshot gate.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
@@ -103,6 +105,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+WEB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -124,6 +127,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --web) WEB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -152,6 +156,11 @@ if [ "$KIND" = ship ]; then
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+
+if [ "$WEB" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --web applies only to website or web-deployment ship briefs" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -409,6 +418,23 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+WEB_DOD=""
+if [ "$WEB" -eq 1 ]; then
+  IFS= read -r -d '' WEB_DOD <<'EOF' || true
+
+## Website deployment completion gate
+This is a website or web-deployment ship task, so the task is not complete until firstmate can accept all of the following evidence together:
+- Verify the deployed revision against the real custom production domain, never only on a preview or staging URL.
+- Perform fresh-browser visual verification with the existing Interceptor skill: run `interceptor open <custom-production-domain>` and inspect the actual rendered page, not a headless or CDP shortcut.
+- Confirm that the rendered page visibly contains concrete distinguishing revision content - a marker introduced by this change - and record the exact marker checked.
+- Capture screenshot evidence of that verified custom-domain page with the existing Interceptor screenshot mechanism, and preserve the screenshot as durable task or PR evidence.
+- Explicitly record the custom production URL, marker, and screenshot evidence before reporting done.
+HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as insufficient acceptance evidence.
+Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing.
+EOF
+  WEB_DOD=${WEB_DOD%$'\n'}
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -460,5 +486,6 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+$WEB_DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

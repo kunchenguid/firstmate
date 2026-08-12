@@ -371,6 +371,39 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_web_ship_brief_requires_visual_verification() {
+  local home web nonweb
+  home="$TMP_ROOT/web-visual-gate-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" web-visual-gate-a1 website \
+    --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web ship brief should scaffold successfully"
+  web="$home/data/web-visual-gate-a1/brief.md"
+  assert_grep "custom production domain" "$web" \
+    "web ship brief missing custom production domain verification"
+  assert_grep "fresh-browser visual verification with the existing Interceptor skill" "$web" \
+    "web ship brief missing fresh-browser Interceptor verification"
+  assert_grep 'interceptor open <custom-production-domain>' "$web" \
+    "web ship brief missing the Interceptor open command"
+  assert_grep "distinguishing revision content" "$web" \
+    "web ship brief missing distinguishing revision content"
+  assert_grep "Capture screenshot evidence" "$web" \
+    "web ship brief missing screenshot evidence"
+  assert_grep "HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as insufficient" "$web" \
+    "web ship brief missing explicit HTTP-only rejection"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-ship-a2 website \
+    --mode no-mistakes >/dev/null 2>&1 \
+    || fail "non-web ship brief should scaffold successfully"
+  nonweb="$home/data/ordinary-ship-a2/brief.md"
+  assert_no_grep "Website deployment completion gate" "$nonweb" \
+    "non-web ship brief received the website completion gate"
+  assert_no_grep "Interceptor" "$nonweb" \
+    "non-web ship brief received false visual-verification requirements"
+  pass "fm-brief.sh: --web structurally requires custom-domain visual evidence and rejects HTTP-only acceptance"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -720,6 +753,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_web_ship_brief_requires_visual_verification
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
