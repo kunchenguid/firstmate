@@ -1601,6 +1601,22 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# task_display_title reads the first task instruction, not an identifier. It is
+# used only by Herdr's explicit sibling-tab presentation and keeps the visible
+# task tab meaningful without creating a second presentation object.
+task_display_title() {  # <brief>
+  local brief=$1 title
+  title=$(awk '
+    /^# Task[[:space:]]*$/ { in_task=1; next }
+    in_task && /^#/ { exit }
+    in_task && /^[[:space:]]*$/ { next }
+    in_task { print; exit }
+  ' "$brief" 2>/dev/null)
+  title=$(printf '%s' "$title" | tr '\r\n\t' '   ' | tr -s ' ' | sed 's/^ //; s/ $//')
+  case "$title" in ''|'{TASK}') return 1 ;; esac
+  printf '%s' "$title"
+}
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
@@ -1804,6 +1820,16 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+HERDR_SIBLING_TABS=0
+HERDR_TASK_TITLE=
+HERDR_TAB_DISAMBIGUATOR=
+HERDR_TASK_LABEL=$W
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = herdr ] \
+   && [ "$(fm_meta_get "$RELAUNCH_META" herdr_presentation)" = tabs ]; then
+  HERDR_SIBLING_TABS=1
+  HERDR_TASK_TITLE=$(fm_meta_get "$RELAUNCH_META" task_title)
+  HERDR_TAB_DISAMBIGUATOR=$(fm_meta_get "$RELAUNCH_META" task_title_disambiguator)
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -1856,7 +1882,15 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    if [ "$KIND" != secondmate ] && fm_backend_herdr_sibling_tabs_enabled "$CONFIG"; then
+      HERDR_SIBLING_TABS=1
+      HERDR_TASK_TITLE=$(task_display_title "$BRIEF") || {
+        echo "error: Herdr sibling-tab presentation needs a human task title in $BRIEF" >&2
+        exit 1
+      }
+      HERDR_TASK_LABEL=$(fm_backend_herdr_task_tab_label '●' "$HERDR_TASK_TITLE") || exit 1
+    fi
+    if [ "$KIND" != secondmate ] && [ "$HERDR_SIBLING_TABS" -ne 1 ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -1985,7 +2019,11 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      if [ "$HERDR_SIBLING_TABS" -eq 1 ]; then
+        HERDR_TAB_DISAMBIGUATOR=$(fm_backend_herdr_task_tab_disambiguator "$CONTAINER" "$HERDR_TASK_LABEL" "$ID") || exit 1
+        HERDR_TASK_LABEL=$(fm_backend_herdr_task_tab_label '●' "$HERDR_TASK_TITLE" "$HERDR_TAB_DISAMBIGUATOR") || exit 1
+      fi
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$HERDR_TASK_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2567,7 +2605,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_presentation task_title task_title_disambiguator zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2597,6 +2635,11 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    if [ "$HERDR_SIBLING_TABS" -eq 1 ]; then
+      echo "herdr_presentation=tabs"
+      echo "task_title=$HERDR_TASK_TITLE"
+      [ -z "$HERDR_TAB_DISAMBIGUATOR" ] || echo "task_title_disambiguator=$HERDR_TAB_DISAMBIGUATOR"
+    fi
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"

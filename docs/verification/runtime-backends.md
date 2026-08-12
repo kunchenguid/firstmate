@@ -384,6 +384,31 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
+
+The sibling-tab workflow ran on 2026-08-12 against Herdr 0.8.0 protocol 19:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
+```
+
+Observed guarantee:
+
+```text
+ok - real herdr E2E: sibling worker tab creation and state changes retain one human-titled tab without focus drift
+ok - real herdr E2E: isolated lab session removed and default fleet session unchanged
+```
+
+The run selected `tabs` in `config/herdr-presentation-spaces`, verified that no disposable projection journal appeared, and confirmed `●` then `◐` titles on the exact worker tab beside its launcher while an unrelated captain workspace retained exact focus.
+
+The completed-worker pressure regression ran on 2026-08-12:
+
+```sh
+bash tests/fm-herdr-completed-pressure.test.sh
+```
+
+It verified the exact warning above 10 GiB completed-worker RSS and silence below that threshold or with no retained completed worker.
+
 One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 

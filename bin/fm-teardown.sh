@@ -54,10 +54,13 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force|--clear-completed]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --clear-completed releases a safely completed Herdr sibling-tab worker after
+#   the captain asks to clear it. Without that explicit release request, a
+#   sibling-tab task reaches a sleeping ✓ tab and retains its isolated copy.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -172,6 +175,13 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+CLEAR_COMPLETED=0
+case "$FORCE" in
+  '') ;;
+  --force) ;;
+  --clear-completed) CLEAR_COMPLETED=1 ;;
+  *) echo "error: usage: fm-teardown.sh <task-id> [--force|--clear-completed]" >&2; exit 2 ;;
+esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -2369,6 +2379,30 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# A safely completed sibling-tab worker is a retained result, not an ordinary
+# cleanup request. It paints the one real tab ✓ and leaves its sleeping worker,
+# record, and isolated copy intact until the captain explicitly clears it with
+# --clear-completed.
+if [ "$BACKEND" = herdr ] \
+   && [ "$(meta_value "$META" herdr_presentation)" = tabs ] \
+   && [ "$CLEAR_COMPLETED" = 0 ] \
+   && [ "$FORCE" != --force ]; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-task-tab.sh" complete "$ID"; then
+    echo "error: completed sibling-tab worker $ID could not be marked complete; retaining every record and isolated copy" >&2
+    exit 1
+  fi
+  COMPLETED_META_TMP=$(mktemp "$STATE/.$ID.meta.completed.XXXXXX") || exit 1
+  if ! awk '!/^herdr_tab_completed=/' "$META" > "$COMPLETED_META_TMP" \
+      || ! printf 'herdr_tab_completed=1\n' >> "$COMPLETED_META_TMP" \
+      || ! mv -f "$COMPLETED_META_TMP" "$META"; then
+    rm -f "$COMPLETED_META_TMP"
+    echo "error: completed sibling-tab worker $ID could not record its retained completion; retaining every record and isolated copy" >&2
+    exit 1
+  fi
+  echo "retained completed sibling-tab worker $ID (clear with fm-teardown.sh $ID --clear-completed)"
+  exit 0
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

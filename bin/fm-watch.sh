@@ -956,6 +956,19 @@ while :; do
     done <<EOF
 $pending
 EOF
+    # A status event is also the presentation refresh trigger for a real
+    # sibling worker tab. The helper owns Herdr identity and focus safety;
+    # failure to repaint a cosmetic marker cannot suppress the durable signal.
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      case "$f" in
+        "$STATE"/*.status)
+          FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-task-tab.sh" refresh "$(basename "$f" .status)" >/dev/null 2>&1 || true
+          ;;
+      esac
+    done <<EOF
+$pending
+EOF
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
@@ -1174,6 +1187,20 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Retained completed sibling tabs never auto-clean for resource pressure.
+    # Their metric owner emits a warning only from concrete measurements, and
+    # this episode marker keeps one pressure episode to one captain-facing wake.
+    completed_pressure=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-completed-pressure.sh" 2>/dev/null || true)
+    if [ -n "$completed_pressure" ]; then
+      if [ ! -e "$STATE/.completed-worker-pressure" ]; then
+        : > "$STATE/.completed-worker-pressure"
+        fm_wake_append check completed-worker-pressure "$completed_pressure" || exit 1
+        touch "$STATE/.last-check"
+        wake "$completed_pressure"
+      fi
+    else
+      rm -f "$STATE/.completed-worker-pressure"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,

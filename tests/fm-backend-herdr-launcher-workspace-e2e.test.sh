@@ -183,12 +183,18 @@ PRES_HOME="$TMP_ROOT/presentation-home"
 mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 : > "$PRES_HOME/config/herdr-presentation-spaces"
 
+TABS_HOME="$TMP_ROOT/tabs-home"
+mkdir -p "$TABS_HOME/state" "$TABS_HOME/config"
+printf 'tabs\n' > "$TABS_HOME/config/herdr-presentation-spaces"
+
 for id in uniqA uniqB dupC dupD staleF smE presU presD; do
   mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
   printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRIMARY_HOME/data/$id/brief.md"
   printf 'trivial launcher-placement brief: nothing to do.\n' > "$SM_HOME/data/$id/brief.md"
   printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRES_HOME/data/$id/brief.md"
 done
+mkdir -p "$TABS_HOME/data/tabsA"
+printf '# Task\nBuild the visible worker tab workflow\n' > "$TABS_HOME/data/tabsA/brief.md"
 mkdir -p "$PRIMARY_HOME/data/$SM2_ID"
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$PRIMARY_HOME/data/$SM2_ID/brief.md"
 
@@ -264,6 +270,63 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
   || fail "the projection journal does not name its own workspace"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
 pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+
+# --- 2c. sibling tabs: one real human-titled worker tab beside launcher ------
+
+spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$TABS_HOME" tabsA "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "a sibling-tab spawn from a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
+TABSA_META="$TABS_HOME/state/tabsA.meta"
+record_worktree "$TABSA_META"
+TABSA_PANE=$(grep '^herdr_pane_id=' "$TABSA_META" | cut -d= -f2-)
+TABSA_TAB=$(grep '^herdr_tab_id=' "$TABSA_META" | cut -d= -f2-)
+[ "$(workspace_of_pane "$TABSA_PANE")" = "$WS_PRIMARY" ] \
+  || fail "a sibling-tab worker must stay beside its launcher"
+[ "$(grep '^herdr_presentation=' "$TABSA_META")" = 'herdr_presentation=tabs' ] \
+  || fail "a sibling-tab worker did not record its explicit presentation"
+[ ! -e "$TABS_HOME/state/tabsA.herdr-presentation" ] \
+  || fail "a sibling-tab worker created a disposable presentation journal"
+[ "$(lab tab get "$TABSA_TAB" | jq -r '.result.tab.label')" = '● Build the visible worker tab workflow' ] \
+  || fail "a sibling-tab worker did not receive its human working title"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a sibling-tab spawn stole focus from the captain's workspace"
+printf 'done: implementation committed\n' > "$TABS_HOME/state/tabsA.status"
+FM_HOME="$TABS_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$TABS_HOME/state" \
+  "$ROOT/bin/fm-herdr-task-tab.sh" refresh tabsA \
+  || fail "could not refresh the sibling worker tab state"
+[ "$(lab tab get "$TABSA_TAB" | jq -r '.result.tab.label')" = '◐ Build the visible worker tab workflow' ] \
+  || fail "a ready worker did not retain its human title with the review marker"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a sibling-tab state change stole focus from the captain's workspace"
+pass "real herdr E2E: sibling worker tab creation and state changes retain one human-titled tab without focus drift"
+
+# A raw fixture has no control adapter, while a completed real worker's process
+# is already agent-free. Mark this fixture pi only to exercise the existing
+# stopped-agent lifecycle path without launching a second process.
+awk 'BEGIN { OFS="=" } $1 == "harness" { print "harness", "pi"; next } { print }' \
+  FS='=' "$TABSA_META" > "$TABSA_META.rewrite" \
+  || fail "could not prepare the completed sibling-tab fixture"
+mv "$TABSA_META.rewrite" "$TABSA_META" || fail "could not publish the completed sibling-tab fixture"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TABS_HOME" FM_STATE_OVERRIDE="$TABS_HOME/state" \
+  FM_DATA_OVERRIDE="$TABS_HOME/data" FM_CONFIG_OVERRIDE="$TABS_HOME/config" \
+  "$ROOT/bin/fm-teardown.sh" tabsA >"$TMP_ROOT/tabs-retain.out" 2>&1 \
+  || fail "a safely completed sibling tab could not enter retention"$'\n'"$(cat "$TMP_ROOT/tabs-retain.out")"
+[ -f "$TABSA_META" ] || fail "completed sibling-tab retention removed its durable record"
+lab pane get "$TABSA_PANE" >/dev/null 2>&1 || fail "completed sibling-tab retention closed the real worker tab"
+[ "$(lab tab get "$TABSA_TAB" | jq -r '.result.tab.label')" = '✓ Build the visible worker tab workflow' ] \
+  || fail "completed sibling-tab retention did not mark the real worker tab complete"
+if FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TABS_HOME" FM_STATE_OVERRIDE="$TABS_HOME/state" \
+    "$ROOT/bin/fm-control.sh" tabsA relaunch --note 'do not reuse completed tab' >"$TMP_ROOT/tabs-relaunch.out" 2>&1; then
+  fail "a retained completed sibling tab was reused by relaunch"
+fi
+grep -F 'retained completed sibling-tab worker' "$TMP_ROOT/tabs-relaunch.out" >/dev/null \
+  || fail "completed sibling-tab relaunch refusal did not name the retained worker boundary"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TABS_HOME" FM_STATE_OVERRIDE="$TABS_HOME/state" \
+  FM_DATA_OVERRIDE="$TABS_HOME/data" FM_CONFIG_OVERRIDE="$TABS_HOME/config" \
+  "$ROOT/bin/fm-teardown.sh" tabsA --clear-completed >"$TMP_ROOT/tabs-clear.out" 2>&1 \
+  || fail "an explicit completed sibling-tab clear failed"$'\n'"$(cat "$TMP_ROOT/tabs-clear.out")"
+[ ! -f "$TABSA_META" ] || fail "explicit completed sibling-tab clear retained its durable record"
+if lab pane get "$TABSA_PANE" >/dev/null 2>&1; then
+  fail "explicit completed sibling-tab clear retained the real worker tab"
+fi
+pass "real herdr E2E: completed sibling tabs retain the real worker until an explicit clear releases it"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------

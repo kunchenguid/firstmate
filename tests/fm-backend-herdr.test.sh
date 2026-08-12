@@ -1158,7 +1158,7 @@ test_release_floor_verdict_survives_losing_either_signal() {
   pass "herdr presentation floor: either signal alone can carry an above verdict, and each divergence is real"
 }
 
-test_presentation_preference_reports_three_distinct_states() {
+test_presentation_preference_reports_four_distinct_states() {
   local dir config got
   dir="$TMP_ROOT/presentation-preference"; config="$dir/config"; mkdir -p "$config"
   preference() {
@@ -1172,10 +1172,32 @@ test_presentation_preference_reports_three_distinct_states() {
   printf 'off\n' > "$config/herdr-presentation-spaces"
   got=$(preference "$config")
   [ "$got" = off ] || fail "an explicit off must report off, got '$got'"
+  printf 'tabs\n' > "$config/herdr-presentation-spaces"
+  got=$(preference "$config")
+  [ "$got" = tabs ] || fail "an explicit tabs selection must report tabs, got '$got'"
   printf 'disabled\n' > "$config/herdr-presentation-spaces"
   got=$(preference "$config")
   [ "$got" = default ] || fail "an unrecognized value must report the default, got '$got'"
-  pass "herdr presentation: config parsing separates a deliberate choice from an unconfigured default"
+  pass "herdr presentation: config parsing separates sibling tabs, projection, opt-out, and the unconfigured default"
+}
+
+test_sibling_tab_label_uses_only_the_closed_marker_grammar() {
+  local out status
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_task_tab_label "●" "Build worker workflow"
+    printf "\\n"
+    fm_backend_herdr_task_tab_label "?" "Choose release policy" shortid
+  ' "$ROOT") || fail "sibling tab label formatting failed"
+  [ "$out" = $'● Build worker workflow\n? Choose release policy · shortid' ] \
+    || fail "sibling tab label formatting changed human title or disambiguator: $out"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_tab_label "x" title' "$ROOT" >/dev/null 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "an unrecognized sibling tab marker was accepted"
+  pass "herdr sibling-tab labels accept only the visible worker-state grammar"
 }
 
 test_projection_journal_is_atomic_and_uses_128_bit_token() {
@@ -4256,7 +4278,8 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe
 test_presentation_running_server_release_is_load_bearing
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
-test_presentation_preference_reports_three_distinct_states
+test_presentation_preference_reports_four_distinct_states
+test_sibling_tab_label_uses_only_the_closed_marker_grammar
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane

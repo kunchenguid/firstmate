@@ -142,14 +142,16 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
-# The config item a home writes to opt out of, or explicitly in to, the
-# projection.
+# The config item that selects a visual presentation for directly delegated
+# workers. "tabs" keeps the real worker beside its launcher, while the historic
+# "on" value retains the disposable-workspace projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
 
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
-# config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
-# (a deliberate opt-in, honored even below the version floor), or "default"
-# (this home configured nothing, so the floor decides).
+# config/herdr-presentation-spaces parsing. Echoes exactly one of "off",
+# "on" (the historic disposable-workspace opt-in, honored below the version
+# floor), "tabs" (the sibling-tab workflow), or "default" (this home configured
+# nothing, so the floor decides).
 # Values are read with the whole-file whitespace-stripped convention the other
 # scalar config items already use (config/backlog-backend, config/crew-harness),
 # plus case folding. An empty file is the historical presence-based opt-in form
@@ -166,8 +168,9 @@ fm_backend_herdr_presentation_preference() {  # <config-dir>
   case "$value" in
     off) printf 'off\n' ;;
     ''|on) printf 'on\n' ;;
+    tabs) printf 'tabs\n' ;;
     *)
-      echo "warning: $file: unrecognized value \"$value\"; herdr presentation spaces fall back to the default (write \"off\" to opt out, \"on\" to force the projection on)" >&2
+      echo "warning: $file: unrecognized value \"$value\"; herdr presentation spaces fall back to the default (write \"off\" to opt out, \"on\" for disposable workspaces, or \"tabs\" for sibling task tabs)" >&2
       printf 'default\n'
       ;;
   esac
@@ -319,11 +322,10 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
 # fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
 # bin/fm-spawn.sh consults before projecting this home's children into
 # disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
-# owns the full contract). An explicit "off" or "on" is obeyed as written; a
-# home that configured nothing is projected only at or above the version floor,
-# and otherwise falls back to the flat layout with one warning. Sets
-# FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection boundary to
-# distinguish an unconfigured default from an explicit opt-in.
+# owns the full contract). An explicit "off" or "tabs" never projects, "on"
+# preserves the historic projection, and a home that configured nothing is
+# projected only at or above the version floor. Sets
+# FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the spawn boundary.
 fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   local config_dir=${1:-} state_dir=${2:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
@@ -331,10 +333,77 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   # shellcheck disable=SC2034
   FM_BACKEND_HERDR_PRESENTATION_PREFERENCE=$preference
   case "$preference" in
-    off) return 1 ;;
+    off|tabs) return 1 ;;
     on) return 0 ;;
   esac
   fm_backend_herdr_presentation_default_supported "$state_dir"
+}
+
+# fm_backend_herdr_sibling_tabs_enabled <config-dir>: the explicit opt-in for
+# the worker-tab workflow. It intentionally has no release floor because it
+# creates no workspace and every task remains in the launcher's own workspace.
+fm_backend_herdr_sibling_tabs_enabled() {  # <config-dir>
+  [ "$(fm_backend_herdr_presentation_preference "${1:-}")" = tabs ]
+}
+
+# fm_backend_herdr_task_tab_label <marker> <title> [<disambiguator>]: format
+# the one visible label for a worker's real tab. Markers are a deliberately
+# closed set so presentation callers cannot invent a second lifecycle grammar.
+fm_backend_herdr_task_tab_label() {
+  local marker=${1:-} title=${2:-} disambiguator=${3:-} cleaned
+  case "$marker" in '●'|'◐'|'?'|'!'|'✓') ;; *) return 1 ;; esac
+  cleaned=$(printf '%s' "$title" | tr '\r\n\t' '   ' | tr -s ' ' | sed 's/^ //; s/ $//')
+  [ -n "$cleaned" ] || return 1
+  cleaned=$(LC_ALL=C printf '%.72s' "$cleaned")
+  if [ -n "$disambiguator" ]; then
+    cleaned="$cleaned · $disambiguator"
+  fi
+  printf '%s %s' "$marker" "$cleaned"
+}
+
+# fm_backend_herdr_task_tab_disambiguator <container> <working-label> <task-id>:
+# return a small id-derived suffix only when a sibling already uses the same
+# human working label. Herdr permits duplicate labels, but the suffix avoids
+# making two captain-visible tasks indistinguishable.
+fm_backend_herdr_task_tab_disambiguator() {
+  local container=$1 label=$2 id=$3 session workspace tabs
+  session=${container%%:*}
+  workspace=${container#*:}
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  if printf '%s' "$tabs" | jq -e --arg label "$label" '
+    (.result.tabs | type) == "array" and any(.result.tabs[]?; .label == $label)
+  ' >/dev/null 2>&1; then
+    printf '%s' "${id:0:8}"
+  fi
+}
+
+# fm_backend_herdr_tab_rename_exact <session> <workspace> <tab> <pane> <label>:
+# update only the recorded worker tab. The response-derived identities protect
+# the captain's unrelated tabs, and the exact pre-mutation focus is restored if
+# Herdr ever changes it. A failed verification leaves the label untouched.
+fm_backend_herdr_tab_rename_exact() {
+  local session=$1 workspace=$2 tab=$3 pane=$4 label=$5 before pane_info tab_info after
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$pane" ] && [ -n "$label" ] || return 1
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  if ! printf '%s' "$pane_info" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    .result.pane.pane_id == $pane and .result.pane.tab_id == $tab and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1 \
+     || ! printf '%s' "$tab_info" | jq -e --arg tab "$tab" --arg workspace "$workspace" '
+    .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace
+  ' >/dev/null 2>&1; then
+    return 1
+  fi
+  fm_backend_herdr_cli "$session" tab rename "$tab" "$label" >/dev/null 2>&1 || {
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "task-tab rename" || true
+    return 1
+  }
+  fm_backend_herdr_projection_focus_restore "$session" "$before" "task-tab rename" || return 1
+  after=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$after" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" '
+    .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace and .result.tab.label == $label
+  ' >/dev/null 2>&1
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
