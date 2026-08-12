@@ -66,7 +66,7 @@ fm_backend_tmux_window_presence() {  # <session> <window-id>
     return $?
   fi
   case "$windows" in
-    *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+    *"can't find session:"*|*"no server running on "*)
       return 1
       ;;
     *) return 2 ;;

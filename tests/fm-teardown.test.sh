@@ -76,7 +76,7 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
 fi
 if [ "${1:-}" = list-windows ]; then
   if [ "${FM_FAKE_TMUX_QUERY_ERROR:-0}" = 1 ]; then
-    printf '%s\n' 'tmux query failed' >&2
+    printf '%s\n' 'error connecting to /tmp/tmux.sock (Connection refused)' >&2
     exit 1
   fi
   case " $* " in
@@ -1560,6 +1560,12 @@ case "$cmd $sub" in
     else
       printf '%s\n' '{"error":{"code":"agent_not_found"}}'
     fi
+    ;;
+  "pane process-info")
+    pane=${4:-${3:-}}
+    pid=${FM_FAKE_HERDR_WORKER_PID:-0}
+    jq -n --arg pane "$pane" --argjson pid "$pid" \
+      '{result:{type:"pane_process_info",process_info:{pane_id:$pane,shell_pid:$pid,foreground_process_group_id:$pid,foreground_processes:[{pid:$pid,name:"sleep",argv0:"sleep"}]}}}'
     ;;
   *) exit 0 ;;
 esac

@@ -243,6 +243,8 @@ SPAWN_WORKTREE_PATH_SOURCE=
 SPAWN_META_PUBLISHED=0
 SPAWN_RECOVERY_META_PUBLISHED=0
 SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=0
+SPAWN_ENDPOINT_RECOVERY_RESERVATION=0
+SPAWN_ENDPOINT_CLEANUP_CONFIRMED=0
 SPAWN_RECOVERY_META_REPLACE_ALLOWED=0
 SPAWN_SLOT_STAMPED=0
 SPAWN_SLOT_LOCK_HELD=0
@@ -375,6 +377,13 @@ spawn_abort_recovery_meta() {
       echo "opencode_hook_inode=$SPAWN_OPENCODE_HOOK_INODE"
       echo "opencode_hook_digest=$SPAWN_OPENCODE_HOOK_DIGEST"
     fi
+    if [ "${BACKEND:-}" = tmux ] \
+      && [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] \
+      && [ "${SPAWN_ENDPOINT_CLEANUP_CONFIRMED:-0}" != 1 ] \
+      && [ -n "${WID:-}" ]; then
+      echo "window_id=$WID"
+      echo "endpoint_recovery=1"
+    fi
     echo "spawn_state=aborted"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
@@ -407,6 +416,36 @@ spawn_endpoint_recovery_meta() {
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
+  SPAWN_ENDPOINT_RECOVERY_RESERVATION=0
+}
+
+spawn_endpoint_recovery_reservation() {
+  local tmp meta="$STATE/$ID.meta"
+  [ -n "${T:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ "${SPAWN_RECOVERY_META_REPLACE_ALLOWED:-0}" = 1 ] || return 1
+    [ ! -L "$meta" ] || return 1
+  fi
+  mkdir -p "$STATE" 2>/dev/null || return 1
+  tmp=$(mktemp "$STATE/.$ID.spawn-endpoint-reservation.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    printf 'window=%s\n' "$T"
+    printf 'window_id=pending\n'
+    printf 'project=%s\n' "$PROJ_ABS"
+    printf 'harness=%s\n' "${HARNESS:-unknown}"
+    printf 'kind=%s\n' "${KIND:-ship}"
+    printf 'mode=%s\n' "${MODE:-no-mistakes}"
+    printf 'yolo=%s\n' "${YOLO:-off}"
+    printf 'backend=tmux\n'
+    printf 'endpoint_recovery=1\n'
+    printf 'endpoint_recovery_pending=1\n'
+    printf 'spawn_state=starting\n'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
+  SPAWN_ENDPOINT_RECOVERY_RESERVATION=1
+  SPAWN_RECOVERY_META_REPLACE_ALLOWED=1
 }
 
 spawn_slot_stamp_owned() {
@@ -886,6 +925,7 @@ spawn_abort_cleanup() {
      && [ -n "${WID:-}" ]; then
     if cleanup_spawn_window "$WID"; then
       endpoint_cleanup_status=0
+      SPAWN_ENDPOINT_CLEANUP_CONFIRMED=1
     fi
   fi
   if [ "$status" -ne 0 ] && [ "$endpoint_cleanup_status" -eq 0 ]; then
@@ -895,7 +935,9 @@ spawn_abort_cleanup() {
          && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ] \
          && [ "${SPAWN_WORKTREE_LEASED:-0}" != 1 ] \
          && [ "$(grep '^endpoint_recovery=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = 1 ] \
-         && [ "$(grep '^window_id=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = "$WID" ]; then
+         && { [ "$(grep '^window_id=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = "$WID" ] \
+           || { [ "${SPAWN_ENDPOINT_RECOVERY_RESERVATION:-0}" = 1 ] \
+             && [ "$(grep '^window_id=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = pending ]; }; }; then
         rm -f "$STATE/$ID.meta" || echo "warning: spawn abort removed the endpoint but could not remove its recovery record" >&2
         [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ] || SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=0
       fi
@@ -1862,6 +1904,10 @@ case "$BACKEND" in
   tmux)
     SES=$(fm_backend_container_ensure "$BACKEND" "$PROJ_ABS")
     T="$SES:$W"
+    spawn_endpoint_recovery_reservation || {
+      echo "error: could not reserve recovery ownership for the tmux endpoint $T; refusing to continue" >&2
+      exit 1
+    }
     WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
     WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
     if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
@@ -1871,27 +1917,22 @@ case "$BACKEND" in
     fi
     SPAWN_ENDPOINT_CREATED=1
     spawn_endpoint_recovery_meta || {
-      cleanup_spawn_window "$WID" || true
       echo "error: could not persist a recovery record for the tmux endpoint $T; refusing to continue" >&2
       exit 1
     }
     if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
-      cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to disable automatic window renaming for $T" >&2
       exit 1
     fi
     if ! fm_backend_set_task_option "$BACKEND" "$WID" allow-rename off; then
-      cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to disable window renaming for $T" >&2
       exit 1
     fi
     if ! fm_backend_rename_task "$BACKEND" "$WID" "$W"; then
-      cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to restore canonical window name $T" >&2
       exit 1
     fi
     if [ "$(fm_backend_task_name "$BACKEND" "$WID")" != "$W" ]; then
-      cleanup_spawn_window "$WID" || true
       echo "error: tmux did not retain canonical window name $T" >&2
       exit 1
     fi

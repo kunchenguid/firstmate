@@ -617,6 +617,24 @@ fm_backend_herdr_paths_same() {
   [ "$left_real" = "$right_real" ]
 }
 
+fm_backend_herdr_projection_provider_process_matches() {
+  local session=$1 pane_id=$2 pid=$3 info
+  [ "$pid" -gt 1 ] 2>/dev/null || return 1
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane_id" --argjson pid "$pid" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and ((.result.process_info.foreground_processes // []) | any(.pid == $pid))
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_projection_provider_close_bound() {
+  local session=$1 pane_id=$2 pid=$3
+  fm_backend_herdr_projection_provider_process_matches "$session" "$pane_id" "$pid" || return 1
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
+}
+
 fm_backend_herdr_projection_task_identity_matches() {
   local session=$1 workspace=$2 tab_id=$3 pane_id=$4 expected_label=$5 expected_harness=${6:-}
   local required_agent_state=${7:-} expected_task=${8:-} expected_path=${9:-} expected_home=${10:-}
@@ -667,6 +685,7 @@ EOF
       FM_BACKEND_HERDR_BOUND_PID_START=$start
       current_path=$(fm_backend_herdr_current_path "$session:$pane_id") || return 1
       fm_backend_herdr_paths_same "$current_path" "$expected_path" || return 1
+      fm_backend_herdr_projection_provider_process_matches "$session" "$pane_id" "$pid" || return 1
       ;;
     *) return 1 ;;
   esac
@@ -675,7 +694,7 @@ EOF
 fm_backend_herdr_projection_close_bound_pane() {
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local expected_workspace=${4:-} expected_tab=${5:-} expected_label=${6:-} expected_harness=${7:-}
-  local expected_task=${8:-} expected_path=${9:-} expected_home=${10:-} state index i
+  local expected_task=${8:-} expected_path=${9:-} expected_home=${10:-}
   [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ] || return 1
   [ -n "$expected_workspace" ] && [ -n "$expected_tab" ] \
     && [ -n "$expected_label" ] || return 1
@@ -687,27 +706,13 @@ fm_backend_herdr_projection_close_bound_pane() {
     [ -n "$FM_BACKEND_HERDR_BOUND_PID" ] && [ -n "$FM_BACKEND_HERDR_BOUND_PID_START" ] || return 1
     fm_agent_pid_start_matches "$FM_BACKEND_HERDR_BOUND_PID" "$FM_BACKEND_HERDR_BOUND_PID_START" || return 1
     fm_agent_worker_identity_matches "$FM_BACKEND_HERDR_BOUND_PID" "$expected_task" "$expected_home" || return 1
-    kill -TERM "$FM_BACKEND_HERDR_BOUND_PID" 2>/dev/null || return 1
-    for ((i = 0; i < 50; i++)); do
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
-      [ "$state" = no-agent ] && break
-      sleep 0.1
-    done
-    case "$state" in
-      no-agent|dead) ;;
-      *) return 1 ;;
-    esac
-    index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
-    if fm_agent_pids_for_task "$expected_task" "$index" "$expected_home" >/dev/null 2>&1; then
-      return 1
-    fi
-    [ "$state" = dead ] && return 0
-    fm_backend_herdr_projection_task_identity_matches \
-      "$session" "$expected_workspace" "$expected_tab" "$pane_id" \
-      "$expected_label" "$expected_harness" no-agent || return 1
+    fm_backend_herdr_projection_provider_close_bound \
+      "$session" "$pane_id" "$FM_BACKEND_HERDR_BOUND_PID" || return 1
   fi
-  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
-  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
+  if [ "$required_agent_state" != live ]; then
+    fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
+    [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
+  fi
 }
 
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [workspace] [tab] [label] [harness] [task] [path] [home]
