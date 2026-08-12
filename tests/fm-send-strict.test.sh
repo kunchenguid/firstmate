@@ -284,14 +284,16 @@ test_busy_queue_confirmation_survives_empty_preflight() {
 }
 
 test_concurrent_sends_serialize_per_endpoint() {
-  local dir fb home log composer hold first_pid second_pid first_rc second_rc i
+  local dir fb first_home second_home lock_namespace log composer hold first_pid second_pid first_rc second_rc i
   dir="$TMP_ROOT/concurrent-sends"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); home=$(setup_home concurrent); log="$dir/tmux.log"; composer="$dir/composer"; hold="$dir/type-hold"
+  fb=$(make_stubs "$dir"); first_home=$(setup_home concurrent-first); second_home=$(setup_home concurrent-second)
+  lock_namespace="$dir/send-locks"; log="$dir/tmux.log"; composer="$dir/composer"; hold="$dir/type-hold"
   : > "$log"
   printf '╭────╮\n│    │\n╰────╯\n' > "$composer"
-  fm_write_meta "$home/state/shared-codex.meta" "window=sess:fm-shared-codex" "kind=ship" "harness=codex"
+  fm_write_meta "$first_home/state/shared-codex.meta" "window=sess:fm-shared-codex" "kind=ship" "harness=codex"
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+  PATH="$fb:$PATH" FM_HOME="$first_home" FM_ROOT_OVERRIDE="$first_home" FM_TMUX_LOG="$log" \
+    FM_SEND_LOCK_NAMESPACE="$lock_namespace" \
     FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_TYPE_HOLD="$hold" FM_SEND_SETTLE=0 \
     "$SEND" shared-codex "first intended steer" >/dev/null 2>"$dir/first.err" &
   first_pid=$!
@@ -301,7 +303,8 @@ test_concurrent_sends_serialize_per_endpoint() {
   done
   [ -e "$hold.started" ] || fail "the first concurrent send never reached the held type boundary: $(cat "$dir/first.err")"
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+  PATH="$fb:$PATH" FM_HOME="$second_home" FM_ROOT_OVERRIDE="$second_home" FM_TMUX_LOG="$log" \
+    FM_SEND_LOCK_NAMESPACE="$lock_namespace" \
     FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_TYPE_HOLD="$hold" FM_SEND_SETTLE=0 \
     "$SEND" sess:fm-shared-codex "second intended steer" >/dev/null 2>"$dir/second.err" &
   second_pid=$!
@@ -315,7 +318,7 @@ test_concurrent_sends_serialize_per_endpoint() {
   [ ! -e "$hold.overlap" ] || fail "two sends entered the shared endpoint type boundary concurrently"
   [ "$(grep -c 'literal=1 arg=.* intended steer' "$log")" -eq 2 ] \
     || fail "serialized sends did not each type exactly once: $(cat "$log")"
-  pass "fm-send delivery: selector and explicit aliases serialize per resolved endpoint"
+  pass "fm-send delivery: cross-home aliases serialize per resolved endpoint"
 }
 
 # A --key send is how firstmate interrupts a worker, so its exit status is the

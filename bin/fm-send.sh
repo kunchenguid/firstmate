@@ -185,6 +185,37 @@ fm_send_count_colons() {  # <string>
   printf '%s' $(( ${#s} - ${#no_colons} ))
 }
 
+fm_send_lock_namespace_mode() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%Lp' "$1" 2>/dev/null
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
+}
+
+fm_send_lock_namespace_uid() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%u' "$1" 2>/dev/null
+  else
+    stat -c '%u' "$1" 2>/dev/null
+  fi
+}
+
+fm_send_lock_namespace() {
+  local uid dir owner mode
+  uid=$(id -u 2>/dev/null) || return 1
+  dir=${FM_SEND_LOCK_NAMESPACE:-${TMPDIR:-/tmp}/firstmate-send-$uid}
+  case "$dir" in /*) ;; *) return 1 ;; esac
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir -m 700 "$dir" 2>/dev/null || true
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  owner=$(fm_send_lock_namespace_uid "$dir") || return 1
+  mode=$(fm_send_lock_namespace_mode "$dir") || return 1
+  [ "$owner" = "$uid" ] && [ "$mode" = 700 ] || return 1
+  printf '%s' "$dir"
+}
+
 fm_send_resolve_target() {  # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -433,7 +464,11 @@ else
   read -r send_lock_sum send_lock_size _ <<EOF
 $(printf '%s' "$send_lock_identity" | cksum)
 EOF
-  SEND_TEXT_LOCK="$STATE/.fm-send-$send_lock_sum-$send_lock_size.lock"
+  send_lock_namespace=$(fm_send_lock_namespace) || {
+    echo "error: text not sent to $T (cannot establish the shared send-lock namespace)" >&2
+    exit 1
+  }
+  SEND_TEXT_LOCK="$send_lock_namespace/endpoint-$send_lock_sum-$send_lock_size.lock"
   fm_lock_acquire_wait "$SEND_TEXT_LOCK"
   trap 'fm_lock_release "$SEND_TEXT_LOCK"' EXIT
   # The pre-marker answer text, kept for the closing resolved note so the
