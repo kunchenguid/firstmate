@@ -21,7 +21,9 @@ make_home() { # <name> [tracked-config]
 
 assert_task_in() { # <path> <id> <message>
   local path=$1 id=$2 message=$3
-  [ -f "$path" ] && grep -F -- "$id" "$path" >/dev/null 2>&1 || fail "$message"
+  if [ ! -f "$path" ] || ! grep -F -- "$id" "$path" >/dev/null 2>&1; then
+    fail "$message"
+  fi
 }
 
 test_split_primary_home() {
