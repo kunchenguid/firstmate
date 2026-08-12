@@ -1146,6 +1146,38 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_github_hosts_validation() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/github-hosts"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "absent github-hosts config should be silent, got: $out"
+
+  printf '%s\n' '# Enterprise instances' '' github.company.com ghe.internal \
+    > "$case_dir/home/config/github-hosts"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "valid github-hosts config should be silent, got: $out"
+
+  printf '%s\n' github.company.com 'https://github.other.example' \
+    > "$case_dir/home/config/github-hosts"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'BOOTSTRAP_INFO: invalid config/github-hosts - line 2 is not a lowercase DNS hostname' ] \
+    || fail "malformed github-hosts diagnostic mismatch: $out"
+
+  printf '%s\n' 'Github.company.com' > "$case_dir/home/config/github-hosts"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'BOOTSTRAP_INFO: invalid config/github-hosts - line 1 is not a lowercase DNS hostname' ] \
+    || fail "uppercase github-hosts diagnostic mismatch: $out"
+  pass "bootstrap validates GitHub Enterprise host allowlists and leaves absent config silent"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1174,3 +1206,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_github_hosts_validation

@@ -89,6 +89,8 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+# shellcheck disable=SC2034 # Read by bootstrap after allowlist validation fails.
+FM_PR_GITHUB_HOSTS_ERROR=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -107,6 +109,63 @@ fm_task_id_creation_valid() {
   local id=${1-}
   fm_pr_task_id_valid "$id" || return 1
   [ "${#id}" -le 64 ]
+}
+
+# GitHub Enterprise allowlist entries are canonical lowercase DNS hostnames.
+# The same form is used in URLs, sidecars, and GH_HOST values, so ports,
+# userinfo, trailing dots, and alternate case cannot create a second identity.
+fm_pr_github_host_valid() {
+  local host=${1-} label
+  local LC_ALL=C
+  local -a labels
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
+# config/github-hosts contains one additional GitHub-compatible hostname per
+# non-empty, non-comment line. The complete file must be valid before any entry
+# is used, so one malformed line cannot leave a partially active allowlist.
+# shellcheck disable=SC2034 # The error is consumed by bootstrap after failure.
+fm_pr_github_hosts_file_valid() {
+  local file=${1-} line line_number=0
+  FM_PR_GITHUB_HOSTS_ERROR=
+  [ -f "$file" ] || {
+    FM_PR_GITHUB_HOSTS_ERROR='must be a regular file'
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    if ! fm_pr_github_host_valid "$line"; then
+      FM_PR_GITHUB_HOSTS_ERROR="line $line_number is not a lowercase DNS hostname"
+      return 1
+    fi
+  done < "$file"
+}
+
+fm_pr_github_host_allowed() {
+  local host=${1-} config file line matched=0
+  [ "$host" = github.com ] && return 0
+  fm_pr_github_host_valid "$host" || return 1
+  config=${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-}}/config}
+  [ "$config" != /config ] || return 1
+  file="$config/github-hosts"
+  fm_pr_github_hosts_file_valid "$file" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "$host" ] && matched=1
+  done < "$file"
+  [ "$matched" -eq 1 ]
 }
 
 # GitLab serves self-hosted instances, so the host is part of the identity
@@ -166,7 +225,7 @@ fm_pr_gitlab_path_valid() {
 # them empty; teaching the merge path about GitLab is a separate change, and
 # until then it refuses a GitLab URL rather than merging anything.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -175,20 +234,25 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
-    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    host=${BASH_REMATCH[1]}
+    owner=${BASH_REMATCH[2]}
+    repo=${BASH_REMATCH[3]}
+    number=${BASH_REMATCH[4]}
+    fm_pr_github_host_allowed "$host" || return 1
+    [[ "$owner" != *--* ]] || return 1
+    [ "$repo" != . ] && [ "$repo" != .. ] || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
-    FM_PR_HOST=github.com
-    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_HOST=$host
+    FM_PR_PATH="$owner/$repo"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_OWNER=$owner
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[2]}
-    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last

@@ -36,6 +36,7 @@ URL=$FM_PR_URL
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
+PR_HOST=$FM_PR_HOST
 shift 2
 [ "${1:-}" = "--" ] && shift
 
@@ -49,7 +50,7 @@ caller_has_merge_method() {
   return 1
 }
 
-reject_repo_overrides() {
+reject_target_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -57,11 +58,15 @@ reject_repo_overrides() {
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
+      --hostname|--hostname=*)
+        echo "error: extra merge arguments must not override the hostname" >&2
+        return 1
+        ;;
     esac
   done
 }
 
-reject_repo_overrides "$@" || exit 1
+reject_target_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -81,4 +86,10 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+if [ "$PR_HOST" = github.com ]; then
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    "${merge_args[@]+"${merge_args[@]}"}" "$@"
+else
+  GH_HOST="$PR_HOST" gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    "${merge_args[@]+"${merge_args[@]}"}" "$@"
+fi

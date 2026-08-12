@@ -74,8 +74,13 @@ fi
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
+  if [ "$HOST" = github.com ]; then
+    REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) || REMOTE_HEAD=
+  else
+    REMOTE_HEAD=$(cd "$WT" && GH_HOST="$HOST" gh pr view "$URL" \
+      --json headRefOid -q .headRefOid 2>/dev/null) || REMOTE_HEAD=
+  fi
+  if fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
 fi

@@ -18,6 +18,16 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+## GitHub Enterprise hosts (config/github-hosts)
+
+`config/github-hosts` is an optional local, gitignored allowlist of additional GitHub Enterprise Server hostnames used by PR URL parsing, merge polling, and the merge wrapper.
+Put one lowercase DNS hostname on each non-empty line; blank lines and lines beginning with `#` are ignored.
+Entries must not include a scheme, path, port, user information, trailing dot, uppercase letter, or surrounding whitespace.
+The complete file must be valid before any additional host is accepted, and bootstrap reports `BOOTSTRAP_INFO: invalid config/github-hosts - <reason>` when it is malformed.
+The built-in `github.com` path remains enabled when this file is absent, empty, or malformed and keeps its existing CLI defaults.
+For an allowlisted enterprise URL, Firstmate passes the exact parsed hostname to `gh` and `gh-axi` through their supported `GH_HOST` selector during PR head lookup, merge polling, and merge execution.
+GitLab merge request parsing and polling remain separate and unchanged.
+
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `bin/fm-startup-network.sh`'s header owns the deferred network stage that keeps every external-network call off that digest's blocking path, including its state files and the safety argument for running them later.
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.

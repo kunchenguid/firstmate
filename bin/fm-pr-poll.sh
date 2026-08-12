@@ -10,6 +10,51 @@ set -u
 LC_ALL=C
 export LC_ALL
 
+# This source-free byte-static poll mirrors the canonical hostname checks in
+# fm-pr-lib.sh before it trusts the provider identity supplied by the watcher.
+github_host_valid() {
+  local candidate=$1 remaining label
+  [ "${#candidate}" -ge 1 ] && [ "${#candidate}" -le 253 ] || return 1
+  case "$candidate" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  remaining=$candidate
+  while [ -n "$remaining" ]; do
+    case "$remaining" in
+      *.*) label=${remaining%%.*}; remaining=${remaining#*.} ;;
+      *) label=$remaining; remaining= ;;
+    esac
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
+github_host_allowed() {
+  local candidate=$1 home allowlist entry matched
+  [ "$candidate" = github.com ] && return 0
+  github_host_valid "$candidate" || return 1
+  home=${FM_HOME:-}
+  if [ -z "$home" ] && [ -n "${data:-}" ]; then
+    case "$data" in
+      */state/*.pr-poll) home=${data%/state/*.pr-poll} ;;
+    esac
+  fi
+  [ -n "$home" ] || return 1
+  allowlist="$home/config/github-hosts"
+  [ -f "$allowlist" ] || return 1
+  matched=0
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    case "$entry" in
+      ''|\#*) continue ;;
+    esac
+    github_host_valid "$entry" || return 1
+    [ "$entry" = "$candidate" ] && matched=1
+  done < "$allowlist"
+  [ "$matched" -eq 1 ]
+}
+
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
@@ -50,7 +95,7 @@ esac
 # a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
-    [ "$host" = github.com ] || exit 0
+    github_host_allowed "$host" || exit 0
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
@@ -61,8 +106,12 @@ case "$provider" in
     case "$repo" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
-    [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    if [ "$host" = github.com ]; then
+      state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    else
+      state=$(GH_HOST="$host" gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    fi
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)

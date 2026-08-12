@@ -75,6 +75,7 @@ SH
   chmod +x "$fake_root/bin/fm-guard.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${GH_HOST:-}" ] || printf 'GH_HOST=%s ' "$GH_HOST" >> "$FM_TEST_GH_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
@@ -87,6 +88,7 @@ esac
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+[ -z "${GH_HOST:-}" ] || printf 'GH_HOST=%s ' "$GH_HOST" >> "$FM_TEST_GH_AXI_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
@@ -716,9 +718,36 @@ make_poll_fixture() {
 
 run_poll() {
   local dir=$1
-  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+  FM_HOME="$dir/home" FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
+}
+
+# shellcheck disable=SC2034 # FM_HOME and FM_CONFIG_OVERRIDE are parser inputs.
+test_github_enterprise_parser_allowlist() {
+  local dir FM_HOME FM_CONFIG_OVERRIDE
+  dir=$(make_case github-enterprise-parser)
+  FM_HOME="$dir/home"
+  FM_CONFIG_OVERRIDE="$dir/home/config"
+
+  fm_pr_url_parse https://github.com/o/r/pull/1 \
+    || fail "absent enterprise config disabled the github.com parser default"
+  ! fm_pr_url_parse https://github.company.com/o/r/pull/2 \
+    || fail "parser accepted an enterprise host with absent config"
+
+  printf '%s\n' '# Enterprise instances' '' github.company.com > "$dir/home/config/github-hosts"
+  fm_pr_url_parse https://github.company.com/Owner/repo/pull/2 \
+    || fail "parser rejected an allowlisted enterprise host"
+  [ "$FM_PR_PROVIDER" = github ] && [ "$FM_PR_HOST" = github.company.com ] \
+    && [ "$FM_PR_PATH" = Owner/repo ] && [ "$FM_PR_NUMBER" = 2 ] \
+    || fail "parser did not preserve the enterprise PR identity"
+
+  printf '%s\n' github.company.com 'https://github.other.example' > "$dir/home/config/github-hosts"
+  ! fm_pr_url_parse https://github.company.com/o/r/pull/3 \
+    || fail "parser used a partial allowlist containing a malformed entry"
+  fm_pr_url_parse https://github.com/o/r/pull/3 \
+    || fail "malformed enterprise config disabled the github.com parser default"
+  pass "GitHub Enterprise parsing is allowlisted per home and github.com remains built in"
 }
 
 test_static_poll_contract() {
@@ -773,6 +802,40 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+test_github_enterprise_poll_contract() {
+  local dir out
+  dir=$(make_case github-enterprise-poll)
+  printf '%s\n' github.company.com > "$dir/home/config/github-hosts"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.company.com/o/r/pull/8 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "enterprise PR check failed"
+  grep -qxF 'GH_HOST=github.company.com pr view https://github.company.com/o/r/pull/8 --json headRefOid -q .headRefOid' \
+    "$dir/gh.log" || fail "enterprise PR head lookup did not pass the exact host to gh"
+  [ "$(cat "$dir/home/state/task-a.pr-poll")" = 'github
+https://github.company.com/o/r/pull/8
+github.company.com
+o/r
+8' ] || fail "enterprise PR check did not publish the exact poll identity"
+
+  : > "$dir/gh.log"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "enterprise poll did not emit an exact merged result"
+  grep -qxF 'GH_HOST=github.company.com pr view https://github.company.com/o/r/pull/8 --json state -q .state' \
+    "$dir/gh.log" || fail "enterprise poll did not pass the exact host to gh"
+
+  : > "$dir/gh.log"
+  rm "$dir/home/config/github-hosts"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "enterprise poll emitted after its allowlist was removed"
+  [ ! -s "$dir/gh.log" ] || fail "enterprise poll called gh with absent config"
+
+  printf '%s\n' github.company.com 'Github.other.example' > "$dir/home/config/github-hosts"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "enterprise poll used a partially malformed allowlist"
+  [ ! -s "$dir/gh.log" ] || fail "enterprise poll called gh with malformed config"
+  pass "GitHub Enterprise polling revalidates the live allowlist and passes the exact hostname"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -3357,6 +3420,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
+test_github_enterprise_parser_allowlist
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only
@@ -3369,6 +3433,7 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_github_enterprise_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries

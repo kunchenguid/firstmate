@@ -29,7 +29,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -48,6 +48,7 @@ add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+[ -z "${GH_HOST:-}" ] || printf 'GH_HOST=%s ' "$GH_HOST" >> "$FM_TEST_GH_AXI_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit 0
 SH
@@ -71,6 +72,7 @@ add_gh_mocks_merge_fails() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+[ -z "${GH_HOST:-}" ] || printf 'GH_HOST=%s ' "$GH_HOST" >> "$FM_TEST_GH_AXI_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
@@ -87,6 +89,7 @@ SH
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
@@ -301,6 +304,46 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_github_enterprise_merge_uses_allowlisted_hostname() {
+  local case_dir
+  case_dir=$(make_case github-enterprise)
+  mkdir -p "$case_dir/wt"
+  printf '%s\n' github.company.com > "$case_dir/config/github-hosts"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.company.com/example/repo/pull/31 -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "enterprise merge wrapper failed"
+
+  grep -qxF 'GH_HOST=github.company.com pr merge 31 --repo example/repo --merge' \
+    "$case_dir/gh-axi.log" || fail "enterprise merge did not pass the exact hostname to gh-axi"
+  assert_grep 'pr=https://github.company.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "enterprise merge did not record the canonical PR URL"
+  pass "fm-pr-merge passes an allowlisted enterprise hostname to gh-axi"
+}
+
+test_github_enterprise_merge_requires_config() {
+  local case_dir rc
+  case_dir=$(make_case github-enterprise-absent)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.company.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "enterprise-absent: an unconfigured host must be refused"
+  assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
+    "enterprise-absent: refusal diagnostic changed"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "enterprise-absent: gh-axi was invoked"
+  assert_no_grep 'pr=https://github.company.com/example/repo/pull/32' "$case_dir/state/task-x1.meta" \
+    "enterprise-absent: unconfigured PR URL was recorded"
+  pass "fm-pr-merge refuses enterprise hosts when config/github-hosts is absent"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +354,5 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_github_enterprise_merge_uses_allowlisted_hostname
+test_github_enterprise_merge_requires_config
