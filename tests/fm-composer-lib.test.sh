@@ -255,6 +255,36 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_agy_separated_glyph_pair() {
+  # Real idle agy (Google Antigravity CLI 1.1.12): a `>` prompt row between
+  # two solid rules - the pi pair with a SHELL glyph. The glyph alone must
+  # never prove the composer (a dead shell's PS2 continuation prompt is the
+  # same bare `>`), so the verdict is the separated shape's identity +
+  # structure conjunction, with the live agy identity acting as the container
+  # proof that lets the shell glyph read empty and text after it read pending.
+  local screen typed agy_idle agy_working none
+  screen=$'transcript\n────────────────────────\n>\n────────────────────────\n? for shortcuts'
+  agy_idle=$(printf 'agy\tidle'); agy_working=$(printf 'agy\tworking'); none=$(printf 'zsh\t')
+  assert_screen "agy idle with identity" empty "$CAPS_STYLED" "$screen" '' "$agy_idle"
+  assert_screen "agy idle on tmux with identity" empty "$CAPS_TMUX" "$screen" 2 "$agy_idle"
+  # A working agy cannot authorize injection into the pair.
+  assert_screen "working agy defers" unknown "$CAPS_STYLED" "$screen" '' "$agy_working"
+  # Identity-capable but unfetched: the adapter is asked to probe lazily.
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")" = need-identity ] \
+    || fail "an identity-capable profile should request the lazy identity probe for agy's pair"
+  # The dead-shell counterexample: the same bytes with no live agy process -
+  # a PS2 `>` between two stale rules - must stay unknown.
+  assert_screen "dead-shell PS2 > between stale rules" unknown "$CAPS_TMUX" "$screen" 2 probe-absent
+  assert_screen "shell identity cannot prove agy pair" unknown "$CAPS_TMUX" "$screen" 2 "$none"
+  assert_screen "agy pair without identity capability" unknown "$CAPS_PLAIN" "$screen"
+  assert_screen "agy pair on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
+  typed=$'transcript\n────────────────────────\n> fix the login bug\n────────────────────────\n? for shortcuts'
+  assert_screen "agy typed" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
+  assert_screen "agy typed on tmux" pending "$CAPS_TMUX" "$typed" 2 "$agy_idle"
+  assert_screen "agy typed while working" pending "$CAPS_STYLED" "$typed" '' "$agy_working"
+  pass "matrix: agy's >-glyph pair needs a live agy identity; the bare shell glyph alone never proves it"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding the "Ask anything..." hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -544,6 +574,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_separated_glyph_pair
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

@@ -31,6 +31,15 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   agy-hook         agy (Google Antigravity CLI) per-task workspace hook file
+#                    (.agent/hooks.json: PreInvocation opens a turn, Stop
+#                    closes it). Like Claude, agy fires no hook for a manual
+#                    interrupt, so an interrupted worker typically remains
+#                    busy until its next turn's Stop; a Stop while background
+#                    tasks still run (fullyIdle=false) also records idle,
+#                    because the composer is genuinely interactive there and
+#                    the auto-resumed loop re-opens busy within seconds
+#                    (verified live, agy 1.1.12; docs/verification/antigravity.md).
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -184,6 +193,9 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
+    # agy is exact like pi: fm-spawn refuses the launch when the per-task hook
+    # wiring cannot be installed, so an agy task always has a live writer.
+    agy) adapter=agy-hook ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'

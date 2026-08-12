@@ -666,6 +666,49 @@ remove_kimi_turnend_auth() {
   rm -f -- "$path"
 }
 
+# The exact-worktree trust entry fm-spawn pre-authorized in agy's own settings
+# file (bin/fm-control-lib.sh owns where that store lives) must not outlive the
+# task that authorized it: a recycled pool or temp path recreated at the same
+# location would otherwise be silently trusted by a future agy session. The
+# removal is keyed on the worktree PATH, never on the task's recorded harness:
+# a harness-switch relaunch rewrites meta harness= while the pre-trust entry
+# stays, and an exact-path entry for this task's worktree can only have come
+# from firstmate's own pre-trust. An absent store or absent entry returns
+# clean, so non-agy teardowns stay cheap. The removal mirrors spawn's surgical
+# fail-closed jq edit - symlinked, unreadable, or malformed settings refuse
+# without writing - and then proves the entry is gone, so a concurrent spawn's
+# overlapping read-modify-write of the same file fails this teardown loudly
+# for a rerun rather than silently keeping the entry.
+remove_agy_workspace_trust() {  # <worktree>
+  local wt=$1 settings tmp
+  [ -n "$wt" ] || return 0
+  settings=$(fm_control_harness_trust_store_path agy)
+  [ -e "$settings" ] || [ -L "$settings" ] || return 0
+  if [ -L "$settings" ]; then
+    echo "error: agy settings file '$settings' is a symlink; refusing the surgical trust removal for $wt" >&2
+    return 1
+  fi
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: removing the agy trust entry for '$wt' requires jq to edit '$settings' safely; install jq and rerun teardown" >&2
+    return 1
+  }
+  jq -e . "$settings" >/dev/null 2>&1 || {
+    echo "error: agy settings file '$settings' is not valid JSON; refusing the surgical trust removal for $wt" >&2
+    return 1
+  }
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) != null' \
+    "$settings" >/dev/null 2>&1 || return 0
+  tmp="$settings.fm-tmp.$$"
+  jq --arg wt "$wt" '.trustedWorkspaces = ((.trustedWorkspaces // []) | map(select(. != $wt)))' \
+    "$settings" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) == null' \
+    "$settings" >/dev/null 2>&1 || {
+    echo "error: agy trust entry for '$wt' is still present in '$settings' after the removal edit; rerun teardown" >&2
+    return 1
+  }
+}
+
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
   if [ -n "$gen" ]; then
@@ -1148,7 +1191,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.agent/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2225,14 +2268,16 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
-          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
+          "$child_wt/.agent/hooks.json"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
-        "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
+        "$child_wt/.agent/hooks.json"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -2249,6 +2294,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
+    remove_agy_workspace_trust "$child_wt" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -2418,7 +2464,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" \
+      "$WT/.agent/hooks.json"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -2431,7 +2478,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.agent/hooks.json"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -2527,6 +2574,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+remove_agy_workspace_trust "$WT" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.

@@ -168,6 +168,10 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
+    # agy (Google Antigravity CLI) is anchored for the muse reason: a
+    # three-letter fragment is too common for a *agy* glob to claim safely,
+    # and the installed binary is exactly `agy` (verified, agy 1.1.12).
+    agy) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

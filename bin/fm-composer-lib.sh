@@ -61,12 +61,16 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done/blocked pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#   separated  - pi and agy: content rows between two solid horizontal `─`
+#                rules, no side border. Pi draws the pair with no glyph; agy
+#                (Google Antigravity CLI, verified 1.1.12) draws the same pair
+#                around a `>` prompt row - a SHELL glyph, so the pair alone
+#                proves nothing. Provable only with a live agent identity
+#                reporting an idle/done/blocked pi or agy (herdr `agent get`;
+#                the tmux foreground-process probe), because a blank region -
+#                or a dead shell's bare `>` continuation prompt - between two
+#                transcript rules is otherwise exactly the strict rule's
+#                unidentifiable blank row.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -1231,18 +1235,23 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
-    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
-  else
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
-  fi
+  case "$agent" in
+    pi|agy) _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" ;;
+    *) _fm_composer_classify_bare_row "$screen" "$styled" "$row" ;;
+  esac
 }
 
-# The pi separated-shape verdict: identity + structure conjunction (herdr's
+# The separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done/blocked pi proves an empty composer.
+# live agent state, while only an idle/done/blocked agent proves an empty
+# composer. Two agents draw this shape, with one content-rule difference:
+# pi's pair is glyphless, so ANY content row text is pending
+# (_fm_composer_classify_pi_rows); agy's pair carries a `>` prompt row, so its
+# rows use the bordered content rules, where the proven container makes a lone
+# shell glyph a genuine empty composer and text after the glyph is pending
+# (_fm_composer_classify_rows with the identity as the container proof).
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1259,15 +1268,31 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
-  if [ "$state" = pending ]; then
-    printf 'pending'
-    return 0
-  fi
+  case "$agent" in
+    pi) state=$(_fm_composer_classify_pi_rows "$screen" "$styled") ;;
+    agy)
+      state=$(_fm_composer_classify_rows "$screen" "$styled" 0 \
+        "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))")
+      ;;
+    *)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
+  case "$state" in
+    pending|pending-unproven)
+      printf '%s' "$state"
+      return 0
+      ;;
+    unknown)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
   case "$agent_status" in
     idle|done|blocked) printf 'empty' ;;
     *) printf 'unknown' ;;

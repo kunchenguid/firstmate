@@ -60,6 +60,11 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
+# agy's mid-turn footer swaps `? for shortcuts` for `esc to cancel` (verified
+# live, agy 1.1.12), the grok-style ASCII choice over its braille spinner.
+# Two documented ambiguities keep this a delivery guard, never a state source:
+# the same footer shows while a slash/permission popup is open, and the footer
+# reverts to the idle shape while the loop is suspended on a background task.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
@@ -67,6 +72,7 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+FM_TMUX_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -81,6 +87,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_TMUX_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -130,22 +137,24 @@ fm_tmux_composer_caps() {
 }
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
-# separated (pi) composer shape, tmux's analogue of herdr's native
-# `agent get`. It answers only for pi, from two live signals:
+# separated composer shape, tmux's analogue of herdr's native `agent get`.
+# It answers only for the harnesses that DRAW that shape - pi (a blank pair)
+# and agy (a `>` glyph pair) - from two live signals:
 #   - identity: the pane tty's FOREGROUND process group (pgid = tpgid, the
 #     same scoping as fm_backend_tmux_foreground_comms) contains a pi-family
 #     process (pi, pi-signed, pi-launcher - docs/verification/
-#     runtime-backends.md "Agent liveness name sources"), falling back to
-#     tmux's own foreground-derived #{pane_current_command}. A pane whose
-#     agent died to a shell has no pi foreground process and gets NO identity,
-#     which is exactly what keeps the strict blank-row rule honest: a blank
-#     row between two stale rules stays unknown.
-#   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
-#     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+#     runtime-backends.md "Agent liveness name sources") or an exact `agy`
+#     process, falling back to tmux's own foreground-derived
+#     #{pane_current_command}. A pane whose agent died to a shell has no such
+#     foreground process and gets NO identity, which is exactly what keeps the
+#     strict blank-row rule honest: a blank row - or a dead shell's bare `>`
+#     continuation prompt - between two stale rules stays unknown.
+#   - status: that harness's verified busy footer via fm_pane_busy_state,
+#     mapped onto the idle/working vocabulary herdr's probe reports natively.
+# Prints "pi<TAB>idle", "pi<TAB>working", "agy<TAB>idle", or
+# "agy<TAB>working"; exits 1 when the pane is not a live pi or agy.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm agent='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -153,24 +162,26 @@ fm_tmux_composer_identity() {  # <target>
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
-          pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          pi|pi-signed|pi-launcher|Pi) agent=pi ;;
+          agy) agent=agy ;;
         esac
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
       ;;
   esac
-  if [ "$found" -ne 1 ]; then
+  if [ -z "$agent" ]; then
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
-      pi|pi-signed|pi-launcher) found=1 ;;
+      pi|pi-signed|pi-launcher) agent=pi ;;
+      agy) agent=agy ;;
     esac
   fi
-  [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  [ -n "$agent" ] || return 1
+  status=$(fm_pane_busy_state "$target" "$agent")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$agent" ;;
+    idle) printf '%s\tidle' "$agent" ;;
     *) return 1 ;;
   esac
 }

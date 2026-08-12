@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -167,6 +167,10 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
+# agy (Google Antigravity CLI) uses one per-task workspace hook file,
+# <worktree>/.agent/hooks.json (gitignored via info/exclude), after pre-trusting
+# the worktree path in agy's own settings.json; agy is crewmate/scout only and
+# is refused for --secondmate.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -806,6 +810,9 @@ clear_relaunch_harness_wiring() {
   # unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
+  if [ "$harness" = agy ]; then
+    agy_retire_workspace_trust "$wt" || return 1
+  fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
@@ -1035,7 +1042,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1151,7 +1158,19 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u ANTIGRAVITY_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Google Antigravity CLI): -i runs the initial prompt interactively
+    # and keeps the session open, so the brief rides the launch command.
+    # --dangerously-skip-permissions auto-approves every tool permission
+    # request (verified fully unattended, agy 1.1.12) but does NOT suppress
+    # the per-workspace trust dialog, which the pre-trust preflight below
+    # removes instead. Foreign harness markers are cleared like muse's launch
+    # because a retained CLAUDECODE/PI_CODING_AGENT/GROK_AGENT in the pane
+    # environment would outrank agy's own ANTIGRAVITY_AGENT child marker in
+    # fm-harness.sh's precedence order. agy's busy and turn-end signals ride
+    # neither the launch command nor a global hook: fm-spawn writes the
+    # per-task <worktree>/.agent/hooks.json below.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1207,15 +1226,23 @@ case "$HARNESS" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
+# muse and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is a
+# firstmate instance, so it needs a primary supervision protocol; muse has none,
+# and its Claude-compatible hook dialect explicitly rejects the model-reawakening
+# and asyncRewake handlers that firstmate's primary turn-end supervision is built
+# on (muse 0.1.0-R708.1). agy has no verified primary supervision protocol
+# either: its hook engine has no asyncRewake-class rewake, its workspace hooks
+# load only when the workspace was already trusted at launch, and no watcher
+# supervision block exists for it (agy 1.1.12). Refusing here keeps those gaps
+# loud instead of standing up a secondmate whose supervision cycle could never
+# be armed.
+if [ "$KIND" = secondmate ]; then
+  case "$HARNESS" in
+    muse|agy)
+      echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -1287,6 +1314,116 @@ resolve_muse_binary() {
   return 1
 }
 
+resolve_agy_binary() {
+  local candidate dir fallback
+  candidate=$(command -v agy 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fallback="${HOME:-}/.local/bin/agy"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: agy executable not found; searched PATH for 'agy' and fallback '$fallback'" >&2
+  return 1
+}
+
+# agy workspace pre-trust. agy gates every workspace behind a per-exact-path
+# trust decision in its own settings.json, --dangerously-skip-permissions does
+# NOT suppress that dialog, and workspace hook files load only when the
+# workspace was ALREADY trusted at launch (all verified live, agy 1.1.12;
+# docs/verification/antigravity.md). A dialog-granted trust therefore leaves
+# the first session hookless - a busy record nothing could clear - so the
+# spawn pre-trusts the worktree path up front and FAILS CLOSED when it cannot
+# prove the entry landed, exactly as the Kimi installer refuses rather than
+# guessing at its managed config. The edit is a surgical jq read-modify-write
+# that only ever appends one path to trustedWorkspaces; an absent settings
+# file is created with only that array, and an unreadable, symlinked, or
+# malformed file refuses without writing. Trusting a worktree firstmate itself
+# populated from the captain's registered project is the same standing
+# autonomy decision as launching with --dangerously-skip-permissions.
+agy_settings_path() {
+  fm_control_harness_trust_store_path agy
+}
+
+agy_pretrust_workspace() {  # <worktree>
+  local wt=$1 settings tmp
+  settings=$(agy_settings_path)
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: agy pre-trust requires jq to edit '$settings' safely; install jq or select a different verified harness" >&2
+    return 1
+  }
+  if [ -L "$settings" ]; then
+    echo "error: agy settings file '$settings' is a symlink; refusing the surgical trust edit" >&2
+    return 1
+  fi
+  tmp="$settings.fm-tmp.$$"
+  if [ -e "$settings" ]; then
+    jq -e . "$settings" >/dev/null 2>&1 || {
+      echo "error: agy settings file '$settings' is not valid JSON; refusing the surgical trust edit" >&2
+      return 1
+    }
+    jq --arg wt "$wt" '.trustedWorkspaces = (((.trustedWorkspaces // []) + [$wt]) | unique)' \
+      "$settings" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  else
+    mkdir -p "$(dirname "$settings")" 2>/dev/null || true
+    jq -n --arg wt "$wt" '{trustedWorkspaces: [$wt]}' > "$tmp" 2>/dev/null \
+      || { rm -f "$tmp"; return 1; }
+  fi
+  mv -f "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  # Prove the entry landed rather than trusting the write.
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) != null' \
+    "$settings" >/dev/null 2>&1
+}
+
+# The inverse of agy_pretrust_workspace, keyed on the worktree PATH alone: the
+# trust entry is agy wiring like the hook file, so a relaunch that retires agy
+# wiring retires the entry with it (a same-harness agy relaunch immediately
+# re-adds it via the pretrust above), and fm-teardown's end-of-life removal
+# stays the final owner. Same surgical fail-closed jq contract as the
+# pretrust: an absent store or absent entry returns clean, while symlinked,
+# jq-less, or malformed settings refuse without writing, and the edit proves
+# the entry is gone rather than trusting the write.
+agy_retire_workspace_trust() {  # <worktree>
+  local wt=$1 settings tmp
+  [ -n "$wt" ] || return 0
+  settings=$(agy_settings_path)
+  [ -e "$settings" ] || [ -L "$settings" ] || return 0
+  if [ -L "$settings" ]; then
+    echo "error: agy settings file '$settings' is a symlink; refusing the surgical trust removal for $wt" >&2
+    return 1
+  fi
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: removing the agy trust entry for '$wt' requires jq to edit '$settings' safely; install jq and retry" >&2
+    return 1
+  }
+  jq -e . "$settings" >/dev/null 2>&1 || {
+    echo "error: agy settings file '$settings' is not valid JSON; refusing the surgical trust removal for $wt" >&2
+    return 1
+  }
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) != null' \
+    "$settings" >/dev/null 2>&1 || return 0
+  tmp="$settings.fm-tmp.$$"
+  jq --arg wt "$wt" '.trustedWorkspaces = ((.trustedWorkspaces // []) | map(select(. != $wt)))' \
+    "$settings" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  jq -e --arg wt "$wt" '(.trustedWorkspaces // []) | index($wt) == null' \
+    "$settings" >/dev/null 2>&1 || {
+    echo "error: agy trust entry for '$wt' is still present in '$settings' after the removal edit" >&2
+    return 1
+  }
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1321,7 +1458,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1351,6 +1488,19 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # agy 1.1.12 --effort accepts only low|medium|high ("invalid --effort
+      # \"xhigh\" (valid: low, medium, high)" is a LAUNCH-fatal error), so
+      # xhigh and max are omitted like grok's. --effort is also only valid for
+      # agy's effort-variant model families: pairing it with a model that has
+      # no effort variants (claude-*, gpt-oss-*) refuses the launch loudly.
+      # That model-conditional validity is intake knowledge owned by the
+      # harness-adapters skill, not a static filter here; a wrong pairing
+      # fails loudly at spawn rather than silently.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -1412,6 +1562,13 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__AGYBIN__*)
+    AGY_BIN=$(resolve_agy_binary) || exit 1
+    LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
     ;;
 esac
 
@@ -2275,9 +2432,25 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       fi
       ;;
+    agy)
+      # Both preconditions of agy's hook wiring are proven BEFORE the arm, so
+      # a refusal cannot leave an armed gen with no writer. The tracked-file
+      # check keeps the hook write (and every later relaunch/teardown removal
+      # of that exact path) inside firstmate-owned material: the singular
+      # .agent/ discovery root is chosen precisely because projects ship their
+      # own hooks in the plural .agents/ root, and agy merges both.
+      if git -C "$WT" ls-files --error-unmatch .agent/hooks.json >/dev/null 2>&1; then
+        echo "error: refusing agy spawn: the project tracks .agent/hooks.json, which firstmate's per-task busy wiring would overwrite. Select a different verified harness for this project." >&2
+        exit 1
+      fi
+      agy_pretrust_workspace "$WT" || {
+        echo "error: refusing agy spawn because the worktree could not be pre-trusted in $(agy_settings_path); without launch-time trust agy loads no workspace hooks and the busy contract would have no writer" >&2
+        exit 1
+      }
+      ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|agy)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2505,6 +2678,36 @@ EOF
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
+      ;;
+    agy)
+      # Semantic busy-state hooks (bin/fm-busy-lib.sh): agy's documented
+      # lifecycle hook events, delivered through ONE per-task workspace hook
+      # file in the singular .agent/ discovery root that the tracked-file
+      # check above proved firstmate-owned. PreInvocation fires before every
+      # model call, so the first one opens the turn and repeats are idempotent
+      # re-asserts; Stop fires when the execution loop terminates and closes
+      # it, doubling as the turn-ended NOTIFICATION touch for the watcher.
+      # agy fires no hook for a manual interrupt (verified live), the same
+      # gap Claude has, so an interrupted worker typically remains busy until
+      # its next turn's Stop. A Stop while background tasks still run
+      # (fullyIdle=false) also records idle deliberately: the composer is
+      # genuinely interactive there, the auto-resumed loop re-opens busy
+      # within seconds, and gating idle on fullyIdle could latch a permanent
+      # busy under a long-lived background dev server. Every hook command
+      # tolerates a refused event (|| true) and always prints a JSON object,
+      # because agy parses hook stdout and an empty PreToolUse-style decision
+      # DENIES tool calls - which is also why only these two flat no-decision
+      # events are registered. Hooks load because the pre-trust preflight
+      # above proved the worktree trusted before launch.
+      mkdir -p "$WT/.agent"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
+      j_preinv=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
+      j_stop=$(json_escape "touch $(shell_quote "$TURNEND") 2>/dev/null; $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '{}'")
+      cat > "$WT/.agent/hooks.json" <<EOF
+{"fm-busy-state":{"PreInvocation":[{"command":"$j_preinv"}],"Stop":[{"command":"$j_stop"}]}}
+EOF
+      exclude_path '.agent/hooks.json'
       ;;
   esac
 fi
