@@ -9,8 +9,12 @@
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
-#       That project list is non-exclusive provisioning data. Pass --no-projects
-#       instead of a project list to seed a project-less home for a domain whose
+#       That project list is non-exclusive provisioning data. Explicitly
+#       registered local-only projects are cloned only from the main home's
+#       canonical local filesystem project, with no hardlinks and no external
+#       remote, and receive a private guarded branch-return capability under
+#       data/local-project-routes/. Pass --no-projects instead of a project list
+#       to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
@@ -47,6 +51,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-local-project-route-lib.sh
+. "$SCRIPT_DIR/fm-local-project-route-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -457,7 +463,7 @@ EOF
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode
+  local project=$1 home=$2 src dst url dst_url mode canonical_src canonical_dst
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
@@ -466,8 +472,45 @@ clone_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
+    canonical_src=$(fm_local_route_canonical_dir "$src") || {
+      echo "error: local-only project $project source path is unsafe or symlinked" >&2
+      return 1
+    }
+    fm_local_route_git_common_dir "$canonical_src" >/dev/null || {
+      echo "error: local-only project $project source is not an unambiguous Git working repository" >&2
+      return 1
+    }
+    fm_local_route_all_remotes_local "$canonical_src" "local-only project $project" || {
+      echo "error: $FM_LOCAL_ROUTE_ERROR" >&2
+      return 1
+    }
+    if [ -e "$dst" ]; then
+      canonical_dst=$(fm_local_route_canonical_dir "$dst") || {
+        echo "error: seeded local-only project $project destination is unsafe or symlinked" >&2
+        return 1
+      }
+      fm_local_route_git_common_dir "$canonical_dst" >/dev/null || {
+        echo "error: seeded local-only project $project is not an unambiguous Git working repository" >&2
+        return 1
+      }
+      fm_local_route_all_remotes_local "$canonical_dst" "seeded local-only project $project" || {
+        echo "error: $FM_LOCAL_ROUTE_ERROR" >&2
+        return 1
+      }
+      fm_local_route_exact_origin "$canonical_dst" "$canonical_src" || {
+        echo "error: $FM_LOCAL_ROUTE_ERROR" >&2
+        return 1
+      }
+      return 0
+    fi
+    git clone --quiet --no-local "$canonical_src" "$dst" || return 1
+    canonical_dst=$(fm_local_route_canonical_dir "$dst") || return 1
+    git -C "$canonical_dst" remote set-url --push origin "$canonical_dst" || return 1
+    fm_local_route_exact_origin "$canonical_dst" "$canonical_src" || {
+      echo "error: $FM_LOCAL_ROUTE_ERROR" >&2
+      return 1
+    }
+    return 0
   fi
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
@@ -485,7 +528,8 @@ EOF
 }
 
 validate_seed_project() {
-  local project=$1 src mode url
+  local project=$1 src mode url canonical_src default current status
+  fm_local_route_safe_id "$project" || { echo "error: unsafe project name: $project" >&2; return 1; }
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -493,8 +537,36 @@ validate_seed_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
+    canonical_src=$(fm_local_route_canonical_dir "$src") || {
+      echo "error: local-only project $project source path is unsafe or symlinked" >&2
+      return 1
+    }
+    fm_local_route_git_common_dir "$canonical_src" >/dev/null || {
+      echo "error: local-only project $project source is not an unambiguous Git working repository" >&2
+      return 1
+    }
+    default=$(fm_local_route_default_branch "$canonical_src") || {
+      echo "error: local-only project $project source has an ambiguous or missing local default branch" >&2
+      return 1
+    }
+    current=$(git -C "$canonical_src" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [ "$current" = "$default" ] || {
+      echo "error: local-only project $project source is on ${current:-detached}, expected $default" >&2
+      return 1
+    }
+    status=$(git -C "$canonical_src" status --porcelain 2>/dev/null) || {
+      echo "error: local-only project $project source cannot be inspected safely" >&2
+      return 1
+    }
+    [ -z "$status" ] || {
+      echo "error: local-only project $project source is dirty; preserve or commit that work before seeding" >&2
+      return 1
+    }
+    fm_local_route_all_remotes_local "$canonical_src" "local-only project $project" || {
+      echo "error: $FM_LOCAL_ROUTE_ERROR" >&2
+      return 1
+    }
+    return 0
   fi
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
@@ -516,12 +588,14 @@ seed_exit_cleanup() {
   seed_rollback
   seed_registry_lock_release
 }
+SEED_ID=
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
 SEED_BACKUP_DIR=
 SEED_CREATED_PROJECTS_FILE=
+SEED_CAPABILITY_RECORDS_FILE=
 SEED_PARENT_REG_EXISTED=0
 SEED_PARENT_BRIEF=
 SEED_PARENT_BRIEF_CREATED=0
@@ -624,7 +698,7 @@ seed_project_was_created() {
 }
 
 seed_rollback() {
-  local project_path
+  local project_path capability_state capability_project capability_path
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
   [ "${SEED_COMMITTED:-0}" = 0 ] || return 0
 
@@ -633,6 +707,21 @@ seed_rollback() {
   fi
   if [ -n "${SEED_PARENT_BRIEF:-}" ] && [ "$SEED_PARENT_BRIEF_DIR_CREATED" = 1 ]; then
     rmdir "$(dirname "$SEED_PARENT_BRIEF")" 2>/dev/null || true
+  fi
+
+  if [ -n "${SEED_CAPABILITY_RECORDS_FILE:-}" ] && [ -f "$SEED_CAPABILITY_RECORDS_FILE" ]; then
+    while IFS=$'\t' read -r capability_state capability_project; do
+      [ -n "$capability_project" ] || continue
+      capability_path=$(fm_local_route_capability_path "$FM_HOME" "$SEED_ID" "$capability_project") || continue
+      if [ "$capability_state" = existing ]; then
+        mkdir -p "$(dirname "$capability_path")"
+        cp "$SEED_BACKUP_DIR/capability.$capability_project" "$capability_path" 2>/dev/null || true
+      else
+        rm -f -- "$capability_path" 2>/dev/null || true
+      fi
+      rmdir "$(dirname "$capability_path")" 2>/dev/null || true
+      rmdir "$(dirname "$(dirname "$capability_path")")" 2>/dev/null || true
+    done < "$SEED_CAPABILITY_RECORDS_FILE"
   fi
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
@@ -799,7 +888,7 @@ refuse_projectful_projectless_charter() {
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope capability_path main_home_canonical
   local no_projects=0 arg
   local filtered=()
   shift 2
@@ -836,6 +925,7 @@ seed_home() {
 
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
+  SEED_ID=$id
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
   SEED_HOME_CREATED=0
@@ -843,7 +933,9 @@ seed_home() {
   SEED_HOME_BACKED_UP=0
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
+  SEED_CAPABILITY_RECORDS_FILE="$SEED_BACKUP_DIR/capabilities"
   : > "$SEED_CREATED_PROJECTS_FILE"
+  : > "$SEED_CAPABILITY_RECORDS_FILE"
   SEED_PARENT_REG_EXISTED=0
   SEED_PARENT_BRIEF="$DATA/$id/brief.md"
   SEED_PARENT_BRIEF_CREATED=0
@@ -961,6 +1053,34 @@ seed_home() {
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
+  main_home_canonical=$(fm_local_route_canonical_dir "$FM_HOME") || {
+    echo "error: active main home path is unsafe or symlinked" >&2
+    return 1
+  }
+  for project in "$@"; do
+    if [ "$(project_mode_in_home "$home" "$project")" != local-only ]; then
+      continue
+    fi
+    capability_path=$(fm_local_route_capability_path "$FM_HOME" "$id" "$project") || return 1
+    if [ -e "$capability_path" ] || [ -L "$capability_path" ]; then
+      [ -f "$capability_path" ] && [ ! -L "$capability_path" ] || {
+        echo "error: local-project capability is unavailable or unsafe" >&2
+        return 1
+      }
+      cp "$capability_path" "$SEED_BACKUP_DIR/capability.$project" || return 1
+      printf 'existing\t%s\n' "$project" >> "$SEED_CAPABILITY_RECORDS_FILE"
+    else
+      printf 'new\t%s\n' "$project" >> "$SEED_CAPABILITY_RECORDS_FILE"
+    fi
+    project_dst=$(validate_project_destination "$home" "$project") || return 1
+    fm_local_route_record_write "$capability_path" "$id" "$project" \
+      "$main_home_canonical" \
+      "$(fm_local_route_canonical_dir "$PROJECTS/$project")" \
+      "$home" "$(fm_local_route_canonical_dir "$project_dst")" || {
+        echo "error: failed to publish guarded local-project capability for $project" >&2
+        return 1
+      }
+  done
   SEED_COMMITTED=1
   seed_registry_lock_release
   trap - EXIT

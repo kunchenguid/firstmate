@@ -653,6 +653,28 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_landed_in_bound_local_origin_allows() {
+  local case_dir rc wt_head origin
+  case_dir=$(make_case local-origin-landed)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "returned and landed work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  origin=$(git -C "$case_dir/project" remote get-url origin)
+  # Simulate the main home landing the returned commit directly in the bound
+  # local filesystem repository while this secondmate copy's origin/main stays
+  # stale. Teardown must refresh and prove content landed before cleanup.
+  git --git-dir="$origin" fetch -q "$case_dir/wt" "$wt_head:refs/heads/main"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "local-origin-landed: teardown should recognize work landed in the local origin"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-origin-landed: teardown printed a REFUSED line"
+  pass "local-only returned work can be cleaned only after its bound local origin contains it"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2596,6 +2618,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_landed_in_bound_local_origin_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

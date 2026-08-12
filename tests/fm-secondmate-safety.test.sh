@@ -864,24 +864,6 @@ test_home_seed_refuses_missing_projects_without_signal() {
   pass "home seeding fails loudly on accidental project omission and rejects mixed --no-projects"
 }
 
-test_home_seed_refuses_local_only_project() {
-  local home subhome err
-  home="$TMP_ROOT/local-only-seed-home"
-  subhome="$TMP_ROOT/local-only-seed-subhome"
-  err="$TMP_ROOT/local-only-seed.err"
-  mkdir -p "$home/projects" "$home/data" "$home/state"
-  fm_git_init_commit "$home/projects/alpha"
-  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed a local-only project into a secondmate home"
-  fi
-  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
-    || fail "seed did not explain local-only project rejection"
-  [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
-  pass "home seeding refuses local-only projects"
-}
-
 test_home_seed_refuses_registry_delimiter_home() {
   local home subhome err
   home="$TMP_ROOT/delimiter-home"
@@ -2980,7 +2962,6 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects
 test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
-test_home_seed_refuses_local_only_project
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

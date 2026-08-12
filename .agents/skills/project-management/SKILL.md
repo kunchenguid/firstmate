@@ -15,7 +15,7 @@ metadata:
 Use this procedure before adding, creating, removing, or initializing a project.
 Cloning or registering a project is add intake and uses the same trigger.
 This skill is the single owner of Firstmate's project-management procedure.
-It does not replace `secondmate-provisioning`, which owns project clones inside persistent secondmate homes.
+It does not replace `secondmate-provisioning`, which owns project clones inside persistent secondmate homes, including the only guarded capability that permits a local route to supervise an explicitly registered `local-only` project.
 
 ## Preconditions and registry
 

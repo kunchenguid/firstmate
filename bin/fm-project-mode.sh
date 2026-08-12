@@ -8,8 +8,9 @@
 # yolo are resolved by firstmate at intake and passed explicitly to
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
-# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and
-# bin/fm-spawn.sh's advisory registry-deviation notice.
+# bin/fm-home-seed.sh (guard local-only secondmate seeding, run no-mistakes init),
+# bin/fm-spawn.sh (enforce a local-only secondmate route capability and emit the
+# advisory registry-deviation notice), and the guarded branch return path.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)

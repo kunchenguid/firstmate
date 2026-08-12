@@ -22,7 +22,7 @@ Hard rules, in priority order:
 
 1. **Never write to a project.**
    Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects and crewmates change them.
-   The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
+   The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, guarded `local-only` secondmate branch return, and approved `local-only` merge paths, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
@@ -83,6 +83,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
+  local-project-routes/  private guarded local/NAS project capabilities owned by secondmate-provisioning
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
@@ -104,6 +105,7 @@ state/               runtime records and signals; gitignored
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
+  local-branch-returns/  private guarded local-only branch-return receipts owned by fm-local-project-route-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   when/              private condition->action watch specs, their trust bindings, and single-fire markers; written only by bin/fm-procevent-when.sh (section 13's process-event-sources trigger)
@@ -225,7 +227,7 @@ Project creation never authorizes an unmentioned remote, and project removal nev
 
 Load `secondmate-provisioning` before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 Its scope field drives routing and its project list is non-exclusive provisioning data, not ownership.
-Keep `local-only` work in the main home.
+Keep `local-only` work in the main home unless `secondmate-provisioning` validates its guarded same-filesystem local/NAS project capability.
 
 A secondmate is idle by default and acts only on work routed by the main firstmate.
 It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
@@ -256,7 +258,7 @@ An explicit project wins, a clear follow-up inherits its referent, and otherwise
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
 
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
-Keep `local-only` work in the main home.
+Keep `local-only` work in the main home unless `secondmate-provisioning` validates its guarded same-filesystem local/NAS project capability; that skill owns branch return while the main Firstmate retains validation and explicit captain-controlled local landing.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.

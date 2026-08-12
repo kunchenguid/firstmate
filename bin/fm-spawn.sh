@@ -233,6 +233,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-local-project-route-lib.sh
+. "$SCRIPT_DIR/fm-local-project-route-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -1632,6 +1636,42 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# A local-only project remains main-home work unless local secondmate seeding
+# published the guarded local/NAS route capability. Validate that capability
+# before creating an endpoint or isolated task copy, so a hand-written project
+# registry entry or clone can never bypass the route owner.
+if [ "$KIND" = ship ] && [ "$MODE" = local-only ] \
+   && { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
+  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
+    echo "error: local-only secondmate home identity is unavailable or unsafe" >&2
+    exit 1
+  }
+  LOCAL_SECOND_ID=$(cat "$FM_HOME/$SUB_HOME_MARKER" 2>/dev/null || true)
+  fm_local_route_safe_id "$LOCAL_SECOND_ID" || {
+    echo "error: local-only secondmate home identity is malformed" >&2
+    exit 1
+  }
+  fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
+    && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || {
+      echo "error: local-only secondmate projects require a validated same-filesystem parent route" >&2
+      exit 1
+    }
+  LOCAL_PARENT_HOME=$(fm_local_route_canonical_dir "$FM_SECONDMATE_PARENT_HOME") || {
+    echo "error: local-only secondmate parent path is unsafe or symlinked" >&2
+    exit 1
+  }
+  LOCAL_PROJECT=$(basename "$PROJ_ABS")
+  LOCAL_CAPABILITY=$(fm_local_route_capability_path "$LOCAL_PARENT_HOME" "$LOCAL_SECOND_ID" "$LOCAL_PROJECT") || {
+    echo "error: local-only secondmate project identity is unsafe" >&2
+    exit 1
+  }
+  if ! fm_local_route_validate_bound_copy "$LOCAL_CAPABILITY" "$LOCAL_SECOND_ID" "$LOCAL_PROJECT" \
+      "$LOCAL_PARENT_HOME" "$FM_HOME" "$PROJ_ABS"; then
+    echo "error: local-only secondmate route is absent or invalid: $FM_LOCAL_ROUTE_ERROR" >&2
+    exit 1
   fi
 fi
 

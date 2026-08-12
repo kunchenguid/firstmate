@@ -13,7 +13,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate unless this skill's guarded local-project capability validates, and secondmates are idle by default.
 
 ## Routing table
 
@@ -72,7 +72,8 @@ Provision a whole remote home through its configured SSH host with:
 bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 ```
 
-You resolve each project's origin yourself - from the captain, the project registry, a clone that exists elsewhere, `gh-axi`, or an explicit paste - and name it as `<project>=<origin-url>`; the seed validates and transports what you supply.
+You resolve each remote project's origin yourself - from the captain, the project registry, a clone that exists elsewhere, `gh-axi`, or an explicit paste - and name it as `<project>=<origin-url>`; the seed validates and transports what you supply.
+A remote secondmate route always refuses `local-only` projects because the same-filesystem guarded return capability cannot exist across that placement.
 A remote seed therefore creates nothing in this home beyond the route, the charter brief, and a launch record once it is launched: never clone a project into `projects/`, initialize no-mistakes here, or run a fleet sync just to seed a remote secondmate.
 A bare `<project>` remains a convenience for a project this home already has cloned, whose configured origin is read instead.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md#provision-a-route) owns the rest of the operator contract, and [`bin/fm-project-origin-lib.sh`](../../../bin/fm-project-origin-lib.sh) owns the accepted origin forms.
@@ -150,9 +151,35 @@ Run `bin/fm-home-seed.sh validate` when checking registry integrity; its header 
 Seeding is transactional.
 If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 
-Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
-`local-only` projects stay with the main firstmate.
+Secondmate project lists may include `no-mistakes` and `direct-PR` projects normally.
+A local route may additionally include an explicitly registered `local-only` project only when `bin/fm-home-seed.sh` can clone it from the main home's canonical local or mounted-NAS filesystem repository into the secondmate home's isolated `projects/` copy and publish the private guarded route capability.
+The seed refuses any non-filesystem fetch or push URL, unsafe or symlinked path, ambiguous repository, wrong preexisting origin, or missing Git identity, and uses `git clone --no-local` so the copy has its own object store rather than hardlinks.
+That seed is the only capability producer; hand-written clones, registry prose, and a project list never grant local-only routing authority.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+
+## Guarded local-only branch return
+
+A local-only task in a secondmate home is valid only while `fm-spawn.sh` revalidates the parent binding and the private route capability before launch.
+The second mate supervises implementation in its ordinary isolated task copy, but neither it nor its workers have landing authority.
+After the worker reports a clean committed `fm/<task-id>` branch, the main Firstmate runs:
+
+```sh
+bin/fm-local-branch-return.sh <secondmate-id> <task-id>
+```
+
+The main home pulls that one branch from the capability-bound secondmate project path.
+The helper binds canonical main home, secondmate home, project, Git common-directory, task, branch, seed-ancestry, current-default, and head identities; checks both repositories have only filesystem remotes and that the secondmate copy has exactly the bound main project as `origin`; refuses dirty work, missing objects, branch or task ownership collisions, symlinked or drifted paths, and non-fast-forward ancestry; and creates only the main repository's `fm/<task-id>` branch plus a private return receipt.
+A matching branch and receipt replay idempotently.
+The helper never checks out, merges, pushes, stashes, forces, deletes, cleans, rewrites, or grants approval.
+The main Firstmate validates the returned branch, obtains the configured explicit captain approval, and lands it only through:
+
+```sh
+bin/fm-merge-local.sh --secondmate <secondmate-id> <task-id>
+```
+
+That existing local landing owner revalidates the capability, receipt, destination identity, clean default checkout, and fast-forward ancestry before merging.
+Only after the exact returned commit is reachable from the refreshed bound local origin may ordinary task cleanup remove the secondmate worker's isolated copy.
+Private capabilities and return receipts contain identity paths and object IDs only, never repository content, credentials, or captain-private strategy.
 
 ## Record intake for an existing or inherited domain
 
@@ -199,7 +226,7 @@ It accepts in-scope `## Queued` entries only and refuses `## In flight` and hist
 Done records stay with their home for pruning or archiving.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
-Do not hand off `local-only` items.
+Hand off a `local-only` item only after its project was seeded through the guarded local-project capability above; otherwise it stays with the main Firstmate.
 
 ## Recovery
 

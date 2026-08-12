@@ -854,6 +854,24 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
+# Is HEAD itself reachable from the refreshed default branch? This narrower proof
+# is used for local-only work returned from a secondmate: guarded local landing is
+# a fast-forward of the exact returned commit, so content equivalence alone would
+# wrongly treat an unlanded empty commit as landed.
+head_reachable_from_default() {
+  local name ref
+  name=$(default_branch) || return 1
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/origin/$name"
+  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    ref="refs/heads/$name"
+  else
+    return 1
+  fi
+  git -C "$WT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -1172,6 +1190,14 @@ validate_worktree_teardown_safety() {
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+      # A guarded local-secondmate return lands in that project copy's bound
+      # local filesystem origin, not in the secondmate copy's own stale default
+      # branch. With no dirty bytes, refresh and prove exact commit reachability
+      # before refusing. This recognizes landing only; branch return itself never
+      # authorizes or performs cleanup.
+      if [ -z "$dirty" ] && head_reachable_from_default; then
+        return 0
+      fi
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
