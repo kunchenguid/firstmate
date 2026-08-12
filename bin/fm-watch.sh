@@ -369,22 +369,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# Absorb a stale pane whose crewmate is in a DECLARED external-wait pause (paused:),
-# and re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot
-# invisibly. Called on any stale poll once the crewmate is known paused (first sight,
-# after crew_absorb_class; and repeat sights, gated by the .paused-<key> flag), so
-# it must be cheap: it NEVER re-reads the crewmate state. The re-surface age is anchored
-# on the pause's own STATUS-FILE mtime, not a per-hash marker, so a churny idle pane
-# (a ticking clock, a token counter) cannot keep resetting the cadence the way a
-# hash-tied timer would. A .paused-resurfaced-<key> throttle marker records the last
-# re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
-handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+# Register a proven DECLARED external-wait pause independently of pane staleness.
+# This marker has to exist before any exit-capable wake classification: a busy fleet
+# can otherwise keep returning from wake() before the later pane sweep ever reaches
+# the paused lane. Registration also retires the shorter wedge cadence immediately.
+register_declared_pause() {  # <window>
+  local win=$1 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
+# Re-surface a registered pause once every PAUSE_RESURFACE_SECS so it cannot rot
+# invisibly. The age is anchored on the pause's own STATUS-FILE mtime, not a pane
+# hash, so terminal churn cannot reset the cadence. A .paused-resurfaced-<key>
+# throttle marker makes the wake fire once per window rather than every poll.
+recheck_declared_pause() {  # <window> <task>
+  local win=$1 task=$2 key statusf mtime age rf rf_age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -396,6 +398,19 @@ handle_paused_stale() {  # <window> <task> <hash>
     fm_wake_append stale "$win" "$reason" || exit 1
     wake "$reason" "$rf"
   fi
+}
+
+# Absorb a stale pane whose crewmate is in a proven pause. This remains the owner
+# of the pane-hash suppressor, while pause registration and cadence are pane-neutral.
+handle_paused_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key mtime age
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  register_declared_pause "$win"
+  recheck_declared_pause "$win" "$task"
+  mtime=$(stat_mtime "$STATE/$task.status")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  age=$(( $(date +%s) - mtime ))
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
@@ -417,7 +432,7 @@ clear_pause_tracking() {  # <window>
 }
 
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file statusf sig class
+  local win=$1 task=$2 key last recheck_file statusf sig
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -426,16 +441,14 @@ pause_state_class() {  # <window> <task>
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    printf 'none'
     return
   fi
-  # Cached verdict: skip the costly authoritative re-read (an fm-crew-state.sh call
-  # plus the keyed open/resolved fold) while a recent recheck still stands AND the
-  # status stream it was taken from is byte-identical. Both halves of the pause proof
-  # are pure functions of that stream, so an unchanged signature means the earlier
-  # verdict is still exactly as true - while any append, including one that OPENS a
-  # decision after the pause flag was written, invalidates the cache and forces a
-  # fresh proof rather than riding out the age window behind a stale `paused`.
+  # Cached verdict: skip the costly keyed open/resolved fold while a recent recheck
+  # still stands AND the status stream it was taken from is byte-identical. The
+  # durable pause proof is a pure function of that stream. Any append, including one
+  # that OPENS a decision after the pause flag was written, invalidates the cache and
+  # forces a fresh proof rather than riding out the age window.
   # The recheck marker carries the signature as its content; callers read only its
   # mtime for the age bound, and a marker left by an older watcher simply mismatches
   # and re-proves.
@@ -445,21 +458,75 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task" "$last")
-  case "$class" in
-    paused)
-      sig=$(stat_sig "$statusf")
-      if [ -z "$sig" ] || ! crew_declared_pause_absorbable "$task" "$last" \
-         || [ "$sig" != "$(stat_sig "$statusf")" ]; then
-        class=none
-        rm -f "$recheck_file"
-      else
-        printf '%s' "$sig" > "$recheck_file"
-      fi
-      ;;
-    *) rm -f "$recheck_file" ;;
-  esac
+  sig=$(stat_sig "$statusf")
+  if [ -n "$sig" ] && crew_declared_pause_absorbable "$task" "$last" \
+     && [ "$sig" = "$(stat_sig "$statusf")" ]; then
+    printf '%s' "$sig" > "$recheck_file"
+    printf 'paused'
+    return
+  fi
+  rm -f "$recheck_file"
+  printf 'none'
+}
+
+pause_absorb_class() {  # <window> <task>
+  local class statusf sig
+  statusf="$STATE/$2.status"
+  sig=$(stat_sig "$statusf")
+  class=$(pause_state_class "$1" "$2")
+  if [ "$class" = paused ] && crew_has_active_working_evidence "$2"; then
+    printf 'working'
+    return
+  fi
+  if [ "$class" = paused ] && { [ -z "$sig" ] || [ "$sig" != "$(stat_sig "$statusf")" ]; }; then
+    printf 'none'
+    return
+  fi
   printf '%s' "$class"
+}
+
+# Reconcile declared pauses before this cycle reaches any block that may call
+# wake() and exit. This is deliberately separate from the pane sweep: checks and
+# signals precede that sweep, so a chatty sibling used to starve pause registration
+# indefinitely. The same pre-wake pass owns the bounded recheck, which keeps a busy
+# fleet from making a registered pause permanently invisible. Away mode is excluded
+# because its daemon owns pause tracking and rechecks.
+reconcile_declared_pauses() {
+  local w task key last class was_registered
+  afk_present && return 0
+  while IFS= read -r w; do
+    task=$(window_to_task "$w" "$STATE")
+    key=$(printf '%s' "$w" | tr ':/.' '___')
+    last=$(last_status_line "$STATE/$task.status")
+    if ! status_is_paused "$last"; then
+      [ -e "$STATE/.paused-$key" ] && clear_pause_tracking "$w"
+      continue
+    fi
+    class=$(pause_state_class "$w" "$task")
+    case "$class" in
+      paused)
+        was_registered=1
+        [ -e "$STATE/.paused-$key" ] || was_registered=0
+        if { [ "$was_registered" = 1 ] || [ -e "$STATE/.stale-since-$key" ]; } \
+           && crew_has_active_working_evidence "$task"; then
+          # Active work outranks pause absorption, but the durable declaration
+          # remains registered while ordinary stale handling owns wedge tracking.
+          if [ -e "$STATE/.stale-$key" ]; then
+            wedge_timer_check "$w" "$STATE/.stale-since-$key" \
+              "non-terminal stale (provably working after a declared pause)" \
+              "$STATE/.wedge-escalations-$key"
+          fi
+          continue
+        fi
+        register_declared_pause "$w"
+        [ "$was_registered" = 1 ] \
+          || triage_log "registered declared pause before exit-capable wake scans: $w"
+        recheck_declared_pause "$w" "$task"
+        ;;
+      none) clear_pause_tracking "$w" ;;
+      *) clear_pause_tracking "$w" ;;
+    esac
+  done < <(recorded_windows)
 }
 
 # Surface a stopped stale pane immediately. Pause cadence markers belong to the
@@ -1024,6 +1091,11 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   safe_touch_marker_or_log "$STATE/.last-watcher-beat" "watcher beacon" || true
 
+  # Pause state is durable work state, not a pane-state side effect. Reconcile it
+  # before maintenance checks and signals can wake-and-exit this process, otherwise
+  # a busy fleet can starve both initial registration and the bounded recheck.
+  reconcile_declared_pauses
+
   prune_reports_if_due
 
   # A managed provider's SessionStart hook may race the initial spawn return.
@@ -1173,14 +1245,12 @@ EOF
     # without ever creating .paused-<key>. Authoritative working state still
     # outranks a stale paused log and falls through to ordinary stale handling.
     if ! afk_present && [ "$window_busy" != 1 ] && status_is_paused "$last"; then
-      case "$(pause_state_class "$w" "$task")" in
+      case "$(pause_absorb_class "$w" "$task")" in
         paused)
           handle_paused_stale "$w" "$task" "$h"
           continue
           ;;
-        working)
-          clear_pause_state "$w"
-          ;;
+        working) ;;
         none)
           clear_pause_tracking "$w"
           ;;
@@ -1222,9 +1292,10 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
+          case "$(pause_absorb_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
-            working|none) clear_pause_tracking "$w" ;;
+            working) ;;
+            none) clear_pause_tracking "$w" ;;
             *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
@@ -1290,7 +1361,7 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(crew_absorb_class "$task")" in
               working)
-                clear_pause_tracking "$w"
+                status_is_paused "$last" || clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -1308,10 +1379,9 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              case "$(pause_absorb_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$w"
-                         printf '%s' "$h" > "$sf"
+                working) printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 none)    surface_nonterminal_stale "$w" "$h" ;;
@@ -1325,7 +1395,7 @@ EOF
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
         rm -f "$ssf" "$ewf"
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ -e "$pf" ] && ! status_is_paused "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; then
           clear_pause_tracking "$w"
         fi
       fi
@@ -1335,13 +1405,15 @@ EOF
       rm -f "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")" && [ "$window_busy" != 1 ]; then
-        case "$(pause_state_class "$w" "$task")" in
+        case "$(pause_absorb_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          working|none) clear_pause_tracking "$w" ;;
+          working) ;;
+          none) clear_pause_tracking "$w" ;;
           *)      clear_pause_tracking "$w" ;;
         esac
       else
-        [ -e "$pf" ] && clear_pause_tracking "$w"
+        [ -e "$pf" ] && ! status_is_paused "$(last_status_line "$STATE/$task.status")" \
+          && clear_pause_tracking "$w"
       fi
     fi
   done < <(recorded_windows)

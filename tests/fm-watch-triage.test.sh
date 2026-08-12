@@ -1393,7 +1393,7 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "an active run behind a declared pause surfaced instead of resuming wedge tracking: $(cat "$out")"
   fi
-  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "authoritative active run retained paused mode"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "authoritative active run erased the durable pause declaration"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "authoritative active run did not resume wedge tracking"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
@@ -1927,6 +1927,12 @@ if [ "${FM_TEST_FOCUSED:-}" = pause-regressions ]; then
   test_surface_nonterminal_stale_clears_pause_only_after_status_resumes
   test_nonterminal_stale_paused_absorbed_then_resurfaced
   test_herdr_blocked_transition_enters_pause_absorb_path
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = paused-active-working ]; then
+  test_nonterminal_paused_rechecks_authoritative_state
+  test_paused_authoritative_working_preserves_wedge_timer
   exit 0
 fi
 

@@ -468,10 +468,8 @@ scan_crew_liveness_observations() {  # <state-dir>
   done
 }
 
-crew_absorb_class() {  # <id> [declared-pause-status-line]
-  local id=$1 declared_pause=${2:-} line state src liveness
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$(crew_state_line "$id")
+crew_state_line_is_active_working() {  # <authoritative-state-line>
+  local line=$1 state src liveness
   case "$line" in
     state:*)
       state=${line#state: }; state=${state%% *}
@@ -479,11 +477,28 @@ crew_absorb_class() {  # <id> [declared-pause-status-line]
       if [ "$state" = working ]; then
         liveness=$(crew_state_liveness_verdict "$line")
         case "$src:$liveness" in
-          run-step:alive|run-step:|pane:alive|pane:) printf 'working'; return ;;
+          run-step:alive|run-step:|pane:alive|pane:) return 0 ;;
         esac
       fi
       ;;
   esac
+  return 1
+}
+
+crew_has_active_working_evidence() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || return 1
+  line=$(crew_state_line "$id")
+  crew_state_line_is_active_working "$line"
+}
+
+crew_absorb_class() {  # <id> [declared-pause-status-line]
+  local id=$1 declared_pause=${2:-}
+  [ -n "$id" ] || { printf 'none'; return; }
+  if crew_has_active_working_evidence "$id"; then
+    printf 'working'
+    return
+  fi
   # An unreadable verdict falls through here too: it is not evidence against a pause
   # the crewmate durably declared, and it is exactly what a torn-down pane produces.
   if crew_declared_pause_absorbable "$id" "$declared_pause"; then
