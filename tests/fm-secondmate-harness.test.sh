@@ -1511,7 +1511,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   pass "B12 config-push propagates via shared live discovery, reports items, rereads on change only, and does not fast-forward"
 }
 
-test_config_push_reports_skips_dirty_and_invalid_home() {
+test_config_push_reports_skips_and_invalid_home_without_git_dirt_noise() {
   local w head out err status stale_real dirty_real bad_home err_text tmp
   w=$(new_world config-push-warnings)
   head=$(git -C "$w/main" rev-parse HEAD)
@@ -1542,8 +1542,8 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
   expect_code 0 "$status" "warnings-only config push should exit zero"
   assert_contains "$out" "secondmate dirty ($dirty_real):" \
     "config push did not report dirty home"
-  assert_contains "$out" "home: dirty working tree - local-material push continuing" \
-    "config push did not surface dirty state"
+  assert_not_contains "$out" "dirty working tree" \
+    "local-material-only config push should not classify unrelated git dirt"
   assert_contains "$out" "secondmate stale ($stale_real):" \
     "config push did not report stale home"
   assert_contains "$out" "crew-dispatch.json: skipped - destination does not allow inherited item" \
@@ -1553,7 +1553,7 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
   err_text=$(cat "$err")
   assert_contains "$err_text" "fm-config-inherit: warning: skipped crew-dispatch.json" \
     "config push did not inherit the lib's skip stderr warning"
-  pass "B13 config-push reports dirty, non-allowing, and invalid homes without failing warnings-only runs"
+  pass "B13 config-push ignores git dirt and reports non-allowing and invalid homes"
 }
 
 test_config_push_exits_nonzero_on_copy_error() {
@@ -2494,7 +2494,7 @@ test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge
-test_config_push_reports_skips_dirty_and_invalid_home
+test_config_push_reports_skips_and_invalid_home_without_git_dirt_noise
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_rereads_after_partial_propagation
 test_config_reread_per_home_changed_sets_and_exact_bytes

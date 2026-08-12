@@ -3,7 +3,7 @@
 # Usage: . bin/fm-ff-lib.sh   (after FM_ROOT and FM_HOME are set)
 #
 # This is the one implementation of "advance a firstmate checkout to a base by a
-# clean fast-forward, never forcing, merging, or stashing" used by every sync
+# collision-safe fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
 #   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
@@ -224,13 +224,244 @@ changed_instr() {
   printf '%s' "$out"
 }
 
-dirty_status() {
-  local dir=$1 ignore_seed_marker=${2:-no}
-  if [ "$ignore_seed_marker" = yes ]; then
-    git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
-  else
-    git -C "$dir" status --porcelain 2>/dev/null | head -1
+# A dirty checkout blocks a fast-forward only when its uncommitted paths collide
+# with the exact HEAD..base change set. Both listings are NUL-delimited so spaces
+# and non-ASCII path bytes are preserved. Any status or diff state that cannot be
+# classified confidently fails closed instead of becoming an empty change set.
+#
+# Sets FF_COLLISION_ERROR for an unclassifiable state and FF_COLLISION_DETAILS
+# to one entry per genuine collision. Returns 0 when safe, 1 for collisions, and
+# 2 for an unclassifiable state.
+FF_COLLISION_ERROR=""
+FF_COLLISION_DETAILS=()
+FF_INCOMING_PATHS=()
+FF_INCOMING_ACTIONS=()
+FF_INCOMING_ACTION=""
+FF_UNTRACKED_COLLISION=""
+
+ff_operation_marker() {  # <dir> <git-path> <description>
+  local dir=$1 marker=$2 description=$3 path
+  path=$(git -C "$dir" rev-parse --git-path "$marker" 2>/dev/null) || {
+    FF_COLLISION_ERROR="git rev-parse --git-path $marker failed"
+    return 2
+  }
+  case "$path" in
+    /*) : ;;
+    *) path="$dir/$path" ;;
+  esac
+  [ ! -e "$path" ] || {
+    FF_COLLISION_ERROR="$description"
+    return 2
+  }
+  return 0
+}
+
+ff_operation_status() {  # <dir>
+  local dir=$1
+  ff_operation_marker "$dir" MERGE_HEAD "merge in progress" || return $?
+  ff_operation_marker "$dir" CHERRY_PICK_HEAD "cherry-pick in progress" || return $?
+  ff_operation_marker "$dir" REVERT_HEAD "revert in progress" || return $?
+  ff_operation_marker "$dir" sequencer/todo "cherry-pick or revert sequence in progress" || return $?
+  ff_operation_marker "$dir" rebase-merge "rebase in progress" || return $?
+  ff_operation_marker "$dir" rebase-apply/applying "patch application in progress" || return $?
+  ff_operation_marker "$dir" rebase-apply "rebase in progress" || return $?
+  ff_operation_marker "$dir" BISECT_LOG "bisect in progress" || return $?
+  return 0
+}
+
+ff_incoming_action() {  # <path>
+  local want=$1 i=0
+  while [ "$i" -lt "${#FF_INCOMING_PATHS[@]}" ]; do
+    if [ "${FF_INCOMING_PATHS[$i]}" = "$want" ]; then
+      FF_INCOMING_ACTION=${FF_INCOMING_ACTIONS[$i]}
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+ff_untracked_collision() {  # <path>
+  local want=$1 i=0 add lead nested
+  lead="untracked file here"
+  nested="needs that path to be a directory to add"
+  case "$want" in
+    */)
+      want=${want%/}
+      lead="untracked directory here that git will not descend into"
+      nested="adds a file beneath it at"
+      ;;
+  esac
+  while [ "$i" -lt "${#FF_INCOMING_PATHS[@]}" ]; do
+    if [ "${FF_INCOMING_ACTIONS[$i]}" = adds ]; then
+      add=${FF_INCOMING_PATHS[$i]}
+      if [ "$add" = "$want" ]; then
+        FF_UNTRACKED_COLLISION="$lead, while the fast-forward adds that path"
+        return 0
+      fi
+      case "$add" in
+        "$want"/*)
+          FF_UNTRACKED_COLLISION="$lead, while the fast-forward $nested '$add'"
+          return 0
+          ;;
+      esac
+      case "$want" in
+        "$add"/*)
+          FF_UNTRACKED_COLLISION="$lead, while the fast-forward adds '$add' where a directory exists"
+          return 0
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+ff_collision_check() {  # <dir> <base> <ignore-seed-marker>
+  local dir=$1 base=$2 ignore_seed_marker=${3:-no}
+  local tmp status_file incoming_file entry code path other change rc=0
+  local -a dirty_paths untracked_paths
+
+  FF_COLLISION_ERROR=""
+  FF_COLLISION_DETAILS=()
+  FF_INCOMING_PATHS=()
+  FF_INCOMING_ACTIONS=()
+  dirty_paths=()
+  untracked_paths=()
+
+  ff_operation_status "$dir" || return 2
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-ff-collision.XXXXXX") || {
+    FF_COLLISION_ERROR="cannot create collision-check temporary directory"
+    return 2
+  }
+  status_file="$tmp/status"
+  incoming_file="$tmp/incoming"
+
+  if ! git -C "$dir" status --porcelain=v1 -z --untracked-files=all > "$status_file" 2>/dev/null; then
+    FF_COLLISION_ERROR="git status failed"
+    rc=2
   fi
+
+  if [ "$rc" -eq 0 ]; then
+    while IFS= read -r -d '' entry; do
+      if [ "${#entry}" -lt 4 ]; then
+        FF_COLLISION_ERROR="truncated git status entry"
+        rc=2
+        break
+      fi
+      code=${entry:0:2}
+      path=${entry:3}
+      case "$code" in
+        '??')
+          if [ "$ignore_seed_marker" != yes ] || [ "$path" != "$SUB_HOME_MARKER" ]; then
+            untracked_paths+=("$path")
+          fi
+          continue
+          ;;
+        'DD'|'AA'|U?|?U)
+          FF_COLLISION_ERROR="unresolved conflict at '$path'"
+          rc=2
+          break
+          ;;
+      esac
+      case "${code:0:1}" in
+        ' '|M|T|A|D|R|C) : ;;
+        *)
+          FF_COLLISION_ERROR="unrecognized git status code '$code' at '$path'"
+          rc=2
+          break
+          ;;
+      esac
+      case "${code:1:1}" in
+        ' '|M|T|A|D|R|C) : ;;
+        *)
+          FF_COLLISION_ERROR="unrecognized git status code '$code' at '$path'"
+          rc=2
+          break
+          ;;
+      esac
+      dirty_paths+=("$path")
+      case "$code" in
+        *R*|*C*)
+          if ! IFS= read -r -d '' other; then
+            FF_COLLISION_ERROR="truncated '$code' rename entry at '$path'"
+            rc=2
+            break
+          fi
+          dirty_paths+=("$other")
+          ;;
+      esac
+    done < "$status_file"
+  fi
+
+  if [ "$rc" -eq 0 ] && ! git -C "$dir" diff -z --name-status HEAD "$base" -- > "$incoming_file" 2>/dev/null; then
+    FF_COLLISION_ERROR="git diff failed between HEAD and $base"
+    rc=2
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    while IFS= read -r -d '' change; do
+      if ! IFS= read -r -d '' path; then
+        FF_COLLISION_ERROR="truncated '$change' entry in incoming diff"
+        rc=2
+        break
+      fi
+      case "$change" in
+        A)
+          FF_INCOMING_PATHS+=("$path"); FF_INCOMING_ACTIONS+=(adds)
+          ;;
+        M|M[0-9]*|T|T[0-9]*)
+          FF_INCOMING_PATHS+=("$path"); FF_INCOMING_ACTIONS+=(changes)
+          ;;
+        D)
+          FF_INCOMING_PATHS+=("$path"); FF_INCOMING_ACTIONS+=(removes)
+          ;;
+        R|R[0-9]*)
+          if ! IFS= read -r -d '' other; then
+            FF_COLLISION_ERROR="truncated '$change' rename entry at '$path'"
+            rc=2
+            break
+          fi
+          FF_INCOMING_PATHS+=("$path"); FF_INCOMING_ACTIONS+=(removes)
+          FF_INCOMING_PATHS+=("$other"); FF_INCOMING_ACTIONS+=(adds)
+          ;;
+        C|C[0-9]*)
+          if ! IFS= read -r -d '' other; then
+            FF_COLLISION_ERROR="truncated '$change' copy entry at '$path'"
+            rc=2
+            break
+          fi
+          FF_INCOMING_PATHS+=("$other"); FF_INCOMING_ACTIONS+=(adds)
+          ;;
+        *)
+          FF_COLLISION_ERROR="unrecognized git diff status '$change' at '$path'"
+          rc=2
+          break
+          ;;
+      esac
+    done < "$incoming_file"
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    for path in "${dirty_paths[@]}"; do
+      if ff_incoming_action "$path"; then
+        FF_COLLISION_DETAILS+=("$path - uncommitted changes here, while the fast-forward $FF_INCOMING_ACTION it")
+      fi
+    done
+    for path in "${untracked_paths[@]}"; do
+      if ff_untracked_collision "$path"; then
+        FF_COLLISION_DETAILS+=("$path - $FF_UNTRACKED_COLLISION")
+      fi
+    done
+    if [ "${#FF_COLLISION_DETAILS[@]}" -gt 0 ]; then
+      rc=1
+    fi
+  fi
+
+  rm -f -- "$status_file" "$incoming_file"
+  rmdir -- "$tmp" 2>/dev/null || true
+  return "$rc"
 }
 
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
@@ -267,7 +498,8 @@ live_secondmate_meta_records() {
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
 # Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# colliding, unclassifiable, diverged, or wrong-branch target and leave its work
+# untouched. Unrelated uncommitted paths do not block an otherwise safe update.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
@@ -284,7 +516,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr local_rev base_rev before after out collision_rc collision
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -320,11 +552,6 @@ ff_target() {
     return 0
   fi
 
-  if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
-    echo "$label: skipped: dirty working tree"
-    return 0
-  fi
-
   local_rev=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || {
     echo "$label: skipped: cannot read HEAD"
     return 0
@@ -333,6 +560,20 @@ ff_target() {
     echo "$label: skipped: cannot read $base"
     return 0
   }
+
+  collision_rc=0
+  ff_collision_check "$dir" "$base" "$ignore_seed_marker" || collision_rc=$?
+  if [ "$collision_rc" -eq 2 ]; then
+    echo "$label: skipped: cannot classify working tree: $FF_COLLISION_ERROR"
+    return 0
+  fi
+  if [ "$collision_rc" -eq 1 ]; then
+    echo "$label: skipped: uncommitted paths collide with fast-forward:"
+    for collision in "${FF_COLLISION_DETAILS[@]}"; do
+      echo "  $collision"
+    done
+    return 0
+  fi
   if [ "$local_rev" = "$base_rev" ]; then
     FF_STATUS="current"
     echo "$label: already current"

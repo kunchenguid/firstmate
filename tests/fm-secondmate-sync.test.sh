@@ -9,8 +9,8 @@
 # The guarantees under test:
 #   - The shared ff helper, driven with a LOCAL commit base, advances a behind
 #     home (updated), is a no-op on an already-current home (current, no nudge),
-#     and refuses - leaving work untouched - on a dirty, diverged, or
-#     in-flight (feature-branch) home.
+#     and refuses - leaving work untouched - on a colliding, unclassifiable,
+#     diverged, or in-flight (feature-branch) home while unrelated dirt proceeds.
 #   - No origin fetch happens in the local-HEAD sync path.
 #   - The bootstrap sweep fast-forwards every live secondmate home and sends a
 #     reread nudge ONLY for a running secondmate whose instruction surface
@@ -168,8 +168,8 @@ test_ff_current() {
   pass "T2 current: an already-current home is a no-op and reports no instruction change"
 }
 
-# --- T3: dirty - a home with uncommitted edits is skipped, edit preserved ----
-test_ff_dirty() {
+# --- T3: collision - an incoming path with local edits is skipped ------------
+test_ff_collision() {
   local w c1 base before
   w=$(new_world ff-dirty)
   c1=$(head_of "$w/main")
@@ -182,10 +182,113 @@ test_ff_dirty() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" "dirty home is skipped"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: uncommitted paths collide with fast-forward:" \
+    "colliding home is skipped"
+  assert_contains "$FF_OUT" "AGENTS.md - uncommitted changes here, while the fast-forward changes it" \
+    "collision report names the path and incoming action"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty edit was discarded"
-  pass "T3 dirty: an uncommitted home is skipped, its edit preserved"
+  pass "T3 collision: an incoming path with local edits is skipped and named"
+}
+
+test_ff_unrelated_dirt_proceeds() {
+  local w c1 base
+  w=$(new_world ff-unrelated-dirt)
+  printf 'machine local\n' > "$w/main/local-pointer.txt"
+  git -C "$w/main" add local-pointer.txt
+  git -C "$w/main" commit -qm 'seed local pointer'
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  printf 'operator edit\n' >> "$w/sm/local-pointer.txt"
+  mkdir -p "$w/sm/operator notes"
+  printf 'operator reference\n' > "$w/sm/operator notes/Résumé Plan.pdf"
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "unrelated dirt should proceed, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "unrelated dirt blocked the fast-forward"
+  grep -q 'operator edit' "$w/sm/local-pointer.txt" || fail "unrelated tracked edit was disturbed"
+  grep -q 'operator reference' "$w/sm/operator notes/Résumé Plan.pdf" \
+    || fail "unrelated spaced non-ASCII untracked path was disturbed"
+  pass "collision precision proceeds past unrelated tracked and untracked paths"
+}
+
+test_ff_refuses_modified_path_incoming_delete() {
+  local w c1 base before path
+  w=$(new_world ff-delete-collision)
+  path='docs/Résumé Plan.md'
+  mkdir -p "$w/main/docs"
+  printf 'tracked reference\n' > "$w/main/$path"
+  git -C "$w/main" add "$path"
+  git -C "$w/main" commit -qm 'seed reference'
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  git -C "$w/main" rm -q "$path"
+  git -C "$w/main" commit -qm 'remove reference'
+  base=$(primary_head_commit "$w/main")
+  printf 'operator edit\n' >> "$w/sm/$path"
+  before=$(head_of "$w/sm")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "incoming delete collision should skip"
+  assert_contains "$FF_OUT" "$path - uncommitted changes here, while the fast-forward removes it" \
+    "delete collision report lost the spaced non-ASCII path or action"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "delete collision moved HEAD"
+  grep -q 'operator edit' "$w/sm/$path" || fail "delete collision discarded the local edit"
+  pass "collision precision refuses and reports an incoming delete over a modified path"
+}
+
+test_ff_refuses_untracked_path_incoming_add() {
+  local w c1 base before path
+  w=$(new_world ff-untracked-add-collision)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  path='docs/Résumé Plan.pdf'
+  mkdir -p "$w/main/docs"
+  printf 'incoming reference\n' > "$w/main/$path"
+  git -C "$w/main" add "$path"
+  git -C "$w/main" commit -qm 'add reference'
+  base=$(primary_head_commit "$w/main")
+  mkdir -p "$w/sm/docs"
+  printf 'operator reference\n' > "$w/sm/$path"
+  before=$(head_of "$w/sm")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "untracked add collision should skip"
+  assert_contains "$FF_OUT" "$path - untracked file here, while the fast-forward adds that path" \
+    "untracked add collision report lost the spaced non-ASCII path"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "untracked add collision moved HEAD"
+  grep -q 'operator reference' "$w/sm/$path" || fail "untracked collision overwrote the operator file"
+  pass "collision precision refuses and reports an untracked incoming-add path"
+}
+
+test_ff_refuses_unclassifiable_conflict() {
+  local w c1 base
+  w=$(new_world ff-unclassifiable)
+  c1=$(head_of "$w/main")
+  printf 'main side\n' > "$w/main/conflict.txt"
+  git -C "$w/main" add conflict.txt
+  git -C "$w/main" commit -qm 'main side'
+  base=$(primary_head_commit "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'local side\n' > "$w/sm/conflict.txt"
+  git -C "$w/sm" add conflict.txt
+  git -C "$w/sm" commit -qm 'local side'
+  git -C "$w/sm" merge "$base" >/dev/null 2>&1 \
+    && fail "unclassifiable fixture merge was expected to conflict"
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "unclassifiable state should skip"
+  assert_contains "$FF_OUT" "cannot classify working tree: merge in progress" \
+    "unclassifiable operation was not named"
+  [ "$(git -C "$w/sm" ls-files -u | wc -l | tr -d ' ')" -gt 0 ] \
+    || fail "unclassifiable conflict was disturbed"
+  pass "collision precision fails closed on an unclassifiable in-progress state"
 }
 
 # --- T4: diverged - a home with its own commit is skipped, commit preserved --
@@ -684,7 +787,7 @@ SH
   pass "T8b stale herdr nudge failures leave a retry marker after respawn rotates fm-<id> metadata"
 }
 
-# --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
+# --- T9: bootstrap surfaces a skipped colliding live secondmate home ----------
 test_bootstrap_sweep_surfaces_skipped_home() {
   local w c1 base before fakebin out skip_line
   w=$(new_world boot-skip)
@@ -701,11 +804,12 @@ test_bootstrap_sweep_surfaces_skipped_home() {
 
   skip_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm-dirty: skipped:' || true)
   [ -n "$skip_line" ] || fail "no SECONDMATE_SYNC skip line emitted (got: $out)"
-  assert_contains "$skip_line" "dirty working tree" "dirty skipped home reports the actionable reason"
+  assert_contains "$skip_line" "uncommitted paths collide with fast-forward" \
+    "colliding skipped home reports the actionable reason"
   [ "$(head_of "$w/sm-dirty")" = "$before" ] || fail "dirty home HEAD moved"
   [ "$(head_of "$w/main")" = "$base" ] || fail "primary HEAD changed during bootstrap"
   grep -q 'uncommitted local edit' "$w/sm-dirty/AGENTS.md" || fail "dirty edit was discarded"
-  pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
+  pass "T9 bootstrap surfaces a skipped colliding live secondmate home"
 }
 
 # --- T10: spawning a secondmate fast-forwards its worktree before launch ------
@@ -772,7 +876,7 @@ SH
     "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || true
 
   assert_contains "$(cat "$err")" \
-    "warning: secondmate sm sync skipped before launch: dirty working tree" \
+    "warning: secondmate sm sync skipped before launch: uncommitted paths collide with fast-forward:" \
     "spawn warning reports the skipped sync reason"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty spawn home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty spawn edit was discarded"
@@ -827,11 +931,10 @@ test_seed_marker_converges_existing_home() {
   pass "T13 gitignored marker: an existing marker-only-dirty home converges, then reads clean"
 }
 
-# --- T14: marker tolerance does not mask a genuinely dirty home -----------------
-# The ff-skip only forgives the seed marker; a real uncommitted change alongside the
-# marker must still refuse the fast-forward and leave the work untouched, exactly as
-# before this fix.
-test_seed_marker_does_not_mask_real_dirt() {
+# --- T14: marker convergence preserves unrelated genuine dirt -------------------
+# The marker-only upgrade changes .gitignore, so a real edit in AGENTS.md is
+# unrelated to that exact fast-forward and must proceed without disturbing it.
+test_seed_marker_convergence_preserves_unrelated_dirt() {
   local w c0 base before
   w=$(new_world marker-real-dirt)
   c0=$(head_of "$w/main")
@@ -843,17 +946,20 @@ test_seed_marker_does_not_mask_real_dirt() {
 
   run_ff "$w/sm" "$base"
 
-  [ "$FF_STATUS" = skipped ] || fail "a genuinely dirty home must skip, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" \
-    "a genuinely dirty home is skipped even with the marker present"
-  [ "$(head_of "$w/sm")" = "$before" ] || fail "genuinely dirty home HEAD moved (work at risk)"
-  grep -q 'real local change' "$w/sm/AGENTS.md" || fail "genuine local edit was discarded"
-  pass "T14 marker tolerance does not mask a genuinely dirty home"
+  [ "$FF_STATUS" = updated ] || fail "unrelated genuine dirt should proceed, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" != "$before" ] || fail "unrelated dirt blocked marker convergence"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "marker convergence did not reach the target"
+  grep -q 'real local change' "$w/sm/AGENTS.md" || fail "unrelated genuine local edit was discarded"
+  pass "T14 marker convergence preserves unrelated genuine dirt"
 }
 
 test_ff_updated
 test_ff_current
-test_ff_dirty
+test_ff_collision
+test_ff_unrelated_dirt_proceeds
+test_ff_refuses_modified_path_incoming_delete
+test_ff_refuses_untracked_path_incoming_add
+test_ff_refuses_unclassifiable_conflict
 test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
@@ -870,6 +976,6 @@ test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
-test_seed_marker_does_not_mask_real_dirt
+test_seed_marker_convergence_preserves_unrelated_dirt
 
 echo "# all fm-secondmate-sync tests passed"

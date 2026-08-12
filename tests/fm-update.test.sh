@@ -6,8 +6,9 @@
 #   - The running firstmate repo (on its default branch) fast-forwards from
 #     origin; a leased secondmate home (detached HEAD on the default branch)
 #     fast-forwards the same way.
-#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
-#     skipped and reported, never forced or stashed, so unlanded work survives.
+#   - FAST-FORWARD ONLY: a colliding, unclassifiable, diverged, offline, or
+#     wrong-branch target is skipped and reported, never forced or stashed, while
+#     unrelated uncommitted paths proceed and survive.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
@@ -143,8 +144,8 @@ test_reread_gate_is_instruction_only() {
   pass "T3 reread gates on instruction surface, nudge on advancement"
 }
 
-# --- T4: dirty secondmate is skipped, its edit preserved -------------------
-test_dirty_secondmate_skipped() {
+# --- T4: colliding secondmate is skipped, its edit preserved ---------------
+test_colliding_secondmate_skipped() {
   local w out
   w=$(new_world t4)
   add_sm "$w" sm1
@@ -153,11 +154,35 @@ test_dirty_secondmate_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate sm1: skipped: dirty working tree" "dirty home skipped"
+  assert_contains "$out" "secondmate sm1: skipped: uncommitted paths collide with fast-forward:" \
+    "colliding home skipped"
+  assert_contains "$out" "AGENTS.md - uncommitted changes here, while the fast-forward changes it" \
+    "collision report names the affected path"
   assert_not_contains "$out" "fm-sm1" "skipped secondmate is not nudged"
   grep -q 'uncommitted local edit' "$w/sm1/AGENTS.md" \
     || fail "dirty edit was discarded"
-  pass "T4 dirty secondmate skipped, local edit preserved"
+  pass "T4 colliding secondmate skipped, local edit preserved"
+}
+
+test_unrelated_dirt_proceeds_in_origin_mode() {
+  local w out
+  w=$(new_world t4-unrelated)
+  add_sm "$w" sm1
+  bump_origin "$w" readme
+  printf 'operator main edit\n' >> "$w/main/AGENTS.md"
+  printf 'operator secondmate edit\n' >> "$w/sm1/AGENTS.md"
+  printf 'operator main note\n' > "$w/main/Résumé Notes.pdf"
+  printf 'operator secondmate note\n' > "$w/sm1/Résumé Notes.pdf"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "unrelated firstmate dirt blocked origin update"
+  assert_contains "$out" "secondmate sm1: updated " "unrelated secondmate dirt blocked origin update"
+  grep -q 'operator main edit' "$w/main/AGENTS.md" || fail "origin update disturbed firstmate edit"
+  grep -q 'operator secondmate edit' "$w/sm1/AGENTS.md" || fail "origin update disturbed secondmate edit"
+  grep -q 'operator main note' "$w/main/Résumé Notes.pdf" || fail "origin update disturbed firstmate untracked file"
+  grep -q 'operator secondmate note' "$w/sm1/Résumé Notes.pdf" || fail "origin update disturbed secondmate untracked file"
+  pass "origin-mode consumers proceed past unrelated modified and untracked paths"
 }
 
 # --- T5: diverged secondmate is skipped, its commit preserved --------------
@@ -293,7 +318,8 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
-test_dirty_secondmate_skipped
+test_colliding_secondmate_skipped
+test_unrelated_dirt_proceeds_in_origin_mode
 test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
