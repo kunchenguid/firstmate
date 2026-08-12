@@ -274,13 +274,13 @@ test_promote_requires_and_records_the_delivery_contract() {
   mkdir -p "$home/data/promote-web-provenance-d2"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" promote-web-provenance-d2 firstmate --mode no-mistakes --web >/dev/null 2>&1 \
     || fail "web brief scaffold for promotion provenance test should succeed"
-  sed -i 's/^Web gate provenance:.*/Web gate provenance: sha256:0000000000000000000000000000000000000000000000000000000000000000/' "$home/data/promote-web-provenance-d2/brief.md"
+  sed -i 's/^HTTP 200, a preview URL, or bare reachability alone is explicitly rejected/HTTP 200, a preview URL, or bare reachability alone is accepted/' "$home/data/promote-web-provenance-d2/brief.md"
   brief_before=$(cat "$home/data/promote-web-provenance-d2/brief.md")
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-provenance-d2 --mode no-mistakes --yolo off --web 2>&1)
   status=$?
-  expect_code 1 "$status" "promotion with an invalid web provenance marker should fail"
-  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an invalid web provenance marker"
-  assert_grep 'kind=scout' "$web_provenance_meta" "invalid web provenance promotion changed the task record"
+  expect_code 1 "$status" "promotion with an edited web gate body should fail"
+  assert_contains "$out" "lacks the canonical Web gate contract or body" "promotion did not reject an edited web gate body"
+  assert_grep 'kind=scout' "$web_provenance_meta" "edited web gate promotion changed the task record"
   [ "$(cat "$home/data/promote-web-provenance-d2/brief.md")" = "$brief_before" ] \
     || fail "invalid web provenance promotion modified the brief"
 

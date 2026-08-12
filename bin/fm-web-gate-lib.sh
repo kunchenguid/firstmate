@@ -32,13 +32,39 @@ fm_web_gate_hash_stream() {
   fi
 }
 
-fm_web_gate_hash_file_without_provenance() {
-  sed '/^Web gate provenance: /d' "$1" | fm_web_gate_hash_stream
+fm_web_gate_body_hash() {
+  fm_web_gate_body_text | fm_web_gate_hash_stream
+}
+
+fm_web_gate_body_present() {
+  local brief=$1 expected
+  expected=$(fm_web_gate_body_text)
+  awk -v expected="$expected" '
+    BEGIN {
+      wanted_count = split(expected, wanted, "\n")
+      wanted_index = 1
+      matches = 0
+    }
+    {
+      if ($0 == wanted[wanted_index]) {
+        wanted_index++
+        if (wanted_index > wanted_count) {
+          matches++
+          wanted_index = 1
+        }
+      } else if ($0 == wanted[1]) {
+        wanted_index = 2
+      } else {
+        wanted_index = 1
+      }
+    }
+    END { exit matches == 1 ? 0 : 1 }
+  ' "$brief"
 }
 
 fm_web_gate_stamp_file() {
   local brief=$1 digest tmp
-  digest=$(fm_web_gate_hash_file_without_provenance "$brief") || return 1
+  digest=$(fm_web_gate_body_hash) || return 1
   tmp=$(mktemp "$brief.tmp.XXXXXX") || return 1
   if ! sed "s/^Web gate provenance: .*/Web gate provenance: sha256:$digest/" "$brief" > "$tmp"; then
     rm -f -- "$tmp"
@@ -51,7 +77,8 @@ fm_web_gate_provenance_present() {
   local brief=$1 count actual expected
   count=$(grep -Ec '^Web gate provenance: sha256:[0-9a-fA-F]{64}$' "$brief" || true)
   [ "$count" -eq 1 ] || return 1
+  fm_web_gate_body_present "$brief" || return 1
   actual=$(sed -n 's/^Web gate provenance: //p' "$brief")
-  expected=$(fm_web_gate_hash_file_without_provenance "$brief") || return 1
+  expected=$(fm_web_gate_body_hash) || return 1
   [ "$actual" = "sha256:$expected" ]
 }
