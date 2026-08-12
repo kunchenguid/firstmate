@@ -100,7 +100,7 @@ else
 fi
 
 # Test 3: Auto-detection via PASEO_AGENT_ID
-(
+run_paseo_detection_test() {
   unset TMUX HERDR_ENV CMUX_WORKSPACE_ID
   export PASEO_AGENT_ID="agent-12345"
   detected=$(fm_backend_detect)
@@ -109,10 +109,11 @@ fi
   else
     fail "fm_backend_detect failed to detect paseo: '$detected'"
   fi
-)
+}
+run_paseo_detection_test
 
 # Test 4: fm_backend_paseo_parent_id
-(
+run_paseo_parent_env_test() {
   export PASEO_AGENT_ID="agent-parent-1"
   pid=$(fm_backend_paseo_parent_id)
   if [ "$pid" = "agent-parent-1" ]; then
@@ -120,9 +121,11 @@ fi
   else
     fail "unexpected parent_id: '$pid'"
   fi
-)
+  unset PASEO_AGENT_ID
+}
+run_paseo_parent_env_test
 
-(
+run_paseo_parent_fallback_test() {
   reset_responses
   unset PASEO_AGENT_ID
   # Call 1 response for paseo ls --json
@@ -133,12 +136,14 @@ fi
   else
     fail "unexpected fallback parent_id: '$pid'"
   fi
-)
+}
+run_paseo_parent_fallback_test
 
 reset_responses
 
 # Test 5: fm_backend_paseo_create_task
-(
+run_paseo_create_task_test() {
+  local proj_dir brief_file task_tmp out agent_id wt sm_dir out_sm agent_id_sm wt_sm
   proj_dir="$TMP_ROOT/proj"
   brief_file="$TMP_ROOT/brief.md"
   task_tmp="$TMP_ROOT/tasktmp"
@@ -176,7 +181,9 @@ EOF
   else
     fail "unexpected secondmate task creation output: '$out_sm'"
   fi
-)
+  unset FM_FAKE_WORKTREE
+}
+run_paseo_create_task_test
 
 reset_responses
 
@@ -356,7 +363,8 @@ EOF
 )
 
 # Test 16: fm-spawn.sh with backend=paseo passes TASK_TMP and suppresses unintended send commands
-(
+run_paseo_spawn_test() {
+  local spawn_origin spawn_proj spawn_wt out rc meta_file tasktmp_val
   reset_responses
   : > "$FM_PASEO_LOG"
   spawn_origin="$TMP_ROOT/spawn-origin.git"
@@ -411,6 +419,8 @@ EOF
   else
     fail "fm-spawn.sh failed with exit code $rc: $out"
   fi
-)
+  unset FM_FAKE_WORKTREE
+}
+run_paseo_spawn_test
 
 echo "All tests passed!"
