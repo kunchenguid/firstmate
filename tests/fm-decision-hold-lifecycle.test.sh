@@ -560,6 +560,51 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# The deployed-website evidence rule lives on this same completion gate: proving a
+# deployment needs the production domain, the intended revision, an observed
+# interaction, and a real screenshot together. A preview-only or HTTP-status-only
+# claim must fail here, and work that deployed nothing must stay unaffected.
+test_deployed_website_completion_requires_production_evidence() {
+  local home id shot out
+  home=$(make_home deployed-site)
+  id=sample-site-deploy
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Deploy the sample site" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: deployment complete\n' > "$home/state/$id.status"
+  shot="$home/data/$id/production.png"
+  printf 'synthetic screenshot bytes\n' > "$shot"
+
+  out=$(run_decisions "$home" complete "$id" --none \
+    --deployed-site https://sample.example --revision sample-marker-1 2>&1) \
+    && fail "a partial deployment attestation must not pass the completion gate"
+  assert_contains "$out" "together" "partial deployment proof did not name the whole requirement"
+
+  out=$(run_decisions "$home" complete "$id" --none \
+    --deployed-site https://preview.sample.example/x --revision sample-marker-1 \
+    --interaction "clicked the sample control" --screenshot "$home/data/$id/absent.png" 2>&1) \
+    && fail "a screenshot that does not exist must not pass the completion gate"
+  assert_contains "$out" "existing screenshot file" "missing screenshot evidence was not named"
+
+  out=$(run_decisions "$home" complete "$id" --none \
+    --deployed-site sample.example --revision sample-marker-1 \
+    --interaction "clicked the sample control" --screenshot "$shot" 2>&1) \
+    && fail "a non-https production domain must not pass the completion gate"
+  assert_contains "$out" "https production domain" "non-https deployment proof was not named"
+
+  run_decisions "$home" complete "$id" --none \
+    --deployed-site https://sample.example --revision sample-marker-1 \
+    --interaction "clicked the sample control and the sample panel opened" \
+    --screenshot "$shot" >/dev/null \
+    || fail "complete production-domain proof was rejected"
+  assert_grep "deployed_site=https://sample.example" "$home/state/$id.meta" \
+    "the accepted deployment proof was not recorded durably"
+  assert_grep "deployed_interaction=clicked the sample control and the sample panel opened" \
+    "$home/state/$id.meta" "the observed interaction was not recorded durably"
+
+  pass "deployed website completion requires production-domain revision, interaction, and screenshot proof"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -570,3 +615,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_deployed_website_completion_requires_production_evidence
