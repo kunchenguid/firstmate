@@ -177,11 +177,16 @@ status_is_paused_or_captain_held() {  # <status-line>
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
 # folds skip the line), never rewritten to "default".
-# The parsers are pure reads of a single line; the verb parser strips any key
-# token before the colon so the leading word is recovered cleanly.
+# The parsers are pure reads of a single line; the verb parser strips every
+# "[name=value]" tag before the colon - not just "[key=...]" - so the leading
+# word is recovered cleanly regardless of how many such tags precede the colon
+# or their order. A remote secondmate reply routinely prepends a "[corr=...]"
+# correlation tag ahead of (or instead of) "[key=...]"; treating only the key
+# tag as strippable left that leading verb word contaminated with the corr
+# tag, so the fold's verb match silently failed to recognize the line at all.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
-  v=${v%%\[key=*}
+  v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
