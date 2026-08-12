@@ -172,29 +172,34 @@ while :; do
     echo 'watcher: FAILED - Grok continuity could not create its arm output stream'
     exit 1
   }
-  : > "$stream_dir/terminal"
+  : > "$stream_dir/capture"
   : > "$stream_dir/overflow"
 
   "$ARM" > "$stream_dir/stream" 2>&1 &
   child=$!
   (
-    LC_ALL=C
     captured=0
-    overflowed=0
-    while IFS= read -r line; do
-      bytes=$((${#line} + 1))
-      if [ "$overflowed" -eq 0 ] && [ $((captured + bytes)) -gt "$OUTPUT_MAX_BYTES" ]; then
-        overflowed=1
+    emitted=0
+    while :; do
+      : > "$stream_dir/chunk"
+      dd bs=4096 count=1 of="$stream_dir/chunk" 2>/dev/null || true
+      bytes=$(wc -c < "$stream_dir/chunk" | tr -d '[:space:]')
+      [ "$bytes" -gt 0 ] || break
+      remaining=$((OUTPUT_MAX_BYTES - captured))
+      if [ "$bytes" -gt "$remaining" ]; then
+        head -c "$remaining" "$stream_dir/chunk" >> "$stream_dir/capture"
         printf 'watcher: FAILED - Grok continuity arm output exceeded %s bytes\n' "$OUTPUT_MAX_BYTES" > "$stream_dir/overflow"
         kill -TERM "$child" 2>/dev/null || true
-        continue
+        break
       fi
-      [ "$overflowed" -eq 0 ] || continue
       captured=$((captured + bytes))
-      case "$line" in
-        'watcher: started '*|'watcher: attached '*) printf '%s\n' "$line" ;;
-        *) printf '%s\n' "$line" >> "$stream_dir/terminal" ;;
-      esac
+      cat "$stream_dir/chunk" >> "$stream_dir/capture"
+      complete=$(wc -l < "$stream_dir/capture" | tr -d '[:space:]')
+      if [ "$complete" -gt "$emitted" ]; then
+        sed -n "$((emitted + 1)),${complete}p" "$stream_dir/capture" \
+          | awk '/^watcher: started / || /^watcher: attached /'
+        emitted=$complete
+      fi
     done < "$stream_dir/stream"
   ) &
   reader=$!
@@ -203,6 +208,7 @@ while :; do
   child=
   wait "$reader" 2>/dev/null || true
   reader=
+  awk '!/^watcher: started / && !/^watcher: attached /' "$stream_dir/capture" > "$stream_dir/terminal"
 
   if [ -s "$stream_dir/overflow" ]; then
     rc=1

@@ -168,6 +168,65 @@ SH
   pass "transferred bounded overflow queues once without completing"
 }
 
+test_no_newline_output_overflow_is_bounded() {
+  local home arm out status child failure size
+  home=$(make_home no-newline-overflow)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/overflow-child-pid"
+trap 'exit 143' TERM
+while :; do printf '0123456789abcdef0123456789abcdef'; done
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 "$OWNER" > "$out" 2>&1
+  status=$?
+  expect_code 1 "$status" "no-newline overflow must fail the Grok tracked task"
+  child=$(cat "$home/state/overflow-child-pid")
+  kill -0 "$child" 2>/dev/null && fail "no-newline overflow left the arm child alive"
+  failure='watcher: FAILED - Grok continuity arm output exceeded 128 bytes'
+  [ "$(grep -cF "$failure" "$out")" -eq 1 ] || fail "no-newline overflow failure was not emitted exactly once"
+  size=$(wc -c < "$out" | tr -d '[:space:]')
+  [ "$size" -le 256 ] || fail "no-newline overflow produced unbounded owner output: $size bytes"
+  pass "no-newline output is bounded and retires the child"
+}
+
+test_transferred_no_newline_overflow_queues_once() {
+  local home arm out pid child failure size
+  home=$(make_home transferred-no-newline-overflow)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/overflow-child-pid"
+while [ ! -e "$FM_HOME/state/release-overflow" ]; do sleep 0.05; done
+trap 'exit 143' TERM
+while :; do printf '0123456789abcdef0123456789abcdef'; done
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/overflow-child-pid" || fail "transferred no-newline child did not start"
+  : > "$home/state/.afk"
+  : > "$home/state/release-overflow"
+  wait_for_file "$home/state/.wake-queue" || fail "transferred no-newline failure was not queued"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "transferred no-newline overflow completed the old task"
+  child=$(cat "$home/state/overflow-child-pid")
+  kill -0 "$child" 2>/dev/null && fail "transferred no-newline overflow left the child alive"
+  failure='watcher: FAILED - Grok continuity arm output exceeded 128 bytes'
+  [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "transferred no-newline failure was not queued exactly once"
+  assert_not_contains "$(cat "$out")" "$failure" "old owner emitted transferred no-newline failure"
+  size=$(wc -c < "$out" | tr -d '[:space:]')
+  [ "$size" -le 128 ] || fail "transferred no-newline overflow produced unbounded output: $size bytes"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "transferred no-newline overflow stays bounded and queues once"
+}
+
 test_open_decision_completes_without_queue_row() {
   local home arm out
   home=$(make_home open-decision)
@@ -632,6 +691,8 @@ test_empty_close_rearms_without_completing_grok_task
 test_failure_completes_loudly
 test_output_overflow_retires_child_and_fails_once
 test_transferred_output_overflow_queues_once
+test_no_newline_output_overflow_is_bounded
+test_transferred_no_newline_overflow_queues_once
 test_open_decision_completes_without_queue_row
 test_pending_recovery_completes_without_queue_row
 test_malformed_recovery_fails_closed
