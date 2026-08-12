@@ -17,6 +17,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-web-gate-lib.sh
+. "$ROOT/bin/fm-web-gate-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
@@ -395,7 +397,7 @@ test_ship_project_memory_wording() {
 }
 
 test_web_ship_brief_requires_visual_verification() {
-  local home web nonweb gate_line done_line
+  local home web nonweb surface status
   home="$TMP_ROOT/web-visual-gate-home"
   mkdir -p "$home/data"
 
@@ -403,42 +405,20 @@ test_web_ship_brief_requires_visual_verification() {
     --mode no-mistakes --web >/dev/null 2>&1 \
     || fail "web ship brief should scaffold successfully"
   web="$home/data/web-visual-gate-a1/brief.md"
-  grep -qx "Surface contract: web" "$web" \
-    || fail "web ship brief missing its machine-readable surface contract"
-  grep -qx "Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot" "$web" \
-    || fail "web ship brief missing its machine-readable visual gate contract"
-  assert_grep "custom production domain" "$web" \
-    "web ship brief missing custom production domain verification"
-  assert_grep "fresh-browser visual verification against the real custom production domain with the existing chrome-devtools-axi tool" "$web" \
-    "web ship brief missing fresh-browser chrome-devtools verification"
-  assert_grep 'chrome-devtools-axi open <custom-production-domain>' "$web" \
-    "web ship brief missing the chrome-devtools open command"
-  assert_grep "distinguishing revision content" "$web" \
-    "web ship brief missing distinguishing revision content"
-  assert_grep "concrete interaction on the deployed custom-domain page" "$web" \
-    "web ship brief missing deployed interaction evidence"
-  assert_grep "Capture screenshot evidence" "$web" \
-    "web ship brief missing screenshot evidence"
-  assert_grep "HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as insufficient" "$web" \
-    "web ship brief missing explicit HTTP-only rejection"
-  gate_line=$(grep -n '^## Website deployment completion gate$' "$web" | cut -d: -f1)
-  done_line=$(grep -n 'append `done:' "$web" | head -n 1 | cut -d: -f1)
-  dod_line=$(grep -n '^# Definition of done$' "$web" | cut -d: -f1)
-  [ -n "$gate_line" ] && [ -n "$done_line" ] && [ -n "$dod_line" ] \
-    && [ "$dod_line" -lt "$gate_line" ] && [ "$gate_line" -lt "$done_line" ] \
-    || fail "web visual gate was not inside the operative Definition of done boundary"
+  surface=$(fm_web_gate_scan check "$web" 2>&1)
+  status=$?
+  expect_code 0 "$status" "generated web brief must satisfy the operative web gate"
+  [ "$surface" = web ] || fail "generated web brief validator returned '$surface' instead of web"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-ship-a2 website \
     --mode no-mistakes --no-web >/dev/null 2>&1 \
     || fail "non-web ship brief should scaffold successfully"
   nonweb="$home/data/ordinary-ship-a2/brief.md"
-  grep -qx "Surface contract: non-web" "$nonweb" \
-    || fail "non-web ship brief missing its machine-readable surface contract"
-  assert_no_grep "Website deployment completion gate" "$nonweb" \
-    "non-web ship brief received the website completion gate"
-  assert_no_grep "Website deployment completion gate" "$nonweb" \
-    "non-web ship brief received false visual-verification requirements"
-  pass "fm-brief.sh: --web structurally requires custom-domain visual evidence and rejects HTTP-only acceptance"
+  surface=$(fm_web_gate_scan check "$nonweb" 2>&1)
+  status=$?
+  expect_code 0 "$status" "generated non-web brief must satisfy the non-web contract"
+  [ "$surface" = non-web ] || fail "generated non-web brief validator returned '$surface' instead of non-web"
+  pass "fm-brief.sh: generated web and non-web briefs satisfy their semantic surface contracts"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {

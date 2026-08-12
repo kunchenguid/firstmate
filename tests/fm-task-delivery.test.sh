@@ -16,6 +16,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-web-gate-lib.sh
+. "$ROOT/bin/fm-web-gate-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
@@ -202,7 +204,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status brief brief_before gate_line done_line
+  local home meta out status brief brief_before surface
   local web_bad_meta web_conflict_meta web_fenced_meta web_meta
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
@@ -244,7 +246,10 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
-  assert_grep 'Surface contract: non-web' "$home/data/promote-d1/brief.md" "promotion did not persist the non-web surface contract"
+  surface=$(fm_web_gate_scan check "$home/data/promote-d1/brief.md" 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion must persist a valid non-web surface contract"
+  [ "$surface" = non-web ] || fail "promotion persisted '$surface' instead of a non-web surface contract"
   assert_contains "$out" "ship mode=direct-PR yolo=on surface=non-web" "promotion output did not carry the decided surface"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
 
@@ -285,8 +290,10 @@ test_promote_requires_and_records_the_delivery_contract() {
   status=$?
   expect_code 0 "$status" "promotion over a fenced quotation should succeed"
   assert_grep 'kind=ship' "$web_fenced_meta" "fenced-quotation promotion did not restore ship teardown protection"
-  [ "$(grep -c '^Surface contract: web$' "$brief")" = 2 ] \
-    || fail "fenced-quotation promotion did not add its own operative declaration"
+  surface=$(fm_web_gate_scan check "$brief" 2>&1)
+  status=$?
+  expect_code 0 "$status" "fenced-quotation promotion must persist a valid operative web contract"
+  [ "$surface" = web ] || fail "fenced-quotation promotion persisted '$surface' instead of web"
 
   web_meta="$home/state/promote-web-d2.meta"
   printf 'window=fm-promote-web-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_meta"
@@ -296,12 +303,11 @@ test_promote_requires_and_records_the_delivery_contract() {
   status=$?
   expect_code 0 "$status" "web promotion should succeed"
   assert_grep 'kind=ship' "$web_meta" "web promotion did not restore ship teardown protection"
-  assert_grep 'Surface contract: web' "$home/data/promote-web-d2/brief.md" "web promotion did not persist its surface contract"
-  assert_grep 'Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot' "$home/data/promote-web-d2/brief.md" "web promotion did not persist its visual gate contract"
-  gate_line=$(grep -n '^## Website deployment completion gate$' "$home/data/promote-web-d2/brief.md" | cut -d: -f1)
-  done_line=$(grep -n 'Scout work complete' "$home/data/promote-web-d2/brief.md" | cut -d: -f1)
-  [ "$gate_line" -lt "$done_line" ] || fail "web promotion placed its gate after the completion instruction"
-  pass "fm-promote: promotion requires the delivery contract and records it exactly once"
+  surface=$(fm_web_gate_scan check "$home/data/promote-web-d2/brief.md" 2>&1)
+  status=$?
+  expect_code 0 "$status" "web promotion must persist a valid operative web contract"
+  [ "$surface" = web ] || fail "web promotion persisted '$surface' instead of web"
+  pass "fm-promote: promotion requires the delivery contract and records semantic surface state"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
