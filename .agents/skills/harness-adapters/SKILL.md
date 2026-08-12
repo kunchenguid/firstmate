@@ -148,8 +148,8 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness. Codex `max` is additionally model-qualified: an explicitly known non-supporting model or an unknown model capability refuses before endpoint, metadata, or launch creation, so `effort=max` cannot masquerade as an applied setting.
-This preserves launch success instead of passing a known-bad value.
+For local crewmate and scout launches, when a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness. Remote secondmate launches are stricter: unsupported or unverifiable effort, including an omitted/default effort without verified adapter semantics, refuses before readiness, inheritance or private-material transfer, and endpoint metadata publication. Codex `max` is additionally model-qualified: an explicitly known non-supporting model or an unknown model capability refuses before endpoint, metadata, or launch creation, so `effort=max` cannot masquerade as an applied setting.
+This preserves local launch success without passing a known-bad value while keeping remote runtime truthfulness fail-closed.
 
 ## no-mistakes skill invocation
 
