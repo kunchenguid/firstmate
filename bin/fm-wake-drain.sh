@@ -130,8 +130,18 @@ EOF
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
+#
+# Printed key == answerable key. Every entry renders the key the fold actually
+# decided - INCLUDING the "default" bucket a keyless line opens - and carries
+# its own ready-to-run close command underneath, because the two must never
+# disagree: an entry that showed no key while its note text still contained a
+# "[key=...]" token advertised that token as the key, and fm-send closes only a
+# key this same fold reports open. Rendering the fold's key and spelling the
+# exact command for it removes the inference that mismatch needed. A "[key=...]"
+# inside a note is worker prose, quoted verbatim rather than rewritten - the
+# command line under the note is what says which key is real.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line cmd item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -143,20 +153,33 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    line="$task [key=$key] $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
+    # Never capped: a truncated command would be a command that does not run,
+    # and both operands are bounded already (a task id and a slug-charset key).
+    # The key is slug-charset by the fold's own check, but the task id is just a
+    # state-dir filename, and this line is printed to be RUN: an id outside the
+    # plain-slug charset gets a pointer instead of a command rather than a
+    # string an agent would paste into a shell.
+    case "$task" in
+      *[!A-Za-z0-9._-]*)
+        cmd="  close it: answer that task with bin/fm-send.sh --resolve-key $key (its id is not a plain slug; check $STATE)"
+        ;;
+      *) cmd="  close it: bin/fm-send.sh $task --resolve-key $key '<answer>'" ;;
+    esac
+    # An entry is shown only when its note AND its command both fit, so no
+    # decision is ever listed without the command that closes it.
+    bytes=$(( ${#line} + 1 + ${#cmd} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
       continue
     fi
     output="$output$line
+$cmd
 "
     used=$((used + bytes))
     shown=$((shown + 1))
@@ -174,7 +197,7 @@ EOF
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  printf 'OPEN DECISIONS: answer each one with the close command printed under it; the key that closes a decision is the bracketed key before its verb, never a [key=...] inside the note text.\n' || return 1
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records

@@ -83,19 +83,32 @@
 # transferred from the live status log to its durable captain-held task, which
 # the status ledger alone can no longer close.
 #
-# Each named key must therefore currently be open in ONE of the two ledgers: open
-# in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# a still-open captain-held task resolved as above. A key in neither is refused
-# before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key (a remote
+# A named key is closed only when it is currently open in ONE of the two ledgers:
+# this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
+# a still-open captain-held task resolved as above. A key in neither closes
+# nothing, and fm-send says so loudly on stderr and exits nonzero - but it still
+# DELIVERS the answer, and still closes whichever other named keys are open.
+# Delivering there is deliberate. Cancelling the whole send did not avoid the
+# mis-state this flag exists to prevent - a decision that looks answered while
+# its record stays open - it produced the worse version of it: the decision
+# stayed open anyway AND no worker ever received the answer the captain
+# believed was given. Delivering the text is never more dangerous than the
+# plain steer that is always allowed; the flag's power is the CLOSE, and that
+# is exactly what an unmatched key withholds. "Delivered, not closed" is also
+# what the post-delivery append-failure path below already accepts as the safe
+# direction, because an open decision re-surfaces in every later OPEN DECISIONS
+# listing until it is really answered. The diagnostic stays loud so the key gets
+# reconciled instead of assumed closed, and says not to resend.
+# A failed or unconfirmed send never closes a key (a remote
 # delivered-with-pending-confirmation outcome counts as delivered - see the
-# remote paragraph above); a
-# delivered answer whose closing append fails exits nonzero with the exact
-# manual close command, leaving the decision open to re-surface (the safe
-# direction). A send without the flag never closes anything: a routine steer,
-# working:, or done: event still cannot clear a captain decision. The flag is
-# refused with --key, with an explicit backend target (no task ledger in this
-# home), and with an empty message.
+# remote paragraph above); a delivered answer whose closing append fails exits
+# nonzero with the exact manual close command, leaving the decision open to
+# re-surface (the safe direction). A send without the flag never closes anything:
+# a routine steer, working:, or done: event still cannot clear a captain
+# decision. Malformed usage IS refused before anything is sent - a key outside
+# the slug charset, a duplicate key, --key, an explicit backend target (no task
+# ledger in this home), and an empty message - because those are argument errors
+# with no answer to deliver, not ledger-state mismatches.
 #
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
@@ -382,20 +395,25 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
 fi
 
 # Validate the answerer-closes request before any durable mutation or send: the
-# target must have a task ledger in THIS home, the send must carry an answer
-# message, and every named key must be open right now in that ledger per the
-# ONE authoritative fold (status_open_decisions). Refusing here, before the
-# send, is what keeps a mistyped key loud instead of delivering an answer that
-# silently leaves its decision open.
+# target must have a task ledger in THIS home and the send must carry an answer
+# message. Those are argument errors, refused outright.
+# Each named key is then checked against the ONE authoritative fold
+# (status_open_decisions) and split into the keys this send may close and the
+# keys it may not. An unmatched key is announced here, before the send, so the
+# reason is on the record even if delivery later fails - but it does not cancel
+# the answer (see the header contract).
 RESOLVE_STATUS_FILE=
 # Which ledger each answered key belongs to. A key still open in the status log
 # is owned by the status log: fm-captain-hold's `complete` closes that live copy
 # at the moment it transfers a decision to its durable captain-held task, so
 # "still open in status" and "already held" are the two sides of one transfer,
 # never both at once. Checking the backlog only for keys the status log no
-# longer owns also keeps the common path free of any backlog read.
+# longer owns also keeps the common path free of any backlog read. A key in
+# neither ledger is unmatched: the answer is still delivered, and nothing is
+# closed for that key.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
+RESOLVE_UNMATCHED_KEYS=
 
 # Resolve a --resolve-key key that the status log no longer owns to the
 # captain-held task that carries it: the key as a task id itself (the collapsed
@@ -443,19 +461,20 @@ if [ -n "$RESOLVE_KEYS" ]; then
     esac
     # Not open in the status log. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
-    # through the other ledger - so check there before refusing.
+    # through the other ledger - so check there before treating it as unmatched.
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-    exit 1
+    RESOLVE_UNMATCHED_KEYS="${RESOLVE_UNMATCHED_KEYS}${RESOLVE_UNMATCHED_KEYS:+ }$k"
+    echo "warning: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed, mistyped, or transferred). The answer is still being delivered; nothing will be closed for that key." >&2
   done
 fi
 
 # Close each answered decision in this home's ledger, only after delivery is
-# fully confirmed. An append failure exits nonzero with the manual close
-# command; the decision then stays open and re-surfaces, never silently lost.
+# fully confirmed, and only for the keys that were actually open. An append
+# failure exits nonzero with the manual close command; the decision then stays
+# open and re-surfaces, never silently lost.
 # The close is this home's own bookkeeping, written by the very turn that
 # answered the decision, so it goes through the guarded self-announced append
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
@@ -666,7 +685,7 @@ else
   fi
   # Delivery is fully confirmed: close each answered decision in this home's
   # ledger (answerer-closes; see the header contract).
-  if [ -n "$RESOLVE_KEYS" ]; then
+  if [ -n "$RESOLVE_STATUS_KEYS" ] || [ -n "$RESOLVE_HOLD_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
@@ -682,4 +701,14 @@ else
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.
   [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
+fi
+
+# The answer landed but at least one named key was not open, so the ledger is
+# not in the state the caller expected: exit nonzero rather than reporting a
+# clean success. The decision, if it exists under another key, stays open and
+# re-surfaces in the next OPEN DECISIONS listing - which is also where the key
+# that actually closes it is printed, next to its own close command.
+if [ -n "$RESOLVE_UNMATCHED_KEYS" ]; then
+  echo "error: the answer was delivered to $T, but no decision was closed for --resolve-key '$RESOLVE_UNMATCHED_KEYS' (not open in $RESOLVE_STATUS_FILE). Do not resend the answer. Re-check the OPEN DECISIONS listing and close the real key with its printed command, or leave it open if it is already closed." >&2
+  exit 1
 fi

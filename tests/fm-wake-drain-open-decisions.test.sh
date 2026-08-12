@@ -6,6 +6,11 @@
 # open/resolved statement); these tests exercise the real drain script over
 # crafted status logs and assert on its printed output, not on the fold's own
 # source text.
+# They also pin the printed-key/answerable-key agreement: the section renders
+# the key the fold decided (including the "default" bucket) and the exact
+# command that closes it, so it can never advertise a key fm-send would refuse.
+# The agreement is proven end to end - drain output executed through the real
+# fm-send - in tests/fm-send-resolve-key.test.sh.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -32,9 +37,127 @@ test_buried_decision_still_surfaces() {
   grep -F 'OPEN DECISIONS' "$out" >/dev/null || fail "buried decision produced no OPEN DECISIONS section"
   grep -F 'task1' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
     || fail "buried needs-decision was not surfaced with its task, key, and note"
-  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
-    || fail "open section is missing the answerer-closes hint"
+  grep -F "close it: bin/fm-send.sh task1 --resolve-key api-shape '<answer>'" "$out" >/dev/null \
+    || fail "open section is missing the decision's own answerer-closes command"
   pass "a needs-decision buried under later routine/other-key lines still reports as open"
+}
+
+# The section used to hide the key whenever the fold landed on "default", so a
+# decision whose NOTE still contained a "[key=...]" token advertised that token
+# as its key - and the generic hint invited answering with it. fm-send then
+# refused the key the listing had just shown. Every entry must now render the
+# key the fold decided and carry the command that closes exactly that key.
+test_printed_key_and_command_agree_for_every_key_form() {
+  local dir state out line prev
+  dir=$(make_case key-command-agreement)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # 1. The inline-marker form the generated briefs tell workers to write.
+  printf 'needs-decision: [key=totals-pool-separation] display-only or engine bug\n' \
+    > "$state/inline.status"
+  # 2. The no-marker fallback, which folds to the shared "default" bucket.
+  printf 'needs-decision: which banner color\n' > "$state/plain.status"
+  # 3. The trap: no stated key, but key-shaped tokens inside the note text.
+  printf 'needs-decision: pick a [key=red] or [key=blue] theme\n' > "$state/prose.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on mixed key forms"
+
+  grep -F 'inline [key=totals-pool-separation] needs-decision: display-only or engine bug' "$out" >/dev/null \
+    || fail "the inline-marker decision did not list under its stated key: $(cat "$out")"
+  grep -F "close it: bin/fm-send.sh inline --resolve-key totals-pool-separation '<answer>'" "$out" >/dev/null \
+    || fail "the inline-marker decision's close command did not use its stated key: $(cat "$out")"
+
+  grep -F 'plain [key=default] needs-decision: which banner color' "$out" >/dev/null \
+    || fail "the keyless decision did not list its actual (default) key: $(cat "$out")"
+  grep -F "close it: bin/fm-send.sh plain --resolve-key default '<answer>'" "$out" >/dev/null \
+    || fail "the keyless decision's close command did not name the default key: $(cat "$out")"
+
+  grep -F 'prose [key=default] needs-decision: pick a [key=red] or [key=blue] theme' "$out" >/dev/null \
+    || fail "a note-only key mention changed how the decision listed: $(cat "$out")"
+  grep -F "close it: bin/fm-send.sh prose --resolve-key default '<answer>'" "$out" >/dev/null \
+    || fail "the close command followed prose in the note instead of the folded key: $(cat "$out")"
+  if grep -F -- "--resolve-key red" "$out" >/dev/null || grep -F -- "--resolve-key blue" "$out" >/dev/null; then
+    fail "the section suggested closing with a key from note prose: $(cat "$out")"
+  fi
+
+  # Nothing is listed without its own command: every decision line is followed
+  # by a close command, so a reader never has to infer the key from the note.
+  prev=''
+  while IFS= read -r line; do
+    case "$prev" in
+      ''|'OPEN DECISIONS'*|'  close it: '*) ;;
+      *)
+        case "$line" in
+          '  close it: bin/fm-send.sh '*) ;;
+          *) fail "a listed decision had no close command under it: $prev" ;;
+        esac
+        ;;
+    esac
+    prev=$line
+  done <<EOF
+$(cat "$out")
+EOF
+  case "$prev" in
+    'OPEN DECISIONS'*|'  close it: '*) ;;
+    *) fail "the section ended on a decision with no close command under it: $prev" ;;
+  esac
+  pass "every listed decision prints the folded key and the exact command that closes it"
+}
+
+# The close command is printed to be RUN, so an id that is not a plain task
+# slug - a stray or hand-made status file - must not be pasted into one.
+test_unslug_task_id_gets_a_pointer_not_a_command() {
+  local dir state out
+  dir=$(make_case unslug-id)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=real]: a normal task\n' > "$state/normal.status"
+  printf 'needs-decision [key=odd]: a hand-made status file\n' > "$state/we ird; echo pwned.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with an odd status filename"
+
+  grep -F "close it: bin/fm-send.sh normal --resolve-key real '<answer>'" "$out" >/dev/null \
+    || fail "the ordinary task lost its close command: $(cat "$out")"
+  grep -F 'a hand-made status file' "$out" >/dev/null \
+    || fail "the odd-id decision was dropped instead of listed: $(cat "$out")"
+  if grep -F 'bin/fm-send.sh we ird' "$out" >/dev/null; then
+    fail "an unslug task id was pasted into a runnable command: $(cat "$out")"
+  fi
+  grep -F 'its id is not a plain slug' "$out" >/dev/null \
+    || fail "the odd-id decision did not explain why it has no command: $(cat "$out")"
+  pass "a task id outside the plain-slug charset gets a pointer instead of a runnable command"
+}
+
+# The section's global byte budget now pays for each entry's close command as
+# well as its note, and the two are charged together on purpose: at the cap
+# boundary an entry must be dropped whole rather than listed with no way to
+# close it.
+test_global_cap_never_lists_a_decision_without_its_command() {
+  local dir state out i decisions commands
+  dir=$(make_case global-cap)
+  state="$dir/state"
+  out="$dir/drain.out"
+  i=0
+  while [ "$i" -lt 40 ]; do
+    {
+      printf 'needs-decision [key=k%02d]: decision %02d needs a call' "$i" "$i"
+      awk 'BEGIN { while (n++ < 12) printf " and-then-some" }'
+      printf '\n'
+    } > "$state/task$(printf '%02d' "$i").status"
+    i=$((i + 1))
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a flooded decision set"
+
+  decisions=$(grep -c ' needs-decision: ' "$out")
+  commands=$(grep -c '  close it: bin/fm-send.sh ' "$out")
+  [ "$decisions" -eq "$commands" ] \
+    || fail "$decisions decisions listed but $commands close commands printed"
+  [ "$decisions" -gt 0 ] || fail "the flooded set listed nothing at all"
+  [ "$decisions" -lt 40 ] || fail "the flood was not large enough to reach the byte cap"
+  grep -E '^OPEN DECISIONS: [0-9]+ more omitted \(byte cap\)$' "$out" >/dev/null \
+    || fail "entries were dropped without the omission disclosure: $(cat "$out")"
+  pass "at the global byte cap an entry is dropped whole, never listed without its close command"
 }
 
 test_explicit_resolution_closes_it() {
@@ -196,13 +319,17 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-long decision note"
 
-  line=$(grep -F 'task-long' "$out")
+  line=$(grep -F 'task-long [key=' "$out")
   case "$line" in
     'task-long [key=api-shape] needs-decision: pick REST or RPC'*' [truncated]') : ;;
     *) fail "an over-long decision note was not capped with its lede intact: $line" ;;
   esac
   longest=${#line}
   [ "$longest" -le 219 ] || fail "a capped decision item ran $longest characters past its per-item budget"
+  # The note is what gets cut; its close command must survive whole, because a
+  # truncated command is a command that does not run.
+  grep -F "close it: bin/fm-send.sh task-long --resolve-key api-shape '<answer>'" "$out" >/dev/null \
+    || fail "the close command was cut along with its over-long note: $(cat "$out")"
 
   printf 'needs-decision [key=short]: brief enough to keep whole\n' > "$state/task-short.status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
@@ -216,7 +343,10 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 }
 
 test_buried_decision_still_surfaces
+test_printed_key_and_command_agree_for_every_key_form
 test_over_long_decision_note_is_capped_with_a_marker
+test_unslug_task_id_gets_a_pointer_not_a_command
+test_global_cap_never_lists_a_decision_without_its_command
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library

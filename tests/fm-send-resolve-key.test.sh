@@ -13,7 +13,13 @@
 #      scenario where the worker never writes a matching resolved line.
 #   2. A routine steer without the flag never closes anything, and a working:/
 #      done: line still cannot clear a captain decision.
-#   3. A key that is not open refuses BEFORE anything is sent (mistype safety).
+#   3. A key that is not open closes nothing and exits nonzero, while the answer
+#      itself is still delivered - and a mixed batch closes only its open keys.
+#      Cancelling the send used to drop the captain's answer entirely, which is
+#      the worse half of the same mis-state this flag exists to prevent.
+#   3b. Whatever key the drain PRINTS is a key fm-send ACCEPTS: the printed close
+#      commands are replayed verbatim, never retyped, for the inline-marker
+#      form, the keyless fallback, and a note carrying key-shaped prose.
 #   4. A failed or unconfirmed send never closes a key.
 #   5. A local secondmate answer is marked+corr'd yet closes the same way, and
 #      the closing line carries the plain answer, not marker or corr bytes.
@@ -242,7 +248,13 @@ test_routine_steer_never_closes() {
   pass "fm-send: a send without --resolve-key never closes a decision, and working/done still cannot"
 }
 
-test_not_open_key_refuses_before_send() {
+# A key that is not open closes nothing and exits nonzero, but the ANSWER still
+# reaches the worker. Refusing the whole send used to drop the captain's answer
+# on the floor - the mis-state this flag exists to prevent is a decision that
+# looks answered while its record stays open, and cancelling delivery produced
+# the worse version of it: nothing answered, nothing closed, and a captain who
+# believed the decision was handled.
+test_not_open_key_still_delivers_but_closes_nothing() {
   local dir fb log home err rc out
   dir="$TMP_ROOT/not-open"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
@@ -254,17 +266,99 @@ test_not_open_key_refuses_before_send() {
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t4 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
-  assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
-  assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
-  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+  [ "$rc" -ne 0 ] || fail "a not-open key should still exit nonzero"
+  assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the diagnostic should name the bad key"
+  assert_contains "$(cat "$err")" "Do not resend the answer" \
+    "the diagnostic should say the answer already landed"
+  assert_contains "$(cat "$log")" "the answer" "the answer itself should still reach the worker"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
-    fail "a refused answer still closed something: $(cat "$home/state/t4.status")"
+    fail "an unmatched key still closed something: $(cat "$home/state/t4.status")"
   fi
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=real-key]' >/dev/null \
-    || fail "the real decision disappeared after a refused answer: $out"
-  pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
+    || fail "the real decision disappeared after an unmatched key: $out"
+  pass "fm-send --resolve-key: an unmatched key delivers the answer, closes nothing, and exits nonzero"
+}
+
+# Mixed batch: the open keys close exactly as they would have, the unmatched one
+# is reported, and the answer is delivered once. Partial closure is the point -
+# each key names an independently open decision, so an unrelated mistyped key
+# must not withhold closure from the decisions this answer really did answer.
+test_partially_matched_keys_close_only_what_is_open() {
+  local dir fb log home err rc out
+  dir="$TMP_ROOT/partial"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home partial)
+  fm_write_meta "$home/state/t10.meta" "window=sess:fm-t10" "kind=ship"
+  {
+    printf 'needs-decision [key=open-one]: first\n'
+    printf 'needs-decision [key=open-two]: second\n'
+  } > "$home/state/t10.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t10 --resolve-key open-one --resolve-key gone "do the first one" \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a batch containing an unmatched key should exit nonzero"
+  assert_contains "$(cat "$err")" "--resolve-key 'gone'" "the diagnostic should name only the unmatched key"
+  grep -F 'resolved [key=open-one]: answered: do the first one' "$home/state/t10.status" >/dev/null \
+    || fail "the matched key was not closed:"$'\n'"$(cat "$home/state/t10.status")"
+  if grep -F '[key=gone]' "$home/state/t10.status" >/dev/null; then
+    fail "an unmatched key was written into the ledger: $(cat "$home/state/t10.status")"
+  fi
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=open-two]' >/dev/null \
+    || fail "an untouched decision was cleared by a partially matched batch: $out"
+  if printf '%s' "$out" | grep -F '[key=open-one]' >/dev/null; then
+    fail "the matched key is still listed as open: $out"
+  fi
+  pass "fm-send --resolve-key: a mixed batch closes the open keys and reports only the unmatched one"
+}
+
+# End-to-end agreement between the two halves of the contradiction that started
+# this: whatever key the drain PRINTS for a decision is a key fm-send ACCEPTS.
+# The test does not retype the key - it runs the exact command the drain printed
+# under each decision, for the inline-marker form the briefs tell workers to
+# write, for the keyless fallback, and for the trap case where the note text
+# carries key-shaped prose the fold deliberately ignores.
+test_drain_printed_command_is_accepted_verbatim() {
+  local dir fb log home rc out cmd task key n
+  dir="$TMP_ROOT/agreement"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home agreement)
+  for task in inline plain prose; do
+    fm_write_meta "$home/state/$task.meta" "window=sess:fm-$task" "kind=ship"
+  done
+  printf 'needs-decision: [key=totals-pool-separation] display-only or engine bug\n' \
+    > "$home/state/inline.status"
+  printf 'needs-decision: which banner color\n' > "$home/state/plain.status"
+  printf 'needs-decision: pick a [key=red] or [key=blue] theme\n' > "$home/state/prose.status"
+
+  n=0
+  while IFS= read -r cmd; do
+    case "$cmd" in
+      *'close it: bin/fm-send.sh '*) ;;
+      *) continue ;;
+    esac
+    # "  close it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
+    cmd=${cmd#*bin/fm-send.sh }
+    task=${cmd%% *}
+    key=${cmd#*--resolve-key }
+    key=${key%% *}
+    run_send "$fb" "$home" "$log" "$task" --resolve-key "$key" "answering $task"; rc=$?
+    expect_code 0 "$rc" "the drain printed --resolve-key $key for $task, but fm-send did not accept it"
+    n=$((n + 1))
+  done <<EOF
+$(drain_out "$home")
+EOF
+  [ "$n" -eq 3 ] || fail "expected 3 printed close commands to replay, replayed $n"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "replaying every printed close command left a decision open: $out"
+  fi
+  pass "fm-send --resolve-key: every key the drain prints is accepted verbatim by the real send"
 }
 
 test_failed_send_does_not_close() {
@@ -501,7 +595,9 @@ test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
-test_not_open_key_refuses_before_send
+test_not_open_key_still_delivers_but_closes_nothing
+test_partially_matched_keys_close_only_what_is_open
+test_drain_printed_command_is_accepted_verbatim
 test_failed_send_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed

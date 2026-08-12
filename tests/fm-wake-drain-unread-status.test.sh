@@ -253,8 +253,8 @@ test_open_decisions_fold_is_unchanged() {
     || fail "OPEN DECISIONS no longer surfaces a buried needs-decision: $(cat "$out")"
   grep -F 'task6 note: re-read acknowledgement' "$out" >/dev/null \
     || fail "the unread note was not surfaced alongside the still-open decision: $(cat "$out")"
-  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
-    || fail "OPEN DECISIONS lost its answerer-closes hint"
+  grep -F "close it: bin/fm-send.sh task6 --resolve-key api-shape '<answer>'" "$out" >/dev/null \
+    || fail "OPEN DECISIONS lost the answerer-closes command for the buried decision"
 
   printf 'resolved [key=api-shape]: went with REST\n' >> "$state/task6.status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after resolving the keyed decision"
