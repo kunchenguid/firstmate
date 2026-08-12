@@ -444,10 +444,8 @@ if [ "$WEB" -eq 1 ]; then
   DOD=${DOD/"Surface contract: web"/"Surface contract: web"$'\n'"$(fm_web_gate_contract)"}
 fi
 
-WEB_DOD=""
 if [ "$WEB" -eq 1 ]; then
-  WEB_DOD=$(fm_web_gate_text)
-  DOD="$WEB_DOD"$'\n'"$DOD"
+  DOD=${DOD/"# Definition of done"/"# Definition of done"$'\n'"$(fm_web_gate_body_text)"}
 fi
 
 cat > "$BRIEF" <<EOF

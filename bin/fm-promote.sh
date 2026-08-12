@@ -158,18 +158,20 @@ fi
 BRIEF_TMP="$STATE/.$ID.brief.promote.${BASHPID:-$$}"
 WEB_GATE_TMP="$STATE/.$ID.web-gate.promote.${BASHPID:-$$}"
 if [ "$WEB" -eq 1 ]; then
-  fm_web_gate_text > "$WEB_GATE_TMP"
+  fm_web_gate_body_text > "$WEB_GATE_TMP"
 fi
 awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
   BEGIN { inserted_surface = 0; inserted_gate = 0 }
   /^# Definition of done$/ && !inserted_surface {
     if (surface_line_count == 0) print "Surface contract: " surface
+    print
     if (web == 1 && gate_line_count == 0) {
       print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
       while ((getline line < gate) > 0) print line
       close(gate)
     }
     inserted_surface = 1
+    next
   }
   { print }
   END { exit inserted_surface ? 0 : 1 }

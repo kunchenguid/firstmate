@@ -18,32 +18,22 @@ Do not append a done status or claim completion when any visual, marker, custom-
 EOF
 }
 
-fm_web_gate_text() {
-  printf '\n'
-  fm_web_gate_body_text
-}
-
 fm_web_gate_body_present() {
   local brief=$1 expected
   expected=$(fm_web_gate_body_text)
   awk -v expected="$expected" '
     BEGIN {
       wanted_count = split(expected, wanted, "\n")
-      in_fence = 0
-      matched = 0
       wanted_index = 1
+      in_dod = 0
       found = 0
     }
     {
-      if ($0 ~ /^[[:space:]]*```/) {
-        in_fence = !in_fence
-        matched = 0
-        wanted_index = 1
+      if ($0 == "# Definition of done") {
+        in_dod = 1
         next
       }
-      if (in_fence) next
-      if ($0 == wanted[wanted_index]) {
-        matched = 1
+      if (in_dod && $0 == wanted[wanted_index]) {
         wanted_index++
         if (wanted_index > wanted_count) {
           found = 1
@@ -51,8 +41,7 @@ fm_web_gate_body_present() {
         }
         next
       }
-      matched = 0
-      wanted_index = ($0 == wanted[1]) ? 2 : 1
+      if (in_dod) exit 1
     }
     END { exit found ? 0 : 1 }
   ' "$brief"

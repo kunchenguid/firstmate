@@ -421,8 +421,10 @@ test_web_ship_brief_requires_visual_verification() {
     "web ship brief missing explicit HTTP-only rejection"
   gate_line=$(grep -n '^## Website deployment completion gate$' "$web" | cut -d: -f1)
   done_line=$(grep -n 'append `done:' "$web" | head -n 1 | cut -d: -f1)
-  [ -n "$gate_line" ] && [ -n "$done_line" ] && [ "$gate_line" -lt "$done_line" ] \
-    || fail "web visual gate appeared after the terminal done instruction"
+  dod_line=$(grep -n '^# Definition of done$' "$web" | cut -d: -f1)
+  [ -n "$gate_line" ] && [ -n "$done_line" ] && [ -n "$dod_line" ] \
+    && [ "$dod_line" -lt "$gate_line" ] && [ "$gate_line" -lt "$done_line" ] \
+    || fail "web visual gate was not inside the operative Definition of done boundary"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-ship-a2 website \
     --mode no-mistakes --no-web >/dev/null 2>&1 \
