@@ -340,7 +340,7 @@ fm_slot_meta_referencing_tasks() {
 }
 
 fm_slot_declared_endpoint_pid() {
-  local self=$1 expected_home=${2:-} index matches pid ppid candidate_pids= root_pid= root_count=0
+  local self=$1 expected_home=${2:-} index matches pid ppid candidate_pids='' root_pid='' root_count=0
   local root_home
   if [ "$#" -ge 3 ]; then
     index=$3

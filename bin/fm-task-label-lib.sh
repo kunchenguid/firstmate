@@ -7,8 +7,6 @@
 #
 # A caller must publish the returned journal before creating the Herdr tab and
 # remove it only after complete task metadata has been atomically published.
-FM_TASK_LABEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 fm_task_label_kind() {  # <ship|crew|scout|secondmate>
   case "$1" in
     ship|crew) printf 'Crew' ;;

@@ -127,8 +127,7 @@ for meta in "$STATE"/*.meta; do
     endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
     case "$endpoint_state" in
       missing|dead|no-agent)
-        occupants=
-        if occupants=$(fm_agent_worktree_process_census "$recorded" 2>/dev/null); then
+        if fm_agent_worktree_process_census "$recorded" >/dev/null 2>&1; then
           echo "ISOLATION: task $id endpoint is ${endpoint_state}, but live process(es) remain in its recorded worktree; block mutation until ownership is re-established"
           sweep_status=1
           continue

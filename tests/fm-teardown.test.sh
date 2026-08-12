@@ -39,7 +39,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 FM_FAKE_HARNESS_PID=$$
@@ -181,7 +180,8 @@ SH
 
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3 stamp_home=${FM_HOME:-$case_dir} state=${FM_STATE_OVERRIDE:-$case_dir/state}
+  local case_dir=$1 mode=$2 kind=$3
+  local stamp_home=${FM_HOME:-$case_dir} state=${FM_STATE_OVERRIDE:-$case_dir/state}
   mkdir -p "$state"
   fm_write_meta "$state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \

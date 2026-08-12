@@ -417,7 +417,6 @@ meta_value() {
 
 TOP_SLOT_LEASE_STATE=$(meta_value "$META" slot_lease_state)
 TOP_SLOT_LEASE_HOLDER=$(meta_value "$META" slot_lease_holder)
-TOP_SLOT_WT_CANDIDATE=$(meta_value "$META" slot_worktree_candidate)
 TOP_SLOT_UNRESOLVED_LEASE=0
 if [ "$KIND" != secondmate ] && [ -z "$WT" ] \
    && [ "$TOP_SLOT_LEASE_STATE" = unresolved ]; then
@@ -1102,7 +1101,7 @@ teardown_grok_registry_expected_dir() {
 }
 
 teardown_grok_registry_read() {
-  local state_dir=$1 id=$2 file line token= dir= inode= digest= count=0
+  local state_dir=$1 id=$2 file line token='' dir='' inode='' digest='' count=0
   local state_real auth_file actual_inode actual_digest expected_dir expected_token legacy=0
   file="$state_dir/$id.grok-turnend-token"
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
@@ -1154,6 +1153,7 @@ teardown_grok_registry_read() {
   state_real=$(cd "$state_dir" && pwd -P) || return 1
   printf '%s\n' "$state_real/$id.turn-ended" | cmp -s - "$auth_file" || return 1
   GROK_REGISTRY_TOKEN=$token
+  # shellcheck disable=SC2034 # Exposed to callers that need the validated directory.
   GROK_REGISTRY_AUTH_DIR=$dir
   GROK_REGISTRY_AUTH_FILE=$auth_file
   GROK_REGISTRY_AUTH_INODE=$actual_inode
@@ -2242,7 +2242,7 @@ secondmate_registry_transaction_begin() {
             secondmate_registry_transaction_clear || return 1
           fi
         else
-          SECOND_MATE_REGISTRY_TRANSACTION_PHASE=home-removed
+          SECOND_MATE_REGISTRY_TRANSACTION_PHASE='home-removed'
           secondmate_registry_transaction_record_write home-removed || return 1
           SECOND_MATE_REGISTRY_HOME_REMOVED=1
         fi
@@ -2254,7 +2254,7 @@ secondmate_registry_transaction_begin() {
         else
           registry_state=$?
           [ "$registry_state" -eq 1 ] || return 1
-          SECOND_MATE_REGISTRY_TRANSACTION_PHASE=registry-removed
+          SECOND_MATE_REGISTRY_TRANSACTION_PHASE='registry-removed'
           secondmate_registry_transaction_record_write registry-removed || return 1
         fi
         SECOND_MATE_REGISTRY_HOME_REMOVED=1
@@ -2771,7 +2771,7 @@ if [ "$KIND" = secondmate ]; then
     fi
     SECOND_MATE_REGISTRY_HOME_REMOVED=1
     if [ "$SECOND_MATE_REGISTRY_TRANSACTION_ACTIVE" = 1 ]; then
-      SECOND_MATE_REGISTRY_TRANSACTION_PHASE=home-removed
+      SECOND_MATE_REGISTRY_TRANSACTION_PHASE='home-removed'
       secondmate_registry_transaction_record_write home-removed || exit 1
     fi
   fi
@@ -2782,7 +2782,7 @@ if [ "$KIND" = secondmate ]; then
       echo "error: could not remove secondmate $ID from its registry; preserving home and task state" >&2
       exit 1
     }
-    SECOND_MATE_REGISTRY_TRANSACTION_PHASE=registry-removed
+    SECOND_MATE_REGISTRY_TRANSACTION_PHASE='registry-removed'
     secondmate_registry_transaction_record_write registry-removed || exit 1
   fi
 fi

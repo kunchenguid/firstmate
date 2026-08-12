@@ -474,7 +474,7 @@ fm_agent_pid_for_task() {
   else
     matches=$(fm_agent_pids_for_task "$id") || return 1
     if [ -n "$expected_home" ]; then
-      local filtered= indexed_home
+      local filtered='' indexed_home=''
       filtered=$(while IFS= read -r pid; do
         indexed_home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
         [ -n "$indexed_home" ] && fm_agent_paths_same "$indexed_home" "$expected_home" || continue

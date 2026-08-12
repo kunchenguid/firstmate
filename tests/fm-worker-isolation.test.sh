@@ -98,7 +98,7 @@ start_declared_agent_with_inherited_home() {
        FM_AGENT_TEST_RUN="$RUN_TAG" \
        exec sleep 300 ) >/dev/null 2>&1 </dev/null &
   pid=$!
-  BG_PIDS+=($pid)
+  BG_PIDS+=("$pid")
   local i=0
   while [ "$i" -lt 50 ]; do
     [ -e "/proc/$pid/cwd" ] && break

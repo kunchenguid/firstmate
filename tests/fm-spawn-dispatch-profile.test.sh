@@ -122,7 +122,7 @@ run_spawn() {
 }
 
 read_case_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR WT2_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR _WT2_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
 }
