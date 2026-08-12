@@ -404,7 +404,7 @@ Because the versioned install path is what identifies the alias, an auto-update 
 **Cursor parks its terminal cursor outside its composer.**
 `#{cursor_y}` pointed below the footer both when idle and with real text typed, and `#{cursor_flag}` was 0.
 The tmux composer verdict for a cursor pane is therefore `unknown` in EVERY state; this is expected, not a defect to chase.
-Submission is acknowledged from the idle-to-busy transition instead, which is why cursor's `ctrl+c to stop` token is part of the delivery busy union in `bin/fm-tmux-lib.sh`.
+Submission is acknowledged from the idle-to-busy transition instead, which is why cursor's `ctrl+c to stop` token is part of the delivery busy union in `bin/fm-composer-lib.sh`.
 Match that TOKEN and never the spinner verb: the same version rendered `Working` in one turn and `Running` in the next.
 
 The composer's reverse-video placeholder remnant is taught to the ONE fleet-wide screen classifier in `bin/fm-composer-lib.sh`, not to any adapter.
