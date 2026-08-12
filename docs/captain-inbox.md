@@ -23,6 +23,9 @@ Use the narrow command interface rather than opening arbitrary paths:
 FM_HOME=<firstmate-home> bin/fm-captain-inbox.sh list
 FM_HOME=<firstmate-home> bin/fm-captain-inbox.sh mark <ci_v1_message_id> read
 FM_HOME=<firstmate-home> bin/fm-captain-inbox.sh mark <ci_v1_message_id> unread
+FM_HOME=<firstmate-home> bin/fm-captain-inbox.sh delete <ci_v1_message_id>
+FM_HOME=<firstmate-home> bin/fm-captain-inbox.sh delete read
+FM_HOME=<firstmate-home> bin/fm-captain-inbox.sh delete unread
 ```
 
 The command accepts no file-path argument.
@@ -45,6 +48,11 @@ The command accepts no file-path argument.
 
 Messages are ordered newest first.
 `mark` prints `{ "version": 1, "id": "...", "read": true|false }` only after the requested state is durably replaced.
+`delete <ci_v1_message_id>` is an explicit destructive operation and succeeds only when that retained message is currently read.
+It prints `{ "version": 1, "id": "...", "deleted": true }` after the message and its read-state entry are durably removed.
+`delete read` and `delete unread` are separate explicit destructive operations that remove every retained message currently in the named state.
+They print `{ "version": 1, "read": true|false, "deleted": <count> }`, including `0` when no retained message matches.
+Deletion is never implied by listing, marking, capture, startup, retention cleanup, or migration.
 The message ID, completion timestamp, body, harness, and session identifier are immutable capture data.
 Read state is stored independently and is the only consumer-mutable field.
 
@@ -56,12 +64,12 @@ A dashboard must render it as text, for example through a text node or `textCont
 The producer keeps versioned private records beneath `state/captain-inbox/v1/` in the effective Firstmate home.
 It creates private directories at mode `0700` and JSON records at mode `0600` where the platform supports POSIX modes.
 Each replacement is written to a unique temporary file and atomically renamed.
-A short private lock serializes capture, list snapshots, retention, and read-state updates, so concurrent dashboard updates cannot lose another update.
+A short private lock serializes capture, list snapshots, retention, read-state updates, and explicit deletions, so concurrent dashboard updates cannot lose another update.
 Malformed, linked, or unsafe records are rejected without overwriting the existing content.
 
 Duplicate completed-message events resolve to the same stable ID and do not create another record or reset its read state.
 The inbox retains the newest 100 messages and removes the corresponding obsolete read-state entries in the same serialized update.
-The command returns an error for a disabled inbox, malformed storage, unknown message ID, or a contended update instead of guessing.
+The command returns an error for a disabled inbox, malformed storage, an invalid request, an unknown or unread single-message deletion target, or a contended update instead of guessing.
 
 ## Support matrix
 

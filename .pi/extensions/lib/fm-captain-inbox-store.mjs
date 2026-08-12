@@ -457,3 +457,54 @@ export async function markCaptainInboxMessage(paths, id, read) {
     return { version: CAPTAIN_INBOX_VERSION, id, read };
   });
 }
+
+async function deleteCaptainInboxMessages(paths, select, result) {
+  return withStoreLock(paths, { create: false }, async () => {
+    const { messages, readState } = await readDocuments(paths);
+    const deleted = messages.messages.filter((message) => select(message, readState.states[message.id]?.read === true));
+    if (deleted.length === 0) return result(0);
+
+    const deletedIds = new Set(deleted.map((message) => message.id));
+    const remaining = messages.messages.filter((message) => !deletedIds.has(message.id));
+    const states = nextReadState(remaining, readState.states);
+
+    // Keep both document replacements under the private store lock.
+    // Each replacement remains crash-safe through writePrivateJson's atomic rename.
+    await writePrivateJson(paths.messages, {
+      version: CAPTAIN_INBOX_VERSION,
+      messages: remaining,
+    });
+    await writePrivateJson(paths.readState, {
+      version: CAPTAIN_INBOX_VERSION,
+      states,
+    });
+    return result(deleted.length);
+  });
+}
+
+export async function deleteCaptainInboxMessage(paths, id) {
+  if (!MESSAGE_ID_RE.test(id)) {
+    throw new Error("invalid Captain's Inbox delete request");
+  }
+  return deleteCaptainInboxMessages(
+    paths,
+    (message, read) => message.id === id && read,
+    (deleted) => {
+      if (deleted === 0) {
+        throw new Error("Captain's Inbox message was not found or is not read");
+      }
+      return { version: CAPTAIN_INBOX_VERSION, id, deleted: true };
+    },
+  );
+}
+
+export async function deleteCaptainInboxMessagesByReadState(paths, read) {
+  if (typeof read !== "boolean") {
+    throw new Error("invalid Captain's Inbox delete request");
+  }
+  return deleteCaptainInboxMessages(
+    paths,
+    (_message, messageRead) => messageRead === read,
+    (deleted) => ({ version: CAPTAIN_INBOX_VERSION, read, deleted }),
+  );
+}

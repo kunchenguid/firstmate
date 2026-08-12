@@ -2,6 +2,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
   captainInboxIsEnabled,
+  deleteCaptainInboxMessage,
+  deleteCaptainInboxMessagesByReadState,
   listCaptainInbox,
   markCaptainInboxMessage,
   resolveCaptainInboxPaths,
@@ -17,7 +19,8 @@ const paths = resolveCaptainInboxPaths({ home, state, config });
 function usage() {
   process.stdout.write(
     "Usage: fm-captain-inbox.sh list\n" +
-      "       fm-captain-inbox.sh mark <ci_v1_message_id> read|unread\n",
+      "       fm-captain-inbox.sh mark <ci_v1_message_id> read|unread\n" +
+      "       fm-captain-inbox.sh delete <ci_v1_message_id>|read|unread\n",
   );
 }
 
@@ -40,6 +43,15 @@ async function main(args) {
   }
   if (args.length === 3 && args[0] === "mark" && (args[2] === "read" || args[2] === "unread")) {
     process.stdout.write(`${JSON.stringify(await markCaptainInboxMessage(paths, args[1], args[2] === "read"))}\n`);
+    return;
+  }
+  if (args.length === 2 && args[0] === "delete") {
+    const result = args[1] === "read"
+      ? await deleteCaptainInboxMessagesByReadState(paths, true)
+      : args[1] === "unread"
+        ? await deleteCaptainInboxMessagesByReadState(paths, false)
+        : await deleteCaptainInboxMessage(paths, args[1]);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
   usage();

@@ -23,7 +23,7 @@ fi
 out=$(EXT="$EXT" CLI="$CLI" OPERATIONAL_INPUT="$OPERATIONAL_INPUT" TMP_ROOT="$TMP_ROOT" node --input-type=module 2>&1 <<'JS'
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, execFileSync, spawn } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -268,6 +268,63 @@ assert.equal(inbox.messages.length, 100, "retention did not keep the conservativ
 assert.equal(inbox.messages.some((message) => message.id === firstId), false, "retention kept the oldest record");
 assert.equal(inbox.messages.some((message) => message.body === body), false, "retention retained a pruned response body");
 
+const [singleRead, singleUnread, firstBulkRead, secondBulkRead] = inbox.messages;
+await runCli(home, "mark", singleRead.id, "read");
+const singleDelete = JSON.parse((await runCli(home, "delete", singleRead.id)).stdout);
+assert.deepEqual(singleDelete, { version: 1, id: singleRead.id, deleted: true }, "read single-message delete returned an unstable result");
+inbox = await list(home);
+assert.equal(inbox.messages.some((message) => message.id === singleRead.id), false, "read single-message delete retained its message");
+
+await expectCliFailure(home, ["delete", singleUnread.id], /not found or is not read/);
+await expectCliFailure(home, ["delete", "ci_v1_00000000000000000000000000000000"], /not found or is not read/);
+inbox = await list(home);
+assert.equal(inbox.messages.some((message) => message.id === singleUnread.id), true, "unread single-message delete changed membership");
+for (const args of [
+  ["delete"],
+  ["delete", "../outside"],
+  ["delete", singleUnread.id, "extra"],
+  ["delete", "read", "extra"],
+]) {
+  await expectCliFailure(home, args, /invalid/);
+}
+
+await runCli(home, "mark", firstBulkRead.id, "read");
+await runCli(home, "mark", secondBulkRead.id, "read");
+const deleteRead = JSON.parse((await runCli(home, "delete", "read")).stdout);
+assert.deepEqual(deleteRead, { version: 1, read: true, deleted: 2 }, "delete read did not report its durable membership change");
+inbox = await list(home);
+assert.equal(inbox.messages.some((message) => message.id === firstBulkRead.id || message.id === secondBulkRead.id), false, "delete read retained a read message");
+assert.equal(inbox.messages.every((message) => !message.read), true, "delete read changed an unread message state");
+const deleteUnread = JSON.parse((await runCli(home, "delete", "unread")).stdout);
+assert.equal(deleteUnread.version, 1, "delete unread changed the versioned response shape");
+assert.equal(deleteUnread.read, false, "delete unread reported the wrong state selector");
+assert.equal(deleteUnread.deleted, 97, "delete unread did not remove every currently unread message");
+assert.deepEqual(await list(home), { version: 1, messages: [] }, "bulk deletion left a visible message behind");
+assert.deepEqual(
+  JSON.parse(await readFile(`${home}/state/captain-inbox/v1/read-state.json`, "utf8")).states,
+  {},
+  "bulk deletion left an orphaned read-state entry",
+);
+assert.deepEqual(
+  JSON.parse((await runCli(home, "delete", "read")).stdout),
+  { version: 1, read: true, deleted: 0 },
+  "an explicit empty delete read did not remain a stable no-op",
+);
+
+if (process.platform !== "win32") {
+  const unsafeDelete = await makeHome("unsafe-delete");
+  const unsafeRuntime = await loadExtension(unsafeDelete);
+  await deliver(unsafeRuntime, { message: assistant([{ type: "text", text: "unsafe delete fixture" }], firstTimestamp + 30_000) });
+  await eventually(async () => (await list(unsafeDelete)).messages.length === 1, "unsafe delete fixture was not captured");
+  const unsafeId = (await list(unsafeDelete)).messages[0].id;
+  const external = `${unsafeDelete}/external-messages.json`;
+  await writeFile(external, "external sentinel\n", { mode: 0o600 });
+  await rm(`${unsafeDelete}/state/captain-inbox/v1/messages.json`);
+  await symlink(external, `${unsafeDelete}/state/captain-inbox/v1/messages.json`);
+  await expectCliFailure(unsafeDelete, ["delete", unsafeId], /unsafe/);
+  assert.equal(await readFile(external, "utf8"), "external sentinel\n", "delete followed an unsafe storage link");
+}
+
 async function makeLockedInboxHome(name, { ownerContent, ageMs } = {}) {
   const home = await makeHome(name);
   const directory = `${home}/state/captain-inbox/v1`;
@@ -360,6 +417,24 @@ const afterConcurrentMarks = await list(concurrent);
 assert.equal(afterConcurrentMarks.messages.length, 2, "concurrent update changed message membership");
 assert.equal(afterConcurrentMarks.messages.every((message) => message.read), true, "concurrent updates lost a read state");
 assert.equal(afterConcurrentMarks.messages.every((message) => message.source.harness === "pi-signed"), true, "pi-signed source identity was not retained");
+const [concurrentSingle, concurrentBulk] = afterConcurrentMarks.messages;
+const concurrentDeleteRequests = await Promise.allSettled([
+  runCli(concurrent, "delete", concurrentSingle.id),
+  runCli(concurrent, "delete", "read"),
+  ...Array.from({ length: 4 }, () => list(concurrent)),
+]);
+assert.equal(concurrentDeleteRequests[1].status, "fulfilled", "concurrent delete read did not complete");
+for (const snapshot of concurrentDeleteRequests.slice(2)) {
+  assert.equal(snapshot.status, "fulfilled", "concurrent delete made a list snapshot fail");
+  assert.equal(snapshot.value.version, 1, "concurrent delete returned an invalid snapshot version");
+  assert.ok(snapshot.value.messages.length >= 0 && snapshot.value.messages.length <= 2, "concurrent delete returned unstable membership");
+}
+assert.deepEqual(await list(concurrent), { version: 1, messages: [] }, "concurrent deletion retained an already-read message");
+assert.deepEqual(
+  JSON.parse(await readFile(`${concurrent}/state/captain-inbox/v1/read-state.json`, "utf8")).states,
+  {},
+  "concurrent deletion left an orphaned read-state entry",
+);
 
 const worker = await makeHome("worker", { lock: "1" });
 const workerRuntime = await loadExtension(worker);
@@ -377,4 +452,4 @@ JS
 status=$?
 [ "$status" -eq 0 ] || fail "Captain's Inbox contract failed: $out"
 [ -z "$out" ] || fail "Captain's Inbox contract printed output: $out"
-pass "Captain's Inbox is opt-in, filters only completed primary Pi responses, preserves private atomic consumer records, and supports bounded concurrent read-state updates"
+pass "Captain's Inbox is opt-in, filters only completed primary Pi responses, preserves private atomic consumer records, and supports explicit serialized deletion"

@@ -47,3 +47,13 @@ export function markCaptainInboxMessage(
   id: string,
   read: boolean,
 ): Promise<{ version: number; id: string; read: boolean }>;
+
+export function deleteCaptainInboxMessage(
+  paths: CaptainInboxPaths,
+  id: string,
+): Promise<{ version: number; id: string; deleted: true }>;
+
+export function deleteCaptainInboxMessagesByReadState(
+  paths: CaptainInboxPaths,
+  read: boolean,
+): Promise<{ version: number; read: boolean; deleted: number }>;
