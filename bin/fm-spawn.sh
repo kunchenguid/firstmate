@@ -1666,12 +1666,11 @@ if [ "$KIND" = ship ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
   fi
-  BRIEF_SURFACE_COUNT=$(grep -Ec '^Surface contract:' "$BRIEF" || true)
-  if [ "$BRIEF_SURFACE_COUNT" -ne 1 ]; then
+  BRIEF_SURFACE=$(fm_web_gate_surface_contract "$BRIEF" 2>/dev/null || true)
+  if [ -z "$BRIEF_SURFACE" ]; then
     echo "error: $BRIEF must contain exactly one Surface contract: web or Surface contract: non-web line; re-scaffold the ship brief with --web or --no-web" >&2
     exit 1
   fi
-  BRIEF_SURFACE=$(sed -n 's/^Surface contract: //p' "$BRIEF")
   case "$BRIEF_SURFACE" in
     non-web) ;;
     web)

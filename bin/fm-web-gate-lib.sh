@@ -5,7 +5,7 @@ fm_web_gate_contract() {
 }
 
 fm_web_gate_provenance_placeholder() {
-  printf '%s\n' 'Web gate provenance: sha256:pending'
+  printf '%s\n' 'Web gate provenance: surface=web sha256:pending'
 }
 
 fm_web_gate_body_text() {
@@ -66,7 +66,7 @@ fm_web_gate_stamp_file() {
   local brief=$1 digest tmp
   digest=$(fm_web_gate_body_hash) || return 1
   tmp=$(mktemp "$brief.tmp.XXXXXX") || return 1
-  if ! sed "s/^Web gate provenance: .*/Web gate provenance: sha256:$digest/" "$brief" > "$tmp"; then
+  if ! sed "s/^Web gate provenance: .*/Web gate provenance: surface=web sha256:$digest/" "$brief" > "$tmp"; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -75,10 +75,36 @@ fm_web_gate_stamp_file() {
 
 fm_web_gate_provenance_present() {
   local brief=$1 count actual expected
-  count=$(grep -Ec '^Web gate provenance: sha256:[0-9a-fA-F]{64}$' "$brief" || true)
+  count=$(grep -Ec '^Web gate provenance: surface=web sha256:[0-9a-fA-F]{64}$' "$brief" || true)
   [ "$count" -eq 1 ] || return 1
   fm_web_gate_body_present "$brief" || return 1
   actual=$(sed -n 's/^Web gate provenance: //p' "$brief")
   expected=$(fm_web_gate_body_hash) || return 1
-  [ "$actual" = "sha256:$expected" ]
+  [ "$actual" = "surface=web sha256:$expected" ]
+}
+
+fm_web_gate_surface_line_count() {
+  grep -Ec '^Surface contract:' "$1" || true
+}
+
+fm_web_gate_surface_contract() {
+  local brief=$1 count declared
+  count=$(fm_web_gate_surface_line_count "$brief")
+  if fm_web_gate_provenance_present "$brief"; then
+    if [ "$count" -eq 0 ]; then
+      printf '%s\n' web
+      return 0
+    fi
+    [ "$count" -eq 1 ] || return 1
+    declared=$(sed -n 's/^Surface contract: //p' "$brief")
+    [ "$declared" = web ] || return 1
+    printf '%s\n' web
+    return 0
+  fi
+  [ "$count" -eq 1 ] || return 1
+  declared=$(sed -n 's/^Surface contract: //p' "$brief")
+  case "$declared" in
+    web|non-web) printf '%s\n' "$declared" ;;
+    *) return 1 ;;
+  esac
 }

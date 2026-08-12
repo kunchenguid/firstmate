@@ -134,12 +134,12 @@ BRIEF="$DATA/$ID/brief.md"
 
 SURFACE=non-web
 [ "$WEB" -eq 1 ] && SURFACE=web
-surface_count=$(grep -Ec '^Surface contract:' "$BRIEF" || true)
-if [ "$surface_count" -gt 1 ]; then
+surface_count=$(fm_web_gate_surface_line_count "$BRIEF")
+existing_surface=$(fm_web_gate_surface_contract "$BRIEF" 2>/dev/null || true)
+if [ "$surface_count" -gt 1 ] || { [ "$surface_count" -eq 1 ] && [ -z "$existing_surface" ]; }; then
   echo "error: $BRIEF contains more than one Surface contract line" >&2
   exit 1
 fi
-existing_surface=$(sed -n 's/^Surface contract: //p' "$BRIEF")
 if [ -n "$existing_surface" ] && [ "$existing_surface" != "$SURFACE" ]; then
   echo "error: promotion surface $SURFACE disagrees with the brief's Surface contract: $existing_surface" >&2
   exit 1
@@ -173,7 +173,7 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
     if (surface_line_count == 0) print "Surface contract: " surface
     if (web == 1 && gate_line_count == 0) {
       print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
-      print "Web gate provenance: sha256:pending"
+      print "Web gate provenance: surface=web sha256:pending"
     }
     inserted_surface = 1
     next
@@ -186,7 +186,7 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
   exit 1
 }
 if [ "$WEB" -eq 1 ]; then
-  if grep -F 'Web gate provenance: sha256:pending' "$BRIEF_TMP" >/dev/null 2>&1; then
+  if grep -F 'Web gate provenance: surface=web sha256:pending' "$BRIEF_TMP" >/dev/null 2>&1; then
     fm_web_gate_stamp_file "$BRIEF_TMP" || {
       rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"
       BRIEF_TMP=

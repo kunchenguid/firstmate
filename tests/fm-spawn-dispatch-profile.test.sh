@@ -204,41 +204,39 @@ test_ship_spawn_rejects_incomplete_web_gate_body() {
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
     || fail "web brief scaffold for fenced-body test should succeed"
   brief="$HOME_DIR/data/$id/brief.md"
+  sed -i '/^Web gate provenance:/d' "$brief"
   awk '
-    /^## Website deployment completion gate$/ { print "```markdown"; fenced = 1 }
+    /^Surface contract: web$/ { print "```markdown"; print; print "```"; next }
     { print }
-    /^Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing\.$/ && fenced { print "```"; fenced = 0 }
   ' "$brief" > "$brief.tmp"
   mv "$brief.tmp" "$brief"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "ship spawn with a fenced web gate body must fail"
+  expect_code 1 "$status" "ship spawn with a fenced web surface and no provenance must fail"
   assert_contains "$out" "lacks the canonical Web gate body" \
-    "fenced web gate body refusal did not explain the fail-closed boundary"
+    "fenced web surface refusal did not explain the fail-closed boundary"
   assert_absent "$HOME_DIR/state/$id.meta" \
-    "fenced web gate body refusal still wrote task metadata"
+    "fenced web surface refusal still wrote task metadata"
 
-  id=profile-task-only-web-gate-z9
-  rec=$(make_spawn_case task-only-web-gate claude "$id")
+  id=profile-missing-web-gate-body-z9
+  rec=$(make_spawn_case missing-web-gate-body claude "$id")
   read_case_record "$rec"
   rm -f "$HOME_DIR/data/$id/brief.md"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
-    || fail "web brief scaffold for task-only test should succeed"
+    || fail "web brief scaffold for missing-body test should succeed"
   brief="$HOME_DIR/data/$id/brief.md"
-  dod=$(awk '/^# Definition of done$/{print; exit}' "$brief")
-  awk -v block="$(awk '/^## Website deployment completion gate$/{show=1} show{print} /^Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing\.$/{exit}' "$brief")" '
-    /^# Task$/ { print; print block; next }
-    /^## Website deployment completion gate$/ { skip = 1 }
+  awk '
+    /^## Website deployment completion gate$/ { skip = 1; next }
     skip && /^Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing\.$/ { skip = 0; next }
     !skip { print }
   ' "$brief" > "$brief.tmp"
   mv "$brief.tmp" "$brief"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "ship spawn with a Task-only web gate must fail"
+  expect_code 1 "$status" "ship spawn with a missing web gate body must fail"
   assert_contains "$out" "lacks the canonical Web gate body" \
-    "Task-only web gate refusal did not explain the fail-closed boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" "Task-only web gate refusal still wrote task metadata"
+    "missing web gate body refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing web gate body refusal still wrote task metadata"
   pass "fm-spawn: incomplete web gate body refuses before launch"
 }
 
