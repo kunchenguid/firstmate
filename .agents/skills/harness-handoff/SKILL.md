@@ -146,21 +146,41 @@ Never fill the gap from the expired conversation.
 2. Keep a healthy worker running when only supervision lapsed.
 3. For a live, positively attributed endpoint that needs a harness change, use `bin/fm-control.sh <task-id> relaunch --harness <target> --note-file <packet>`.
 4. For a positively agent-free endpoint that is still present and sitting in the recorded worktree, add the packet to the task brief, then use `bin/fm-spawn.sh <task-id> --relaunch --harness <target>` only when the control-plane transaction has already stopped the old agent or the operator is deliberately relaunching an already-stopped task.
-5. Use the fresh-spawn fallback below only when the recorded endpoint is gone or the preserved endpoint cannot launch from the recorded worktree.
+5. When the recorded endpoint is gone, or the preserved endpoint cannot launch from the recorded worktree, stop and escalate to firstmate with the packet; this procedure has no blessed fresh-spawn fallback.
+
+`--relaunch` is the only spawn form this procedure authorizes against a recorded worktree, because it is the form that skips the base refresh described below.
 
 `bin/fm-control.sh relaunch` deliberately refuses when the recorded endpoint is gone because there is no agent it can stop.
 Its launch half also refuses when the endpoint shell is not sitting in the recorded worktree.
 These refusals both occurred in the 2026-08-11 incident and are safety boundaries, not instructions to force the control plane.
 
-After either refusal, first prove that no live agent owns the task and that the recorded worktree still exists with the same physical path, HEAD, containing branches, and dirty state captured in the packet.
-Append the packet to `data/<task-id>/brief.md` under a clearly labeled harness-handoff heading so the replacement is guaranteed to read it.
-Then use a normal `bin/fm-spawn.sh <task-id> <project>` invocation with the existing task id, recorded task kind and delivery posture, and explicit target harness.
-For a ship task, pass the recorded `--mode` and `--yolo`; for a scout, pass `--scout`.
-Read current `bin/fm-spawn.sh --help` before composing the invocation because that executable owns the exact flags.
+After either refusal, prove that no live agent owns the task and that the recorded worktree still exists with the same physical path, HEAD, containing branches, and dirty state captured in the packet.
+Append the packet to `data/<task-id>/brief.md` under a clearly labeled harness-handoff heading so the eventual replacement is guaranteed to read it.
+Then hand the blocked task to firstmate with that evidence intact rather than reaching for another spawn form.
 
-The normal spawn path creates a replacement endpoint and, in the incident this skill codifies, reused the existing task worktree for the same task id.
-Immediately verify that the newly recorded physical worktree equals the packet's worktree and that exactly one live agent owns the task before sending any follow-up.
-If the path differs, the endpoint is ambiguous, or another agent may still be live, stop and preserve both copies without teardown.
+### Never fresh-spawn a recorded worktree
+
+Do not recover a task with a normal non-`--relaunch` `bin/fm-spawn.sh <task-id> <project>` invocation.
+On current `origin/main`, `bin/fm-spawn.sh` runs `freshen_spawn_worktree_base` for every non-`--relaunch`, non-secondmate spawn, and that function ends in `git reset --hard origin/<default>`.
+Against a clean reused task worktree that reset moves the task branch off its unlanded commits, leaving them on zero branches and removing their files from the working tree.
+That destroys exactly the work this procedure exists to preserve.
+
+The 2026-08-11 incident did record three successful fresh spawns that reused the recorded worktree for the same task id, and that fact stands.
+It has a version boundary.
+The captain verified that the primary firstmate checkout used that day was 16 commits behind `origin/main` and contained no `reset --hard`, so those three spawns are evidence about that stale checkout, not evidence that the mechanism is safe.
+The captain confirmed that `fm/ow-311-charge-water` and `fm/ow-rites-part5-interaction` remain intact, at 12 and 4 commits above main.
+
+Fast-forwarding that checkout to current main turns the formerly successful fallback into a latent-dangerous one.
+Never reason about this from the incident.
+Read the `bin/fm-spawn.sh` implementation and version you are actually about to run, and confirm for yourself whether its non-`--relaunch` path still refreshes the worktree base.
+
+`fm-usage-window-resume` owns supplying a preservation-safe replacement mechanism.
+Until it does, no fresh-spawn fallback is blessed here.
+
+When the recorded worktree is dirty, `fm-spawn` refuses with `pooled worktree ... is not clean; refusing to discard uncommitted work while refreshing its base`.
+That refusal is correct, and it is a wall rather than an obstacle.
+Stop and escalate to firstmate.
+Never move, clean, stash, reset, force, tear down, or otherwise route around it.
 
 Never use `--force`, discard a dirty worktree, delete an endpoint to make a check pass, tear down unlanded work, or bypass a lifecycle refusal.
 
