@@ -121,6 +121,11 @@ require_procfs() {
   [ -d /proc ] && [ -L "/proc/$$/cwd" ]
 }
 
+require_complete_process_index() {
+  require_procfs || return 1
+  ( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_task_pid_index >/dev/null 2>&1 )
+}
+
 # --- A. the home declaration itself -----------------------------------------
 
 test_crewmate_declaration_clears_every_inherited_home() {
@@ -1687,6 +1692,10 @@ SH
 
 test_sweep_does_not_block_a_record_whose_endpoint_is_gone() {
   local world out status path
+  require_complete_process_index || {
+    pass "skip: this host cannot provide a complete process index for the endpoint-gone sweep fixture"
+    return 0
+  }
   world=$(make_sweep_home sweep-stale-endpoint)
   fm_write_meta "$world/home/state/task-f3b.meta" \
     "window=firstmate:fm-task-f3b" "worktree=$world/wt" "project=$world/project" \

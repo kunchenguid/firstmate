@@ -281,9 +281,11 @@ fm_slot_meta_referencing_tasks() {
     else
       continue
     fi
-    for candidate in "${seen[@]}"; do
-      [ "$candidate" = "$home_real" ] && continue 2
-    done
+    if [ "${#seen[@]}" -gt 0 ]; then
+      for candidate in "${seen[@]}"; do
+        [ "$candidate" = "$home_real" ] && continue 2
+      done
+    fi
     seen+=("$home_real")
     meta_state="$home_real/state"
     if [ -e "$meta_state" ] && [ ! -d "$meta_state" ]; then
