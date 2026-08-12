@@ -6,6 +6,31 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Shared project skill discovery
+
+Claude Code 2.1.228 and Codex CLI 0.147.0 were verified on 2026-08-11 from the same Firstmate worktree.
+The canonical skill source was `.agents/skills/`, with `.claude/skills` resolving to `../.agents/skills` and no project `.codex/skills` directory.
+
+```sh
+readlink .claude/skills
+codex exec --ephemeral -C "$PWD" -s read-only -m gpt-5.6-luna \
+  '$harness-handoff Do not use tools or inspect the filesystem. Return exactly INVOKED followed by the first two sentences in the skill body under its title.'
+claude -p --model haiku --effort low --no-session-persistence \
+  --disallowedTools 'Bash,Read,Glob,Grep' -- \
+  'Use the harness-handoff skill. Do not use tools or inspect the filesystem. Return exactly INVOKED followed by the first two sentences in the skill body under its title.'
+```
+
+Observed output:
+
+```text
+../.agents/skills
+INVOKED Reconstruct the handoff entirely from durable records. Never use conversation memory as evidence, because the lost conversation is the failure this procedure exists to survive.
+INVOKED Reconstruct the handoff entirely from durable records. Never use conversation memory as evidence, because the lost conversation is the failure this procedure exists to survive.
+```
+
+Codex discovered the project-local `.agents/skills/` source directly, while Claude reached that same source through the existing `.claude/skills` symlink.
+This gives crewmates, worktree-local primaries, and a captain-run session rooted in the Firstmate checkout one shared skill source without a second copy under `.codex/skills`.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
