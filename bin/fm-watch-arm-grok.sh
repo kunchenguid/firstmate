@@ -152,6 +152,8 @@ session_owner_is_still_valid() {
 
 while :; do
   wait_until_needed
+  completion_rc=
+  completion_failure=
 
   stream_dir=$(mktemp -d "$STATE/.grok-watch-arm.XXXXXX") || {
     echo 'watcher: FAILED - Grok continuity could not allocate its arm output stream'
@@ -183,36 +185,35 @@ while :; do
   if [ "$rc" -ne 0 ] || grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
     if [ "$rc" -eq 0 ]; then rc=1; fi
     if ! grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
-      printf 'watcher: FAILED - Grok continuity arm exited %s\n' "$rc"
+      completion_failure="watcher: FAILED - Grok continuity arm exited $rc"
     fi
-    rm -rf "$stream_dir"
-    stream_dir=
-    exit "$rc"
+    completion_rc=$rc
+  else
+    durable_action_pending
+    verdict=$?
+    case "$verdict" in
+      0) completion_rc=0 ;;
+      1) ;;
+      *)
+        completion_rc=1
+        completion_failure="watcher: FAILED - Grok continuity could not classify a completed arm: $CLASSIFY_FAILURE"
+        ;;
+    esac
   fi
 
-  durable_action_pending
-  verdict=$?
-  if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; then
+  if [ -n "$completion_rc" ]; then
+    if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; then
+      rm -rf "$stream_dir"
+      stream_dir=
+      wait_until_needed
+      continue
+    fi
+    [ -z "$completion_failure" ] || printf '%s\n' "$completion_failure"
     rm -rf "$stream_dir"
     stream_dir=
-    wait_until_needed
-    continue
+    exit "$completion_rc"
   fi
-  case "$verdict" in
-    0)
-      rm -rf "$stream_dir"
-      stream_dir=
-      exit 0
-      ;;
-    1)
-      rm -rf "$stream_dir"
-      stream_dir=
-      ;;
-    *)
-      printf 'watcher: FAILED - Grok continuity could not classify a completed arm: %s\n' "$CLASSIFY_FAILURE"
-      rm -rf "$stream_dir"
-      stream_dir=
-      exit 1
-      ;;
-  esac
+
+  rm -rf "$stream_dir"
+  stream_dir=
 done

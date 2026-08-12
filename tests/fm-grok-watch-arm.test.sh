@@ -451,6 +451,74 @@ SH
   pass "session transfer during failed classification keeps the old owner dormant"
 }
 
+make_blocking_failure_grep() {
+  local home=$1 real_grep
+  real_grep=$(command -v grep)
+  mkdir -p "$home/test-bin"
+  cat > "$home/test-bin/grep" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"^watcher: FAILED"*)
+    : > "\$FM_HOME/state/failure-classification-blocked"
+    while [ ! -e "\$FM_HOME/state/release-failure-classification" ]; do sleep 0.05; done
+    ;;
+esac
+exec "$real_grep" "\$@"
+SH
+  chmod +x "$home/test-bin/grep"
+}
+
+test_away_transfer_during_arm_failure_classification_stays_dormant() {
+  local home arm out pid
+  home=$(make_home arm-failure-away-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: FAILED - classified after away transfer\n'
+exit 7
+SH
+  chmod +x "$arm"
+  make_blocking_failure_grep "$home"
+
+  PATH="$home/test-bin:$PATH" FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/failure-classification-blocked" || fail "arm failure classification did not block"
+  : > "$home/state/.afk"
+  : > "$home/state/release-failure-classification"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "arm failure completed after away mode took supervision"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "away transfer during arm failure classification keeps the old owner dormant"
+}
+
+test_session_transfer_during_arm_failure_classification_stays_dormant() {
+  local home arm out pid replacement
+  home=$(make_home arm-failure-session-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  replacement=$$
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: FAILED - classified after session transfer\n'
+exit 7
+SH
+  chmod +x "$arm"
+  make_blocking_failure_grep "$home"
+
+  PATH="$home/test-bin:$PATH" FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/failure-classification-blocked" || fail "arm failure classification did not block"
+  printf '%s\n' "$replacement" > "$home/state/.lock"
+  : > "$home/state/release-failure-classification"
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "arm failure completed after session ownership transferred"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  pass "session transfer during arm failure classification keeps the old owner dormant"
+}
+
 test_owner_signal_retires_arm_child() {
   local home arm out pid child status
   home=$(make_home signal-cleanup)
@@ -490,4 +558,6 @@ test_away_transfer_during_actionable_classification_stays_dormant
 test_session_transfer_during_actionable_classification_stays_dormant
 test_away_transfer_during_failed_classification_stays_dormant
 test_session_transfer_during_failed_classification_stays_dormant
+test_away_transfer_during_arm_failure_classification_stays_dormant
+test_session_transfer_during_arm_failure_classification_stays_dormant
 test_owner_signal_retires_arm_child
