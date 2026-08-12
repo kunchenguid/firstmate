@@ -1295,6 +1295,47 @@ test_completed_task_tab_refresh_keeps_the_completed_marker() {
   pass "herdr sibling tab refresh keeps retained completed workers view-only"
 }
 
+test_completed_graduation_only_marks_an_agent_free_done_worker() {
+  local dir state fb out status
+  dir="$TMP_ROOT/task-tab-graduate-done"; mkdir -p "$dir"; state="$dir/state.json"
+  fb=$(make_herdr_statefake "$dir")
+  task_tab_fixture "$dir" '' '◐ Complete fixture'
+  printf 'done: implementation committed\n' > "$dir/home/state/tasktab.status"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-herdr-task-tab.sh" complete tasktab 2>&1); status=$?
+  [ "$status" -eq 0 ] || fail "an agent-free done worker could not graduate to completed"$'\n'"$out"
+  [ "$(jq -r '.tabs[0].label' "$state")" = '✓ Complete fixture' ] \
+    || fail "an agent-free done worker did not receive the completed marker"
+  grep '^herdr_tab_completed=1$' "$dir/home/state/tasktab.meta" >/dev/null \
+    || fail "an agent-free done worker was not published as a retained completed worker"
+  pass "herdr sibling completion graduates only an agent-free done worker to the completed marker"
+}
+
+test_completed_retention_keeps_non_done_workers_ungraduated() {
+  local dir state fb out status case_id verb expected
+  while IFS='|' read -r case_id verb expected; do
+    dir="$TMP_ROOT/task-tab-retain-$case_id"; mkdir -p "$dir"; state="$dir/state.json"
+    fb=$(make_herdr_statefake "$dir")
+    task_tab_fixture "$dir" '' '◐ Complete fixture'
+    printf '%s: last recorded event\n' "$verb" > "$dir/home/state/tasktab.status"
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+      "$ROOT/bin/fm-herdr-task-tab.sh" complete tasktab 2>&1); status=$?
+    [ "$status" -eq 0 ] || fail "$case_id retention failed"$'\n'"$out"
+    [ "$(jq -r '.tabs[0].label' "$state")" = "$expected Complete fixture" ] \
+      || fail "$case_id retention painted the wrong marker: $(jq -r '.tabs[0].label' "$state")"
+    [ -z "$(grep '^herdr_tab_completed=' "$dir/home/state/tasktab.meta" || true)" ] \
+      || fail "$case_id retention graduated a worker that never wrote a done event"
+  done <<'CASES'
+failed|failed|!
+blocked|blocked|?
+decision|needs-decision|?
+stopped|working|!
+CASES
+  pass "herdr sibling completion retains stopped/failed/decision workers with their own markers"
+}
+
 test_projection_journal_is_atomic_and_uses_128_bit_token() {
   local dir state out token parsed status
   dir="$TMP_ROOT/projection-journal"; state="$dir/state"; mkdir -p "$state"
@@ -4378,6 +4419,8 @@ test_sibling_tab_label_uses_only_the_closed_marker_grammar
 test_sibling_tab_disambiguator_extends_a_colliding_prefix
 test_completed_task_tab_refuses_a_registered_done_agent
 test_completed_task_tab_refresh_keeps_the_completed_marker
+test_completed_graduation_only_marks_an_agent_free_done_worker
+test_completed_retention_keeps_non_done_workers_ungraduated
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane

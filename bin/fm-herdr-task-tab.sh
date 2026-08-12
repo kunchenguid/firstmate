@@ -74,12 +74,16 @@ fm_lock_acquire_wait "$TAB_LOCK"
 TAB_LOCK_HELD=1
 [ "$(fm_backend_herdr_presentation_session_lock_path "$SESSION")" = "$TAB_LOCK" ] || exit 1
 
-marker_for_refresh() {
+last_status_verb() {
   local log="$STATE/$ID.status" line verb
   line=$(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -1 || true)
   verb=${line%%:*}
   verb=${verb%% *}
-  case "$verb" in
+  printf '%s' "$verb"
+}
+
+marker_for_refresh() {
+  case "$(last_status_verb)" in
     needs-decision|blocked) printf '?'; return 0 ;;
     failed) printf '!'; return 0 ;;
     done)
@@ -88,6 +92,13 @@ marker_for_refresh() {
       ;;
   esac
   printf '●'
+}
+
+marker_for_retained() {
+  case "$(last_status_verb)" in
+    needs-decision|blocked) printf '?' ;;
+    *) printf '!' ;;
+  esac
 }
 
 mark_completed() {
@@ -111,7 +122,7 @@ if [ "$ACTION" = complete ]; then
       exit 1
       ;;
   esac
-  if [ "$COMPLETED" != 1 ]; then
+  if [ "$COMPLETED" != 1 ] && [ "$(last_status_verb)" = done ]; then
     mark_completed || exit 1
     COMPLETED=1
   fi
@@ -123,7 +134,7 @@ else
     refresh) MARKER=$(marker_for_refresh) ;;
     working) MARKER='●' ;;
     stopped) MARKER='!' ;;
-    complete) MARKER='✓' ;;
+    complete) MARKER=$(marker_for_retained) ;;
   esac
 fi
 LABEL=$(fm_backend_herdr_task_tab_label "$MARKER" "$TITLE" "$DISAMBIGUATOR") || exit 1

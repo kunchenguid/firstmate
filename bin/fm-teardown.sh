@@ -2384,7 +2384,16 @@ fi
 # A safely completed sibling-tab worker is a retained result, not an ordinary
 # cleanup request. It paints the one real tab ✓ and leaves its sleeping worker,
 # record, and isolated copy intact until the captain explicitly clears it with
-# --clear-completed.
+# --clear-completed. A sibling-tab worker whose last status verb is not `done`
+# is retained only as-is (stopped/failed keeps !, needs-decision/blocked keeps
+# ?), never graduated to the completed ✓ marker or herdr_tab_completed=1.
+if [ "$BACKEND" = herdr ] \
+   && [ "$(meta_value "$META" herdr_presentation)" = tabs ] \
+   && [ "$CLEAR_COMPLETED" = 1 ] \
+   && [ "$(meta_value "$META" herdr_tab_completed 2>/dev/null || true)" != 1 ]; then
+  echo "refused: sibling-tab worker $ID is not a retained completed worker; --clear-completed releases only completed workers. Use --force after explicit discard approval." >&2
+  exit 1
+fi
 if [ "$BACKEND" = herdr ] \
    && [ "$(meta_value "$META" herdr_presentation)" = tabs ] \
    && [ "$CLEAR_COMPLETED" = 0 ] \
@@ -2392,16 +2401,20 @@ if [ "$BACKEND" = herdr ] \
   fm_lock_release "$META_LOCK"
   META_LOCK_HELD=0
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-task-tab.sh" complete "$ID"; then
-    echo "error: completed sibling-tab worker $ID could not be marked complete; retaining every record and isolated copy" >&2
+    echo "error: sibling-tab worker $ID could not be retained; keeping every record and isolated copy" >&2
     exit 1
   fi
   fm_lock_acquire_wait "$META_LOCK"
   META_LOCK_HELD=1
   [ -f "$META" ] && [ ! -L "$META" ] || {
-    echo "error: completed sibling-tab worker $ID lost its durable record while retaining completion" >&2
+    echo "error: sibling-tab worker $ID lost its durable record while retaining it" >&2
     exit 1
   }
-  echo "retained completed sibling-tab worker $ID (clear with fm-teardown.sh $ID --clear-completed)"
+  if [ "$(meta_value "$META" herdr_tab_completed 2>/dev/null || true)" = 1 ]; then
+    echo "retained completed sibling-tab worker $ID (clear with fm-teardown.sh $ID --clear-completed)"
+  else
+    echo "retained sibling-tab worker $ID without completion (release with fm-teardown.sh $ID --force)"
+  fi
   exit 0
 fi
 
