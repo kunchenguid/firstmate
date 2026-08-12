@@ -11,8 +11,9 @@ Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot
 ## Website deployment completion gate
 This is a website or web-deployment ship task, so the task is not complete until firstmate can accept all of the following evidence together:
 - Verify the deployed revision against the real custom production domain, never only on a preview or staging URL.
-- Perform a fresh-page visual verification against the real custom production domain with the existing chrome-devtools-axi tool: run `chrome-devtools-axi open <custom-production-domain>`, render the page, and inspect the actual result, not a headless or CDP shortcut.
+- Perform a fresh-browser visual verification against the real custom production domain with the existing chrome-devtools-axi tool: start a fresh browser session, run `chrome-devtools-axi open <custom-production-domain>`, render the page, and inspect the actual result, not a headless or CDP shortcut.
 - Confirm that the rendered page visibly contains concrete distinguishing revision content - a marker introduced by this change - and record the exact marker checked.
+- Exercise a concrete interaction on the deployed custom-domain page and record the observed result from that deployed site.
 - Capture screenshot evidence of that verified custom-domain page with `chrome-devtools-axi screenshot`, and preserve the screenshot as durable task or PR evidence.
 - Explicitly record the custom production URL, marker, and screenshot evidence before reporting done.
 HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as insufficient acceptance evidence.
@@ -39,10 +40,39 @@ fm_web_gate_block() {  # <web|non-web>
 #                    operative boundary.
 fm_web_gate_scan() {  # <check|insert:web|insert:non-web> <brief>
   awk -v mode="$1" '
+    function parse_fence(line,   i,c,n) {
+      candidate_char = ""
+      candidate_len = 0
+      candidate_rest = ""
+      i = 1
+      while (i <= length(line) && i <= 4 && substr(line, i, 1) == " ") i++
+      if (i > 4) return 0
+      c = substr(line, i, 1)
+      if (c != "`" && c != "~") return 0
+      n = 0
+      while (substr(line, i + n, 1) == c) n++
+      if (n < 3) return 0
+      candidate_char = c
+      candidate_len = n
+      candidate_rest = substr(line, i + n)
+      return 1
+    }
     NR == FNR { gate[++gn] = $0; next }
     {
       raw[++ln] = $0
-      if ($0 ~ /^(```|~~~)/) { fenced[ln] = 1; fence = !fence; next }
+      if (parse_fence($0)) {
+        fenced[ln] = 1
+        if (!fence) {
+          fence = 1
+          fence_char = candidate_char
+          fence_len = candidate_len
+        } else if (candidate_char == fence_char && candidate_len >= fence_len && candidate_rest ~ /^[ \t]*$/) {
+          fence = 0
+          fence_char = ""
+          fence_len = 0
+        }
+        next
+      }
       fenced[ln] = fence
       if (fence) next
       if ($0 == "# Definition of done") { dod = ln; dods++ }

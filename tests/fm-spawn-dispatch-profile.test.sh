@@ -41,15 +41,8 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows)
-    [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
-    exit 0
-    ;;
-  new-window)
-    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_LOG"
-    exit 0
-    ;;
-  has-session|new-session|kill-window) exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -107,11 +100,9 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4 endpointlog
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
-  endpointlog="$(dirname "$launchlog")/endpoint.log"
   : > "$launchlog"
-  : > "$endpointlog"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -121,7 +112,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -181,6 +172,30 @@ test_ship_spawn_rejects_non_operative_web_markers() {
   mv "$brief.tmp" "$brief"
   expect_web_gate_refusal "$id" "a fully fenced web gate with otherwise valid text"
 
+  id=profile-indented-fenced-web-gate-z9
+  read_case_record "$(make_spawn_case indented-fenced-web-gate claude "$id")"
+  scaffold_web_brief "$id" indented-fenced-marker
+  brief="$HOME_DIR/data/$id/brief.md"
+  awk '
+    /^Surface contract: web$/ { print "   ```markdown"; next }
+    /^Do not append a done status/ { print; print "   ```"; next }
+    { print }
+  ' "$brief" > "$brief.tmp"
+  mv "$brief.tmp" "$brief"
+  expect_web_gate_refusal "$id" "an indented fully fenced web gate with otherwise valid text"
+
+  id=profile-mismatched-fenced-web-gate-z9
+  read_case_record "$(make_spawn_case mismatched-fenced-web-gate claude "$id")"
+  scaffold_web_brief "$id" mismatched-fenced-marker
+  brief="$HOME_DIR/data/$id/brief.md"
+  awk '
+    /^Surface contract: web$/ { print "~~~markdown"; print "```"; print; next }
+    /^Do not append a done status/ { print; print "~~~"; next }
+    { print }
+  ' "$brief" > "$brief.tmp"
+  mv "$brief.tmp" "$brief"
+  expect_web_gate_refusal "$id" "a web gate with a mismatched inner fence delimiter"
+
   id=profile-task-only-web-gate-z9
   read_case_record "$(make_spawn_case task-only-web-gate claude "$id")"
   scaffold_web_brief "$id" task-only-marker
@@ -206,6 +221,13 @@ test_ship_spawn_rejects_web_without_canonical_gate() {
   sed -i 's/^HTTP 200, a preview URL, or bare reachability alone is explicitly rejected/HTTP 200, a preview URL, or bare reachability alone is accepted/' "$brief"
   expect_web_gate_refusal "$id" "a web gate whose evidence bar was weakened"
   pass "fm-spawn: a web declaration without the canonical gate refuses before launch"
+
+  id=profile-missing-interaction-evidence-z9
+  read_case_record "$(make_spawn_case missing-interaction-evidence claude "$id")"
+  scaffold_web_brief "$id" missing-interaction
+  brief="$HOME_DIR/data/$id/brief.md"
+  sed -i 's/^- Exercise a concrete interaction on the deployed custom-domain page.*$/- Verify the page visually./' "$brief"
+  expect_web_gate_refusal "$id" "a web gate without deployed interaction evidence"
 }
 
 test_ship_spawn_accepts_compliant_web_gate() {
@@ -755,39 +777,6 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
-test_batch_forwards_shared_skills() {
-  local rec id1 id2 out status launch skill_dir first_link second_link
-  id1=profile-batch-skills-a-z9b
-  id2=profile-batch-skills-b-z10b
-  rec=$(make_spawn_case profile-batch-skills claude "$id1" "$id2")
-  read_case_record "$rec"
-  skill_dir="$HOME_DIR/projects/alpha/.claude/skills/batch-skill"
-  mkdir -p "$skill_dir" "$HOME_DIR/claude-config/skills"
-  printf '%s\n' '- alpha [no-mistakes] - batch skill fixture' > "$HOME_DIR/data/projects.md"
-  cat > "$skill_dir/SKILL.md" <<'EOF'
----
-name: batch-skill
-description: batch skill fixture
----
-EOF
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$HOME_DIR/claude-config" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --skills batch-skill)
-  status=$?
-  expect_code 0 "$status" "batch spawn with shared skills should succeed"
-  first_link="$HOME_DIR/config/skill-compose/claude/task-$id1/.claude/skills/batch-skill"
-  second_link="$HOME_DIR/config/skill-compose/claude/task-$id2/.claude/skills/batch-skill"
-  [ -L "$first_link" ] || fail "batch did not compose the shared skill for its first task"
-  [ -L "$second_link" ] || fail "batch did not compose the shared skill for its second task"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--add-dir '$HOME_DIR/config/skill-compose/claude/task-$id1'" \
-    "first batch launch omitted its task-specific skill overlay"
-  assert_contains "$launch" "--add-dir '$HOME_DIR/config/skill-compose/claude/task-$id2'" \
-    "second batch launch omitted its task-specific skill overlay"
-  pass "batch dispatch forwards shared skills into each task-specific Claude overlay"
-}
-
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
@@ -819,158 +808,6 @@ test_claude_omits_config_dir_prefix_when_unset() {
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
     "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
   pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
-}
-
-test_claude_skills_compose_add_dir_overlay() {
-  local rec id out status launch skill_dir composed
-  id=profile-claude-skills-z20
-  rec=$(make_spawn_case profile-claude-skills claude "$id")
-  read_case_record "$rec"
-  skill_dir="$HOME_DIR/projects/alpha/.claude/skills/extra-skill"
-  mkdir -p "$skill_dir" "$HOME_DIR/claude-config/skills"
-  printf '%s\n' '- alpha [no-mistakes] - skill fixture' > "$HOME_DIR/data/projects.md"
-  cat > "$skill_dir/SKILL.md" <<'EOF'
----
-name: extra-skill
-description: extra skill fixture
----
-EOF
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$HOME_DIR/claude-config" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --skills extra-skill)
-  status=$?
-  expect_code 0 "$status" "claude spawn with composed skills should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --add-dir '$HOME_DIR/config/skill-compose/claude/task-$id' --dangerously-skip-permissions" \
-    "claude launch did not include the composed skill overlay through --add-dir"
-  composed="$HOME_DIR/config/skill-compose/claude/task-$id/.claude/skills/extra-skill"
-  [ -L "$composed" ] || fail "fm-spawn --skills did not compose the requested skill symlink"
-  [ -f "$composed/SKILL.md" ] || fail "composed spawn skill is not loadable through the overlay"
-  pass "claude --skills composes a per-task overlay and launches with --add-dir"
-}
-
-test_claude_secondmate_skills_compose_home_overlay() {
-  local rec id sm out status launch skill_dir composed
-  id=profile-claude-secondmate-skills-z20b
-  rec=$(make_spawn_case profile-claude-secondmate-skills claude "$id")
-  read_case_record "$rec"
-  sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id"
-  sm=$(cd "$sm" && pwd -P)
-  skill_dir="$HOME_DIR/projects/alpha/.agents/skills/secondmate-skill"
-  mkdir -p "$skill_dir" "$HOME_DIR/claude-config/skills"
-  printf '%s\n' '- alpha [no-mistakes] - secondmate skill fixture' > "$HOME_DIR/data/projects.md"
-  cat > "$skill_dir/SKILL.md" <<'EOF'
----
-name: secondmate-skill
-description: secondmate skill fixture
----
-EOF
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$HOME_DIR/claude-config" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$sm" --secondmate --harness claude --skills secondmate-skill)
-  status=$?
-  expect_code 0 "$status" "Claude secondmate spawn with composed skills should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --add-dir '$sm/config/skill-compose/claude/home' --dangerously-skip-permissions" \
-    "secondmate launch omitted its per-home skill overlay"
-  composed="$sm/config/skill-compose/claude/home/.claude/skills/secondmate-skill"
-  [ -L "$composed" ] || fail "secondmate skill was not composed as a per-home symlink"
-  [ -f "$composed/SKILL.md" ] || fail "secondmate composed skill is not loadable through its overlay"
-  assert_absent "$sm/.agents/skills/secondmate-skill" \
-    "secondmate skill composition polluted the tracked .agents/skills set"
-  pass "Claude secondmate --skills composes a non-polluting per-home overlay"
-}
-
-test_claude_missing_skill_refuses_before_endpoint_or_metadata() {
-  local rec id out status
-  id=profile-claude-missing-skill-z21
-  rec=$(make_spawn_case profile-claude-missing-skill claude "$id")
-  read_case_record "$rec"
-  mkdir -p "$HOME_DIR/claude-config/skills"
-  : > "$HOME_DIR/data/projects.md"
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$HOME_DIR/claude-config" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --skills absent-skill)
-  status=$?
-  expect_code 1 "$status" "claude spawn with a missing skill should fail"
-  assert_contains "$out" "skill not found" "missing skill refusal did not explain resolution failure"
-  assert_absent "$HOME_DIR/state/$id.meta" "missing skill refusal published task metadata"
-  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "missing skill refusal created a runtime endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "missing skill refusal sent text to a runtime endpoint"
-  pass "skill resolution failures refuse before endpoint and metadata publication"
-}
-
-test_duplicate_claude_spawn_preserves_live_skill_overlay() {
-  local rec id out status alpha_dir beta_dir skills_dir alpha_target manifest_before
-  id=profile-claude-skills-duplicate-z22
-  rec=$(make_spawn_case profile-claude-skills-duplicate claude "$id")
-  read_case_record "$rec"
-  alpha_dir="$HOME_DIR/projects/alpha/.claude/skills/alpha-skill"
-  beta_dir="$HOME_DIR/projects/alpha/.claude/skills/beta-skill"
-  mkdir -p "$alpha_dir" "$beta_dir" "$HOME_DIR/claude-config/skills"
-  printf '%s\n' '- alpha [no-mistakes] - skill fixture' > "$HOME_DIR/data/projects.md"
-  cat > "$alpha_dir/SKILL.md" <<'EOF'
----
-name: alpha-skill
-description: alpha skill fixture
----
-EOF
-  cat > "$beta_dir/SKILL.md" <<'EOF'
----
-name: beta-skill
-description: beta skill fixture
----
-EOF
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$HOME_DIR/claude-config" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --skills alpha-skill)
-  status=$?
-  expect_code 0 "$status" "initial claude skill spawn should succeed"
-  skills_dir="$HOME_DIR/config/skill-compose/claude/task-$id/.claude/skills"
-  [ -L "$skills_dir/alpha-skill" ] || fail "initial spawn did not publish alpha skill"
-  alpha_target=$(readlink "$skills_dir/alpha-skill")
-  manifest_before=$(cat "$HOME_DIR/config/skill-compose/claude/task-$id/manifest.tsv")
-
-  out=$(FM_FAKE_DUPLICATE_WINDOW="fm-$id" FM_TEST_CLAUDE_CONFIG_DIR="$HOME_DIR/claude-config" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --skills beta-skill)
-  status=$?
-  expect_code 1 "$status" "duplicate claude skill spawn should be refused"
-  assert_contains "$out" "refusing fresh spawn before changing its skill overlay" \
-    "duplicate spawn did not refuse before overlay reconciliation"
-  [ -L "$skills_dir/alpha-skill" ] || fail "duplicate spawn removed the live alpha skill"
-  [ "$(readlink "$skills_dir/alpha-skill")" = "$alpha_target" ] \
-    || fail "duplicate spawn retargeted the live alpha skill"
-  [ ! -e "$skills_dir/beta-skill" ] && [ ! -L "$skills_dir/beta-skill" ] \
-    || fail "duplicate spawn added beta to the live skill overlay"
-  [ "$(cat "$HOME_DIR/config/skill-compose/claude/task-$id/manifest.tsv")" = "$manifest_before" ] \
-    || fail "duplicate spawn rewrote the live skill manifest"
-
-  pass "duplicate claude spawn preserves the live skill overlay"
-}
-
-test_remote_secondmate_skills_refuse_without_a_verified_load_point() {
-  local rec id out status
-  id=profile-remote-secondmate-skills-z23
-  rec=$(make_spawn_case profile-remote-secondmate-skills kimi "$id")
-  read_case_record "$rec"
-  printf '%s\n' \
-    "- $id - remote skill fixture (host: remote-test; root: /remote/firstmate; home: /remote/home; scope: tests; projects: alpha; added 2026-08-11)" \
-    > "$HOME_DIR/data/secondmates.md"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" --secondmate --harness kimi --skills extra-skill)
-  status=$?
-  expect_code 1 "$status" "remote secondmate --skills should refuse without a verified load point"
-  assert_contains "$out" "remote home has no verified composition load point" \
-    "remote secondmate refusal did not explain the missing load point"
-  assert_absent "$HOME_DIR/state/$id.meta" "remote skill refusal published task metadata"
-  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "remote skill refusal created a local runtime endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "remote skill refusal sent a launch command"
-  pass "remote secondmate skills refuse before provisioning without a verified load point"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -1034,14 +871,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
-test_batch_forwards_shared_skills
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
-test_claude_skills_compose_add_dir_overlay
-test_claude_secondmate_skills_compose_home_overlay
-test_claude_missing_skill_refuses_before_endpoint_or_metadata
-test_duplicate_claude_spawn_preserves_live_skill_overlay
-test_remote_secondmate_skills_refuse_without_a_verified_load_point
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

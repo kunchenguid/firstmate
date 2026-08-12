@@ -860,119 +860,6 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
-# --- herdr: an agent that already exited to its shell -----------------------
-#
-# The bug this pins: a Pi worker had genuinely ended - herdr's own registry
-# reported agent_status `done` and the pane's foreground process was a plain
-# shell - but the classifier read the surviving agent registration as `alive`,
-# so neither exit nor relaunch could act. Both waited out FM_CONTROL_EXIT_WAIT
-# for a stop that had already happened and then refused, wedging the control
-# plane on a task nothing could recover.
-
-# make_herdr_stub: a `herdr` whose whole model is $FM_FAKE_DIR/agent-status and
-# $FM_FAKE_DIR/foreground - the two authoritative signals the classifier reads.
-# Ships the `ps` the idle-shell proof consults alongside it, so the verdict does
-# not depend on the developer's own process table.
-make_herdr_stub() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
-  mkdir -p "$fb"
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-D=$FM_FAKE_DIR
-fg=$(cat "$D/foreground")
-case "${1:-} ${2:-}" in
-  "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
-  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
-  "agent get")
-    status=$(cat "$D/agent-status")
-    case "$status" in
-      working) state=working ;;
-      blocked) state=blocked ;;
-      *) state=idle ;;
-    esac
-    printf '{"result":{"agent":{"agent_status":"%s","state":"%s"}}}\n' "$status" "$state"
-    ;;
-  "pane process-info")
-    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":["%s"],"name":"%s","pid":67}]}}}\n' \
-      "$fg" "${fg##*/}" ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/herdr"
-  cat > "$fb/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  "-axo pid=,ppid=") printf '1 0\n67 1\n' ;;
-  "-p 67 -o stat=") printf 'Ss\n' ;;
-  *) exit 1 ;;
-esac
-SH
-  chmod +x "$fb/ps"
-  printf '%s\n' "$fb"
-}
-
-# new_herdr_case <name> <agent-status> <foreground> -> a case dir holding a
-# herdr-backed task whose pane reports exactly those two signals.
-new_herdr_case() {  # <name> <agent-status> <foreground>
-  local dir
-  dir=$(new_case "$1")
-  make_herdr_stub "$dir" >/dev/null
-  printf '%s' "$2" > "$dir/fake/agent-status"
-  printf '%s' "$3" > "$dir/fake/foreground"
-  add_task "$dir" h1 pi ship herdr "hsess:w1:p2"
-  {
-    echo "herdr_session=hsess"
-    echo "herdr_workspace_id=w1"
-    echo "herdr_tab_id=w1:t2"
-    echo "herdr_pane_id=w1:p2"
-  } >> "$dir/home/state/h1.meta"
-  printf '%s\n' "$dir"
-}
-
-run_herdr_control() {  # <case-dir> <args...>
-  local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    FM_HERDR_PS_BIN="$dir/fakebin/ps" FM_CONTROL_POLL=0.01 \
-    FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
-    "$CONTROL" "$@" 2>&1
-}
-
-test_herdr_exit_proceeds_when_the_agent_already_left_a_bare_shell() {
-  local dir out rc
-  dir=$(new_herdr_case herdr-ended 'done' /bin/zsh)
-  out=$(run_herdr_control "$dir" h1 exit); rc=$?
-  expect_code 0 "$rc" "exit must proceed for an agent that already ended"$'\n'"$out"
-  assert_contains "$out" "already-stopped h1" "exit should report the agent as already stopped"
-  pass "fm-control exit: an agent that ended to its shell is already-stopped, not an unstoppable agent"
-}
-
-test_herdr_relaunch_gets_past_the_stop_gate_for_an_ended_agent() {
-  local dir out journal
-  dir=$(new_herdr_case herdr-relaunch 'done' /bin/zsh)
-  out=$(run_herdr_control "$dir" h1 relaunch --note "worker ended mid-task")
-  case "$out" in
-    *"did not stop"*) fail "relaunch must not refuse to stop an agent that already ended: $out" ;;
-  esac
-  # The stub cannot launch a replacement, so the transaction still fails - but
-  # it fails at the LAUNCH phase, which is only reachable once the stop phase
-  # has already succeeded. Before the fix it never got past stopping.
-  journal="$dir/home/state/h1.control-relaunch"
-  [ -f "$journal" ] || fail "relaunch should have recorded its transaction journal"
-  assert_contains "$(cat "$journal")" "launching" \
-    "relaunch should have cleared the stop phase and reached replacement launch"
-  pass "fm-control relaunch: an agent that ended to its shell clears the stop phase instead of wedging"
-}
-
-test_herdr_busy_agent_is_still_alive() {
-  local dir out rc
-  dir=$(new_herdr_case herdr-busy working /usr/local/bin/pi)
-  out=$(run_herdr_control "$dir" h1 interrupt); rc=$?
-  expect_code 0 "$rc" "a busy agent must still be interruptible"$'\n'"$out"
-  assert_contains "$out" "verified=agent-alive" "a busy agent must still classify as alive"
-  pass "fm-control: a genuinely busy agent stays alive, so the fix introduces no false stop"
-}
-
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
@@ -1006,8 +893,5 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
-test_herdr_exit_proceeds_when_the_agent_already_left_a_bare_shell
-test_herdr_relaunch_gets_past_the_stop_gate_for_an_ended_agent
-test_herdr_busy_agent_is_still_alive
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

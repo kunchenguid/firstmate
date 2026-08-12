@@ -10,9 +10,9 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, the generated skill map, captain preferences, optional shared captain preferences, learnings, backlog, recurring routines, briefs, and scout reports.
-`state/` holds runtime (volatile) records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, routines check state, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-`config/` holds local gitignored operating choices and generated per-home skill-composition overlays, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -24,18 +24,6 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
-## Recurring routine
-
-Locked primary bootstrap creates a private mode-`0600` `data/routines.md` when it is absent, preserves an existing regular registry, and installs `state/routine-scan.check.sh` as a registered single-link mode-`0700` custom check.
-The initial registry contains no active routines and two commented generic examples; edit the private registry to add the routines the captain wants to run.
-Edit that local registry to change routines; the header of [`bin/fm-routine-scan.sh`](../bin/fm-routine-scan.sh) is the single owner of the exact record schema, accepted cadence, diagnostics, due-output shape, and `state/.routine-fired` mechanics.
-The scanner captures one local date per run, records acknowledged due emissions across restarts so an unchanged item does not fire twice on that date, and produces no due output when nothing is due.
-The deferred watcher check retains due records in `state/.routine-pending` and promotes them into fire state only after complete due output is durably published to the wake rail; queue acknowledgement finalizes that same boundary before the wake is consumed, so an interrupted or failed emission remains available without firing an already handled wake again after restart.
-Malformed or duplicate registry rows are ignored with diagnostics in the authenticated check output, which makes them actionable wake-visible errors while valid rows continue to be evaluated.
-Because the check persists, a routine-only primary home still requires the ordinary watcher supervision cycle, and each invocation remains bounded by `FM_CHECK_TIMEOUT`.
-Normal locked bootstrap provisions or repairs the wrapper and registration automatically; [`bin/fm-routine-setup.sh`](../bin/fm-routine-setup.sh) provides the same idempotent local setup without replacing an existing registry.
-The recurring routine is entirely local and has no Google Calendar or `gws` integration, UI, daemon, per-item checks, outbound communication, credentials handling, or automatic agent dispatch; any calendar remains a separate human-facing mirror.
-
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
@@ -43,11 +31,6 @@ The only values it writes are `on` and `off`, each followed by one newline; an a
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
-
-## Skill map and composition (data/skill-map.md / config/skill-compose/)
-
-`data/skill-map.md` is the generated private discovery registry, and `config/skill-compose/` holds generated per-home composition overlays.
-[`docs/skill-system.md`](skill-system.md) owns discovery sources, refresh behavior, the operator workflow, supported load points, and the one-canonical-copy symlink rule; the producing script headers and `--help` output own exact formats and flags.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

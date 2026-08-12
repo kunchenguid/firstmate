@@ -409,12 +409,14 @@ test_web_ship_brief_requires_visual_verification() {
     || fail "web ship brief missing its machine-readable visual gate contract"
   assert_grep "custom production domain" "$web" \
     "web ship brief missing custom production domain verification"
-  assert_grep "fresh-page visual verification against the real custom production domain with the existing chrome-devtools-axi tool" "$web" \
-    "web ship brief missing fresh-page chrome-devtools verification"
+  assert_grep "fresh-browser visual verification against the real custom production domain with the existing chrome-devtools-axi tool" "$web" \
+    "web ship brief missing fresh-browser chrome-devtools verification"
   assert_grep 'chrome-devtools-axi open <custom-production-domain>' "$web" \
     "web ship brief missing the chrome-devtools open command"
   assert_grep "distinguishing revision content" "$web" \
     "web ship brief missing distinguishing revision content"
+  assert_grep "concrete interaction on the deployed custom-domain page" "$web" \
+    "web ship brief missing deployed interaction evidence"
   assert_grep "Capture screenshot evidence" "$web" \
     "web ship brief missing screenshot evidence"
   assert_grep "HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as insufficient" "$web" \

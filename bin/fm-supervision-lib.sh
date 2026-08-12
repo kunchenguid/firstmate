@@ -3,9 +3,8 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists), a persistent routine check
-# (state/routine-scan.check.sh), or an X-mode relay poll (state/x-watch.check.sh),
-# and whether its watcher has a fresh liveness beacon
+# work (a state/<id>.meta exists) or an X-mode relay poll
+# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
@@ -28,9 +27,8 @@ fm_sup_stat_mtime() {
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
-#   FM_SUP_ROUTINES       count of installed persistent routine checks
-#   FM_SUP_NEEDED         true/false - in-flight work, a persistent routine check,
-#                         an X-mode relay poll, or a registered event source (a source is a wait on an
+#   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
+#                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
@@ -40,7 +38,6 @@ fm_sup_stat_mtime() {
 fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
   FM_SUP_IN_FLIGHT=0
-  FM_SUP_ROUTINES=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
@@ -55,9 +52,7 @@ fm_supervision_status() {
     [ -e "$source" ] || continue
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
-  [ -f "$state/routine-scan.check.sh" ] && FM_SUP_ROUTINES=1
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
-    || [ "$FM_SUP_ROUTINES" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then
     FM_SUP_NEEDED=true

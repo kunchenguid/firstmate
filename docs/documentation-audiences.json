@@ -289,10 +289,6 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/skill-system.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/subagent-guard.md",
       "audience": "maintainer-architecture"
     },

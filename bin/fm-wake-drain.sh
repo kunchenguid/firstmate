@@ -77,38 +77,6 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
-# A deferred routine becomes fired only while its durable wake is still queued.
-# If the watcher stops after appending and before its normal acknowledgement,
-# this recovery path completes the promotion before consuming the wake. A
-# failed promotion leaves the queue untouched for the next handling turn.
-routine_wake_acknowledge_queued() {
-  local cutoff=$1 epoch seq kind key payload generation
-  while IFS=$'\t' read -r epoch seq kind key payload; do
-    case "$seq" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    [ "$seq" -le "$cutoff" ] || continue
-    case "$key" in
-      */routine-scan.check.sh:routine-generation:*|routine-scan.check.sh:routine-generation:*)
-        generation=${key##*:}
-        case "$generation" in
-          ''|*[!0-9]*) continue ;;
-        esac
-        ;;
-      *) continue ;;
-    esac
-    case "$payload" in
-      *'routine-due: '*) ;;
-      *) continue ;;
-    esac
-    FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-      FM_ROUTINE_WAKE_QUEUE_LOCK_HELD=1 \
-      "$SCRIPT_DIR/fm-routine-scan.sh" --ack --generation "$generation" >/dev/null 2>&1 \
-      || { echo 'wake drain: routine fire state acknowledgement failed' >&2; return 1; }
-  done < "$FM_WAKE_QUEUE"
-  return 0
-}
-
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -194,7 +162,6 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=true
-  routine_wake_acknowledge_queued "$ACK_THROUGH" || exit 1
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
   awk -F '\t' -v cutoff="$ACK_THROUGH" '

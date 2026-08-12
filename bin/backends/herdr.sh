@@ -1921,50 +1921,18 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
-# fm_backend_herdr_pane_agent_done_idle: succeed only when Herdr's one
-# authoritative agent report says both agent_status=done and state=idle.
-fm_backend_herdr_pane_agent_done_idle() {  # <session> <pane_id>
-  local out
-  out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
-  printf '%s' "$out" | jq -e \
-    '.result.agent.agent_status == "done" and .result.agent.state == "idle"' \
-    >/dev/null 2>&1
-}
-
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
-#
-# One registered-agent case is still `dead`: a hook-authoritative `done` agent
-# whose pane provably holds nothing but a lone idle shell has ENDED - the agent
-# process exited to its shell and only herdr's terminal registration outlived
-# it. Reading that as `alive` wedged the whole control plane, because
-# bin/fm-control.sh could then neither exit nor relaunch the task (it typed the
-# exit command into a bare shell and waited out FM_CONTROL_EXIT_WAIT for a
-# transition that could never happen). Both signals are required and both are
-# authoritative - the hook-reported done+idle state AND the idle-shell proof
-# that owns "no foreground agent process" - so a merely idle-LOOKING pane, a
-# non-idle done state, or a `done` turn on a harness still sitting in its own
-# TUI stays `alive`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
-    live)
-      # Done+idle+bare-shell is authoritative STOPPED for any agent identity.
-      if fm_backend_herdr_pane_agent_done_idle \
-             "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        && fm_backend_herdr_pane_idle_shell_pid \
-             "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null; then
-        printf 'dead'
-      else
-        printf 'alive'
-      fi
-      ;;
+    live) printf 'alive' ;;
     *) printf 'unreadable' ;;
   esac
 }

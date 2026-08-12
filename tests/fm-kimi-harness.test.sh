@@ -216,28 +216,6 @@ test_kimi_launch_then_send_is_verified() {
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
 }
 
-test_kimi_skills_refusal_precedes_global_hook_install() {
-  local id rec out rc before
-  id="kimi-skills-refusal-z17-$$"
-  rec=$(make_spawn_case skills-refusal "$id")
-  read_spawn_record "$rec"
-  before="$CASE_DIR/config.before"
-  cp "$HOME_DIR/.kimi-code/config.toml" "$before"
-
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --skills extra)
-  rc=$?
-  expect_code 1 "$rc" "Kimi --skills should be refused"
-  assert_contains "$out" "harness 'kimi' has no verified composition load point" \
-    "Kimi --skills refusal did not explain the unsupported load point"
-  cmp -s "$before" "$HOME_DIR/.kimi-code/config.toml" \
-    || fail "Kimi --skills refusal mutated the global Kimi config"
-  assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.sh" \
-    "Kimi --skills refusal installed the global turn-end hook"
-  assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d" \
-    "Kimi --skills refusal created the global turn-end registry"
-  pass "fm-spawn: Kimi --skills refuses before global hook preparation"
-}
-
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once stripped count
   home="$TMP_ROOT/config-surgery"
@@ -684,7 +662,6 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
-test_kimi_skills_refusal_precedes_global_hook_install
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token
