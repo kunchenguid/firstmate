@@ -650,6 +650,10 @@ test_omp_extension_reloads_and_reconciles_persisted_run() {
   run_token=$(cat "$state/$id.omp-session-run")
   started_at=$(printf '%s\n' "$run_token" | awk -F. '{ print $(NF - 1) }')
   rm -f "$state/$id.turn-ended"
+  out=$(EVENT_TIMESTAMP=$((started_at + 1)) drive_omp_ext "$ext" timestamped-agent-end-continuation "$state" "$id") \
+    || fail "timestamped reload continuation drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a correlated continuation must keep the persisted run busy, got '$out'"
   out=$(EVENT_TIMESTAMP=$((started_at + 1)) drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
     || fail "timestamped reload agent_end drive failed: $out"
   out=$(classify omp "$id" "$state")
@@ -689,11 +693,199 @@ test_omp_extension_reloads_and_reconciles_persisted_run() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy omp-ext" ] || fail "conflicting persisted stop evidence must remain busy, got '$out'"
   printf '%s\n' pending > "$state/$id.omp-session-stop"
+  out=$(EVENT_TIMESTAMP=$((fresh_started_at + 1)) \
+    drive_omp_ext "$ext" timestamped-agent-end-continuation "$state" "$id") \
+    || fail "fresh correlated continuation drive failed: $out"
   out=$(EVENT_TIMESTAMP=$((fresh_started_at + 1)) drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
     || fail "fresh timestamped reload shutdown drive failed: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "a fresh persisted run must settle after reload, got '$out'"
   pass "omp extension reconciles persisted runs across reloads with timestamp and ambiguity guards"
+}
+
+test_omp_extension_rejects_unproven_timestamp_after_reload() {
+  local rec id=busy-omp-unproven-timestamp out state ext run_token started_at
+  rec=$(make_spawn_case omp-unproven-timestamp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "unproven timestamp agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  started_at=$(printf '%s\n' "$run_token" | awk -F. '{ print $(NF - 1) }')
+  rm -f "$state/$id.turn-ended"
+  out=$(EVENT_TIMESTAMP=$((started_at + 1)) drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
+    || fail "unproven timestamp terminal drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "an in-range but unproven reload timestamp settled the run, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "an unproven reload timestamp published turn-end evidence"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "uncorrelated tokenless terminal drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a tokenless terminal should still settle the unique recovered run, got '$out'"
+  pass "omp rejects in-range but unproven timestamp-only reload settlement"
+}
+
+test_omp_extension_adopts_pending_run_before_new_start() {
+  local rec id=busy-omp-reload-new-start out state ext first_token second_token
+  rec=$(make_spawn_case omp-reload-new-start omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp new-start recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "new-start first agent_start drive failed: $out"
+  first_token=$(cat "$state/$id.omp-session-run")
+  out=$(drive_omp_ext "$ext" agent-start) || fail "new-start reloaded agent_start drive failed: $out"
+  second_token=$(cat "$state/$id.omp-session-run")
+  [ "$first_token" != "$second_token" ] || fail "new-start recovery did not rotate a fresh run"
+  out=$(EVENT_TOKEN="$second_token" drive_omp_ext "$ext" explicit-session-shutdown "$state" "$id") \
+    || fail "new-start explicit current settlement failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "settling a fresh run must preserve the reloaded sibling, got '$out'"
+  [ "$(cat "$state/$id.omp-session-run")" = "$first_token" ] \
+    || fail "settling a fresh run discarded the reloaded sibling pointer"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "new-start surviving run settlement failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "the reloaded sibling did not settle after the fresh run, got '$out'"
+  pass "omp reload adopts pending runs before rotating a fresh run"
+}
+
+test_omp_extension_recovers_partial_persistence() {
+  local rec id=busy-omp-partial out state ext run_token evidence_dir first_token second_token
+  rec=$(make_spawn_case omp-partial omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "partial marker agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  evidence_dir="$state/$id.omp-session-evidence"
+  rm -rf "$evidence_dir"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "missing evidence recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a run marker without evidence was not recovered, got '$out'"
+  [ -f "$evidence_dir/$run_token" ] || fail "recovery did not materialize missing run evidence"
+
+  rec=$(make_spawn_case omp-partial-stop omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp stop-marker spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "stop-marker agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  printf '%s\n' "$run_token" > "$state/$id.omp-session-stop"
+  rm -rf "$state/$id.omp-session-evidence"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "stop-marker recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a stop marker before evidence was not recovered, got '$out'"
+
+  rec=$(make_spawn_case omp-partial-pointer omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp pointer-recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "pointer-recovery first agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  out=$(drive_omp_ext "$ext" session-stop) || fail "pointer-recovery first session_stop drive failed: $out"
+  first_token="$run_token"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "pointer-recovery second agent_start drive failed: $out"
+  second_token=$(cat "$state/$id.omp-session-run")
+  [ "$first_token" != "$second_token" ] || fail "pointer-recovery setup did not create a new run"
+  printf '%s\n' "$first_token" > "$state/$id.omp-session-stop"
+  rm -f "$state/$id.omp-session-evidence/$second_token"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "pointer-before-evidence recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a new run pointer with stale stop evidence was not recovered, got '$out'"
+  [ "$(cat "$state/$id.omp-session-stop")" = pending ] \
+    || fail "pointer recovery did not repair the stale stop marker"
+
+  rec=$(make_spawn_case omp-partial-evidence-first omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp evidence-first recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "evidence-first agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  rm -f "$state/$id.omp-session-run" "$state/$id.omp-session-stop"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "evidence-first recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a pending evidence record without run markers was not recovered, got '$out'"
+  [ -f "$state/$id.omp-session-evidence/$run_token" ] \
+    || fail "evidence-first recovery lost the durable run record"
+
+  rec=$(make_spawn_case omp-partial-stop-publish omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp publication-recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "publication agent_start drive failed: $out"
+  out=$(drive_omp_ext "$ext" session-stop) || fail "publication session_stop drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  rm -f "$state/$id.turn-ended"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
+    --run-token "$run_token" --source omp-ext --event crash-replay >/dev/null \
+    || fail "could not recreate busy state before publication recovery"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "busy publication recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "stopped evidence did not recover idle publication, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "stopped evidence did not recover turn-end publication"
+
+  rec=$(make_spawn_case omp-partial-turnend omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp turn-end-recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "turn-end agent_start drive failed: $out"
+  out=$(drive_omp_ext "$ext" session-stop) || fail "turn-end session_stop drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "idle turn-end recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "idle publication recovery changed busy state, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "idle publication recovery did not restore turn-end evidence"
+  pass "omp extension recovers partial run, stop, idle, and turn-end persistence"
+}
+
+test_omp_extension_ignores_only_own_evidence_temps() {
+  local rec id=busy-omp-evidence-temp out state ext run_token evidence_dir
+  rec=$(make_spawn_case omp-evidence-temp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp evidence-temp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "evidence-temp agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  evidence_dir="$state/$id.omp-session-evidence"
+  printf '%s\n' "$run_token 1 1 0" > "$evidence_dir/$run_token.123.1.tmp"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "owned evidence temp recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "the extension-owned evidence temp blocked recovery, got '$out'"
+  [ ! -e "$evidence_dir/$run_token.123.1.tmp" ] || fail "the extension-owned evidence temp was not cleaned"
+
+  rec=$(make_spawn_case omp-foreign-evidence-temp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp foreign-temp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "foreign-temp agent_start drive failed: $out"
+  evidence_dir="$state/$id.omp-session-evidence"
+  printf '%s\n' malformed > "$evidence_dir/foreign.123.1.tmp"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "foreign evidence temp drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a foreign evidence temp was accepted, got '$out'"
+  [ -e "$evidence_dir/foreign.123.1.tmp" ] || fail "a foreign evidence temp was silently removed"
+  pass "omp reload ignores only extension-owned evidence temporary files"
 }
 
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps() {
@@ -738,7 +930,7 @@ test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps() {
   [ "$out" = "busy omp-ext" ] \
     || fail "a prior-run timestamp must not settle the persisted run, got '$out'"
 
-  out=$(EVENT_TIMESTAMP=$((started_at + 6)) \
+  out=$(EVENT_TIMESTAMP=$((started_at + 5)) \
     drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
     || fail "valid timestamp drive failed: $out"
   out=$(classify omp "$id" "$state")
@@ -968,6 +1160,10 @@ test_omp_extension_scopes_evidence_per_run
 test_omp_extension_rejects_settled_sibling_after_reload
 test_omp_extension_rejects_overlapping_runs_after_reload
 test_omp_extension_reloads_and_reconciles_persisted_run
+test_omp_extension_rejects_unproven_timestamp_after_reload
+test_omp_extension_adopts_pending_run_before_new_start
+test_omp_extension_recovers_partial_persistence
+test_omp_extension_ignores_only_own_evidence_temps
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected

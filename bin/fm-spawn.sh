@@ -678,7 +678,6 @@ CONFIG_INHERIT_LOCK_HELD=0
 RAW_LAUNCH=0
 RAW_LAUNCH_OWNER=
 RAW_OWNER_REQUIRED=0
-RAW_LAUNCH_SANITIZE=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -1283,11 +1282,7 @@ if [ "$RAW_LAUNCH" -eq 1 ]; then
   if raw_launch_uses_omp "$LAUNCH"; then
     RAW_OWNER_REQUIRED=1
     RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
-    RAW_LAUNCH_SANITIZE=1
   fi
-  case "$LAUNCH" in
-    *" && "*) RAW_LAUNCH_SANITIZE=1 ;;
-  esac
 fi
 
 # FM_PI_HARNESS is the identity the WORKER reports back through
@@ -1331,14 +1326,6 @@ case "$HARNESS" in
     ;;
 esac
 fi
-# A raw pi-signed escape hatch remains unverified, but its explicit executable
-# identity must still win over an inherited OMPCODE marker when the worker
-# reports back through fm-harness.sh. Plain raw pi intentionally stays wholly
-# unmarked so it retains the generic unverified identity behavior.
-if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = pi-signed ]; then
-  LAUNCH="unset OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_PI_HARNESS=pi-signed; $LAUNCH"
-fi
-
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -2587,11 +2574,13 @@ EOF
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
+const TURNEND = "$TURNEND";
+const RUN_TOKEN_PREFIX = "$BUSY_GEN" + ".";
 let runToken = "";
 let idlePublishedToken = "";
 let runSequence = 0;
@@ -2602,6 +2591,9 @@ const runRecords: Array<{
   lastEventAt: number;
   stoppedAt: number;
   active: boolean;
+  recovered: boolean;
+  finalizing: boolean;
+  idlePending: boolean;
 }> = [];
 const trimRunHistory = () => {
   while (runRecords.length > 64) {
@@ -2629,6 +2621,35 @@ const ensureEvidenceDirectory = () => {
   }
 };
 const evidencePath = (token: string) => SESSION_EVIDENCE_DIR + "/" + token;
+const readOptional = (path: string) => {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as any)?.code === "ENOENT") return "";
+    throw error;
+  }
+};
+const parseRunToken = (token: string) => {
+  if (typeof token !== "string" || !token.startsWith(RUN_TOKEN_PREFIX)) return null;
+  const fields = token.slice(RUN_TOKEN_PREFIX.length).split(".");
+  if (fields.length !== 3 || fields.some((field) => !/^[0-9]+$/.test(field))) return null;
+  const processId = Number(fields[0]);
+  const startedAt = Number(fields[1]);
+  const sequence = Number(fields[2]);
+  if (!Number.isSafeInteger(processId) || processId <= 0) return null;
+  if (!Number.isSafeInteger(startedAt) || startedAt <= 0) return null;
+  if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
+  return { processId, startedAt, sequence };
+};
+const parseAtomicTempName = (name: string) => {
+  const match = /^(.*)\.([0-9]+)\.([0-9]+)\.tmp$/.exec(name);
+  if (!match || !parseRunToken(match[1])) return null;
+  const processId = Number(match[2]);
+  const sequence = Number(match[3]);
+  if (!Number.isSafeInteger(processId) || processId <= 0) return null;
+  if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
+  return match[1];
+};
 const writeRunEvidence = (record: {
   token: string;
   startedAt: number;
@@ -2649,8 +2670,10 @@ const parseRunEvidence = (line: string) => {
   const startedAt = Number(startedAtText);
   const lastEventAt = Number(lastEventAtText);
   const stoppedAt = Number(stoppedAtText);
-  if (!token || !/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
+  const tokenData = parseRunToken(token);
+  if (!tokenData) return null;
   if (!Number.isSafeInteger(startedAt) || startedAt <= 0) return null;
+  if (startedAt !== tokenData.startedAt) return null;
   if (!Number.isSafeInteger(lastEventAt) || lastEventAt < startedAt) return null;
   if (!Number.isSafeInteger(stoppedAt) || stoppedAt < 0) return null;
   if (stoppedAt > 0 && stoppedAt < lastEventAt) return null;
@@ -2674,14 +2697,17 @@ const touchTurnEnd = (token: string) =>
       resolve();
       return;
     }
-    execFile("touch", ["$TURNEND"], () => resolve());
+    execFile("touch", [TURNEND], () => resolve());
   });
 const rotateRun = () => {
   const startedAt = Date.now();
   const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
   runToken = token;
   idlePublishedToken = "";
-  const record = { token, startedAt, lastEventAt: startedAt, stoppedAt: 0, active: true };
+  const record = {
+    token, startedAt, lastEventAt: startedAt, stoppedAt: 0, active: true,
+    recovered: false, finalizing: false, idlePending: true,
+  };
   runRecords.push(record);
   trimRunHistory();
   atomicWrite(SESSION_RUN, token + "\\n");
@@ -2691,24 +2717,83 @@ const rotateRun = () => {
 };
 const persistedRuns = () => {
   try {
-    const runLines = readFileSync(SESSION_RUN, "utf8").split(/\r?\n/).filter(Boolean);
-    const stop = readFileSync(SESSION_STOP, "utf8").trim();
+    const runLines = readOptional(SESSION_RUN).split(/\r?\n/).filter(Boolean);
+    const stop = readOptional(SESSION_STOP).trim();
     const busyFields = new Set(readFileSync("$STATE_REAL/$ID.busy-state", "utf8").trim().split(/\s+/));
-    if (runLines.length !== 1 || stop !== "pending") return null;
-    if (!busyFields.has("gen=$BUSY_GEN") || !busyFields.has("state=busy")) return null;
-    const token = runLines[0];
-    if (!/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
-    const pending = [];
-    for (const entry of readdirSync(SESSION_EVIDENCE_DIR, { withFileTypes: true })) {
-      if (!entry.isFile() || !/^[A-Za-z0-9._-]+$/.test(entry.name) || !entry.name.startsWith("$BUSY_GEN.")) {
-        return null;
-      }
-      const evidence = parseRunEvidence(readFileSync(evidencePath(entry.name), "utf8"));
-      if (!evidence || evidence.token !== entry.name) return null;
-      if (evidence.stoppedAt === 0) pending.push(evidence);
+    const busy = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=busy");
+    const idle = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=idle");
+    if (!busy && !idle) return null;
+    if (runLines.length > 1) return null;
+    let token = runLines[0] || "";
+    if (token && !parseRunToken(token)) return null;
+    if (stop !== "" && stop !== "pending" && !parseRunToken(stop)) return null;
+    const evidence = new Map<string, any>();
+    const materialize: any[] = [];
+    let repairPendingStop = false;
+    let pointerRepair = runLines.length === 0;
+    let entries: any[] = [];
+    try {
+      entries = readdirSync(SESSION_EVIDENCE_DIR, { withFileTypes: true });
+    } catch (error) {
+      if ((error as any)?.code !== "ENOENT") return null;
     }
-    if (!pending.length || !pending.some((record) => record.token === token)) return null;
-    return { token, pending };
+    for (const entry of entries) {
+      if (!entry.isFile()) return null;
+      const tempToken = parseAtomicTempName(entry.name);
+      if (tempToken) {
+        try { unlinkSync(evidencePath(entry.name)); } catch { return null; }
+        continue;
+      }
+      if (entry.name.endsWith(".tmp") || !parseRunToken(entry.name)) return null;
+      const record = parseRunEvidence(readFileSync(evidencePath(entry.name), "utf8"));
+      if (!record || record.token !== entry.name) return null;
+      evidence.set(record.token, record);
+    }
+    const pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
+    if (!token && stop !== "" && stop !== "pending") {
+      const stopRecord = evidence.get(stop);
+      if (!stopRecord) return null;
+      if (stopRecord?.stoppedAt === 0) token = stop;
+      else if (pendingEvidence.length > 0) token = pendingEvidence[0].token;
+      else token = stop;
+    }
+    if (!token && pendingEvidence.length > 0) {
+      token = pendingEvidence[0].token;
+    }
+    if (!token) return null;
+    if (!evidence.has(token)) {
+      const tokenData = parseRunToken(token);
+      if (!tokenData) return null;
+      const record = { token, startedAt: tokenData.startedAt, lastEventAt: tokenData.startedAt, stoppedAt: 0 };
+      evidence.set(token, record);
+      materialize.push(record);
+    }
+    if (stop !== "" && stop !== "pending" && stop !== token) {
+      const stoppedSibling = evidence.get(stop);
+      if (!stoppedSibling || stoppedSibling.stoppedAt === 0) return null;
+      repairPendingStop = true;
+    }
+    const records = [...evidence.values()];
+    const pending = records.filter((record) => record.stoppedAt === 0);
+    const current = evidence.get(token);
+    if (!current) return null;
+    if (repairPendingStop && current.stoppedAt > 0) return null;
+    if (current.stoppedAt === 0) {
+      if ((!busy && !idle) || !pending.some((record) => record.token === token)) return null;
+      return {
+        token, pending, finalizing: [], materialize,
+        pointerMissing: pointerRepair,
+        stopMissing: stop === "" || repairPendingStop,
+        needsBusy: !busy,
+      };
+    }
+    if (pending.length > 0) return null;
+    if (!busy && !idle) return null;
+    return {
+      token, pending: [],
+      finalizing: [{ ...current, idlePending: busy }], materialize,
+      pointerMissing: pointerRepair, stopMissing: stop === "", needsBusy: false,
+    };
   } catch {
     return null;
   }
@@ -2717,10 +2802,27 @@ const adoptCurrentRun = () => {
   if (runToken) return runToken;
   const persisted = persistedRuns();
   if (!persisted) return "";
+  try {
+    for (const record of persisted.materialize) writeRunEvidence(record);
+    if (persisted.pointerMissing) atomicWrite(SESSION_RUN, persisted.token + "\n");
+    if (persisted.finalizing.length > 0) atomicWrite(SESSION_STOP, persisted.token + "\n");
+    else if (persisted.stopMissing) atomicWrite(SESSION_STOP, "pending\n");
+    if (persisted.needsBusy) {
+      execFileSync("$FM_ROOT/bin/fm-busy-event.sh", [
+        "apply", "$STATE_REAL", "$ID", "busy", "--current-gen",
+        "--run-token", persisted.token, "--source", "omp-ext", "--event", "recover-busy",
+      ], { stdio: "ignore" });
+    }
+  } catch {
+    return "";
+  }
   runToken = persisted.token;
   idlePublishedToken = "";
   for (const record of persisted.pending) {
-    runRecords.push({ ...record, active: true });
+    runRecords.push({ ...record, active: true, recovered: true, finalizing: false, idlePending: true });
+  }
+  for (const record of persisted.finalizing) {
+    runRecords.push({ ...record, active: true, recovered: true, finalizing: true });
   }
   trimRunHistory();
   return runToken;
@@ -2749,8 +2851,13 @@ const timestampMatchesRun = (record: {
   startedAt: number;
   lastEventAt: number;
   stoppedAt: number;
-}, timestamp: number | undefined) => {
+  recovered?: boolean;
+}, timestamp: number | undefined, tokenless = false, allowRecoveredAdvance = false) => {
   if (timestamp === undefined) return true;
+  if (record.recovered && tokenless && !allowRecoveredAdvance) {
+    if (record.stoppedAt > 0) return timestamp === record.stoppedAt;
+    return record.lastEventAt > record.startedAt && timestamp === record.lastEventAt;
+  }
   const upperBound = record.stoppedAt > 0 ? record.stoppedAt : Date.now();
   return record.startedAt > 0 && timestamp >= record.startedAt &&
     timestamp >= record.lastEventAt && timestamp <= upperBound;
@@ -2760,9 +2867,10 @@ const rememberRunTimestamp = (record: {
   startedAt: number;
   lastEventAt: number;
   stoppedAt: number;
+  recovered?: boolean;
 }, timestamp: number | undefined) => {
   if (timestamp === undefined) return true;
-  if (!timestampMatchesRun(record, timestamp)) return false;
+  if (!timestampMatchesRun({ ...record, recovered: false }, timestamp)) return false;
   record.lastEventAt = timestamp;
   writeRunEvidence(record);
   return true;
@@ -2779,23 +2887,23 @@ const advanceCurrentRun = () => {
   }
   return current;
 };
-const uniqueActiveCurrentRun = (timestamp?: number) => {
+const uniqueActiveCurrentRun = (timestamp?: number, allowRecoveredAdvance = false) => {
   if (!adoptCurrentRun()) return null;
   const active = runRecords.filter((record) => record.active);
   if (active.length !== 1) return null;
   const current = advanceCurrentRun();
-  return current && timestampMatchesRun(current, timestamp) ? current : null;
+  return current && timestampMatchesRun(current, timestamp, true, allowRecoveredAdvance) ? current : null;
 };
-const eventRunToken = (event: any) => {
+const eventRunToken = (event: any, allowRecoveredAdvance = false) => {
   const timestamp = eventTimestamp(event);
   adoptCurrentRun();
   const explicit = explicitRunToken(event);
   if (explicit) {
     const record = runRecords.find((candidate) => candidate.token === explicit);
-    return record?.active && timestampMatchesRun(record, timestamp) ? explicit : "";
+    return record?.active && timestampMatchesRun(record, timestamp, false, allowRecoveredAdvance) ? explicit : "";
   }
-  const active = uniqueActiveCurrentRun(timestamp);
-  return active && timestampMatchesRun(active, timestamp) ? active.token : "";
+  const active = uniqueActiveCurrentRun(timestamp, allowRecoveredAdvance);
+  return active && timestampMatchesRun(active, timestamp, true, allowRecoveredAdvance) ? active.token : "";
 };
 const resolveUniqueActiveRunToken = () => {
   return uniqueActiveCurrentRun()?.token || "";
@@ -2806,7 +2914,7 @@ const resolveSessionShutdownToken = (event: any) => {
   return resolveUniqueActiveRunToken();
 };
 const resolveRunToken = (event: any) => {
-  const token = eventRunToken(event);
+  const token = eventRunToken(event, event?.willContinue === true);
   if (token || eventTimestamp(event) !== undefined || explicitRunToken(event)) return token;
   return resolveUniqueActiveRunToken();
 };
@@ -2815,9 +2923,17 @@ const settleRun = async (token: string, event: string, timestamp?: number) => {
   const record = runRecords.find((candidate) => candidate.token === token);
   if (!record?.active) return;
   if (!rememberRunTimestamp(record, timestamp)) return;
-  record.stoppedAt = timestamp === undefined ? Math.max(Date.now(), record.lastEventAt) : timestamp;
-  writeRunEvidence(record);
-  record.active = false;
+  if (record.finalizing) {
+    record.active = false;
+    if (!record.idlePending) {
+      await touchTurnEnd(token);
+      return;
+    }
+  } else {
+    record.stoppedAt = timestamp === undefined ? Math.max(Date.now(), record.lastEventAt) : timestamp;
+    writeRunEvidence(record);
+    record.active = false;
+  }
   if (runRecords.some((candidate) => candidate.active)) {
     advanceCurrentRun();
     return;
@@ -2829,6 +2945,7 @@ const settleRun = async (token: string, event: string, timestamp?: number) => {
 };
 export default function (omp: any) {
   omp.on("agent_start", () => {
+    adoptCurrentRun();
     const token = rotateRun();
     return busyEvent(token, "busy", "agent-start");
   });
@@ -2839,6 +2956,7 @@ export default function (omp: any) {
     if (!record?.active) return;
     if (!timestampMatchesRun(record, timestamp)) return;
     if (token === runToken && !runRecords.some((candidate) => candidate.active && candidate.token !== token)) {
+      if (!rememberRunTimestamp(record, timestamp)) return;
       atomicWrite(SESSION_STOP, token + "\\n");
     }
     await settleRun(token, "session-stop", timestamp);
@@ -3191,10 +3309,10 @@ fi
 if [ "$RAW_LAUNCH" -eq 1 ]; then
   if [ -n "$RAW_LAUNCH_OWNER" ]; then
     LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch FM_RAW_LAUNCH_OWNER='$RAW_LAUNCH_OWNER'; $LAUNCH"
-  elif [ "$RAW_LAUNCH_SANITIZE" -eq 1 ]; then
-    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT FM_RAW_LAUNCH_OWNER; export FM_HARNESS_UNVERIFIED=raw-launch; $LAUNCH"
+  elif [ "$HARNESS" = pi-signed ]; then
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT FM_RAW_LAUNCH_OWNER; export PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed; $LAUNCH"
   else
-    :
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT FM_RAW_LAUNCH_OWNER; export FM_HARNESS_UNVERIFIED=raw-launch; $LAUNCH"
   fi
 else
   if [ -n "${FM_HARNESS_UNVERIFIED:-}" ] || [ -n "${FM_RAW_LAUNCH_OWNER:-}" ]; then

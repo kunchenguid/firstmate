@@ -415,7 +415,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" "raw launch metadata did not retain its raw-launch provenance"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  assert_contains "$launch" "custom-agent --flag" "raw launch command payload changed"
+  assert_contains "$launch" "export FM_HARNESS_UNVERIFIED=raw-launch" \
+    "raw launch did not retain its unverified boundary"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -908,6 +910,34 @@ test_raw_launch_mentions_do_not_receive_omp_owner() {
   pass "raw launch mentions stay generic without an OMP ownership marker"
 }
 
+test_generic_raw_launch_sanitizes_inherited_verified_markers() {
+  local rec id out status launch observed
+  id=profile-raw-inherited-markers-z8pa
+  rec=$(make_spawn_case raw-inherited-markers claude "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/raw-marker-probe" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  "${FM_PRIMARY_HARNESS-unset}" "${OMPCODE-unset}" "${CLAUDECODE-unset}" \
+  "${PI_CODING_AGENT-unset}" "${FM_PI_HARNESS-unset}" "${GROK_AGENT-unset}" \
+  "${GROK_HOOK_EVENT-unset}" "${FM_RAW_LAUNCH_OWNER-unset}" \
+  "${FM_HARNESS_UNVERIFIED-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/raw-marker-probe"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$FAKEBIN_DIR/raw-marker-probe --probe")
+  status=$?
+  expect_code 0 "$status" "a generic raw marker probe should spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT FM_RAW_LAUNCH_OWNER" \
+    "generic raw launch did not clear inherited verified markers"
+  observed=$(FM_PRIMARY_HARNESS=omp OMPCODE=1 CLAUDECODE=1 PI_CODING_AGENT=true \
+    FM_PI_HARNESS=pi-signed GROK_AGENT=1 PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch")
+  [ "$observed" = "unset|unset|unset|unset|unset|unset|unset|unset|raw-launch" ] \
+    || fail "generic raw launch inherited verified identity markers: '$observed'"
+  pass "generic raw launches clear inherited verified identity markers"
+}
+
 test_raw_launch_marker_covers_process_tree_forms() {
   local rec id out status launch raw_omp script sub probe command expected_harness raw_owner
   local direct_id wrapped_id nested_id script_id stdin_id env_id cwd_id no_node_id
@@ -1188,6 +1218,7 @@ test_raw_launch_worker_identity_matches_its_recorded_harness
 test_raw_omp_launch_does_not_arm_unwired_semantic_busy
 test_raw_omp_dispatch_policy_is_structural
 test_raw_launch_mentions_do_not_receive_omp_owner
+test_generic_raw_launch_sanitizes_inherited_verified_markers
 test_raw_launch_marker_covers_process_tree_forms
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
