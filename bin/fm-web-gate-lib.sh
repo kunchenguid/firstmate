@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Shared sourced contract for website deployment completion evidence.
+# fm-brief.sh and fm-promote.sh write the canonical web gate into ship briefs,
+# while fm-spawn.sh validates its surface declaration and stamped gate before launch.
 
 fm_web_gate_contract() {
   printf '%s\n' 'Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot'
