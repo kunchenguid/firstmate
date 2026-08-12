@@ -90,11 +90,25 @@ esac
 [ ! -L "$PENDING" ] \
   || { routine_error "pending routine state is unavailable: $PENDING"; exit 1; }
 
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+
+routine_private_file_single_link() {
+  local path=$1
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(fm_pr_file_link_count "$path")" = 1 ]
+}
+
+if [ -e "$PENDING" ]; then
+  routine_private_file_single_link "$PENDING" \
+    || { routine_error "pending routine state is unavailable: $PENDING"; exit 1; }
+fi
+
 if [ "$ROUTINE_ACK" -eq 0 ]; then
   [ ! -L "$REGISTRY" ] \
     || { routine_error "registry is a symlink: $REGISTRY"; exit 1; }
   if [ -e "$REGISTRY" ]; then
-    [ -f "$REGISTRY" ] \
+    routine_private_file_single_link "$REGISTRY" \
       || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
   elif [ "$ROUTINE_DEFER_FIRE" -ne 1 ]; then
     exit 0
@@ -103,8 +117,6 @@ if [ "$ROUTINE_ACK" -eq 0 ]; then
     exit 1
   fi
 fi
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] \
   || { routine_error "state directory is unavailable: $STATE"; exit 1; }
 [ ! -L "$FIRED" ] \
@@ -428,7 +440,7 @@ DUE_LINES=()
 DUE_PENDING_LINES=()
 PENDING_FIRED_CLEANUP=0
 if [ "$ROUTINE_DEFER_FIRE" -eq 1 ] && [ -e "$PENDING" ]; then
-  [ -f "$PENDING" ] && [ ! -L "$PENDING" ] \
+  routine_private_file_single_link "$PENDING" \
     || { routine_error "pending routine state is unavailable: $PENDING"; exit 1; }
   while IFS='|' read -r pending_id pending_cadence pending_date pending_owner pending_action pending_generation pending_extra \
     || [ -n "${pending_id:-}${pending_cadence:-}${pending_date:-}${pending_owner:-}${pending_action:-}${pending_generation:-}${pending_extra:-}" ]; do
@@ -457,7 +469,7 @@ if [ -e "$REGISTRY" ]; then
     || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
   exec 8< "$REGISTRY" \
     || { routine_error "could not open routine registry: $REGISTRY"; exit 1; }
-  [ ! -L "$REGISTRY" ] \
+  routine_private_file_single_link "$REGISTRY" \
     || { routine_error "registry became a symlink: $REGISTRY"; exit 1; }
 else
   exec 8< /dev/null \

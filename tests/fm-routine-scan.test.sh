@@ -552,6 +552,7 @@ test_watcher_acknowledges_only_after_complete_scan() {
   fake_root="$TMP_ROOT/watch-ack-root"
   fakebin="$TMP_ROOT/watch-ack-fakebin"
   mkdir -p "$fake_root/bin" "$fakebin"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$fake_root/bin/fm-pr-lib.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$fake_root/bin/fm-timeout-lib.sh"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -763,6 +764,48 @@ test_hardlink_fired_state_cannot_suppress_due_routine() {
   esac
   pass "routine scanner rejects hardlinked fired state"
 }
+test_hardlink_registry_is_rejected_at_scan_boundary() {
+  local home outside out rc
+  home=$(make_home hardlink-registry)
+  outside="$TMP_ROOT/outside-hardlink-routines.md"
+  write_registry "$home" \
+    '- outside-item | daily | captain | should not run'
+  mv "$home/data/routines.md" "$outside"
+  ln "$outside" "$home/data/routines.md"
+  out=$(run_scan "$home" 2026-08-10 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the scanner accepted a hardlinked registry"
+  case "$out" in
+    *'routine-scan: registry is not a regular file:'*) ;;
+    *) fail "the hardlinked registry diagnostic was missing: $out" ;;
+  esac
+  case "$out" in
+    *'routine-due: outside-item'*) fail "the scanner consumed a hardlinked registry: $out" ;;
+  esac
+  pass "routine scanner rejects hardlinked registries"
+}
+test_hardlink_pending_is_rejected_before_recovery() {
+  local home check outside out rc
+  home=$(make_home hardlink-pending)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the hardlinked-pending fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- pending-item | daily | captain | recover safely'
+  FM_ROUTINE_DATE=2026-08-10 "$check" >/dev/null \
+    || fail "the pending fixture did not create pending state"
+  outside="$TMP_ROOT/outside-hardlink-pending"
+  mv "$home/state/.routine-pending" "$outside"
+  ln "$outside" "$home/state/.routine-pending"
+  out=$(FM_ROUTINE_DATE=2026-08-10 "$check" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the scanner accepted hardlinked pending state"
+  case "$out" in
+    *'routine-check-error: scanner exited 1'*) ;;
+    *) fail "the hardlinked pending state did not surface an actionable error: $out" ;
+  esac
+  pass "routine scanner rejects hardlinked pending state"
+}
 test_check_surfaces_registry_diagnostics() {
   local home check out
   home=$(make_home diagnostics)
@@ -818,4 +861,6 @@ test_ack_rejects_dangling_pending_symlink
 test_symlink_registry_is_rejected_at_scan_boundary
 test_symlink_fired_state_cannot_suppress_due_routine
 test_hardlink_fired_state_cannot_suppress_due_routine
+test_hardlink_registry_is_rejected_at_scan_boundary
+test_hardlink_pending_is_rejected_before_recovery
 test_check_surfaces_registry_diagnostics
