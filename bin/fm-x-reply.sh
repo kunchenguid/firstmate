@@ -331,6 +331,11 @@ esac
 # the follow-up path so the answer path and every dry-run stay network-free
 # (fm-x-lib.sh owns the resolution-order contract).
 ALLOW_RELAY=0
+DURABLE_CONTEXT=$(fmx_resolve_reply_context "$STATE" "$REQ" 0) || {
+  echo "fm-x-reply: failed to resolve durable request context" >&2
+  exit 1
+}
+DURABLE_AUDIENCE=$(printf '%s' "$DURABLE_CONTEXT" | jq -r '.reply_audience // "public"')
 if [ -n "${FMX_REPLY_PLATFORM:-}" ] && [ -n "${FMX_REPLY_MAX_CHARS:-}" ] && [ -n "$REPLY_AUDIENCE" ]; then
   REQ_PLATFORM=${FMX_REPLY_PLATFORM}
   REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS}
@@ -345,6 +350,9 @@ else
   REQ_PLATFORM=${FMX_REPLY_PLATFORM:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')}
   REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')}
   REPLY_AUDIENCE=${REPLY_AUDIENCE:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_audience // "public"')}
+fi
+if [ "$DURABLE_AUDIENCE" = private-trusted ]; then
+  REPLY_AUDIENCE=private-trusted
 fi
 case "$REPLY_AUDIENCE" in private-trusted) ;; *) REPLY_AUDIENCE=public ;; esac
 case "$REQ_PLATFORM" in

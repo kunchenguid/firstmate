@@ -1090,13 +1090,21 @@ test_reply_private_audience_transport_drift_refuses() {
 
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_RELAY_URL="https://relay.test" \
     FMX_REPLY_AUDIENCE=public "$ROOT/bin/fm-x-reply.sh" req-private-answer \
-    "Private answer." 2>"$err"); rc=$?
+    --reply-audience public "Private answer." 2>"$err"); rc=$?
   expect_code 1 "$rc" "private initial-answer drift exit"
   [ -z "$out" ] || fail "a private initial-answer refusal must echo nothing"
   assert_grep "private-trusted reply requires" "$err" \
     "a private initial-answer refusal must explain the disclosure guard"
   assert_absent "$home/state/x-outbox/req-private-answer.json" \
-    "a private initial answer must refuse public preview transport drift"
+    "an explicit public override must not downgrade a durable private answer"
+
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_RELAY_URL="http://127.0.0.1:8787" \
+    FMX_REPLY_AUDIENCE=private-trusted "$ROOT/bin/fm-x-reply.sh" req-private-answer \
+    --reply-audience public "Validated private answer." 2>"$err"); rc=$?
+  expect_code 0 "$rc" "validated private explicit-downgrade answer exit"
+  [ "$out" = req-private-answer ] || fail "a validated private answer must remain publishable"
+  [ "$(jq -r .text "$home/state/x-outbox/req-private-answer.json")" = "Validated private answer." ] \
+    || fail "validated private publication must preserve the answer"
 
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_RELAY_URL="https://relay.test" \
     FMX_REPLY_AUDIENCE=public "$ROOT/bin/fm-x-reply.sh" req-legacy-public \
