@@ -228,17 +228,26 @@ make_fake_ps_claude() {
 }
 
 make_fake_ps_harness() {
-  local fakebin=$1 harness=$2
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-set -u
+  local fakebin=$1 harness=$2 cursor_versions="$fakebin/cursor-install/cursor-agent/versions/2026.08.04-aaa8809"
+  case "$harness" in
+    cursor|cursor-alias)
+      # Cursor identity is the executable's own CLI probe plus the CURSOR_AGENT
+      # marker in the process environment, so the fixture needs a real
+      # probe-passing install and an `ps eww` environment that carries the marker.
+      fm_fake_cursor_alias_symlinked "$fakebin/cursor-install/bin" cursor-agent "$fakebin/cursor-install"
+      ln -sf "$cursor_versions/cursor-agent" "$cursor_versions/agent"
+      ;;
+  esac
+  printf '#!/usr/bin/env bash\nset -u\nCURSOR_VERSIONS=%q\n' "$cursor_versions" > "$fakebin/ps"
+  cat >> "$fakebin/ps" <<'SH'
 harness=${FM_FAKE_HARNESS:-claude}
+harness_path=/usr/local/bin/$harness
 # fm-harness.sh's ancestry matcher recognizes Cursor's verified executable name,
 # including its legacy agent alias, or MainThread with that path.
-[ "$harness" = cursor ] && harness=cursor-agent
+[ "$harness" = cursor ] && { harness=cursor-agent; harness_path=$CURSOR_VERSIONS/cursor-agent; }
 # The legacy alias as Cursor actually installs it: the generic `agent` name
 # inside Cursor's own versioned install tree, which is what identifies it.
-[ "$harness" = cursor-alias ] && harness=cursor-agent/versions/2026.08.04-aaa8809/agent
+[ "$harness" = cursor-alias ] && { harness=cursor-agent/versions/2026.08.04-aaa8809/agent; harness_path=$CURSOR_VERSIONS/agent; }
 pid=
 previous=
 for argument in "$@"; do
@@ -246,10 +255,22 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  *"command="*)
+    # `ps eww -p <pid> -o command=`: the process environment, as the Cursor
+    # identity rules read it when /proc is unavailable.
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
+      case "$harness" in
+        cursor-agent*) printf '%s CURSOR_AGENT=1\n' "$harness" ;;
+        *) printf '%s\n' "$harness" ;;
+      esac
+    fi
+    exit 0
+    ;;
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
-      printf '/usr/local/bin/%s\n' "$harness"
+      printf '%s\n' "$harness_path"
     else
       printf '/bin/bash\n'
     fi
@@ -2326,7 +2347,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_harness "$fakebin" cursor
 
-  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_HARNESS=cursor FM_PROC_ROOT_OVERRIDE="$root/no-proc" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" "cursor supervision block missing"
   assert_contains "$out" "Mode: Cursor stop-hook-owned supervision." "cursor snippet missing from session start"
@@ -2349,7 +2370,7 @@ EOF
     jq '.hooks.stop += [{"command":"echo extra-stop","timeout":600,"loop_limit":null}] | .hooks.preToolUse += [{"matcher":"Shell","command":"echo extra-pretool","timeout":10}]' \
       "$ROOT/.cursor/hooks.json" > "$root/.cursor/hooks.json"
 
-    out=$(FM_FAKE_HARNESS="$fake_harness" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+    out=$(FM_FAKE_HARNESS="$fake_harness" FM_PROC_ROOT_OVERRIDE="$root/no-proc" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
     assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" \
       "$fake_harness supervision block missing"
@@ -2369,11 +2390,11 @@ EOF
   make_fake_ps_harness "$fakebin" cursor
   mkdir -p "$root/.cursor"
   printf '%s\n' '{"version":1,"hooks":{"stop":[],"preToolUse":[]}}' > "$root/.cursor/hooks.json"
-  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_HARNESS=cursor FM_PROC_ROOT_OVERRIDE="$root/no-proc" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
     "empty Cursor hook arrays must produce a registration diagnostic"
   printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"echo fm-turnend-guard-cursor.sh","timeout":600,"loop_limit":null}],"preToolUse":[{"matcher":"Shell","command":"echo fm-arm-pretool-check.sh --cursor","timeout":1}]}}' > "$root/.cursor/hooks.json"
-  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_HARNESS=cursor FM_PROC_ROOT_OVERRIDE="$root/no-proc" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
     "wrong Cursor hook commands or matcher must produce a registration diagnostic"
   pass "session start rejects empty and structurally wrong Cursor hooks"

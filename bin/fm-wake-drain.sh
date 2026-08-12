@@ -217,6 +217,12 @@ trap 'exit 143' TERM
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 
+# Single owner of the hook-owned park interruption marker (written by
+# bin/fm-watch-arm.sh's signal traps under FM_WATCH_ARM_INTERRUPT_MARKER): this
+# drain IS the reconciliation the marker demands, so clear it here rather than
+# in any adapter that merely reads it.
+rm -f -- "$STATE/.hook-arm-interrupted" 2>/dev/null || true
+
 if [ -n "$ACK_THROUGH" ]; then
   ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
   ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1

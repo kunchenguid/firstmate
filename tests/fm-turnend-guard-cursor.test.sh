@@ -197,9 +197,17 @@ test_cursor_shim_recovers_silent_stop_after_drain() {
   expect_code 0 "$status" "cursor shim must exit 0 on the loud pre-drain stop"
   assert_contains "$out" "bin/fm-wake-drain.sh" \
     "pre-drain stop must tell firstmate to drain and reconcile"
-  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 \
+  local drain_err ack_args
+  drain_err=$(FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null) \
     || fail "drain after the interrupted park failed"
   [ ! -e "$dir/state/.hook-arm-interrupted" ] || fail "drain did not clear the interrupt marker"
+  # Consuming the presented rows is the drain contract's acknowledgement step.
+  ack_args=$(printf '%s\n' "$drain_err" \
+    | sed -n 's|.*WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh ||p')
+  [ -n "$ack_args" ] || fail "drain did not present an acknowledgement command: $drain_err"
+  # shellcheck disable=SC2086 # the drain prints its own acknowledgement argv.
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" $ack_args >/dev/null 2>&1 \
+    || fail "acknowledging the drained wakes failed"
   [ ! -s "$dir/state/.wake-queue" ] || fail "drain did not consume the queued wake"
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
