@@ -23,72 +23,75 @@ The ordinary Firstmate and Pi authorization rules continue to apply equally to b
 
 The tracked dependency is the official `@larksuiteoapi/node-sdk` version recorded in `package.json` and `package-lock.json`.
 Install project dependencies only in the operator's intended Firstmate checkout before enabling the optional channel.
-The channel remains inert when the dependency, pairing, binding, or app credentials are absent.
+The channel remains inert when `config/feishu.env` is absent or explicitly disabled.
 
 Create a self-built Feishu app through the Feishu developer console outside Firstmate.
 Enable bot capability and subscribe to `im.message.receive_v1` using the developer console's long-connection mode.
 Do not configure a webhook URL, public endpoint, reverse proxy, or tunnel.
 Grant only the app-identity scopes required by the developer console for P2P message reception, `im.v1.chat.get`, and bot message creation.
 
-Provide credentials only in the transport process environment:
+## Local configuration
 
-```sh
-export FM_FEISHU_APP_ID='cli_...'
-export FM_FEISHU_APP_SECRET='...'
+Install the safe disabled template, then edit the local file with an editor that does not put values in command arguments:
+
+```console
+$ install -m 600 docs/examples/feishu.env config/feishu.env
+$ ${EDITOR:-vi} config/feishu.env
 ```
 
-Do not put the app secret in tracked files, `config/`, pairing state, command arguments, startup output, or status output.
-The official SDK owns app-token acquisition, refresh, long-connection authentication, event decoding, and REST requests.
+Set `FM_FEISHU_ENABLED=true` and add the exact App ID, App Secret, captain open ID, and P2P chat ID required by the [configuration schema](configuration.md#feishu-current-pi-channel).
+Do not quote values or add shell syntax.
+Do not export the credentials.
+The file is local and gitignored.
+It must remain owned by the current user with mode `0600`.
 
-Compute the safe app-ID fingerprint without storing the app ID in pairing state:
+The App Secret may exist only in this protected file and the dedicated transport process environment.
+It never enters Pi, command arguments, tracked files, pairing or binding records, logs, status, diagnostics, or process titles.
+The dedicated transport parses the file as data and never sources or executes it.
 
-```sh
-node -e 'const c=require("node:crypto");const id=process.env.FM_FEISHU_APP_ID||"";process.stdout.write("sha256:"+c.createHash("sha256").update(id).digest("hex")+"\n")'
+Run the body-free local check when setup needs diagnosis:
+
+```console
+$ bin/fm-feishu-transport.sh config-check
 ```
 
-## Local pairing and binding
+The check prints only `absent`, `disabled`, or `enabled` state in JSON.
+An invalid file returns one actionable error that contains no configured value.
 
-All control commands are available only in a trusted local Pi TUI that owns the verified Firstmate session lock.
-No Feishu message can pair, bind, rebind, disable, or move the channel.
+## Automatic pairing and binding
 
-Pair the exact captain open ID, P2P chat ID, and app-ID fingerprint:
-
-```text
-/fm-feishu-pair <captain-open-id> <p2p-chat-id> <sha256:app-id-hash>
-```
-
-The command stores only the safe app fingerprint and the exact allowlisted user/chat identity.
-It performs no authentication or network operation.
-
-Bind the current persisted Pi session:
-
-```text
-/fm-feishu-bind
-```
-
-The binding records the complete session UUID, exact session file, session cwd, persisted header identity, canonical Firstmate home, generation, and the last persisted session entry at bind time as the outbound history boundary.
+Normal startup of a trusted local persisted Pi session validates the file, derives the App ID fingerprint, authenticates through the official SDK, verifies the configured chat is P2P, stores the exact pairing, binds the exact current session, and starts or recovers one transport.
+No `/fm-feishu-pair`, `/fm-feishu-bind`, `/fm-feishu-rebind`, credential export, or manual transport start is required.
+Healthy startup is silent and idempotent.
+The binding records the complete session UUID, exact session file, session cwd, persisted header identity, canonical Firstmate home, generation, and the last persisted session entry at first bind or replacement as the outbound history boundary.
 Pre-binding Assistant history is never backfilled.
 An ephemeral `--no-session` session cannot bind.
 The bridge activates only in trusted TUI mode while the current process owns the Firstmate session lock and every stored identity matches.
 
-Use `/fm-feishu-rebind` only when deliberately moving the channel to the current exact persisted session.
-Rebinding first waits for the verified transport owner to stop, then increments the generation and reloads the bridge so no old-generation SDK send can race the new binding.
-Pending events may retarget only when none already belongs to the prior Pi native queue.
-Use `/fm-feishu-disable` to wait for the same verified graceful stop before disabling the pairing.
+Starting, resuming, forking, reloading, or replacing the eligible persisted Pi session converges the binding to that exact current session.
+Replacement validates credentials and P2P identity first, then waits for the verified prior transport to stop, rejects any event already submitted to the prior Pi native queue, increments the binding generation, and starts one new transport.
+The prior transport is fully stopped before binding publication, so an old-generation send cannot race the replacement.
+Pending events retarget only when none already belongs to the prior Pi native queue.
+Changing the configured app, user, or chat supersedes unsent events from the prior authorization identity rather than redirecting them.
+
+Use `/fm-feishu-disable` to stop the verified transport gracefully, retire the pairing and binding, and atomically set `FM_FEISHU_ENABLED=false`.
 Use `/fm-feishu-status` for the detailed local identity and queue view.
+No Feishu message can enable, disable, pair, bind, rebind, or move the channel.
 
 ## Direct SDK long connection
 
-`bin/fm-feishu-transport.sh start` starts one dedicated no-Agent transport after pairing, binding, dependency, and environment credentials are present.
+Automatic startup invokes `bin/fm-feishu-transport.sh` for configuration validation, credential probing, graceful replacement, and one dedicated no-Agent transport.
+`bin/fm-feishu-transport.sh start` remains an explicit local recovery control and reads the same protected file.
 `bin/fm-feishu-transport.sh stop` signals only the exact owner process after home, module, nonce, PID incarnation, and process-title verification.
 `bin/fm-feishu-transport.sh restart` performs the same controlled stop followed by start.
 `bin/fm-feishu-transport.sh status` prints a body-free and identifier-free health summary.
 
 The transport creates one SDK `WSClient` and one `EventDispatcher` for `im.message.receive_v1`.
 It uses one SDK `Client` for P2P chat verification and canonical outbound `message.create` calls to the bound chat.
-It verifies the environment app ID against the paired fingerprint and verifies `chat_mode=p2p` before starting the long connection and after reconnect.
+It verifies the configured app ID against the derived paired fingerprint and verifies `chat_mode=p2p` before changing a configured binding, before starting the long connection, and after reconnect.
 A current owner and binding generation must still match before any outbound claim or inbound publication.
 A second transport owner for the same Firstmate home is refused.
+The official SDK owns app-token acquisition, refresh, long-connection authentication, event decoding, and REST requests.
 
 The SDK event callback performs only bounded validation and private durable publication.
 It does not wait for Pi, execute a model, execute a tool, or send an outbound response.
@@ -155,15 +158,17 @@ Directories are mode `0700` and files are mode `0600`.
 Raw identity is never used as a filename.
 Symlinks, hardlinks, partial files, malformed schemas, cross-record mismatches, and cross-home paths are rejected.
 
-Normal startup and public status show only enabled state, binding status, generation, body-free transport phase, and aggregate counts.
+Healthy normal startup prints no Feishu status or success line.
+Public status shows only enabled state, binding status, generation, body-free transport phase, and aggregate counts.
 They do not show credentials, app IDs, user/chat IDs, message bodies, session paths, or raw diagnostics.
-A paired channel with a missing SDK dependency or missing credential environment remains stopped and reports one body-free local prerequisite.
+A malformed, unsafe, incomplete, or credential-rejected configuration stops activation safely, preserves unrelated Pi and Firstmate operation, and reports one body-free local remediation.
+A missing SDK dependency reports its existing optional-feature prerequisite without activating the channel.
 
 ## Verification boundary
 
 The focused regression uses a local mock of the official SDK constructor, long-connection callbacks, reconnect callbacks, P2P chat API, and message APIs.
 It performs no real authentication, network connection, app configuration, event consumption, Pi-session mutation, or Feishu send.
-It proves unconfigured inertness, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion, restart deduplication, non-Assistant exclusion, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, ambiguous retry handling, owner-verified stop, and absence of the former command transport path.
+It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion, restart deduplication, non-Assistant exclusion, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, ambiguous retry handling, owner-verified stop, and absence of the former command transport path.
 
 That mock does not prove a real app's scopes, developer-console long-connection selection, tenant policy, or production network reachability.
 A future live integration check requires explicit operator authorization and disposable app credentials.

@@ -5,7 +5,7 @@
 // event client and the SDK's message APIs for durable outbound delivery.
 // It never starts Pi, imports an Agent SDK, writes a Pi session, evaluates
 // message text, opens a webhook, or invokes an operator command.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -13,6 +13,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   claimNextOutbound,
   claimTransportOwner,
+  configuredSessionMatches,
+  convergeConfiguredSession,
+  disablePairing,
   failOutboundAttempt,
   publicStatusSummary,
   publishFeishuInbound,
@@ -28,6 +31,7 @@ import {
   transportHealthAllowsDispatch,
   writeTransportHealth,
 } from "./fm-feishu-state.mjs";
+import { disableFeishuConfig, readFeishuConfig } from "./fm-feishu-config.mjs";
 
 const MODULE_FILE = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(MODULE_FILE), "..");
@@ -39,6 +43,8 @@ const COMMAND_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_COMMAND_TIMEOUT
 const OUTBOX_POLL_MS = positiveInteger(process.env.FM_FEISHU_OUTBOX_POLL_MS, 500);
 const BINDING_POLL_MS = positiveInteger(process.env.FM_FEISHU_BINDING_POLL_MS, 1000);
 const ONCE_SETTLE_MS = positiveInteger(process.env.FM_FEISHU_ONCE_SETTLE_MS, 50);
+const SILENT = process.env.FM_FEISHU_SILENT === "1";
+const LOCK_STATUS_SCRIPT = process.env.FM_FEISHU_LOCK_STATUS_SCRIPT || resolve(ROOT, "bin/fm-session-lock-status.sh");
 let stopping = false;
 let sdkClient = null;
 let wsClient = null;
@@ -89,6 +95,28 @@ function directAppCredentials(pairing) {
   }
   if (appFingerprint(appId) !== pairing.app_id_fingerprint) throw new Error("direct SDK app fingerprint does not match the local pairing");
   return { appId, appSecret };
+}
+
+function environmentAppCredentials() {
+  const appId = String(process.env.FM_FEISHU_APP_ID || "");
+  const appSecret = String(process.env.FM_FEISHU_APP_SECRET || "");
+  if (!/^cli_[A-Za-z0-9_-]{8,128}$/.test(appId) || !/^[A-Za-z0-9._~+/=-]{8,4096}$/.test(appSecret)) {
+    throw new Error("direct SDK app credentials are unavailable or malformed");
+  }
+  return { appId, appSecret };
+}
+
+function loadConfiguredCredentials(config) {
+  process.env.FM_FEISHU_APP_ID = config.appId;
+  process.env.FM_FEISHU_APP_SECRET = config.appSecret;
+  process.env.FM_FEISHU_P2P_CHAT_ID = config.p2pChatId;
+  process.env.FM_FEISHU_CONFIG_IDENTITY = config.fileIdentity;
+}
+
+function loadConfiguredCredentialsIfNeeded() {
+  const config = readFeishuConfig(HOME);
+  if (config.status === "enabled") loadConfiguredCredentials(config);
+  return config;
 }
 
 function silentSdkLogger() {
@@ -270,7 +298,12 @@ async function runTransport({ once = false, daemon = false } = {}) {
   const processStartToken = readProcessStartToken(process.pid);
   if (!processStartToken) throw new Error("transport process incarnation cannot be verified on this host");
   process.title = transportProcessTitle(nonce, HOME);
-  const owner = claimTransportOwner(HOME, { nonce, moduleFile: realpathSync(MODULE_FILE), processStartToken });
+  const owner = claimTransportOwner(HOME, {
+    nonce,
+    moduleFile: realpathSync(MODULE_FILE),
+    processStartToken,
+    configFileIdentity: process.env.FM_FEISHU_CONFIG_IDENTITY || undefined,
+  });
   if (!owner.ok) throw new Error("another Feishu transport already owns this home");
   const ownerFence = {
     ownerPid: process.pid,
@@ -468,14 +501,141 @@ function ownerLooksLive(owner) {
   return command.length === 1 && command[0] === transportProcessTitle(owner.nonce, HOME) && Boolean(startToken) && startToken === owner.process_start_token;
 }
 
+function ownerPidIsAlive(owner) {
+  const pid = Number(owner?.pid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function currentOwnerMatchesConfiguration(owner) {
+  const identity = String(process.env.FM_FEISHU_CONFIG_IDENTITY || "");
+  return !identity || owner?.config_file_identity === identity;
+}
+
+async function probeConfiguration() {
+  const credentials = environmentAppCredentials();
+  const chatId = String(process.env.FM_FEISHU_P2P_CHAT_ID || "");
+  if (!/^oc_[A-Za-z0-9_-]{4,128}$/.test(chatId)) throw new Error("configured P2P chat identity is unavailable or malformed");
+  const sdk = await loadSdk();
+  const client = new sdk.Client({
+    appId: credentials.appId,
+    appSecret: credentials.appSecret,
+    domain: sdk.Domain?.Feishu,
+    logger: silentSdkLogger(),
+    loggerLevel: sdk.LoggerLevel?.error,
+    source: "firstmate-feishu",
+  });
+  await verifyP2pChat(client, { chat_id: chatId });
+}
+
+function lockIsOwned() {
+  const result = spawnSync(LOCK_STATUS_SCRIPT, [], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: HOME, FM_ROOT_OVERRIDE: ROOT },
+    timeout: 3000,
+  });
+  return result.status === 0 && result.stdout.trim() === "owned";
+}
+
+function configuredSessionFromStdin() {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(0, "utf8"));
+  } catch {
+    throw new Error("current persisted Pi session identity is malformed");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("current persisted Pi session identity is unavailable");
+  return value;
+}
+
+function configuredIdentity(config) {
+  return {
+    appIdFingerprint: appFingerprint(config.appId),
+    allowedUser: config.captainOpenId,
+    allowedChat: config.p2pChatId,
+  };
+}
+
+function assertConfigUnchanged(expected) {
+  const current = readFeishuConfig(HOME);
+  if (current.status !== "enabled" || current.fileIdentity !== expected.fileIdentity) {
+    throw new Error("local Feishu configuration changed during activation");
+  }
+}
+
+function currentTransportMatches(config, binding) {
+  const owner = readTransportOwner(HOME);
+  return Boolean(
+    owner &&
+    owner.config_file_identity === config.fileIdentity &&
+    transportHealthAllowsDispatch(HOME, binding),
+  );
+}
+
+async function reconcileConfiguredLifecycle() {
+  const session = configuredSessionFromStdin();
+  let config;
+  try {
+    config = readFeishuConfig(HOME);
+  } catch (error) {
+    await stopOwned({ replacement: true });
+    throw error;
+  }
+  if (config.status === "absent") return;
+  if (!lockIsOwned()) throw new Error("current Pi does not own the verified Firstmate session lock");
+  if (config.status === "disabled") {
+    const pairing = readPairing(HOME);
+    const owner = readTransportOwner(HOME);
+    if (!pairing && !owner) return;
+    await stopOwned({ replacement: true });
+    if (pairing) disablePairing(HOME);
+    return;
+  }
+  loadConfiguredCredentials(config);
+  const desired = configuredIdentity(config);
+  const stateMatches = configuredSessionMatches(HOME, desired, session);
+  const binding = stateMatches ? readActiveBinding(HOME) : undefined;
+  const transportMatches = binding ? currentTransportMatches(config, binding) : false;
+  if (!stateMatches || !transportMatches) {
+    try {
+      await probeConfiguration();
+      assertConfigUnchanged(config);
+    } catch (error) {
+      await stopOwned({ replacement: true });
+      throw error;
+    }
+  }
+  if (!stateMatches || !transportMatches) await stopOwned({ replacement: true });
+  assertConfigUnchanged(config);
+  if (!stateMatches) convergeConfiguredSession(HOME, desired, session);
+  assertConfigUnchanged(config);
+  await startDetached();
+}
+
+async function disableConfiguredLifecycle() {
+  const config = readFeishuConfig(HOME);
+  if (config.status === "absent") return false;
+  if (!lockIsOwned()) throw new Error("current Pi does not own the verified Firstmate session lock");
+  await stopOwned({ replacement: true });
+  disableFeishuConfig(HOME);
+  disablePairing(HOME);
+  return true;
+}
+
 async function startDetached() {
   const { pairing } = activeConfiguration();
   directAppCredentials(pairing);
   const existing = readTransportOwner(HOME);
-  if (existing && ownerLooksLive(existing)) {
-    process.stdout.write("feishu transport already running\n");
+  if (existing && ownerLooksLive(existing) && currentOwnerMatchesConfiguration(existing)) {
+    if (!SILENT) process.stdout.write("feishu transport already running\n");
     return;
   }
+  if (existing && ownerLooksLive(existing)) throw new Error("a verified Feishu transport for another configuration is still running");
   if (existing && !retireStaleTransportOwner(HOME, existing)) throw new Error("stale Feishu transport ownership changed during retirement");
   const child = spawn(process.execPath, [realpathSync(MODULE_FILE), "run", "--daemon"], {
     cwd: ROOT,
@@ -488,7 +648,7 @@ async function startDetached() {
     await sleep(50);
     const owner = readTransportOwner(HOME);
     if (owner && owner.pid === child.pid && ownerLooksLive(owner)) {
-      process.stdout.write("feishu transport started\n");
+      if (!SILENT) process.stdout.write("feishu transport started\n");
       return;
     }
     if (child.exitCode !== null) break;
@@ -496,17 +656,19 @@ async function startDetached() {
   throw new Error("Feishu transport did not publish a live owner record");
 }
 
-async function stopOwned() {
+async function stopOwned({ replacement = false } = {}) {
   const owner = readTransportOwner(HOME);
   if (!owner) {
+    if (replacement) return;
     writeTransportHealth(HOME, { phase: "stopped", healthy: false, lastErrorType: null });
-    process.stdout.write("feishu transport already stopped\n");
+    if (!SILENT) process.stdout.write("feishu transport already stopped\n");
     return;
   }
   if (!ownerLooksLive(owner)) {
+    if (replacement && ownerPidIsAlive(owner)) throw new Error("the prior Feishu transport owner is live but cannot be verified for safe replacement");
     if (!retireStaleTransportOwner(HOME, owner)) throw new Error("stale Feishu transport ownership changed during retirement");
     writeTransportHealth(HOME, { phase: "stopped", healthy: false, lastErrorType: "stale-owner" });
-    process.stdout.write("feishu transport owner was stale; no process was signalled\n");
+    if (!SILENT) process.stdout.write("feishu transport owner was stale; no process was signalled\n");
     return;
   }
   process.kill(Number(owner.pid), "SIGTERM");
@@ -514,7 +676,7 @@ async function stopOwned() {
     await sleep(50);
     try { process.kill(Number(owner.pid), 0); }
     catch {
-      process.stdout.write("feishu transport stopped\n");
+      if (!SILENT) process.stdout.write("feishu transport stopped\n");
       return;
     }
   }
@@ -522,14 +684,32 @@ async function stopOwned() {
 }
 
 function usage() {
-  return "usage: fm-feishu-transport.sh start|stop|restart|status|run [--once]";
+  return "usage: fm-feishu-transport.sh reconcile|disable-config|config-check|probe|start|stop|restart|status|run [--once]";
 }
 
 async function main(argv) {
   const command = argv.shift();
-  if (command === "start") return startDetached();
+  if (command === "config-check") {
+    const config = readFeishuConfig(HOME);
+    process.stdout.write(`${JSON.stringify({ status: config.status })}\n`);
+    return;
+  }
+  if (command === "probe") {
+    const config = loadConfiguredCredentialsIfNeeded();
+    if (config.status !== "enabled") return;
+    return probeConfiguration();
+  }
+  if (command === "reconcile") return reconcileConfiguredLifecycle();
+  if (command === "disable-config") return disableConfiguredLifecycle();
+  if (command === "start") {
+    const config = loadConfiguredCredentialsIfNeeded();
+    if (config.status !== "enabled") return;
+    return startDetached();
+  }
   if (command === "stop") return stopOwned();
   if (command === "restart") {
+    const config = loadConfiguredCredentialsIfNeeded();
+    if (config.status !== "enabled") return;
     await stopOwned();
     return startDetached();
   }
@@ -538,11 +718,18 @@ async function main(argv) {
     process.stdout.write(`${JSON.stringify(full)}\n`);
     return;
   }
-  if (command === "run") return runTransport({ once: argv.includes("--once"), daemon: argv.includes("--daemon") });
+  if (command === "run") {
+    const config = loadConfiguredCredentialsIfNeeded();
+    if (config.status !== "enabled") return;
+    return runTransport({ once: argv.includes("--once"), daemon: argv.includes("--daemon") });
+  }
   throw new Error(usage());
 }
 
 main(process.argv.slice(2)).catch((error) => {
-  process.stderr.write(`fm-feishu-transport: ${error.message}\n`);
+  const kind = error?.code === "FM_FEISHU_CONFIG_INVALID"
+    ? error.message
+    : sdkErrorType(error, "operation-failed");
+  process.stderr.write(`fm-feishu-transport: ${kind}\n`);
   process.exitCode = 2;
 });

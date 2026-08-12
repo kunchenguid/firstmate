@@ -634,12 +634,13 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
   PI_FEISHU_ACTIVE=''
-  if [ -f "$DATA/feishu/pairing.json" ] && [ ! -L "$DATA/feishu/pairing.json" ]; then
-    PI_FEISHU_ACTIVE=$("$SCRIPT_DIR/fm-feishu-status.sh" bootstrap 2>/dev/null || printf '')
+  if [ -e "$CONFIG/feishu.env" ] || [ -L "$CONFIG/feishu.env" ]; then
+    PI_FEISHU_ACTIVE=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$SCRIPT_DIR/fm-feishu-transport.sh" config-check 2>/dev/null || printf '')
   fi
-  if [ -n "$PI_FEISHU_ACTIVE" ] \
+  if [ "$PI_FEISHU_ACTIVE" = '{"status":"enabled"}' ] \
     && ! pi_extension_loaded "$PI_FEISHU_MARKER" "$PI_FEISHU_VERSION" "$PI_LOCK"; then
-    printf 'FEISHU: Pi bridge not loaded - restart %s after approving project trust so %s can enforce the exact current-session binding; do not move the binding remotely\n' "$PI_RESTART_COMMAND" "$PI_FEISHU_EXT"
+    printf 'FEISHU: Pi bridge not loaded - restart %s after approving project trust so %s can converge the configured exact current-session binding\n' "$PI_RESTART_COMMAND" "$PI_FEISHU_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

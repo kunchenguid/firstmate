@@ -1,7 +1,7 @@
 # Feishu channel verification
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
-The active redesign was verified on 2026-08-12 against Pi `0.84.1` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
+The configuration-driven lifecycle was verified on 2026-08-12 against Pi `0.84.1` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
 
 ## Official SDK selection evidence
 
@@ -27,6 +27,7 @@ No project dependency was installed into this worktree while recording this evid
 No app was created or configured.
 No app credential was obtained or written.
 No authentication flow, real long connection, webhook, event consumption, real Feishu send, installation into a live Firstmate home, or live Pi-session mutation was performed.
+All configuration credentials in the executable fixture are synthetic.
 
 The transport test replaces only the SDK boundary with one local module.
 It does not assert that a real app has the required scopes, developer-console subscription mode, tenant policy, or production network route.
@@ -37,7 +38,8 @@ A real integration check remains an explicit future operator action.
 ```console
 $ bash tests/fm-feishu-channel.test.sh
 ok - native Pi steering, all-origin Assistant mirroring, durable state, and TUI-equivalent tool path
-ok - local Pi bridge keeps native TUI/tool paths and stops transport before identity changes
+ok - local Pi bridge keeps only status and durable disable controls
+ok - secure config parsing and automatic Feishu lifecycle converge silently and fail closed
 ok - official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized outbound
 ```
 
@@ -46,6 +48,9 @@ It proves that the extension registers no TUI input, message-end, turn-start, or
 It proves that native TUI and ordinary Firstmate operational input do not enter Feishu state.
 It proves that accepted Feishu text is durably recorded and offered to Pi through native steer delivery with an exact session and generation fence.
 It proves marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.` exclusion, non-Assistant exclusion, restart deduplication, URL-preserving chunking, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
+
+The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-check`, `bin/fm-feishu-lifecycle.mjs reconcile`, the real pairing and binding state owner, verified process-owner stop, and the mocked official SDK boundary.
+It proves absent-config inertness without private state creation, strict key parsing, missing-field refusal, duplicate and unsupported-field refusal, exact `0600` enforcement, symlink and wrong-owner refusal, credential and P2P probing before binding mutation, silent first activation, unchanged-session idempotence, exact-session replacement with generation increment, prior-owner shutdown, stopped-transport recovery without generation churn, config-persisted disable, process-argument redaction, state-record redaction, and credential-rejection failure before binding state exists.
 
 The SDK section uses a local module implementing the documented `Client`, `WSClient`, and `EventDispatcher` calls.
 It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, reconnect callback handling, replay deduplication, canonical bound-chat SDK `message.create`, stable UUID retry, Retry-After preservation, outbound serialization, body-free health, and owner-verified graceful stop.

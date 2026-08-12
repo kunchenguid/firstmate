@@ -19,7 +19,7 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
-#                 "FEISHU: paired=... binding=... transport=...".
+#                 "FEISHU: <body-free local remediation>".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -1159,22 +1159,18 @@ detect_local_tools() {
 }
 
 feishu_channel_detect() {
-  local pairing status sdk_module
-  pairing="$DATA/feishu/pairing.json"
-  [ -f "$pairing" ] && [ ! -L "$pairing" ] || return 0
-  if ! status=$("$SCRIPT_DIR/fm-feishu-status.sh" bootstrap 2>/dev/null); then
-    echo "FEISHU: invalid private channel state; inspect locally with bin/fm-feishu-status.sh"
+  local config_status sdk_module
+  [ -e "$CONFIG/feishu.env" ] || [ -L "$CONFIG/feishu.env" ] || return 0
+  if ! config_status=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-feishu-transport.sh" config-check 2>/dev/null); then
+    echo "FEISHU: local config refused; run bin/fm-feishu-transport.sh config-check and inspect docs/feishu-channel.md"
     return 0
   fi
-  [ -n "$status" ] || return 0
+  [ "$config_status" = '{"status":"enabled"}' ] || return 0
   sdk_module=${FM_FEISHU_SDK_MODULE:-@larksuiteoapi/node-sdk}
   if ! node -e 'const fs=require("fs");const s=process.argv[1];if(s.startsWith("/"))fs.accessSync(s);else require.resolve(s,{paths:[process.argv[2]]})' "$sdk_module" "$FM_ROOT" >/dev/null 2>&1; then
     echo "MISSING_MANUAL: @larksuiteoapi/node-sdk (instructions: docs/feishu-channel.md)"
   fi
-  if [ -z "${FM_FEISHU_APP_ID:-}" ] || [ -z "${FM_FEISHU_APP_SECRET:-}" ]; then
-    echo "FEISHU: direct SDK app credentials unavailable; transport remains stopped"
-  fi
-  printf '%s\n' "$status"
 }
 
 detect_local_config() {

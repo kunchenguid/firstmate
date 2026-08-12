@@ -26,8 +26,21 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 
 ## Feishu current-Pi channel
 
-The optional Feishu channel is absent and inert until a trusted local Pi TUI stores a pairing and binds one exact persisted session.
-[`docs/feishu-channel.md`](feishu-channel.md) is the single operator owner for setup, local commands, supported limits, transport operation, safety, health, and recovery.
+The optional `config/feishu.env` file is local, gitignored, and parsed strictly as data by [`bin/fm-feishu-config.mjs`](../bin/fm-feishu-config.mjs).
+It is absent by default.
+The only accepted fields are `FM_FEISHU_ENABLED`, `FM_FEISHU_APP_ID`, `FM_FEISHU_APP_SECRET`, `FM_FEISHU_CAPTAIN_OPEN_ID`, and `FM_FEISHU_P2P_CHAT_ID`.
+Each non-comment line is one unquoted `KEY=value` with no whitespace, duplicate key, expansion, command, continuation, or unsupported field.
+Comments start with `#` in column one, and blank lines are accepted.
+`FM_FEISHU_ENABLED` is exactly `true` or `false`.
+When enabled, all four identity and credential fields are required.
+When disabled, those four fields are optional but any present value is still validated.
+The App ID must be a `cli_` identifier, the captain identity must be an `ou_` open ID, and the chat identity must be an `oc_` chat ID.
+The file must be one current-user-owned, single-linked regular file with exact mode `0600` beneath a current-user-owned, non-symlinked config directory that is not writable by group or others.
+Missing or disabled configuration starts no transport and creates no Feishu state in a fresh home.
+An explicit disable converges any previously active local channel to stopped and disabled state.
+Malformed content, unsafe ownership, unsafe permissions, another file type, a symlink, a hardlink, an unsupported field, or a missing required value refuses activation before credential use or binding mutation.
+
+[`docs/feishu-channel.md`](feishu-channel.md) is the single operator owner for app setup, activation, local controls, supported limits, transport operation, safety, health, and recovery.
 [`bin/fm-feishu-state.mjs`](../bin/fm-feishu-state.mjs) owns the exact private child schemas and mutation mechanics.
 
 ## Pi Calm preference (config/calm)
