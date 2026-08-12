@@ -3,11 +3,9 @@
 # behavior-test candidates (Phase 2 pre-shard gate).
 #
 # This is the single owner of the proven parallel candidate set, the concurrent
-# proof run, and the isolation checks that admitted that set. Production
-# portable test selection remains owned by bin/fm-test-run.sh.
+# proof run, and the isolation checks that admitted that set.
 #
 # It does NOT:
-#   - compose production CI shard membership (fm-test-run.sh owns that partition)
 #   - run real Herdr, real default-server tmux, watcher lock races, AFK, live
 #     harnesses, or GUI backends
 #
@@ -127,8 +125,7 @@ exclusion_reason() {
       printf '%s\n' 'live harness opt-in; never default parallel CI'
       ;;
     fm-backend-autodetect-smoke.test.sh|fm-backend-herdr-eventwait-smoke.test.sh|\
-    fm-backend-herdr-respawn-idem-e2e.test.sh|fm-backend-herdr-smoke.test.sh|\
-    fm-backend-herdr-workspace-per-home-e2e.test.sh)
+    fm-backend-herdr-smoke.test.sh)
       printf '%s\n' 'real Herdr-gated; Herdr lane is a later phase'
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
@@ -163,7 +160,6 @@ tests/fm-send-popup-settle.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
-tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
 tests/fm-x-mode.test.sh

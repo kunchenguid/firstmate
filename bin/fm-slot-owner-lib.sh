@@ -339,8 +339,7 @@ fm_slot_meta_referencing_tasks() {
 
 fm_slot_declared_endpoint_pid() {
   local self=$1 expected_home=${2:-} index matches pid ppid candidate_pids= root_pid= root_count=0
-  local current_uid proc_uid root_home
-  current_uid=$(id -u 2>/dev/null) || return 2
+  local root_home
   if [ "$#" -ge 3 ]; then
     index=$3
   else
@@ -350,8 +349,6 @@ fm_slot_declared_endpoint_pid() {
   [ -n "$matches" ] || return 2
   while IFS= read -r pid; do
     fm_agent_pid_is_numeric "$pid" || continue
-    proc_uid=$(stat -c '%u' "/proc/$pid" 2>/dev/null) || continue
-    [ "$proc_uid" = "$current_uid" ] || continue
     candidate_pids="${candidate_pids}${candidate_pids:+$'\n'}$pid"
   done <<EOF
 $matches

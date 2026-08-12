@@ -134,6 +134,50 @@ fm_backend_herdr_workspace_label() {
   printf 'firstmate'
 }
 
+fm_backend_herdr_workspace_owner_file() {
+  local state="$FM_HOME/state" key
+  key=$(printf '%s--%s' "$1" "$2" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_') || return 1
+  printf '%s/.herdr-workspace-owner.%s' "$state" "$key"
+}
+
+fm_backend_herdr_workspace_owner_home() {
+  cd "$FM_HOME" 2>/dev/null && pwd -P
+}
+
+fm_backend_herdr_workspace_owner_read() {
+  local session=$1 label=$2 file owner owner_home owner_session owner_label owner_wsid extra
+  file=$(fm_backend_herdr_workspace_owner_file "$session" "$label") || return 2
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 3
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+  owner=$(cat "$file") || return 2
+  case "$owner" in *$'\n'*) return 2 ;; esac
+  IFS=$'\t' read -r owner_home owner_session owner_label owner_wsid extra <<EOF
+$owner
+EOF
+  [ -z "$extra" ] || return 2
+  [ -n "$owner_home" ] && [ -n "$owner_session" ] && [ -n "$owner_label" ] && [ -n "$owner_wsid" ] || return 2
+  [ "$owner_home" = "$(fm_backend_herdr_workspace_owner_home)" ] || return 2
+  [ "$owner_session" = "$session" ] && [ "$owner_label" = "$label" ] || return 2
+  printf '%s' "$owner_wsid"
+}
+
+fm_backend_herdr_workspace_owner_write() {
+  local session=$1 label=$2 workspace=$3 state file tmp home
+  state="$FM_HOME/state"
+  home=$(fm_backend_herdr_workspace_owner_home) || return 1
+  file=$(fm_backend_herdr_workspace_owner_file "$session" "$label") || return 1
+  mkdir -p "$state" || return 1
+  tmp=$(mktemp "$state/.herdr-workspace-owner.XXXXXX") || return 1
+  if ! printf '%s\t%s\t%s\t%s' "$home" "$session" "$label" "$workspace" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Current transport
@@ -1013,22 +1057,34 @@ fm_backend_herdr_server_ensure() {  # <session>
 
 # fm_backend_herdr_workspace_find: this HOME's own workspace id inside
 # <session> (fm_backend_herdr_workspace_label), or empty (never creates).
-# Read-only, safe for recovery/list paths. Label-collision semantics
-# (docs/herdr-backend.md "Watching and task containers"): Herdr enforces no label
-# uniqueness at all, so this adopts the FIRST matching workspace `jq` returns
-# (list order, normally creation order/oldest) rather than disambiguating -
-# identical in spirit to the pre-existing tab duplicate-label check below.
+# Read-only, safe for recovery/list paths. A label match is usable only when
+# this home has a matching persisted owner record.
 fm_backend_herdr_workspace_find() {  # <session>
-  local session=$1 label list
+  local session=$1 label list owner_wsid owner_status
   label=$(fm_backend_herdr_workspace_label)
-  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+  printf '%s' "$list" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[];
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.label | type) == "string"
+    )
+  ' >/dev/null 2>&1 || return 1
+  if owner_wsid=$(fm_backend_herdr_workspace_owner_read "$session" "$label" 2>/dev/null); then
+    printf '%s' "$list" | jq -e --arg want "$label" --arg owner "$owner_wsid" \
+      '[.result.workspaces[] | select(.label == $want and .workspace_id == $owner)] | length == 1' \
+      >/dev/null 2>&1 || return 1
+    printf '%s' "$owner_wsid"
+    return 0
+  else
+    owner_status=$?
+  fi
+  [ "$owner_status" -eq 3 ] || return 1
 }
 
 fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
@@ -1145,15 +1201,8 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 #                                      empirically against the real binary -
 #                                      no follow-up tab-list call needed).
 #                                      Empty whenever this call instead
-#                                      ADOPTED a pre-existing workspace
-#                                      (fm_backend_herdr_workspace_find
-#                                      matched by label - docs/herdr-backend.md
-#                                      "Watching and task containers": that match can
-#                                      never distinguish an explicitly
-#                                      `--label`-created workspace from one
-#                                      whose label only coincidentally
-#                                      matches this home's own, e.g. a
-#                                      cwd-basename-derived label). An
+#                                      ADOPTED a pre-existing workspace with a
+#                                      matching persisted owner record. An
 #                                      ADOPTED workspace's tabs are NEVER
 #                                      inspected or identified as prunable by
 #                                      this function, no matter what they are
@@ -1170,7 +1219,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
-  wsid=$(fm_backend_herdr_workspace_find "$session")
+  wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
@@ -1178,8 +1227,15 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   fi
   label=$(fm_backend_herdr_workspace_label)
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
-  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
-  [ -n "$wsid" ] || return 1
+  printf '%s' "$out" | jq -e '
+    (.result.workspace.workspace_id | type) == "string"
+    and (.result.workspace.workspace_id | length) > 0
+    and (.result.tab.tab_id | type) == "string"
+    and (.result.tab.tab_id | length) > 0
+    and (.result.root_pane.pane_id | type) == "string"
+    and (.result.root_pane.pane_id | length) > 0
+  ' >/dev/null 2>&1 || return 1
+  wsid=$(printf '%s' "$out" | jq -er '.result.workspace.workspace_id' 2>/dev/null) || return 1
   FM_BACKEND_HERDR_WS_ID=$wsid
   # Herdr seeds a new workspace with one auto-created default tab firstmate
   # never uses. It is NOT pruned here: at this instant it is the workspace's
@@ -1188,7 +1244,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   # workspace we just created. fm_backend_herdr_create_task prunes it instead,
   # once the first real task tab exists alongside it, and only ever targets
   # this exact captured tab_id.
-  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -er '.result.tab.tab_id' 2>/dev/null) || return 1
+  fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || return 1
   printf '%s' "$wsid"
 }
 

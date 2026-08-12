@@ -234,6 +234,7 @@ HERDR_PROJECTION_ABORT_HARNESS=
 HERDR_PROJECTION_ABORT_TASK=
 HERDR_PROJECTION_ABORT_PATH=
 HERDR_PROJECTION_ABORT_HOME=
+HERDR_PRESENTATION_JOURNAL_RETIRE_ALLOWED=0
 HERDR_FLAT_ABORT_CLEANUP=0
 HERDR_FLAT_ABORT_TARGET=
 HERDR_FLAT_ABORT_UNCERTAIN=0
@@ -876,7 +877,14 @@ spawn_abort_artifacts_cleanup() {
     fi
   done
   [ -z "${HERDR_LABEL_JOURNAL:-}" ] || rm -f "$HERDR_LABEL_JOURNAL" || rc=1
-  [ -z "${HERDR_PRESENTATION_JOURNAL:-}" ] || rm -f "$HERDR_PRESENTATION_JOURNAL" || rc=1
+  if [ -n "${HERDR_PRESENTATION_JOURNAL:-}" ] \
+    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+    if [ "${HERDR_PRESENTATION_JOURNAL_RETIRE_ALLOWED:-0}" = 1 ]; then
+      rm -f "$HERDR_PRESENTATION_JOURNAL" || rc=1
+    else
+      rc=1
+    fi
+  fi
   if [ -n "${TASK_TMP:-}" ] && [ -d "$TASK_TMP" ]; then
     owner_file="$TASK_TMP/.fm-tasktmp-owner"
     if [ -f "$owner_file" ] && [ ! -L "$owner_file" ] \
@@ -930,6 +938,7 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_PATH" \
       "$HERDR_PROJECTION_ABORT_HOME"; then
       endpoint_cleanup_status=0
+      HERDR_PRESENTATION_JOURNAL_RETIRE_ALLOWED=1
     fi
   fi
   if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then

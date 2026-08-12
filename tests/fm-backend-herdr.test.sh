@@ -375,8 +375,9 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
 # --- container_ensure / create_task ------------------------------------------
 
 test_container_ensure_starts_server_and_workspace() {
-  local dir log resp fb out
+  local dir log resp fb out home
   dir="$TMP_ROOT/container"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
   # 1: version_check status --json (server not running yet, irrelevant to client check)
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   # 2: server_ensure's status --json check -> not running
@@ -391,7 +392,7 @@ test_container_ensure_starts_server_and_workspace() {
   # the seeded tab/pane ids in the SAME response - verified empirically).
   printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w1\tw1:t9' ] || fail "container_ensure should echo '<session>:<workspace_id>\\t<seeded_default_tab_id>', got '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''server' "container_ensure did not start the herdr server"
@@ -401,17 +402,35 @@ test_container_ensure_starts_server_and_workspace() {
 }
 
 test_container_ensure_reuses_existing_workspace() {
-  local dir log resp fb out
+  local dir log resp fb out home
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
+  printf '%s\tfmtest\tfirstmate\tw9' "$home" > "$home/state/.herdr-workspace-owner.fmtest--firstmate"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
   printf '{"result":{"workspaces":[{"workspace_id":"w9","label":"firstmate"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing firstmate workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already exists"
   pass "fm_backend_herdr_container_ensure: reuses an existing firstmate workspace without recreating it, and reports no seeded default tab (adopted, not created)"
+}
+
+test_container_ensure_refuses_incomplete_create_identity() {
+  local dir log resp fb out status home
+  dir="$TMP_ROOT/container-incomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
+  printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "container_ensure should refuse a workspace create response without seeded tab and pane identity"
+  pass "fm_backend_herdr_workspace_ensure: incomplete create identity fails closed"
 }
 
 test_create_task_refuses_duplicate_label() {
@@ -848,14 +867,15 @@ test_close_active_husk_focuses_replacement() {
 # --- container_ensure / create_task: --no-focus and per-home label ----------
 
 test_container_ensure_creates_with_no_focus_flag() {
-  local dir log resp fb out
+  local dir log resp fb out home
   dir="$TMP_ROOT/container-no-focus"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
   printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w1\tw1:t1' ] || fail "container_ensure should still echo '<session>:<workspace_id>\\t<seeded_default_tab_id>', got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate'$'\x1f''--no-focus' \
@@ -866,7 +886,7 @@ test_container_ensure_creates_with_no_focus_flag() {
 test_container_ensure_uses_secondmate_home_label() {
   local dir log resp fb out home
   dir="$TMP_ROOT/container-secondmate-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  home="$TMP_ROOT/container-secondmate-home"; mkdir -p "$home"; printf 'sshhip-h7\n' > "$home/.fm-secondmate-home"
+  home="$TMP_ROOT/container-secondmate-home"; mkdir -p "$home/state"; printf 'sshhip-h7\n' > "$home/.fm-secondmate-home"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
@@ -1751,7 +1771,8 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
 test_workspace_find_matches_only_this_homes_own_label() {
   local dir log resp fb out home jq_real
   dir="$TMP_ROOT/find-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  home="$TMP_ROOT/find-scoped-home"; mkdir -p "$home"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
+  home="$TMP_ROOT/find-scoped-home"; mkdir -p "$home/state"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
+  printf '%s\tfmtest\t2ndmate-bravo-b2\tw2' "$home" > "$home/state/.herdr-workspace-owner.fmtest--2ndmate-bravo-b2"
   # A workspace list carrying BOTH the primary's "firstmate" space and this
   # secondmate's own "2ndmate-bravo-b2" space (as would be true once several
   # homes share one herdr session) - find must pick the one matching THIS
@@ -1781,7 +1802,19 @@ SH
     FM_REAL_JQ="$jq_real" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find fmtest' "$ROOT" )
   [ "$out" = "w2" ] || fail "workspace_find should have matched this home's own label (2ndmate-bravo-b2 -> w2), got '$out'"
-  pass "fm_backend_herdr_workspace_find: matches only THIS home's own label among several coexisting workspaces"
+  pass "fm_backend_herdr_workspace_find: requires and matches this home's persisted workspace owner"
+}
+
+test_workspace_find_refuses_unreadable_list() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/find-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":{}}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace_find should refuse a malformed workspace list"
+  pass "fm_backend_herdr_workspace_find: malformed workspace lists fail closed"
 }
 
 # --- list_live: scoped to this home's own workspace only ---------------------
@@ -2978,11 +3011,12 @@ SH
 # --- workspace lifecycle: reuse, no orphans, default-tab pruning -------------
 
 test_workspace_ensure_prunes_default_tab() {
-  local dir log state fb raw container seeded wsid ids pane tabcount
+  local dir log state home fb raw container seeded wsid ids pane tabcount
   dir="$TMP_ROOT/prune-default"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
   fb=$(make_herdr_statefake "$dir")
   export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
-  raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  raw=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
   container=${raw%%$'\t'*}
@@ -2995,7 +3029,7 @@ test_workspace_ensure_prunes_default_tab() {
   # alongside it - verify it is still present right after container_ensure.
   tabcount=$(jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)]|length' "$state")
   [ "$tabcount" = 1 ] || fail "expected the untouched default tab to remain after container_ensure alone, got $tabcount tab(s): $(jq -c '.tabs' "$state")"
-  ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  ids=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-prunetest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
@@ -3013,12 +3047,13 @@ EOF
 }
 
 test_repeated_cycles_reuse_one_workspace_no_orphans() {
-  local dir log state fb i raw container seeded wsid ids tab pane first_ws="" wscount total tabcount created
+  local dir log state home fb i raw container seeded wsid ids tab pane first_ws="" wscount total tabcount created
   dir="$TMP_ROOT/cycles"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
   fb=$(make_herdr_statefake "$dir")
   export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   for i in 1 2 3; do
-    raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    raw=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
       || fail "cycle $i: container_ensure failed"
     container=${raw%%$'\t'*}
@@ -3032,14 +3067,14 @@ test_repeated_cycles_reuse_one_workspace_no_orphans() {
       [ "$wsid" = "$first_ws" ] || fail "cycle $i: workspace not reused ('$wsid' != '$first_ws')"
       [ -z "$seeded" ] || fail "cycle $i: a REUSED (adopted) workspace must never report a seeded default tab id, got '$seeded'"
     fi
-    ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    ids=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-cycle$i" "$seeded" ) \
       || fail "cycle $i: create_task failed"
     read -r tab pane <<EOF
 $ids
 EOF
     [ -n "$pane" ] || fail "cycle $i: create_task returned no pane id"
-    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_provider_close_tab_bound "$1" "$2" "$3" "$4"' \
       "$ROOT" fmtest "$wsid" "$tab" "$pane" \
       || fail "cycle $i: bound tab cleanup failed"
@@ -3078,8 +3113,10 @@ test_adopted_workspace_never_prunes_default_tab() {
   # create_task, regardless of that tab's label or count - the created-vs-
   # adopted gate is structural (an empty seeded_tab_id), never re-derived
   # from label patterns at create_task time.
-  local dir log state fb raw container seeded ids pane
+  local dir log state home fb raw container seeded ids pane
   dir="$TMP_ROOT/adopt-no-prune"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
+  printf '%s\tfmtest\tfirstmate\tw1' "$home" > "$home/state/.herdr-workspace-owner.fmtest--firstmate"
   fb=$(make_herdr_statefake "$dir")
   export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   # Pre-seed a workspace that ALREADY exists before this spawn runs (as if a
@@ -3087,7 +3124,7 @@ test_adopted_workspace_never_prunes_default_tab() {
   # shape herdr's own auto-seeded default tab has, but this run's own
   # container_ensure never ran a `workspace create` call to produce it.
   jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{}}' > "$state"
-  raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  raw=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
   container=${raw%%$'\t'*}
@@ -3096,7 +3133,7 @@ test_adopted_workspace_never_prunes_default_tab() {
   [ -z "$seeded" ] || fail "an ADOPTED workspace must report an EMPTY seeded default tab id, got '$seeded'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure must not create a new workspace when one already exists to adopt"
 
-  ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  ids=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-adopttest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
@@ -3120,8 +3157,9 @@ test_label_collision_startup_workspace_leaves_live_tab_alone() {
   # --label ever passed and no firstmate involvement at all. That workspace's
   # single auto-created tab (label "1") holds the captain's own live agent.
   # The very next crewmate spawn must adopt-and-leave-alone, never prune.
-  local dir log state fb raw container seeded ids pane
+  local dir log state home fb raw container seeded ids pane
   dir="$TMP_ROOT/label-collision"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
   fb=$(make_herdr_statefake "$dir")
   export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
   # Mimic a bare `herdr workspace create --cwd <dir-named-firstmate>` (no
@@ -3130,15 +3168,15 @@ test_label_collision_startup_workspace_leaves_live_tab_alone() {
   # alone, from firstmate's own freshly-seeded default tab. Its pane hosts a
   # live agent (agent_status=working), exactly like the captain's own pane.
   jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{"w1:p1":"working"}}' > "$state"
-  raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  raw=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
   container=${raw%%$'\t'*}
   seeded=${raw#*$'\t'}
-  [ "$container" = "fmtest:w1" ] || fail "container_ensure should adopt the captain's coincidentally-labeled workspace, got '$container'"
-  [ -z "$seeded" ] || fail "the coincidentally-labeled workspace was ADOPTED, not created, so seeded default tab id must be empty, got '$seeded'"
+  [ "$container" = "fmtest:w2" ] || fail "container_ensure should refuse an unowned coincidentally-labeled workspace and create a new one, got '$container'"
+  [ -n "$seeded" ] || fail "the newly created owned workspace must report its seeded default tab id"
 
-  ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  ids=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-collisiontest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
@@ -3158,11 +3196,12 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   # freshly-created workspace with a genuine non-empty seeded default tab id,
   # if that specific pane's agent reports "working" by the time create_task
   # runs, the prune must refuse rather than close a live agent's pane.
-  local dir log state fb raw container seeded seeded_pane ids pane
+  local dir log state home fb raw container seeded seeded_pane ids pane
   dir="$TMP_ROOT/prune-busy-defense"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  home="$dir/home"; mkdir -p "$home/state"
   fb=$(make_herdr_statefake "$dir")
   export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close"
-  raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  raw=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
   container=${raw%%$'\t'*}
@@ -3174,7 +3213,7 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   [ -n "$seeded_pane" ] || fail "could not resolve the seeded default tab's pane id from state"
   fake_herdr_set_agent_status "$state" "$seeded_pane" working
 
-  ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+  ids=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-busytest" "$seeded" 2>&1 )
   [ "$?" -ne 0 ] || fail "create_task must refuse when seeded-tab pruning sees a working agent"
 
@@ -3505,6 +3544,7 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
+test_container_ensure_refuses_incomplete_create_identity
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
@@ -3558,6 +3598,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_reclaim_partial_create_rolls_back_or_fails_closed
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
+test_workspace_find_refuses_unreadable_list
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key

@@ -128,7 +128,8 @@ Operational compromises:
 
 `herdr workspace create` seeds one default tab.
 Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
-An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
+An adopted workspace is reused only with its persisted home owner record, never from a label alone.
+An adopted workspace never supplies the seeded tab id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.
 
@@ -266,8 +267,6 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-backend-herdr-smoke.test.sh
-tests/fm-backend-herdr-respawn-idem-e2e.test.sh
-tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 ```

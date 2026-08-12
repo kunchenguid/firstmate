@@ -44,20 +44,10 @@ jobs:
       - name: Run focused isolation and slot tests
         run: |
           set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh \
-            tests/fm-worker-isolation.test.sh \
-            tests/fm-slot-occupant-proof.test.sh \
-            tests/fm-spawn-route.test.sh \
-            tests/fm-teardown.test.sh \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing.json"
-      - name: Upload behavior timing artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing
-          path: ${{ runner.temp }}/fm-test/fm-test-timing.json
-          if-no-files-found: warn
+          bash tests/fm-worker-isolation.test.sh
+          bash tests/fm-slot-occupant-proof.test.sh
+          bash tests/fm-spawn-route.test.sh
+          bash tests/fm-teardown.test.sh
 
   macos-stock-bash:
     name: Stock macOS Bash pooled-slot compatibility

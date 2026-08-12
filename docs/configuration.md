@@ -81,7 +81,7 @@ The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `c
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 Local no-mistakes Test stays intent-targeted; [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) owns the broad portable and required real-Herdr lane composition.
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for local test entry points, `bin/fm-test-run.sh --help` for exact selection mechanics, and [herdr-backend.md](herdr-backend.md) for the real-Herdr lane's verification and isolation rationale.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for local test entry points and [herdr-backend.md](herdr-backend.md) for the real-Herdr lane's verification and isolation rationale.
 The Phase 2 concurrent isolation proof for the portable parallel candidate set is owned by `bin/fm-test-isolation-proof.sh`; it does not enable production CI sharding.
 
 ## Captain preferences (data/captain.md)

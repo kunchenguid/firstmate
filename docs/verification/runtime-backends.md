@@ -83,13 +83,12 @@ The real label-collision reproduction is owned by:
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 ```
 
-Observed guarantee: a pre-existing captain-owned workspace with a seed-shaped tab was adopted for routing but its tab was never eligible for prune because the current create call did not return that seed id.
+Observed guarantee: a pre-existing captain-owned workspace with a seed-shaped tab is not adopted without a persisted home owner record.
 
 Restart-husk replacement is owned by:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 ```
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
@@ -100,7 +99,6 @@ Per-home behavior is owned by:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 ```
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
