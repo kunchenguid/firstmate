@@ -528,6 +528,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `bits-development` - load before creating, reusing, or updating a BITS Dev Task for code delivery, attaching projects, binding MRs or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `technical-design-docs` - load before creating or materially revising an implementation-ready technical design or reviewable technical-solution research document.
 
 ## 14. Relay
 
