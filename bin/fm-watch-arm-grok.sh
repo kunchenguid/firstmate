@@ -116,7 +116,7 @@ signal_identity_records() {
 }
 
 retire_child_tree() {
-  local root=$1 seed=${2:-} i=0 records current incomplete=0
+  local root=$1 seed=${2:-} i=0 records current kill_records pid expected observed incomplete=0
   records=$(mktemp "$STATE/.grok-retire.XXXXXX") || return 1
   printf '%s\n' "$(cat "$seed" 2>/dev/null || true)" \
     "$(cat "${FM_GROK_WATCH_RETIRE_TEST_SEED:-/dev/null}" 2>/dev/null || true)" \
@@ -128,12 +128,23 @@ retire_child_tree() {
     i=$((i + 1))
   done
   current="$records.current"
-  printf '%s\n' "$(cat "$records")" "$(child_tree_identities "$root")" \
-    | awk -F '\t' 'NF >= 2 && !seen[$1 FS $2]++' > "$current"
-  mv "$current" "$records"
-  signal_identity_records "$records" KILL || incomplete=1
+  child_tree_identities "$root" > "$current"
+  kill_records="$records.kill"
+  awk -F '\t' 'NR == FNR { current[$1 FS $2]=1; next } current[$1 FS $2]' \
+    "$current" "$records" > "$kill_records"
+  while IFS=$'\t' read -r pid expected; do
+    [ -n "$pid" ] && [ -n "$expected" ] || continue
+    observed=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    [ -z "$observed" ] && continue
+    if [ "$observed" = "$expected" ] \
+      && ! awk -F '\t' -v pid="$pid" -v identity="$expected" \
+        '$1 == pid && $2 == identity { found=1 } END { exit !found }' "$kill_records"; then
+      incomplete=1
+    fi
+  done < "$records"
+  signal_identity_records "$kill_records" KILL || incomplete=1
   wait "$root" 2>/dev/null || true
-  rm -f "$records"
+  rm -f "$records" "$current" "$kill_records"
   [ "$incomplete" -eq 0 ]
 }
 

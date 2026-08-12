@@ -200,7 +200,7 @@ test_term_resistant_overflow_is_forced_bounded() {
   out="$home/owner.out"
   cat > "$arm" <<'SH'
 #!/usr/bin/env bash
-trap '' TERM
+trap '' TERM PIPE
 (trap '' TERM; while :; do sleep 1; done) &
 printf '%s\n' "$!" > "$FM_HOME/state/overflow-descendant-pid"
 printf '%s\n' "$$" > "$FM_HOME/state/overflow-child-pid"
@@ -252,6 +252,36 @@ SH
   kill -TERM "$unrelated" 2>/dev/null || true
   wait "$unrelated" 2>/dev/null || true
   pass "retirement skips changed identities and preserves unrelated processes"
+}
+
+test_retirement_reparented_identity_is_not_forced() {
+  local home arm out status escaped identity fake_seed failure
+  home=$(make_home retirement-reparented-identity)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  escaped=$!
+  identity=$(FM_HOME="$home" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$escaped") \
+    || fail "could not identify reparented retirement counterfactual"
+  fake_seed="$home/state/fake-overflow-identities"
+  printf '%s\t%s\n' "$escaped" "$identity" > "$fake_seed"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do printf '0123456789abcdef0123456789abcdef'; done
+SH
+  chmod +x "$arm"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 \
+    FM_GROK_WATCH_CHILD_TERM_GRACE=0.2 FM_GROK_WATCH_RETIRE_TEST_SEED="$fake_seed" "$OWNER" > "$out" 2>&1
+  status=$?
+  expect_code 1 "$status" "reparented identity retirement must fail through the typed boundary"
+  kill -0 "$escaped" 2>/dev/null || fail "unchanged reparented identity was forcibly signaled"
+  failure='exact child retirement was incomplete'
+  assert_contains "$(cat "$out")" "$failure" "reparented identity did not surface incomplete retirement"
+  kill -KILL "$escaped" 2>/dev/null || true
+  wait "$escaped" 2>/dev/null || true
+  pass "retirement skips unchanged identities outside the current tree"
 }
 
 test_transferred_no_newline_overflow_queues_once() {
@@ -755,6 +785,7 @@ test_transferred_output_overflow_queues_once
 test_no_newline_output_overflow_is_bounded
 test_term_resistant_overflow_is_forced_bounded
 test_retirement_identity_mismatch_preserves_unrelated_process
+test_retirement_reparented_identity_is_not_forced
 test_transferred_no_newline_overflow_queues_once
 test_open_decision_completes_without_queue_row
 test_pending_recovery_completes_without_queue_row
