@@ -1179,6 +1179,24 @@ test_metadata_record_read_failure_retains() {
   pass "metadata record read failures retain the pooled lease"
 }
 
+test_malformed_metadata_record_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-malformed-record)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-malformed-record.meta" \
+    "window=firstmate:fm-task-malformed-record" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_write_meta "$WORLD/home/state/malformed-sibling.meta" \
+    "window=firstmate:fm-malformed-sibling" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-malformed-record "$WORLD/home" )
+  verdict=$(slot_verdict "$WORLD/home/state" task-malformed-record "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "retain: all-home slot metadata evidence is unavailable" \
+    "malformed sibling metadata authorized pooled-slot disposal"
+  pass "malformed pooled-slot metadata retains the lease"
+}
+
 test_missing_ownership_stamp_retains() {
   local rec verdict
   rec=$(make_slot_world slot-missing-stamp)
@@ -1670,6 +1688,7 @@ test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
 test_unexpected_metadata_scan_failure_retains
 test_metadata_record_read_failure_retains
+test_malformed_metadata_record_retains
 test_missing_ownership_stamp_retains
 test_relinquish_refuses_without_ownership_evidence
 test_missing_recorded_worktree_retains

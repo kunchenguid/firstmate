@@ -300,7 +300,7 @@ fm_slot_meta_referencing_tasks() {
       slot_returning=$(fm_slot_meta_value "$meta" slot_returning) || return 2
       [ "$slot_returned" = 1 ] && [ -z "$slot_returning" ] && continue
       other=$(fm_slot_meta_worktree "$meta") || return 2
-      [ -n "$other" ] || continue
+      [ -n "$other" ] || return 2
       if fm_slot_same_path "$other" "$wt"; then
         :
       else
