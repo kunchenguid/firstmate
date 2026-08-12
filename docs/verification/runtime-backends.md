@@ -841,5 +841,5 @@ The portable regression is `tests/fm-cursor-harness.test.sh`, and the composer c
 Refresh this harness-dependent proof before accepting a cursor upgrade:
 
 ```sh
-FM_HARNESS_LIVENESS_DRIFT_LIVE=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
