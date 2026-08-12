@@ -143,6 +143,8 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   end=$(date +%s)
   elapsed=$((end - start))
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
+  [ "$(cat "$COUNTFILE")" = 2 ] \
+    || fail "physical-path guard did not require two repeated logical worktree observations"
   assert_grep "worktree=$physical" "$HOME_DIR/state/$id.meta" \
     "meta did not record the physical already-settled worktree"
   assert_no_grep "worktree=$logical" "$HOME_DIR/state/$id.meta" \
@@ -156,7 +158,44 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane records its physical path and carries one task token without an extra poll cycle"
 }
 
+# The active assertion above must not merely document the intended output: it
+# must go RED when the two canonicalization points on this path are removed.
+# The fake pane supplies the same logical symlink path twice, so a raw-path
+# implementation would record that spelling rather than pwd -P's physical one.
+test_physical_canonicalization_guard_goes_red() {
+  local rec id out status physical logical neutralized real_spawn
+  id=settle-physical-guard-z3
+  rec=$(make_settle_case settle-physical-guard "$id" 0)
+  read_settle_record "$rec"
+  physical=$(cd "$WT_DIR" && pwd -P)
+  logical="$TMP_ROOT/settle-physical-guard/wt-logical"
+  ln -s "$physical" "$logical"
+  WT_DIR=$logical
+  # Run the temporary variant from a complete sibling bin/ directory: spawn
+  # deliberately resolves its helper libraries relative to its own location.
+  cp -R "$ROOT/bin" "$TMP_ROOT/bin"
+  neutralized="$TMP_ROOT/bin/fm-spawn.sh"
+  perl -pe 's{p_real=\$\(real_path_or_raw "\$p"\)}{p_real=\$p}; s{WT=\$\(real_path_or_raw "\$WT"\)}{: # canonicalization intentionally neutralized}' \
+    "$SPAWN" > "$neutralized"
+  chmod +x "$neutralized"
+  real_spawn=$SPAWN
+  SPAWN=$neutralized
+  out=$(run_settle_spawn "$id")
+  status=$?
+  SPAWN=$real_spawn
+  expect_code 0 "$status" "neutralized fixture should still expose the raw-path regression"
+  [ "$(cat "$COUNTFILE")" = 2 ] \
+    || fail "neutralized fixture did not receive two repeated logical worktree observations"
+  grep -Fqx "worktree=$logical" "$HOME_DIR/state/$id.meta" \
+    || fail "neutralizing physical canonicalization did not record the logical symlink spelling: $out"
+  if grep -Fqx "worktree=$physical" "$HOME_DIR/state/$id.meta"; then
+    fail "neutralizing physical canonicalization left the physical-path assertion green: $out"
+  fi
+  pass "removing physical canonicalization turns the symlinked-worktree assertion RED"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_physical_canonicalization_guard_goes_red
 
 echo "# all fm-spawn-worktree-settle tests passed"
