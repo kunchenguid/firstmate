@@ -37,7 +37,9 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   from that harness's launch rather than guessed. Codex `max` is model-qualified:
+#   it refuses before endpoint or metadata creation unless the selected model is a
+#   current catalog entry that advertises `max`.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -239,6 +241,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -387,7 +391,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_model remote_effort remote_expected_effort remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -470,6 +474,18 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  fm_profile_validate_effort_capability "$harness" "$model" "$effort" || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id profile harness=$harness model=${model#-} effort=$effort is not supported; refusing before readiness or inheritance" >&2
+    return 1
+  }
+  remote_expected_effort=$(fm_profile_effective_effort "$harness" "$effort") || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id profile harness=$harness model=${model#-} effort=$effort has an unverifiable effective effort; refusing before readiness or inheritance" >&2
+    return 1
+  }
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -565,6 +581,8 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+  remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effective_effort=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
@@ -573,13 +591,6 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
-    return 1
-  }
   if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -587,6 +598,16 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  [ -n "$remote_target" ] \
+    && [ "$(fm_profile_normalize_harness "$remote_harness")" = "$(fm_profile_normalize_harness "$harness")" ] \
+    && [ "$remote_model" = "$(fm_profile_normalize_model "$model")" ] \
+    && [ "$remote_effort" = "$remote_expected_effort" ] || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned a profile different from the requested profile; preserving the remote route for reconciliation" >&2
+    return 1
+  }
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -1240,6 +1261,10 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+# Resolve Codex's model-qualified max capability after secondmate config tokens
+# have been applied, but before any endpoint, hook, or task metadata is created.
+fm_profile_validate_effort_capability "$HARNESS" "${MODEL:-default}" "${EFFORT:-}" || exit 1
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
@@ -1328,7 +1353,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 model=$2 effort=$3
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1337,11 +1362,13 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort. Max is
+      # emitted only after the model-qualified capability check above.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          fm_profile_codex_max_effort_capability "$model" || return 1
+          printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
@@ -2647,7 +2674,10 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT") || {
+  echo "error: codex max reasoning effort is not supported by model '${MODEL:-default}'; refusing before launch" >&2
+  exit 1
+}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

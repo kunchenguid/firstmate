@@ -120,7 +120,7 @@ git -C "$PARENT/projects/alpha" push -q -u origin main
 cat > "$PARENT/data/projects.md" <<EOF
 - alpha [direct-PR] - alpha project (added 2026-08-02)
 EOF
-printf 'codex\n' > "$PARENT/config/secondmate-harness"
+printf 'pi - high\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
 
@@ -724,6 +724,266 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+remote_parent_meta_before_reuse="$TMP_ROOT/parent-ios-before-reuse.meta"
+remote_route_meta_before_reuse="$TMP_ROOT/remote-ios-before-reuse.meta"
+cp "$PARENT/state/ios.meta" "$remote_parent_meta_before_reuse"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$remote_route_meta_before_reuse"
+herdr_launches_before_reuse=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+assert_contains "$out" 'remote=remote-mac backend=herdr' \
+  "an exact remote profile reuse did not return the existing route"
+herdr_launches_after_reuse=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+[ "$herdr_launches_before_reuse" -eq "$herdr_launches_after_reuse" ] \
+  || fail "an exact remote profile reuse launched a second endpoint"
+cmp -s "$remote_parent_meta_before_reuse" "$PARENT/state/ios.meta" \
+  || fail "an exact remote profile reuse changed the parent profile record"
+cmp -s "$remote_route_meta_before_reuse" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "an exact remote profile reuse changed the live remote profile record"
+pass "remote secondmate exact profile reuse preserves the live endpoint and both records"
+
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-profile-preflight.meta"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-profile-preflight.meta"
+cp "$PARENT/state/.remote-inherit-ios.generation" "$TMP_ROOT/remote-inherit-ios-before-profile-preflight.generation"
+ssh_before_profile_preflight=$(cat "$SSH_COUNT")
+set +e
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness grok --model grok-4 --effort max 2>&1)
+profile_preflight_rc=$?
+set -e
+[ "$profile_preflight_rc" -ne 0 ] \
+  || fail "remote parent accepted an unverifiable profile after inheritance"
+assert_contains "$out" 'before readiness or inheritance' \
+  "remote parent profile preflight did not identify its side-effect boundary"
+[ "$(cat "$SSH_COUNT")" = "$ssh_before_profile_preflight" ] \
+  || fail "remote parent profile refusal reached readiness or inheritance SSH"
+cmp -s "$TMP_ROOT/parent-ios-before-profile-preflight.meta" "$PARENT/state/ios.meta" \
+  || fail "remote parent profile refusal changed parent metadata"
+cmp -s "$TMP_ROOT/remote-ios-before-profile-preflight.meta" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "remote parent profile refusal changed the live endpoint metadata"
+cmp -s "$TMP_ROOT/remote-inherit-ios-before-profile-preflight.generation" \
+  "$PARENT/state/.remote-inherit-ios.generation" \
+  || fail "remote parent profile refusal advanced inheritance generation"
+pass "remote parent profile preflight refuses before readiness or inheritance"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-default-profile.meta"
+set_remote_profile() {
+  local harness=$1 model=$2 effort=$3 source=$4
+  awk -v harness="$harness" -v model="$model" -v effort="$effort" '
+    /^harness=/ { print "harness=" harness; next }
+    /^model=/ { print "model=" model; next }
+    /^effort=/ { print "effort=" effort; next }
+    { print }
+  ' "$source" > "$remote_route_meta"
+}
+
+set_remote_profile grok grok-4 high "$TMP_ROOT/remote-ios-default-profile.meta"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$out" 'harness=grok' "remote route did not expose the live Grok harness"
+assert_contains "$out" 'effective_effort=high' "remote route did not expose Grok's authoritative effort"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios grok grok-4 high herdr)
+assert_contains "$out" 'effective_effort=high' "Grok exact reuse did not compare or report its authoritative effort"
+
+set_remote_profile opencode opencode-model - "$TMP_ROOT/remote-ios-default-profile.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-opencode.meta"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+default_opencode_route_rc=$?
+set -e
+[ "$default_opencode_route_rc" -ne 0 ] \
+  || fail "remote route published OpenCode's unselected effort axis"
+assert_contains "$out" 'unverifiable' \
+  "OpenCode default route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model - herdr \
+  > "$TMP_ROOT/remote-default-opencode.out" 2>&1
+default_opencode_launch_rc=$?
+set -e
+[ "$default_opencode_launch_rc" -ne 0 ] \
+  || fail "OpenCode exact reuse accepted an unverified default effort"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-default-opencode.out" \
+  "OpenCode default reuse did not refuse unverifiable effort"
+cmp -s "$TMP_ROOT/remote-ios-before-default-opencode.meta" "$remote_route_meta" \
+  || fail "OpenCode default refusal changed the live remote metadata"
+
+set_remote_profile kimi kimi-model - "$TMP_ROOT/remote-ios-default-profile.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-kimi.meta"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+default_kimi_route_rc=$?
+set -e
+[ "$default_kimi_route_rc" -ne 0 ] \
+  || fail "remote route published Kimi's unselected effort axis"
+assert_contains "$out" 'unverifiable' \
+  "Kimi default route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model - herdr \
+  > "$TMP_ROOT/remote-default-kimi.out" 2>&1
+default_kimi_launch_rc=$?
+set -e
+[ "$default_kimi_launch_rc" -ne 0 ] \
+  || fail "Kimi exact reuse accepted an unverified default effort"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-default-kimi.out" \
+  "Kimi default reuse did not refuse unverifiable effort"
+cmp -s "$TMP_ROOT/remote-ios-before-default-kimi.meta" "$remote_route_meta" \
+  || fail "Kimi default refusal changed the live remote metadata"
+
+for default_harness in claude codex pi pi-signed grok; do
+  set_remote_profile "$default_harness" default-model - "$TMP_ROOT/remote-ios-default-profile.meta"
+  cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-$default_harness.meta"
+  cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-default-$default_harness.meta"
+  default_ssh_before=$(cat "$SSH_COUNT")
+  set +e
+  out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness "$default_harness" \
+    --model default-model 2>&1)
+  default_parent_rc=$?
+  set -e
+  [ "$default_parent_rc" -ne 0 ] \
+    || fail "remote parent accepted $default_harness's unselected effort axis"
+  assert_contains "$out" 'before readiness or inheritance' \
+    "$default_harness parent preflight did not identify its side-effect boundary"
+  [ "$(cat "$SSH_COUNT")" = "$default_ssh_before" ] \
+    || fail "$default_harness parent refusal reached readiness or inheritance SSH"
+  cmp -s "$TMP_ROOT/parent-ios-before-default-$default_harness.meta" "$PARENT/state/ios.meta" \
+    || fail "$default_harness parent refusal changed parent metadata"
+  default_herdr_launches=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+  default_herdr_closes=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+  set +e
+  out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+  default_route_rc=$?
+  set -e
+  [ "$default_route_rc" -ne 0 ] \
+    || fail "remote route published $default_harness's unselected effort axis"
+  assert_contains "$out" 'unverifiable' \
+    "$default_harness default route did not refuse unverifiable effort"
+  set +e
+  remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios \
+    "$default_harness" default-model - herdr > "$TMP_ROOT/remote-default-$default_harness.out" 2>&1
+  default_launch_rc=$?
+  set -e
+  [ "$default_launch_rc" -ne 0 ] \
+    || fail "$default_harness exact reuse accepted an unverified default effort"
+  assert_grep 'unverifiable' "$TMP_ROOT/remote-default-$default_harness.out" \
+    "$default_harness default reuse did not refuse unverifiable effort"
+  [ "$default_herdr_launches" -eq "$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)" ] \
+    || fail "$default_harness default refusal created a new Herdr endpoint"
+  [ "$default_herdr_closes" -eq "$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)" ] \
+    || fail "$default_harness default refusal stopped the live Herdr endpoint"
+  cmp -s "$TMP_ROOT/remote-ios-before-default-$default_harness.meta" "$remote_route_meta" \
+    || fail "$default_harness default refusal changed the live remote metadata"
+done
+
+set_remote_profile grok grok-4 max "$TMP_ROOT/remote-ios-default-profile.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-unverifiable-grok.meta"
+herdr_launches_before_unverifiable_grok=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_before_unverifiable_grok=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+unverifiable_grok_route_rc=$?
+set -e
+[ "$unverifiable_grok_route_rc" -ne 0 ] || fail "remote route published Grok max without authoritative effort"
+assert_contains "$out" 'unverifiable' "Grok max route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios grok grok-4 max herdr \
+  > "$TMP_ROOT/remote-unverifiable-grok.out" 2>&1
+unverifiable_grok_launch_rc=$?
+set -e
+[ "$unverifiable_grok_launch_rc" -ne 0 ] || fail "remote reuse accepted Grok max without authoritative effort"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-unverifiable-grok.out" \
+  "Grok max reuse did not refuse unverifiable effort"
+[ "$herdr_launches_before_unverifiable_grok" -eq "$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)" ] \
+  || fail "Grok max refusal created a new Herdr endpoint"
+[ "$herdr_closes_before_unverifiable_grok" -eq "$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)" ] \
+  || fail "Grok max refusal stopped the live Herdr endpoint"
+cmp -s "$TMP_ROOT/remote-ios-before-unverifiable-grok.meta" "$remote_route_meta" \
+  || fail "Grok max refusal changed the live remote metadata"
+
+set_remote_profile opencode opencode-model high "$TMP_ROOT/remote-ios-default-profile.meta"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+unverifiable_opencode_route_rc=$?
+set -e
+[ "$unverifiable_opencode_route_rc" -ne 0 ] || fail "remote route published OpenCode effort without authoritative truth"
+assert_contains "$out" 'unverifiable' "OpenCode route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model high herdr \
+  > "$TMP_ROOT/remote-unverifiable-opencode.out" 2>&1
+unverifiable_opencode_launch_rc=$?
+set -e
+[ "$unverifiable_opencode_launch_rc" -ne 0 ] || fail "remote reuse accepted OpenCode effort without authoritative truth"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-unverifiable-opencode.out" \
+  "OpenCode reuse did not refuse unverifiable effort"
+
+set_remote_profile kimi kimi-model max "$TMP_ROOT/remote-ios-default-profile.meta"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+unverifiable_kimi_route_rc=$?
+set -e
+[ "$unverifiable_kimi_route_rc" -ne 0 ] || fail "remote route published Kimi effort without authoritative truth"
+assert_contains "$out" 'unverifiable' "Kimi route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model max herdr \
+  > "$TMP_ROOT/remote-unverifiable-kimi.out" 2>&1
+unverifiable_kimi_launch_rc=$?
+set -e
+[ "$unverifiable_kimi_launch_rc" -ne 0 ] || fail "remote reuse accepted Kimi effort without authoritative truth"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-unverifiable-kimi.out" \
+  "Kimi reuse did not refuse unverifiable effort"
+
+set_remote_profile codex future-codex-model max "$TMP_ROOT/remote-ios-default-profile.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-stale-codex.meta"
+herdr_launches_before_stale_codex=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_before_stale_codex=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex future-codex-model max herdr \
+  > "$TMP_ROOT/remote-stale-codex.out" 2>&1
+stale_codex_rc=$?
+set -e
+[ "$stale_codex_rc" -ne 0 ] || fail "an alive remote Codex endpoint bypassed capability validation"
+assert_grep 'unknown max reasoning capability' "$TMP_ROOT/remote-stale-codex.out" \
+  "stale remote Codex reuse did not report its unverifiable max capability"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+stale_codex_route_rc=$?
+set -e
+[ "$stale_codex_route_rc" -ne 0 ] || fail "remote route published unsupported Codex max capability"
+assert_contains "$out" 'unknown max reasoning capability' \
+  "remote route did not validate the stale Codex max capability"
+herdr_launches_after_stale_codex=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_after_stale_codex=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+[ "$herdr_launches_before_stale_codex" -eq "$herdr_launches_after_stale_codex" ] \
+  || fail "stale remote Codex reuse created a new Herdr endpoint"
+[ "$herdr_closes_before_stale_codex" -eq "$herdr_closes_after_stale_codex" ] \
+  || fail "stale remote Codex reuse stopped the live Herdr endpoint"
+cmp -s "$TMP_ROOT/remote-ios-before-stale-codex.meta" "$remote_route_meta" \
+  || fail "stale remote Codex reuse changed the live remote metadata"
+mv -f "$TMP_ROOT/remote-ios-default-profile.meta" "$remote_route_meta"
+pass "remote reuse reports applied effort and rejects unverifiable live Codex max"
+
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-profile-mismatch.meta"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-profile-mismatch.meta"
+herdr_launches_before_profile_mismatch=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_before_profile_mismatch=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness codex \
+  --model gpt-5.6-luna --effort max > "$TMP_ROOT/spawn-profile-mismatch.out" 2>&1
+profile_mismatch_rc=$?
+set -e
+[ "$profile_mismatch_rc" -ne 0 ] \
+  || fail "a remote profile mismatch reused the live endpoint"
+assert_grep 'requested profile' "$TMP_ROOT/spawn-profile-mismatch.out" \
+  "remote profile mismatch did not identify the requested profile comparison"
+cmp -s "$TMP_ROOT/parent-ios-before-profile-mismatch.meta" "$PARENT/state/ios.meta" \
+  || fail "remote profile mismatch changed the parent metadata"
+cmp -s "$TMP_ROOT/remote-ios-before-profile-mismatch.meta" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "remote profile mismatch changed the live remote metadata"
+herdr_launches_after_profile_mismatch=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_after_profile_mismatch=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+[ "$herdr_launches_before_profile_mismatch" -eq "$herdr_launches_after_profile_mismatch" ] \
+  || fail "remote profile mismatch launched a new Herdr endpoint"
+[ "$herdr_closes_before_profile_mismatch" -eq "$herdr_closes_after_profile_mismatch" ] \
+  || fail "remote profile mismatch stopped the live Herdr endpoint"
+pass "remote secondmate profile mismatch refuses without retargeting or stopping the endpoint"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
@@ -799,7 +1059,7 @@ EOF
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-before-refusal.meta"
 printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 set +e
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr \
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - high herdr \
   > "$TMP_ROOT/legacy-alive-refusal.out" 2>&1
 legacy_alive_rc=$?
 set -e

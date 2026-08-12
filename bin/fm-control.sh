@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -668,6 +670,8 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
+  fm_profile_validate_effort_capability "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" \
+    || die "relaunch profile for task $ID is not supported; the existing agent remains running"
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

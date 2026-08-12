@@ -607,7 +607,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   dir=$(new_case smpin sm3)
   home="$dir/home"
   mkdir -p "$home/config"
-  printf 'codex some-model high\n' > "$home/config/secondmate-harness"
+  printf 'codex gpt-5.6-luna max\n' > "$home/config/secondmate-harness"
   mkdir -p "$home/data/sm3"
   printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
@@ -634,9 +634,9 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
     || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
-  [ "$(journal_field "$dir" sm3 to_model)" = some-model ] \
+  [ "$(journal_field "$dir" sm3 to_model)" = gpt-5.6-luna ] \
     || fail "the configured model token should come with the pin"
-  [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
+  [ "$(journal_field "$dir" sm3 to_effort)" = max ] \
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
@@ -676,6 +676,44 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   [ "$(journal_field "$dir" sm6 to_effort)" = default ] \
     || fail "invalid configured effort should normalize to default"
   pass "fm-control relaunch: invalid configured effort is ignored before stop"
+}
+
+test_secondmate_relaunch_rejects_unknown_codex_max_before_stop() {
+  local dir home out rc
+  dir=$(new_case unknown-codex-max sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'codex future-codex-model max\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm8 relaunch); rc=$?
+  expect_code 1 "$rc" "unknown Codex max capability should refuse before stop"
+  assert_contains "$out" "unknown max reasoning capability" \
+    "the relaunch refusal should identify the unknown Codex max capability"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "unknown Codex max capability must refuse before stopping the running agent"
+  [ "$(meta_field "$dir" sm8 harness)" = claude ] \
+    || fail "unknown Codex max capability must leave the prior task metadata intact"
+  pass "fm-control relaunch: unknown Codex max capability refuses before stopping the agent"
 }
 
 # muse is a verified adapter, but only for crewmates and scouts: it has no
@@ -1317,6 +1355,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
+test_secondmate_relaunch_rejects_unknown_codex_max_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config

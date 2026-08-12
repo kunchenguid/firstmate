@@ -120,7 +120,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified on codex-cli 0.147.0. The installed binary schema contains `model_reasoning_effort`; `codex debug models` advertises `max` for `gpt-5.6-sol`, `gpt-5.6-sol-wm`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `codex-auto-review`. Firstmate emits `max` only for those known catalog models, and refuses before metadata/launch for `gpt-5.3-codex-spark` or an unknown model. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
@@ -138,7 +138,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | Harness | Authoritative discovery surface |
 |---|---|
 | claude | Open the current interactive session's `/model` picker; `claude --help` documents the accepted alias or full-model-name input shape. |
-| codex | Open the current interactive session's `/model` picker. |
+| codex | Run `codex debug models` and inspect `supported_reasoning_levels` in the installed catalog; the interactive `/model` picker remains the account/session availability surface. |
 | opencode | Run `opencode models [provider]`, which lists available provider/model identifiers. |
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
@@ -148,8 +148,8 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+The local-versus-remote effort contract, malformed-input handling, and Codex model-qualified `max` capability are owned by [`docs/configuration.md`](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
+At this risk point, never infer applied effort from an omitted adapter flag; remote secondmate preflight and reuse require verified effective-effort truth.
 
 ## no-mistakes skill invocation
 
@@ -199,7 +199,7 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
+## codex (baseline mechanics verified 2026-06-11 on codex-cli 0.139.0; max-effort profile refreshed 2026-08-12 on codex-cli 0.147.0)
 
 | Fact | Value |
 |---|---|

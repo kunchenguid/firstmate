@@ -419,21 +419,86 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
+test_codex_threads_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  expect_code 0 "$status" "codex spawn with supported max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread the supported max reasoning effort"
+  pass "codex receives model_reasoning_effort max and records the requested effort"
+}
+
+test_codex_threads_max_effort_for_sol() {
+  local rec id out status launch
+  id=profile-codex-sol-max-z4a
+  rec=$(make_spawn_case profile-codex-sol-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "codex Sol spawn with supported max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"max\"'" \
+    "codex Sol launch did not thread max reasoning effort"
+  pass "codex Sol receives model_reasoning_effort max"
+}
+
+test_codex_rejects_known_unsupported_max_model() {
+  local rec id out status
+  id=profile-codex-spark-max-z4c
+  rec=$(make_spawn_case profile-codex-spark-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.3-codex-spark --effort max)
+  status=$?
+  expect_code 1 "$status" "Codex Spark max should refuse before launch"
+  assert_contains "$out" "does not advertise max reasoning effort" \
+    "known unsupported Codex model refusal did not cite its catalog ceiling"
+  assert_absent "$HOME_DIR/state/$id.meta" "known unsupported Codex max wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "known unsupported Codex max typed a launch command"
+  pass "Codex Spark max refuses before metadata or launch"
+}
+
+test_codex_rejects_unknown_max_model() {
+  local rec id out status
+  id=profile-codex-unknown-max-z4d
+  rec=$(make_spawn_case profile-codex-unknown-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model future-codex-model --effort max)
+  status=$?
+  expect_code 1 "$status" "Codex max with unknown model capability should refuse"
+  assert_contains "$out" "unknown max reasoning capability" \
+    "unknown Codex model refusal did not state the capability uncertainty"
+  assert_absent "$HOME_DIR/state/$id.meta" "unknown Codex max wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unknown Codex max typed a launch command"
+  pass "unknown Codex max capability refuses before metadata or launch"
+}
+
+test_malformed_effort_refuses_before_launch() {
+  local rec id out status
+  id=profile-malformed-effort-z4b
+  rec=$(make_spawn_case profile-malformed-effort claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort impossible)
+  status=$?
+  expect_code 1 "$status" "malformed effort should be rejected before launch"
+  assert_contains "$out" "--effort must be one of low, medium, high, xhigh, max" \
+    "malformed effort refusal did not state the accepted shared vocabulary"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed effort wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "malformed effort typed a launch command"
+  pass "malformed effort refuses before metadata or launch"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -639,7 +704,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status launch
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
@@ -647,14 +712,17 @@ test_batch_forwards_shared_profile_flags() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5.6-luna --effort max)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
-  assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
-  assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
-  pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
+  assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5.6-luna max
+  assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5.6-luna max
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$(grep -c 'model_reasoning_effort=\"max\"' "$LAUNCH_LOG")" -eq 2 ] \
+    || fail "batch dispatch did not render max effort for both Codex launches: $launch"
+  pass "batch dispatch forwards Codex model-qualified max effort to every pair"
 }
 
 test_claude_forwards_firstmate_config_dir_when_set() {
@@ -736,7 +804,11 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort
+test_codex_threads_max_effort_for_sol
+test_codex_rejects_known_unsupported_max_model
+test_codex_rejects_unknown_max_model
+test_malformed_effort_refuses_before_launch
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

@@ -724,18 +724,18 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   sm="$w/sm"
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
-  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-luna max\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
 
   spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
 
   meta="$w/home/state/sm.meta"
-  [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
-  [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
+  [ "$(meta_field "$meta" model)" = gpt-5.6-luna ] || fail "model-effort-tokens: meta model not gpt-5.6-luna"
+  [ "$(meta_field "$meta" effort)" = max ] || fail "model-effort-tokens: meta effort not max (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
-    "model-effort-tokens: launch did not carry both --model opus and --effort high"
-  pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"'" \
+    "model-effort-tokens: launch did not carry Codex Luna and max"
+  pass "C4 spawn: config/secondmate-harness's Codex Luna+max tokens thread into the launch and meta"
 }
 
 # Precedence: an explicit per-spawn --model overrides the file's model token.

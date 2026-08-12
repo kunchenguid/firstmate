@@ -273,10 +273,14 @@ Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-An omitted model or effort means the selected harness uses its own default for that axis.
+An omitted model or effort requests the selected harness's own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
-If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+For local crewmate and scout launches, a syntactically valid effort that the chosen harness does not accept is recorded in task meta for traceability while its launch flag is omitted, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+Malformed effort values are rejected before task metadata or a launch is created.
+Remote secondmate launches are stricter: the resolved profile must pass capability and effective-effort preflight before readiness, inheritance, private-material transfer, endpoint metadata publication, or route publication.
+An omitted/default effort is authoritative for a remote route only when the adapter's default semantics are verified; otherwise it is unverifiable and remote launch, route publication, and exact reuse refuse without retargeting or stopping the live endpoint.
+Codex `max` is model-qualified: the current Codex 0.147.0 catalog supports it for `gpt-5.6-sol`, `gpt-5.6-sol-wm`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `codex-auto-review`; a known non-supporting model or unknown model capability refuses before endpoint or metadata creation.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.

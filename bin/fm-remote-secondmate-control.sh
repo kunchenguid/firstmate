@@ -46,6 +46,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -109,16 +111,49 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness model effort effective_effort traceparent
   remote_endpoint_require "$id"
-  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  harness=$(fm_profile_normalize_harness "$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)") \
+    || die "remote secondmate $id endpoint metadata has an unrecognized harness"
+  model=$(fm_profile_normalize_model "$(fm_meta_get "$REMOTE_ENDPOINT_META" model)")
+  effort=$(fm_profile_normalize_effort "$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)")
+  fm_profile_validate_effort_capability "$harness" "$model" "$effort" \
+    || die "remote secondmate $id endpoint profile is not supported; refusing route publication without changing the live endpoint"
+  effective_effort=$(fm_profile_effective_effort "$harness" "$effort") \
+    || die "remote secondmate $id endpoint profile has an unverifiable effective effort; refusing route publication without changing the live endpoint"
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'model=%s\n' "$model"
+  printf 'effective_effort=%s\n' "$effective_effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+}
+
+remote_profile_require_match() {
+  local id=$1 requested_harness=$2 requested_model=$3 requested_effort=$4
+  local live_harness live_model live_requested_effort live_effective_effort
+  local requested_effective_effort
+  live_harness=$(fm_profile_normalize_harness "$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)") \
+    || die "remote secondmate $id endpoint metadata has an unrecognized harness"
+  requested_harness=$(fm_profile_normalize_harness "$requested_harness") \
+    || die "remote secondmate $id request has an unrecognized harness"
+  live_model=$(fm_profile_normalize_model "$(fm_meta_get "$REMOTE_ENDPOINT_META" model)")
+  live_requested_effort=$(fm_profile_normalize_effort "$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)")
+  requested_model=$(fm_profile_normalize_model "$requested_model")
+  requested_effort=$(fm_profile_normalize_effort "$requested_effort")
+  fm_profile_validate_effort_capability "$live_harness" "$live_model" "$live_requested_effort" \
+    || die "remote secondmate $id live profile is not supported; refusing reuse without retargeting or stopping the endpoint"
+  live_effective_effort=$(fm_profile_effective_effort "$live_harness" "$live_requested_effort") \
+    || die "remote secondmate $id live profile has an unverifiable effective effort; refusing reuse without retargeting or stopping the endpoint"
+  requested_effective_effort=$(fm_profile_effective_effort "$requested_harness" "$requested_effort") \
+    || die "remote secondmate $id requested profile has an unverifiable effective effort; refusing reuse without retargeting or stopping the endpoint"
+  [ "$live_harness" = "$requested_harness" ] \
+    && [ "$live_model" = "$requested_model" ] \
+    && [ "$live_effective_effort" = "$requested_effective_effort" ] \
+    || die "remote secondmate $id is alive with profile harness=$live_harness model=$live_model effective_effort=$live_effective_effort, but the requested profile is harness=$requested_harness model=$requested_model effective_effort=$requested_effective_effort; refusing reuse without retargeting or stopping the live endpoint"
 }
 
 cmd_route() {
@@ -140,6 +175,10 @@ cmd_launch() {
   validate_home "$id"
   case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  fm_profile_validate_effort_capability "$harness" "$model" "$effort" \
+    || die "remote secondmate $id requested profile is not supported; refusing launch or reuse without changing the live endpoint"
+  fm_profile_effective_effort "$harness" "$effort" >/dev/null \
+    || die "remote secondmate $id requested profile has an unverifiable effective effort; refusing launch or reuse without changing the live endpoint"
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
@@ -151,6 +190,7 @@ cmd_launch() {
     current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
+        remote_profile_require_match "$id" "$harness" "$model" "$effort"
         print_route "$id"
         return 0
         ;;
