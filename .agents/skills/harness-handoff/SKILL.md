@@ -37,16 +37,16 @@ A provider-window death does not prove that every lane on that provider died.
 It also does not stop workers on the other provider.
 The primary may be gone while workers and pipeline processes continue unsupervised, so classify each task independently.
 
+- `fine` means its worker endpoint and authoritative pipeline state remain healthy and the task still has supervision.
+- `unsupervised` means work remains live or an authoritative pipeline run remains active, but the primary that owned supervision disappeared.
+- `dead` means durable endpoint inspection proves the agent is gone, or the authoritative run ended because its selected provider became unavailable.
+- `unknown` remains unknown and authorizes inspection only, never relaunch or teardown.
+
 Treat the no-mistakes gate agent as a separate provider axis from the worker harness.
 On this installation, `~/.no-mistakes/config.yaml` line 10 sets `agent: claude`, so review, test, document, and later gate agents consume Claude even when the task worker runs on Codex.
 That same setting supports `agent: codex` or an ordered fallback list such as `agent: [codex, claude]`.
 Read the current config during recovery and record its selected gate agent in the packet; never infer pipeline-provider consumption from the worker harness.
 Do not change the global no-mistakes config as part of a handoff, because it affects other live lanes and remains the captain's decision.
-
-- `fine` means its worker endpoint and authoritative pipeline state remain healthy and the task still has supervision.
-- `unsupervised` means work remains live or an authoritative pipeline run remains active, but the primary that owned supervision disappeared.
-- `dead` means durable endpoint inspection proves the agent is gone, or the authoritative run ended because its selected provider became unavailable.
-- `unknown` remains unknown and authorizes inspection only, never relaunch or teardown.
 
 ## Build one durable recovery packet per task
 
