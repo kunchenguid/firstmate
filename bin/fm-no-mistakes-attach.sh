@@ -85,6 +85,10 @@ fm_nm_attach_status_usable() { # <status-output>
   return 0
 }
 
+fm_nm_attach_status_absent() { # <status-output>
+  printf '%s\n' "$1" | grep -Fx 'No active run. Push through the gate to start a pipeline:' >/dev/null
+}
+
 fm_nm_attach_status_diagnostic() { # <status-output>
   local output=$1 diagnostic
   diagnostic=$(printf '%s\n' "$output" | tr '\r' '\n' | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')
@@ -247,6 +251,8 @@ fm_nm_attach_wait() { # <repo-root> <branch> <expected-head> <no-mistakes-execut
           && ! fm_nm_attach_terminal "$output"; then
           exec "$nm_bin" attach --run "$run"
         fi
+      elif fm_nm_attach_status_absent "$output"; then
+        status_errors=0
       else
         status_errors=$((status_errors + 1))
         diagnostic=$(fm_nm_attach_status_diagnostic "$output")

@@ -43,6 +43,10 @@ case "${1:-} ${2:-}" in
       :
     elif [ -e "${FM_FAKE_NM_STATUS_NO_HEAD:-}" ]; then
       printf '%s\n' 'run:' '  id: "NOHEAD123"' '  branch: fm/dashboard-test' '  status: running'
+    elif [ -e "${FM_FAKE_NM_NO_RUN_ALWAYS:-}" ]; then
+      printf '%s\n' 'No active run. Push through the gate to start a pipeline:'
+    elif [ "$count" -le 1 ] && [ -e "${FM_FAKE_NM_NO_RUN_FIRST:-}" ]; then
+      printf '%s\n' 'No active run. Push through the gate to start a pipeline:'
     elif [ -n "${FM_FAKE_NM_TRANSIENT_FAILURES:-}" ] && [ "$count" -le "$FM_FAKE_NM_TRANSIENT_FAILURES" ]; then
       printf '%s\n' 'simulated transient status failure' >&2
       exit 42
@@ -272,6 +276,32 @@ FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_L
 [ "$(cat "$FM_FAKE_NM_ATTACHED")" = RUN123 ] || fail 'transient status recovery did not attach the matching run'
 pass 'fm-no-mistakes-attach: transient status failure recovers before the bounded limit'
 unset FM_FAKE_NM_TRANSIENT_FAILURES
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-first"
+export FM_FAKE_NM_NO_RUN_FIRST="$FIXTURE/no-run-first"
+FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" || fail 'explicit no-run response did not continue polling'
+[ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'explicit no-run response did not poll until the matching run appeared'
+assert_grep 'attach --run RUN123' "$FM_FAKE_NM_CALLS" 'explicit no-run response prevented attachment to the matching run'
+pass 'fm-no-mistakes-attach: explicit no-run response polls until the matching run appears'
+unset FM_FAKE_NM_NO_RUN_FIRST
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-always"
+export FM_FAKE_NM_NO_RUN_ALWAYS="$FIXTURE/no-run-always"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=2 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail_with_output 'explicit no-run response did not reach the normal absence timeout' "$output"
+assert_contains "$output" 'no active no-mistakes run appeared for branch fm/dashboard-test after 2 polls' \
+  'explicit no-run response did not report the normal absence timeout'
+[ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'explicit no-run response did not consume the normal poll budget'
+assert_no_grep 'attach ' "$FM_FAKE_NM_CALLS" 'explicit no-run response attached a run'
+pass 'fm-no-mistakes-attach: persistent explicit no-run response reaches the normal absence timeout'
+unset FM_FAKE_NM_NO_RUN_ALWAYS
 
 : > "$FM_FAKE_NM_CALLS"
 : > "$FIXTURE/wrong-branch"
