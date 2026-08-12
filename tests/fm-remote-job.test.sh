@@ -19,6 +19,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 GHOST_WORKER_PID=
+CLAIM_ORPHAN_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -27,6 +28,7 @@ cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$GHOST_WORKER_PID" ] || kill "$GHOST_WORKER_PID" 2>/dev/null || true
+  [ -z "$CLAIM_ORPHAN_WORKER_PID" ] || kill "$CLAIM_ORPHAN_WORKER_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -656,5 +658,52 @@ kill -TERM "$GHOST_WORKER_PID" 2>/dev/null || true
 wait "$GHOST_WORKER_PID" 2>/dev/null || true
 GHOST_WORKER_PID=
 pass "an orphaned atomic-publish scratch file does not permanently wedge worker ownership"
+
+CLAIM_ORPHAN_HOME="$TMP_ROOT/claim-orphan-account"
+CLAIM_ORPHAN_STATE="$TMP_ROOT/claim-orphan-jobs"
+CLAIM_ORPHAN_JOB="$CLAIM_ORPHAN_STATE/jobs/job-claimorphan"
+mkdir -p "$CLAIM_ORPHAN_HOME" "$CLAIM_ORPHAN_STATE/jobs" "$CLAIM_ORPHAN_STATE/logs" \
+  "$CLAIM_ORPHAN_STATE/worker.lock" "$CLAIM_ORPHAN_JOB/.claim"
+chmod 700 "$CLAIM_ORPHAN_HOME" "$CLAIM_ORPHAN_STATE" "$CLAIM_ORPHAN_STATE/jobs" "$CLAIM_ORPHAN_STATE/logs" \
+  "$CLAIM_ORPHAN_STATE/worker.lock" "$CLAIM_ORPHAN_JOB" "$CLAIM_ORPHAN_JOB/.claim"
+sleep 0.01 &
+CLAIM_ORPHAN_OWNER_PID=$!
+wait "$CLAIM_ORPHAN_OWNER_PID" 2>/dev/null || true
+printf '%s\n' "$CLAIM_ORPHAN_OWNER_PID" > "$CLAIM_ORPHAN_JOB/.claim/owner"
+printf 'running\n' > "$CLAIM_ORPHAN_JOB/state"
+: > "$CLAIM_ORPHAN_JOB/stdout"
+: > "$CLAIM_ORPHAN_JOB/stderr"
+# An orphaned atomic-publish scratch file, exactly as a worker killed between
+# mktemp and rename inside worker_run_with_timeout would leave behind - the
+# same sibling instance of issue #1972's lock-scratch orphan, scoped to a
+# job's .claim directory instead of the worker ownership lock. Nothing else
+# ever removes this dotfile, so it must not be able to wedge job claim
+# reclaim forever.
+: > "$CLAIM_ORPHAN_JOB/.claim/.group.orphan1"
+chmod 600 "$CLAIM_ORPHAN_JOB/.claim/owner" "$CLAIM_ORPHAN_JOB/state" \
+  "$CLAIM_ORPHAN_JOB/stdout" "$CLAIM_ORPHAN_JOB/stderr" "$CLAIM_ORPHAN_JOB/.claim/.group.orphan1"
+HOME="$CLAIM_ORPHAN_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$CLAIM_ORPHAN_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/claim-orphan-worker.out" 2> "$TMP_ROOT/claim-orphan-worker.err" &
+CLAIM_ORPHAN_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$CLAIM_ORPHAN_STATE/worker.ready" ] && break
+  kill -0 "$CLAIM_ORPHAN_WORKER_PID" 2>/dev/null || break
+  sleep 0.05
+done
+assert_present "$CLAIM_ORPHAN_STATE/worker.ready" \
+  "worker did not start with an orphaned job-claim scratch file present"
+for _ in $(seq 1 300); do
+  [ ! -e "$CLAIM_ORPHAN_JOB/.claim" ] && break
+  sleep 0.05
+done
+assert_absent "$CLAIM_ORPHAN_JOB/.claim" \
+  "an orphaned job-claim scratch file permanently wedged job claim reclaim"
+assert_present "$CLAIM_ORPHAN_JOB/exit" \
+  "the wedged job was never recovered and published a result"
+kill -TERM "$CLAIM_ORPHAN_WORKER_PID" 2>/dev/null || true
+wait "$CLAIM_ORPHAN_WORKER_PID" 2>/dev/null || true
+CLAIM_ORPHAN_WORKER_PID=
+pass "an orphaned job-claim scratch file does not permanently wedge job claim reclaim"
 
 echo "ALL TESTS PASSED"

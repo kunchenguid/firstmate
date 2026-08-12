@@ -366,6 +366,21 @@ worker_claim_owner_alive() { # <job-dir>
   kill -0 "$pid" 2>/dev/null
 }
 
+# worker_run_with_timeout stages its group/armed publish through the same
+# mktemp-then-rename-in-place pattern worker_publish_lock_owner and
+# worker_publish_quarantine use on $WORKER_LOCK. A worker killed between one
+# of those mktemp calls and its rename leaves that scratch file behind in
+# $job/.claim with no owner left to finish or discard it, which would
+# otherwise block every future rmdir reclaim of the claim forever.
+worker_clear_claim_scratch() { # <claim-dir>
+  local claim=$1 file
+  for file in "$claim"/.group.* "$claim"/.armed.*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ ! -L "$file" ] || return 1
+    rm -f -- "$file" || return 1
+  done
+}
+
 worker_clear_dead_claim() { # <job-dir>
   local job=$1 claim="$1/.claim"
   [ -e "$claim" ] || [ -L "$claim" ] || return 0
@@ -373,6 +388,7 @@ worker_clear_dead_claim() { # <job-dir>
   [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
   [ ! -e "$claim/owner" ] || [ ! -L "$claim/owner" ] || return 1
   rm -f -- "$claim/owner" "$claim/supervisor" "$claim/group" "$claim/armed" || return 1
+  worker_clear_claim_scratch "$claim" || return 1
   rmdir "$claim"
 }
 
