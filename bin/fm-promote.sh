@@ -12,7 +12,7 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--skill-review <name>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,8 +27,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 MODE=
 YOLO=
+SKILL_REVIEW=
 MODE_SET=0
 YOLO_SET=0
+SKILL_REVIEW_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -39,6 +41,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      skill-review) SKILL_REVIEW=$a; SKILL_REVIEW_SET=1 ;;
     esac
     want_value=
     continue
@@ -48,10 +51,13 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --skill-review) want_value=skill-review ;;
+    --skill-review=*) SKILL_REVIEW=${a#--skill-review=}; SKILL_REVIEW_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$SKILL_REVIEW_SET" -eq 0 ] || [ -n "$SKILL_REVIEW" ] || { echo "error: --skill-review requires a non-empty value" >&2; exit 1; }
 [ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
@@ -108,12 +114,26 @@ META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+PROJECT_PATH=$(sed -n 's/^project=//p' "$META" | head -n 1)
+if [ -z "$PROJECT_PATH" ]; then
+  PROJECT_PATH=$(sed -n 's/^worktree=//p' "$META" | head -n 1)
+fi
+[ -n "$PROJECT_PATH" ] || { echo "error: task $ID meta has no project or worktree path" >&2; exit 1; }
+PROJECT_NAME=$(basename "$PROJECT_PATH")
+resolve_args=(resolve review "$PROJECT_NAME")
+[ "$SKILL_REVIEW_SET" -eq 0 ] || resolve_args+=(--explicit "$SKILL_REVIEW")
+if ! SKILL_REVIEW=$("$SCRIPT_DIR/fm-crew-skills.sh" "${resolve_args[@]}" 2>&1); then
+  printf '%s\n' "$SKILL_REVIEW" >&2
+  exit 1
+fi
+
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^skill_review=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ -z "$SKILL_REVIEW" ] || echo "skill_review=$SKILL_REVIEW"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
@@ -122,4 +142,8 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+if [ -n "$SKILL_REVIEW" ]; then
+  echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement and commit; stop for configured review skill $SKILL_REVIEW before delivery>'"
+else
+  echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+fi

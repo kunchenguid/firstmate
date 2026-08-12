@@ -1146,6 +1146,40 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_skills_validation() {
+  local case_dir fakebin skills out
+  case_dir="$TMP_ROOT/crew-skills"
+  skills="$case_dir/user-skills"
+  mkdir -p "$case_dir/home/config" "$skills/known-review"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '# known\n' > "$skills/known-review/SKILL.md"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  printf '%s\n' '{"phases":{"review":{"skill":"known-review"}}}' > "$case_dir/home/config/crew-skills.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_USER_SKILLS_DIR="$skills" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "valid crew skills should be silent by default, got: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_USER_SKILLS_DIR="$skills" FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BOOTSTRAP_INFO: crew workflow skills active config/crew-skills.json" \
+    "verbose bootstrap did not report active crew skills"
+
+  printf '%s\n' '{"phases":{"review":{"skill":"missing-review"}}}' > "$case_dir/home/config/crew-skills.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_USER_SKILLS_DIR="$skills" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_SKILLS: invalid config/crew-skills.json - unknown skill: missing-review' ] \
+    || fail "unknown crew skill diagnostic drifted: $out"
+
+  printf '%s\n' '{"phases":[' > "$case_dir/home/config/crew-skills.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_USER_SKILLS_DIR="$skills" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_SKILLS: invalid config/crew-skills.json - malformed JSON' ] \
+    || fail "malformed crew skills diagnostic drifted: $out"
+  pass "bootstrap validates crew-skills.json and fails loudly"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1168,6 +1202,7 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_crew_skills_validation
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times

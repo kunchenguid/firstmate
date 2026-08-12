@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--skill-review <name>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--skill-plan <name>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -106,6 +106,10 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+SKILL_PLAN=
+SKILL_REVIEW=
+SKILL_PLAN_SET=0
+SKILL_REVIEW_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +119,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      skill-plan) SKILL_PLAN=$a; SKILL_PLAN_SET=1 ;;
+      skill-review) SKILL_REVIEW=$a; SKILL_REVIEW_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +133,10 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --skill-plan) want_value=skill-plan ;;
+    --skill-plan=*) SKILL_PLAN=${a#--skill-plan=}; SKILL_PLAN_SET=1 ;;
+    --skill-review) want_value=skill-review ;;
+    --skill-review=*) SKILL_REVIEW=${a#--skill-review=}; SKILL_REVIEW_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -135,6 +145,8 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$SKILL_PLAN_SET" -eq 0 ] || [ -n "$SKILL_PLAN" ] || { echo "error: --skill-plan requires a non-empty value" >&2; exit 1; }
+[ "$SKILL_REVIEW_SET" -eq 0 ] || [ -n "$SKILL_REVIEW" ] || { echo "error: --skill-review requires a non-empty value" >&2; exit 1; }
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -152,6 +164,18 @@ if [ "$KIND" = ship ]; then
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$KIND" = ship ] && [ "$SKILL_PLAN_SET" -eq 1 ]; then
+  echo "error: --skill-plan applies only to scout briefs" >&2
+  exit 1
+fi
+if [ "$KIND" = scout ] && [ "$SKILL_REVIEW_SET" -eq 1 ]; then
+  echo "error: --skill-review applies only to ship briefs" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && { [ "$SKILL_PLAN_SET" -eq 1 ] || [ "$SKILL_REVIEW_SET" -eq 1 ]; }; then
+  echo "error: workflow phase skills apply only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -265,6 +289,46 @@ exit 0
 fi
 
 REPO=${POS[1]}
+PROJECT_NAME=$(basename "$REPO")
+WORKFLOW_SECTION=
+if [ "$KIND" = scout ]; then
+  resolve_args=(resolve plan "$PROJECT_NAME")
+  [ "$SKILL_PLAN_SET" -eq 0 ] || resolve_args+=(--explicit "$SKILL_PLAN")
+  if ! SKILL_PLAN=$("$SCRIPT_DIR/fm-crew-skills.sh" "${resolve_args[@]}" 2>&1); then
+    printf '%s\n' "$SKILL_PLAN" >&2
+    exit 1
+  fi
+  if [ -n "$SKILL_PLAN" ]; then
+    IFS= read -r -d '' WORKFLOW_SECTION <<EOF || true
+
+# Configured workflow skill
+Workflow skill: phase=plan skill=$SKILL_PLAN
+Firstmate will invoke this configured plan skill using the current worker harness's invocation form after launch.
+Treat that invocation as the mandatory first planning phase before the investigation or report work.
+Follow the skill through completion, then continue this brief's task and report contract.
+EOF
+    WORKFLOW_SECTION=${WORKFLOW_SECTION%$'\n'}
+  fi
+else
+  resolve_args=(resolve review "$PROJECT_NAME")
+  [ "$SKILL_REVIEW_SET" -eq 0 ] || resolve_args+=(--explicit "$SKILL_REVIEW")
+  if ! SKILL_REVIEW=$("$SCRIPT_DIR/fm-crew-skills.sh" "${resolve_args[@]}" 2>&1); then
+    printf '%s\n' "$SKILL_REVIEW" >&2
+    exit 1
+  fi
+  if [ -n "$SKILL_REVIEW" ]; then
+    IFS= read -r -d '' WORKFLOW_SECTION <<EOF || true
+
+# Configured workflow skill
+Workflow skill: phase=review skill=$SKILL_REVIEW
+After the implementation commit, stop at the configured review gate without pushing or starting delivery.
+Firstmate will invoke this configured review skill on the same worker using the current harness's invocation form.
+During that invocation, review the current branch, apply and verify any required corrections, and commit resulting changes before continuing the delivery contract below.
+The configured review is additive: it never replaces the No Mistakes pipeline when mode=no-mistakes.
+EOF
+    WORKFLOW_SECTION=${WORKFLOW_SECTION%$'\n'}
+  fi
+fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -305,7 +369,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+$HERDR_SECTION$WORKFLOW_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -355,17 +419,29 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    if [ -n "$SKILL_REVIEW" ]; then
+      REVIEW_DELIVERY="When the implementation is committed, append \`done: implementation committed for configured review\` to the status file and stop without pushing.
+After firstmate invokes the configured review skill, finish that review, commit any fixes, then push your branch and open a PR with \`gh-axi\`; append \`done: PR {url}\` and stop."
+    else
+      REVIEW_DELIVERY="When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop."
+    fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+$REVIEW_DELIVERY
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
     SETUP2=""
+    if [ -n "$SKILL_REVIEW" ]; then
+      REVIEW_DELIVERY="When the implementation is committed, append \`done: implementation committed for configured review\` to the status file and stop.
+After firstmate invokes the configured review skill, finish that review, commit any fixes, then append \`done: ready in branch fm/$ID\` to the status file and stop."
+    else
+      REVIEW_DELIVERY="When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop."
+    fi
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -373,7 +449,7 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+$REVIEW_DELIVERY
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -381,12 +457,18 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    if [ -n "$SKILL_REVIEW" ]; then
+      REVIEW_THEN_VALIDATE="Firstmate will then invoke the configured review skill.
+After that review is complete and its corrections are committed, append \`done: configured review complete\` and stop again; firstmate will then instruct you to run /no-mistakes to validate and ship a PR."
+    else
+      REVIEW_THEN_VALIDATE="Firstmate will then instruct you to run /no-mistakes to validate and ship a PR."
+    fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+$REVIEW_THEN_VALIDATE
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -415,7 +497,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+$HERDR_SECTION$WORKFLOW_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

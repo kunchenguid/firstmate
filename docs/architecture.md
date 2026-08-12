@@ -186,6 +186,16 @@ Secondmate launches are exempt because they resolve the secondmate harness and a
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit.
 
+## Workflow phase skills
+
+The optional local `config/crew-skills.json` file selects an additive skill for the scout `plan` phase or ship `review` phase, with explicit task input overriding project and fleet defaults.
+Unlike natural-language dispatch profiles, this schema is mechanically resolved by `bin/fm-crew-skills.sh` and recorded in both the generated brief and task metadata.
+`fm-spawn.sh` compares those resolved values before launch, so a config change or mismatched explicit override cannot silently change a task's workflow after its brief was written.
+Firstmate invokes the selected skill on the same worker through the existing harness-owned invocation contract.
+A review skill runs before the selected delivery path and remains additive to No Mistakes, whose pipeline and delivery authority are unchanged.
+Bootstrap validates configured skill existence in the repo and user skill locations and blocks dispatch on invalid input.
+The schema, resolution order, and copyable example are documented in [configuration.md](configuration.md#crew-workflow-skills-configcrew-skillsjson).
+
 ## Optional secondmates
 
 `data/secondmates.md` records persistent secondmates with natural-language scopes, project clone lists, and home paths.
@@ -224,6 +234,7 @@ For a local route, an explicit per-spawn harness or raw launch command does not 
 Remote routes accept verified harness adapters only and reject raw launch commands.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
+`config/crew-skills.json` is inherited too; secondmates use the same plan and review phase defaults and project overrides for their own crewmates.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
 
 The `data/secondmates.md` line contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), and the secondmate environment variables are documented in [configuration.md](configuration.md).

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--skill-review <name>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--skill-plan <name>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -264,6 +264,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+SKILL_PLAN=
+SKILL_REVIEW=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -271,6 +273,8 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+SKILL_PLAN_SET=0
+SKILL_REVIEW_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -287,6 +291,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      skill-plan) SKILL_PLAN=$a; SKILL_PLAN_SET=1 ;;
+      skill-review) SKILL_REVIEW=$a; SKILL_REVIEW_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -310,6 +316,10 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --skill-plan) want_value=skill-plan ;;
+    --skill-plan=*) SKILL_PLAN=${a#--skill-plan=}; SKILL_PLAN_SET=1 ;;
+    --skill-review) want_value=skill-review ;;
+    --skill-review=*) SKILL_REVIEW=${a#--skill-review=}; SKILL_REVIEW_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -321,6 +331,8 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$SKILL_PLAN_SET" -eq 0 ] || [ -n "$SKILL_PLAN" ] || { echo "error: --skill-plan requires a non-empty value" >&2; exit 1; }
+[ "$SKILL_REVIEW_SET" -eq 0 ] || [ -n "$SKILL_REVIEW" ] || { echo "error: --skill-review requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -348,6 +360,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$SKILL_PLAN_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded plan skill; --skill-plan cannot override it" >&2; exit 1; }
+  [ "$SKILL_REVIEW_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded review skill; --skill-review cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -382,6 +396,18 @@ else
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
     }
+  fi
+  if [ "$KIND" = ship ] && [ "$SKILL_PLAN_SET" -eq 1 ]; then
+    echo "error: --skill-plan applies only to scout spawns" >&2
+    exit 1
+  fi
+  if [ "$KIND" = scout ] && [ "$SKILL_REVIEW_SET" -eq 1 ]; then
+    echo "error: --skill-review applies only to ship spawns" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ] && { [ "$SKILL_PLAN_SET" -eq 1 ] || [ "$SKILL_REVIEW_SET" -eq 1 ]; }; then
+    echo "error: workflow phase skills apply only to crewmate ship or scout spawns" >&2
+    exit 1
   fi
 fi
 
@@ -743,6 +769,8 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "$SKILL_PLAN" ] || echo "skill_plan=$SKILL_PLAN"
+            [ -z "$SKILL_REVIEW" ] || echo "skill_review=$SKILL_REVIEW"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -852,6 +880,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$SKILL_PLAN_SET" -eq 0 ] || shared_args+=(--skill-plan "$SKILL_PLAN")
+  [ "$SKILL_REVIEW_SET" -eq 0 ] || shared_args+=(--skill-review "$SKILL_REVIEW")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -1001,6 +1031,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  # A relaunch reuses the workflow phase skill the task was dispatched with, the
+  # same way it reuses mode and yolo. Re-resolving would let a later config edit
+  # silently change a live task's workflow, and leaving them empty would drop the
+  # recorded line when the meta record is rewritten below.
+  SKILL_PLAN=$(fm_meta_get "$RELAUNCH_META" skill_plan)
+  SKILL_REVIEW=$(fm_meta_get "$RELAUNCH_META" skill_review)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1601,6 +1637,35 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+PROJECT_NAME=$(basename "$PROJ_ABS")
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  if [ "$KIND" = scout ]; then
+    resolve_args=(resolve plan "$PROJECT_NAME")
+    [ "$SKILL_PLAN_SET" -eq 0 ] || resolve_args+=(--explicit "$SKILL_PLAN")
+    if ! SKILL_PLAN=$("$SCRIPT_DIR/fm-crew-skills.sh" "${resolve_args[@]}" 2>&1); then
+      printf '%s\n' "$SKILL_PLAN" >&2
+      exit 1
+    fi
+    BRIEF_SKILL=$(sed -n 's/^Workflow skill: phase=plan skill=\([^ ]*\)$/\1/p' "$BRIEF")
+    if [ "$BRIEF_SKILL" != "$SKILL_PLAN" ]; then
+      echo "error: workflow skill mismatch for $ID: the brief records plan=${BRIEF_SKILL:-none} but this spawn resolves plan=${SKILL_PLAN:-none}; re-scaffold the brief or pass the same explicit task skill to both commands" >&2
+      exit 1
+    fi
+  else
+    resolve_args=(resolve review "$PROJECT_NAME")
+    [ "$SKILL_REVIEW_SET" -eq 0 ] || resolve_args+=(--explicit "$SKILL_REVIEW")
+    if ! SKILL_REVIEW=$("$SCRIPT_DIR/fm-crew-skills.sh" "${resolve_args[@]}" 2>&1); then
+      printf '%s\n' "$SKILL_REVIEW" >&2
+      exit 1
+    fi
+    BRIEF_SKILL=$(sed -n 's/^Workflow skill: phase=review skill=\([^ ]*\)$/\1/p' "$BRIEF")
+    if [ "$BRIEF_SKILL" != "$SKILL_REVIEW" ]; then
+      echo "error: workflow skill mismatch for $ID: the brief records review=${BRIEF_SKILL:-none} but this spawn resolves review=${SKILL_REVIEW:-none}; re-scaffold the brief or pass the same explicit task skill to both commands" >&2
+      exit 1
+    fi
+  fi
+fi
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
@@ -1615,7 +1680,7 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  PROJ_NAME=$PROJECT_NAME
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -2585,6 +2650,8 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$SKILL_PLAN" ] || echo "skill_plan=$SKILL_PLAN"
+  [ -z "$SKILL_REVIEW" ] || echo "skill_review=$SKILL_REVIEW"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

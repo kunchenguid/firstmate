@@ -284,6 +284,48 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Crew workflow skills (config/crew-skills.json)
+
+`config/crew-skills.json` is an optional local, gitignored file that selects an additional skill for the bounded `plan` and `review` workflow phases.
+The `plan` phase applies to scout tasks before their investigation or report work, and the `review` phase applies to ship tasks after the implementation commit and before delivery.
+No other phase names are accepted in this MVP.
+
+```json
+{
+  "phases": {
+    "plan": { "skill": "grill-with-docs" },
+    "review": { "skill": "thermo-nuclear-code-quality-review" }
+  },
+  "projects": {
+    "my-side-project": {
+      "review": { "skill": "quick-sanity-review" }
+    }
+  }
+}
+```
+
+Both top-level keys are optional.
+Each configured phase entry contains exactly one non-empty `skill` string.
+Project names match the project clone basename passed to the brief and spawn helpers.
+Resolution is explicit per-task skill, then `projects.<project>.<phase>`, then `phases.<phase>`, then no added skill.
+`bin/fm-crew-skills.sh` is the executable owner of validation and resolution.
+Use `--skill-plan <name>` on both the scout brief and spawn commands, or `--skill-review <name>` on both the ship brief and spawn commands, for a current explicit task override.
+The generated brief records the resolved phase skill, and `fm-spawn.sh` refuses a mismatch instead of launching with a different workflow.
+
+A skill name is valid when its `SKILL.md` exists under the tracked `.agents/skills/<name>/` directory or the user's `~/.claude/skills/<name>/` directory.
+Bootstrap reports malformed schema, unsupported phases, unsafe names, and missing skills as `CREW_SKILLS: invalid config/crew-skills.json - <reason>`.
+While that diagnostic remains, crewmate and scout dispatch is blocked rather than falling back to an unconfigured workflow.
+Valid configuration stays silent by default and prints `BOOTSTRAP_INFO: crew workflow skills active config/crew-skills.json` only when verbose bootstrap facts are enabled.
+
+The resolved value is recorded as `skill_plan=` for a scout or `skill_review=` for a ship in `state/<id>.meta`.
+Firstmate invokes the selected skill on the same worker using the invocation form owned by `harness-adapters`; where no command form is verified, it uses a natural-language instruction instead.
+A configured review is additive to the selected delivery path.
+In `no-mistakes` mode it runs before the No Mistakes pipeline and never replaces or weakens that pipeline.
+With no config file and no explicit phase skill, generated briefs and task metadata remain unchanged from the built-in behavior.
+
+See [`docs/examples/crew-skills.json`](examples/crew-skills.json) for a starting point to copy into local `config/crew-skills.json`.
+Secondmate homes inherit the file from the primary, so their own crewmates resolve the same phase defaults and project overrides.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -299,7 +341,7 @@ Backend tool availability uses the adapter's own executable resolver, so bootstr
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/crew-dispatch.json` or `config/crew-skills.json` exists, bootstrap also requires `jq` for local configuration validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
@@ -322,7 +364,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-skills.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

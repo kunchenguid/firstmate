@@ -724,6 +724,33 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_workflow_skills_are_resolved_into_meta() {
+  local rec ship_id scout_id out status
+  ship_id=profile-review-skill-z20
+  scout_id=profile-plan-skill-z21
+  rec=$(make_spawn_case profile-workflow-skills claude "$ship_id" "$scout_id")
+  read_case_record "$rec"
+  printf '%s\n' '{"phases":{"plan":{"skill":"decision-hold-lifecycle"},"review":{"skill":"ask-user-authority"}}}' \
+    > "$HOME_DIR/config/crew-skills.json"
+  printf '%s\n' 'Workflow skill: phase=review skill=ask-user-authority' \
+    >> "$HOME_DIR/data/$ship_id/brief.md"
+  printf '%s\n' 'Workflow skill: phase=plan skill=decision-hold-lifecycle' \
+    >> "$HOME_DIR/data/$scout_id/brief.md"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "ship with configured review skill should spawn"
+  assert_grep 'skill_review=ask-user-authority' "$HOME_DIR/state/$ship_id.meta" \
+    "ship meta did not record the resolved review skill"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout_id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "scout with configured plan skill should spawn"
+  assert_grep 'skill_plan=decision-hold-lifecycle' "$HOME_DIR/state/$scout_id.meta" \
+    "scout meta did not record the resolved plan skill"
+  pass "spawn records resolved plan and review skills in task meta"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -751,5 +778,6 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_workflow_skills_are_resolved_into_meta
 
 echo "# all fm-spawn-dispatch-profile tests passed"

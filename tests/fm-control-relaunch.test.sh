@@ -785,6 +785,31 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A workflow phase skill is part of the task's dispatched contract, exactly like
+# mode and yolo. A relaunch must carry the recorded value through the meta
+# rewrite rather than dropping it or re-resolving it from a config file that may
+# have changed since the task was briefed.
+test_spawn_relaunch_preserves_the_recorded_workflow_skill() {
+  local dir out rc
+  dir=$(new_case spawnskill rl22)
+  add_ship_task "$dir" rl22 claude
+  printf 'skill_review=ask-user-authority\n' >> "$dir/home/state/rl22.meta"
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"phases":{"review":{"skill":"decision-hold-lifecycle"}}}' \
+    > "$dir/home/config/crew-skills.json"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl22 --relaunch --skill-review decision-hold-lifecycle); rc=$?
+  expect_code 1 "$rc" "--skill-review should be refused alongside --relaunch"
+  assert_contains "$out" "reuses the task's recorded review skill" \
+    "the relaunch refusal should name the recorded review skill"
+
+  run_spawn "$dir" rl22 --relaunch >/dev/null
+  [ "$(meta_field "$dir" rl22 skill_review)" = ask-user-authority ] \
+    || fail "relaunch dropped or re-resolved the recorded review skill, got '$(meta_field "$dir" rl22 skill_review)'"
+  pass "fm-spawn --relaunch: the recorded workflow phase skill survives the meta rewrite"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1321,6 +1346,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_preserves_the_recorded_workflow_skill
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything

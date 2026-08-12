@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "CREW_SKILLS: invalid config/crew-skills.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -1082,6 +1083,24 @@ crew_dispatch_validate() {
   fi
 }
 
+crew_skills_validate() {
+  local file reason
+  file="$CONFIG/crew-skills.json"
+  [ -e "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    [ -e "$CONFIG/crew-dispatch.json" ] || echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  if reason=$(FM_CREW_SKILLS_FILE="$file" "$SCRIPT_DIR/fm-crew-skills.sh" validate 2>&1); then
+    if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+      echo "BOOTSTRAP_INFO: crew workflow skills active config/crew-skills.json"
+    fi
+  else
+    reason=$(printf '%s\n' "$reason" | head -n 1)
+    echo "CREW_SKILLS: invalid config/crew-skills.json - $reason"
+  fi
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1176,6 +1195,7 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
   fi
   crew_dispatch_validate
+  crew_skills_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

@@ -238,6 +238,22 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+test_promote_resolves_review_skill() {
+  local home meta out status
+  home="$TMP_ROOT/promote-skill/home"
+  mkdir -p "$home/state" "$home/config"
+  meta="$home/state/promote-skill-d2.meta"
+  printf 'window=fm-promote-skill-d2\nkind=scout\nworktree=/tmp/wt\nproject=/tmp/alpha\n' > "$meta"
+  printf '%s\n' '{"phases":{"review":{"skill":"ask-user-authority"}}}' > "$home/config/crew-skills.json"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-skill-d2 --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion with configured review skill should succeed"
+  assert_grep 'skill_review=ask-user-authority' "$meta" "promotion did not record the resolved review skill"
+  assert_contains "$out" "stop for configured review skill ask-user-authority before delivery" \
+    "promotion hint did not carry the configured review gate"
+  pass "fm-promote: promotion resolves and records the ship review skill"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -278,5 +294,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_resolves_review_skill
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

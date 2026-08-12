@@ -1,0 +1,11 @@
+{
+  "phases": {
+    "plan": { "skill": "grill-with-docs" },
+    "review": { "skill": "thermo-nuclear-code-quality-review" }
+  },
+  "projects": {
+    "my-side-project": {
+      "review": { "skill": "quick-sanity-review" }
+    }
+  }
+}
