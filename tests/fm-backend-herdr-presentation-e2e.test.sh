@@ -266,14 +266,20 @@ HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
+WORKTREE_HOLD_PIDS=""
 LOCK_CONTENTION_OWNER_PID=
 cleanup_all() {
-  local wt
+  local wt pid
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     LOCK_CONTENTION_OWNER_PID=
   fi
+  for pid in $WORKTREE_HOLD_PIDS; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  WORKTREE_HOLD_PIDS=""
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
@@ -369,6 +375,31 @@ remember_meta_worktree() {  # <meta>
   [ -n "$wt" ] || fail "metadata did not record a worktree"
   RECORDED_WORKTREES="${RECORDED_WORKTREES}${wt}"$'\n'
   printf '%s' "$wt"
+}
+
+# Treehouse treats a worktree as free the moment no live process has its cwd
+# inside it, and hands the lowest free slot to the next `treehouse get`. A lab
+# session stop kills every pane shell at once, which would let the next spawn
+# be handed a copy that a still-recorded live task owns - a duplicate
+# allocation fm-spawn.sh refuses outright (assert_spawn_worktree_unowned)
+# rather than mutating another task's copy. A real live owner always keeps a
+# process inside its copy; these holders restore that invariant across the
+# suite's deliberate restarts so the restart cases exercise same-identity
+# reclaim rather than the ownership refusal. `treehouse return --force` during
+# ordinary teardown terminates a holder along with any other lingering
+# process, so held tasks tear down exactly as before.
+hold_recorded_worktrees() {
+  local home meta wt
+  for home in "${HOME_DIR:-}" "${SECOND_HOME_A:-}" "${SECOND_HOME_B:-}"; do
+    [ -n "$home" ] && [ -d "$home/state" ] || continue
+    for meta in "$home"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      wt=$(grep '^worktree=' "$meta" | cut -d= -f2- | head -n 1)
+      [ -n "$wt" ] && [ -d "$wt" ] || continue
+      (cd "$wt" && exec sleep 900) &
+      WORKTREE_HOLD_PIDS="$WORKTREE_HOLD_PIDS $!"
+    done
+  done
 }
 
 make_project() {  # <dir>
@@ -1168,6 +1199,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   PATH="$HERDR_ORIGINAL_PATH" \
     "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
     || fail "could not stop the isolated session for $RESTART_ID validation"
+  hold_recorded_worktrees
   PATH="$HERDR_ORIGINAL_PATH" \
     "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
     || fail "could not reprovision the isolated session for $RESTART_ID validation"
@@ -1198,6 +1230,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
     PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
       || fail "could not stop the isolated session for idempotent reclaim"
+    hold_recorded_worktrees
     PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
       || fail "could not reprovision the isolated session for idempotent reclaim"
     PRIOR_RESTART_WT=$NEW_RESTART_WT
@@ -1241,6 +1274,7 @@ CROSS_BOUND_HOME=$(grep '^home=' "$SECOND_HOME_A/state/$CROSS_RESTART_ID.herdr-p
   || fail "cross-home restart published a journal in the primary home"
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
   || fail "could not stop the isolated session for cross-home restart"
+hold_recorded_worktrees
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for cross-home restart"
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err" \
@@ -1279,6 +1313,7 @@ PRIMARY_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f
 BRAVO_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
   || fail "could not stop the isolated session for concurrent recovery"
+hold_recorded_worktrees
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
