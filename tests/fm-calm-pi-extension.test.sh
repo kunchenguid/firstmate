@@ -364,6 +364,90 @@ JS
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
+test_pi_private_member_probe_fails_loudly() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm private-member probe test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/private-member-probe"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  out=$(cd "$fixture/project" && \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const { InteractiveMode } = await import(
+  pathToFileURL(`${packageRoot}/dist/index.js`).href
+);
+
+// Every Pi-private member the Calm operational-row adapter binds. Removing any one of
+// them must abort installation with a diagnostic naming it, rather than installing a
+// partially-working adapter that silently renders operational rows differently.
+const privateMembers = [
+  "addMessageToChat",
+  "getAllQueuedMessages",
+  "getMarkdownTransformers",
+  "setHiddenThinkingLabel",
+  "updatePendingMessagesDisplay",
+];
+
+for (const member of privateMembers) {
+  const original = InteractiveMode.prototype[member];
+  if (typeof original !== "function") {
+    throw new Error(
+      `fixture precondition failed: installed Pi lacks InteractiveMode.${member}`,
+    );
+  }
+  delete InteractiveMode.prototype[member];
+
+  let reason;
+  try {
+    const layout = await import(
+      `./.pi/extensions/lib/fm-calm-operational-user-layout.ts?probe=${member}`
+    );
+    layout.installCalmOperationalUserLayout();
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  } finally {
+    InteractiveMode.prototype[member] = original;
+  }
+
+  if (!reason) {
+    throw new Error(
+      `removing InteractiveMode.${member} did not fail the Calm operational-row adapter installation`,
+    );
+  }
+  if (!reason.includes(member)) {
+    throw new Error(
+      `the Calm operational-row adapter failed without naming the missing member ${member}: ${reason}`,
+    );
+  }
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm private-member probe failed: $out"
+  [ -z "$out" ] || fail "Pi calm private-member probe printed output: $out"
+  pass "removing any Pi-private member the Calm operational-row adapter binds fails installation loudly and names it"
+}
+
 test_builtin_gate_load_time() {
   local fixture out output_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -3795,6 +3879,7 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
+test_pi_private_member_probe_fails_loudly
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle

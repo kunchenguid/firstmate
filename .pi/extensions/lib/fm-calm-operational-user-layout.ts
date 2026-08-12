@@ -38,7 +38,7 @@ type InteractiveModePresentation = {
     addToHistory?(text: string): void;
   };
   getMarkdownThemeWithSettings(): UserMessageConstructorArgs[1];
-  getMarkdownTransformers?(): UserMessageConstructorArgs[3];
+  getMarkdownTransformers(): UserMessageConstructorArgs[3];
   getUserMessageText(message: UserMessageLike): string;
   outputPad: number;
 };
@@ -51,6 +51,7 @@ type InteractiveModePrototype = {
     options?: AddMessageOptions,
   ): void;
   getAllQueuedMessages?(): PendingMessages;
+  getMarkdownTransformers?(): UserMessageConstructorArgs[3];
   setHiddenThinkingLabel?(label?: string): void;
   updatePendingMessagesDisplay?(): void;
 };
@@ -77,6 +78,7 @@ const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
 const PRIVATE_INTERACTIVE_MODE_MEMBERS = [
   "addMessageToChat",
   "getAllQueuedMessages",
+  "getMarkdownTransformers",
   "setHiddenThinkingLabel",
   "updatePendingMessagesDisplay",
 ] as const satisfies readonly (keyof InteractiveModePrototype)[];
@@ -187,7 +189,7 @@ export function installCalmOperationalUserLayout(): void {
       this.getMarkdownThemeWithSettings(),
       this.outputPad,
       this.chatContainer.children.length > 0,
-      this.getMarkdownTransformers?.(),
+      this.getMarkdownTransformers(),
     );
     this.chatContainer.addChild(component);
     if (options?.populateHistory) this.editor.addToHistory?.(text);
