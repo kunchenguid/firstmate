@@ -62,6 +62,21 @@ wait_live() {
   return 0
 }
 
+# Wait until a watcher either exits to surface a wake or records completion of
+# the targeted absorb cycle. Fixed sleeps can kill a slow CI watcher before it
+# reaches triage, making a bounded re-arm assertion vacuous and timing-sensitive.
+wait_watcher_cycle() {  # <pid> <triage-log> <prior-lines> [limit-ticks]
+  local pid=$1 log=$2 prior=$3 limit=${4:-100} i=0 lines
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    lines=$(awk 'END { print NR + 0 }' "$log" 2>/dev/null || echo 0)
+    [ "$lines" -gt "$prior" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -700,7 +715,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare lines
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -718,12 +733,15 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 
   round=1
   while [ "$round" -le 6 ]; do
+    lines=$(awk 'END { print NR + 0 }' "$state/.watch-triage.log" 2>/dev/null || echo 0)
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if wait_live "$pid" 15; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
+    wait_watcher_cycle "$pid" "$state/.watch-triage.log" "$lines" 100 \
+      || { reap "$pid"; fail "dead-agent watcher round $round did not complete a triage cycle"; }
+    if kill -0 "$pid" 2>/dev/null; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
     round=$((round + 1))
   done
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
