@@ -147,7 +147,7 @@ fi
 # Compute supervision need and watcher-beacon freshness via the shared
 # grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
 # source, or an X-mode relay poll needs supervision.
-fm_supervision_status "$STATE" "$GRACE"
+fm_supervision_status "$STATE" "$GRACE" "$READ_ONLY"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
 needed=$FM_SUP_NEEDED

@@ -18,6 +18,8 @@
 # shellcheck source=bin/fm-classify-lib.sh
 _FM_SUPERVISION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_SUPERVISION_LIB_DIR="."
 . "$_FM_SUPERVISION_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-status-lib.sh
+. "$_FM_SUPERVISION_LIB_DIR/fm-status-lib.sh"
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -28,7 +30,7 @@ fm_sup_stat_mtime() {
   fi
 }
 
-# fm_supervision_status <state-dir> [grace-seconds]
+# fm_supervision_status <state-dir> [grace-seconds] [read-only]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of tasks that need a watcher; positively idle
 #                         secondmates are excluded so caller banners are truthful
@@ -79,8 +81,67 @@ fm_sup_pending_reply_task_has_open() {  # <state-dir> <task-id>
   return 1
 }
 
-fm_sup_secondmate_needs_supervision() {  # <state-dir> <task-id>
-  local state=$1 task_id=$2 status line prefix rest token verb key corr saw=0 decisions activities last have_key=0 have_corr=0
+# Reconcile decision-fold process debt for a resting secondmate.
+#
+# The authoritative status fold intentionally keeps needs-decision and blocked
+# records open until a matching resolved/captain-held record exists.  Supervision
+# has a narrower concern: a secondmate that subsequently reports a terminal
+# state is not waiting for the parent to act.  Append the missing resolutions
+# here, at the supervision predicate boundary, without changing that shared fold
+# contract for any other consumer.
+fm_sup_reconcile_secondmate_ghost_decisions() {  # <status-file>
+  local status=$1 last verb decisions line key rc=0 snapshot_bytes heal_id payload='' delta before='' seen=0
+  [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ] || return 1
+  fm_status_lock_acquire "$status" || return 1
+  snapshot_bytes=$(LC_ALL=C wc -c < "$status" | tr -d ' ') || {
+    fm_status_lock_release "$status"
+    return 1
+  }
+  case "$snapshot_bytes" in ''|*[!0-9]*) fm_status_lock_release "$status"; return 1 ;; esac
+  last=$(last_status_line "$status")
+  verb=$(status_line_verb "$last")
+  case "$verb" in
+    done|resolved|captain-held) ;;
+    *) fm_status_lock_release "$status"; return 0 ;;
+  esac
+  decisions=$(status_open_decisions "$status")
+  [ -n "$decisions" ] || { fm_status_lock_release "$status"; return 0; }
+  heal_id="${BASHPID:-$$}-$(date +%s)-$snapshot_bytes"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%%$'\t'*}
+    if [ "$key" = default ]; then
+      payload="${payload}resolved: terminal $verb closed an earlier decision [heal=$heal_id]"$'\n'
+    else
+      payload="${payload}resolved [key=$key]: terminal $verb closed an earlier decision [heal=$heal_id]"$'\n'
+    fi
+  done <<EOF
+$decisions
+EOF
+  printf '%s' "$payload" >> "$status" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    delta=$(tail -c "+$((snapshot_bytes + 1))" "$status") || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        *"[heal=$heal_id]") seen=1 ;;
+        *) [ "$seen" -eq 1 ] || before="${before}${line}"$'\n' ;;
+      esac
+    done <<EOF
+$delta
+EOF
+    [ "$seen" -eq 1 ] || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$before" ]; then
+    printf '%s' "$before" >> "$status" || rc=1
+  fi
+  fm_status_lock_release "$status"
+  return "$rc"
+}
+
+fm_sup_secondmate_needs_supervision() {  # <state-dir> <task-id> [read-only]
+  local state=$1 task_id=$2 read_only=${3:-0} status line prefix rest token verb key corr saw=0 decisions activities last have_key=0 have_corr=0
   status="$state/$task_id.status"
   [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -138,21 +199,24 @@ fm_sup_secondmate_needs_supervision() {  # <state-dir> <task-id>
   done < "$status" || return 0
   [ "$saw" = 1 ] || return 0
 
-  decisions=$(status_open_decisions "$status")
-  [ -z "$decisions" ] || return 0
-  activities=$(status_open_activities "$status")
-  [ -z "$activities" ] || return 0
   last=$(last_status_line "$status")
   case "$(status_line_verb "$last")" in
     done|resolved|captain-held) ;;
     *) return 0 ;;
   esac
+  if [ "$read_only" != 1 ]; then
+    fm_sup_reconcile_secondmate_ghost_decisions "$status" || return 0
+  fi
+  decisions=$(status_open_decisions "$status")
+  [ -z "$decisions" ] || return 0
+  activities=$(status_open_activities "$status")
+  [ -z "$activities" ] || return 0
   fm_sup_pending_reply_task_has_open "$state" "$task_id" && return 0
   return 1
 }
 
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age task_id
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} read_only=${3:-0} meta source beat m age task_id
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -164,7 +228,7 @@ fm_supervision_status() {
     if grep -qx 'kind=secondmate' "$meta" 2>/dev/null; then
       task_id=$(basename "$meta")
       task_id=${task_id%.meta}
-      fm_sup_secondmate_needs_supervision "$state" "$task_id" || continue
+      fm_sup_secondmate_needs_supervision "$state" "$task_id" "$read_only" || continue
     fi
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
@@ -197,7 +261,7 @@ fm_supervision_status() {
   return 0
 }
 
-# fm_supervision_needed <state-dir> [grace-seconds]
+# fm_supervision_needed <state-dir> [grace-seconds] [read-only]
 # Exit 0 (true) exactly when the home needs a watcher.
 fm_supervision_needed() {
   fm_supervision_status "$@"

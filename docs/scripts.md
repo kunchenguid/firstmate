@@ -67,7 +67,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and one-shot escalation |
-| `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
+| `fm-secondmate-report.sh` | Serializes parent status appends and correlated or document-pointer reports           |
 | `fm-procevent-board-reply.sh` | Run the mission control board reply service, arm its wake, post firstmate's replies into the board conversation, normalize captain board requests, and apply board answers through the decision lifecycle ([`docs/mission-control.md`](mission-control.md)) |
 | `fm-board-reply-server.py` | The loopback reply service itself: serve the board and its conversation for GET, validate and durably record one request per POST |
 | `fm-board-request-parse.pl` | Single owner of the board message vocabulary in both directions and every fail-closed rule, shared by both reply transports |

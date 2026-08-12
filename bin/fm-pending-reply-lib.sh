@@ -829,7 +829,9 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
+    # shellcheck source=bin/fm-status-lib.sh
+    . "$_FM_PENDING_REPLY_LIB_DIR/fm-status-lib.sh"
+    fm_status_append "$parent_status" "blocked: $payload" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1

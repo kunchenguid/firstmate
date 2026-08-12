@@ -253,6 +253,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-status-lib.sh
+. "$SCRIPT_DIR/fm-status-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -2158,7 +2160,7 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() {  # <detail>
-  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  fm_status_append "$STATE/$ID.status" "failed: $1"
   echo "error: $1; inspect window $T" >&2
 }
 

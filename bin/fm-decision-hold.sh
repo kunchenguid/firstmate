@@ -172,6 +172,8 @@ ARCHIVE="$DATA/done-archive.md"
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-status-lib.sh
+. "$SCRIPT_DIR/fm-status-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -899,7 +901,7 @@ EOF
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
-      printf 'captain-held [key=%s]: tracked by %s\n' "$key" "$(hold_id "$origin" "$key")" >> "$status_file"
+      fm_status_append "$status_file" "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")"
       key_seen=1
     done <<EOF
 $raw_open
@@ -1001,7 +1003,7 @@ command_retract() {
   while IFS=$'\t' read -r open_key _verb _summary; do
     [ -n "$open_key" ] || continue
     [ "$open_key" = "$key" ] || continue
-    printf 'captain-held [key=%s]: superseded by %s\n' "$key" "$surviving_id" >> "$STATE/$origin.status"
+    fm_status_append "$STATE/$origin.status" "captain-held [key=$key]: superseded by $surviving_id"
   done <<EOF
 $raw_open
 EOF

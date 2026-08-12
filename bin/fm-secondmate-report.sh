@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-secondmate-report.sh - optional helper to append a correlated parent report.
+# fm-secondmate-report.sh - serialize parent status appends and correlated reports.
 #
 # A secondmate answering a marked from-firstmate request must report on the
 # parent status channel with the request's corr=<id> token. This helper makes
@@ -8,6 +8,7 @@
 # (bin/fm-pending-reply-lib.sh).
 #
 # Usage:
+#   fm-secondmate-report.sh --line <status-file> <status-line...>
 #   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
 #   fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
 #
@@ -25,15 +26,31 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-status-lib.sh
+. "$SCRIPT_DIR/fm-status-lib.sh"
 
 usage() {
   cat <<'EOF' >&2
 Usage:
+  fm-secondmate-report.sh --line <status-file> <status-line...>
   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
   fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
 EOF
   exit 2
 }
+
+if [ "${1:-}" = "--line" ]; then
+  [ "$#" -ge 3 ] || usage
+  STATUS_FILE=$2
+  shift 2
+  mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
+  [ -d "$(dirname "$STATUS_FILE")" ] || {
+    echo "error: cannot create parent directory for status file '$STATUS_FILE'" >&2
+    exit 1
+  }
+  fm_status_append "$STATUS_FILE" "$*"
+  exit
+fi
 
 DOC_MODE=0
 if [ "${1:-}" = "--doc" ]; then
@@ -74,15 +91,15 @@ if [ "$DOC_MODE" = 1 ]; then
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: $NOTE ($DOC_PATH via-helper)"
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: $DOC_PATH (via-helper)"
   fi
 else
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: $NOTE (via-helper)"
   else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: (via-helper)"
   fi
 fi

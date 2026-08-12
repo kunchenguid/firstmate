@@ -35,6 +35,8 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-status-lib.sh
+. "$SCRIPT_DIR/fm-status-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -286,7 +288,7 @@ cmd_ingest() {
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
+      fm_status_append "$status_file" "$line" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fi
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
@@ -302,7 +304,7 @@ cmd_ingest() {
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
     if ! grep -Fqx -- "$rewritten" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$rewritten" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply"; }
+      fm_status_append "$status_file" "$rewritten" || { fm_lock_release "$lock"; die "cannot append remote reply"; }
       appended=$((appended + 1))
     fi
   done < "$payload"

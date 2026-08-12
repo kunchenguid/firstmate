@@ -680,7 +680,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   )
   cmp -s "$baseline" "$brief" \
     || fail "relative FM_HOME changed charter bytes compared with the same absolute home"
-  assert_grep ">> '$home/state/relative-home.status'" "$brief" \
+  assert_grep "fm-secondmate-report.sh --line '$home/state/relative-home.status'" "$brief" \
     "relative FM_HOME did not render an absolute secondmate status path"
 
   brief="$home/data/relative-state/brief.md"
@@ -696,7 +696,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   )
   cmp -s "$baseline" "$brief" \
     || fail "relative FM_STATE_OVERRIDE changed charter bytes compared with the same absolute state directory"
-  assert_grep ">> '$state_override/relative-state.status'" "$brief" \
+  assert_grep "fm-secondmate-report.sh --line '$state_override/relative-state.status'" "$brief" \
     "relative FM_STATE_OVERRIDE did not render an absolute secondmate status path"
 
   brief="$data_override/relative-data/brief.md"
@@ -712,7 +712,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   )
   cmp -s "$baseline" "$brief" \
     || fail "relative FM_DATA_OVERRIDE changed charter bytes compared with the same absolute data directory"
-  assert_grep ">> '$home/state/relative-data.status'" "$brief" \
+  assert_grep "fm-secondmate-report.sh --line '$home/state/relative-data.status'" "$brief" \
     "relative FM_DATA_OVERRIDE changed the absolute default status path"
 
   err="$root/unresolved.err"
