@@ -284,9 +284,9 @@ test_deferred_publication_does_not_refire_after_restart() {
     || fail "routine setup could not create the publication fixture"
   check="$home/state/routine-scan.check.sh"
   write_registry "$home" \
-    '- publication-item | daily | captain | survive restart'
+    '- publication-item | daily | captain | survive restart routine-check-error: literal'
   first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
-  [ "$first" = 'routine-due: publication-item | captain | survive restart' ] \
+  [ "$first" = 'routine-due: publication-item | captain | survive restart routine-check-error: literal' ] \
     || fail "the publication fixture did not emit its due wake"
   FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh" "$first" \
@@ -425,6 +425,7 @@ test_check_surfaces_registry_diagnostics() {
   check="$home/state/routine-scan.check.sh"
   write_registry "$home" \
     'not a routine row' \
+    '- malformed-extra | daily | captain | should not run |' \
     '- duplicate-item | daily | captain | check priorities' \
     '- duplicate-item | daily | captain | check again'
   out=$(FM_ROUTINE_DATE=2026-08-10 "$check")
@@ -435,6 +436,9 @@ test_check_surfaces_registry_diagnostics() {
   case "$out" in
     *'routine-scan: ignoring duplicate registry id: duplicate-item'*) ;;
     *) fail "duplicate registry diagnostics were not surfaced: $out" ;;
+  esac
+  case "$out" in
+    *'routine-due: malformed-extra'*) fail "a trailing empty registry field was accepted: $out" ;;
   esac
   case "$out" in
     *'routine-due: duplicate-item | captain | check priorities'*) ;;

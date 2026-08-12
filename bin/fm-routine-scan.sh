@@ -259,12 +259,15 @@ while IFS= read -r line || [ -n "$line" ]; do
     *) routine_error "ignoring malformed registry line"; continue ;;
   esac
 
-  IFS='|' read -r raw_id raw_cadence raw_owner raw_action extra <<< "$record"
+  separators=${record//[^|]/}
+  [ "${#separators}" -eq 3 ] \
+    || { routine_error "ignoring malformed registry line"; continue; }
+  IFS='|' read -r raw_id raw_cadence raw_owner raw_action <<< "$record"
   id=$(trim "${raw_id:-}")
   cadence=$(trim "${raw_cadence:-}")
   owner=$(trim "${raw_owner:-}")
   action=$(trim "${raw_action:-}")
-  if [ -n "${extra:-}" ] || [ -z "$id" ] || [ -z "$owner" ] || [ -z "$action" ]; then
+  if [ -z "$id" ] || [ -z "$owner" ] || [ -z "$action" ]; then
     routine_error "ignoring malformed registry line"
     continue
   fi

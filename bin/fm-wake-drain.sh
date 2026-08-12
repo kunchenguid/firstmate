@@ -93,7 +93,6 @@ routine_wake_acknowledge_queued() {
       *) continue ;;
     esac
     case "$payload" in
-      *'routine-check-error:'*) continue ;;
       *'routine-due: '*) ;;
       *) continue ;;
     esac

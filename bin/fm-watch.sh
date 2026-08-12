@@ -937,7 +937,11 @@ while :; do
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        fm_wake_append check "$c" "$reason" || exit 1
+        wake_key=$c
+        if [ "$id" = routine-scan ] && [ "$FM_CHECK_RC" -ne 0 ]; then
+          wake_key="$c:routine-error"
+        fi
+        fm_wake_append check "$wake_key" "$reason" || exit 1
         routine_check_ack "$id" "$out" "$FM_CHECK_RC" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
