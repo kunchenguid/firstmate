@@ -252,9 +252,8 @@ fm_slot_same_path() {
 fm_slot_meta_referencing_tasks() {
   local state=$1 self=$2 wt=$3 current_home home home_real meta id other slot_returned slot_returning
   local meta_state registry registry_homes line candidate worktrees found=1 i current_registry_found=0
-  local -a homes=()
-  local -A seen=()
-  [ -d "$state" ] || return 1
+  local -a homes=() seen=()
+  [ -d "$state" ] || return 2
   current_home=$(cd "${state%/}/.." 2>/dev/null && pwd -P) || return 2
   homes+=("$current_home")
   worktrees=$(git -C "$wt" worktree list --porcelain 2>/dev/null) || return 2
@@ -270,8 +269,10 @@ fm_slot_meta_referencing_tasks() {
     else
       continue
     fi
-    [ -n "${seen[$home_real]+seen}" ] && continue
-    seen[$home_real]=1
+    for candidate in "${seen[@]}"; do
+      [ "$candidate" = "$home_real" ] && continue 2
+    done
+    seen+=("$home_real")
     meta_state="$home_real/state"
     if [ -e "$meta_state" ] && [ ! -d "$meta_state" ]; then
       return 2
@@ -289,7 +290,12 @@ fm_slot_meta_referencing_tasks() {
       [ "$slot_returned" = 1 ] && [ -z "$slot_returning" ] && continue
       other=$(fm_slot_meta_worktree "$meta")
       [ -n "$other" ] || continue
-      fm_slot_same_path "$other" "$wt" || continue
+      if fm_slot_same_path "$other" "$wt"; then
+        :
+      else
+        [ "$?" -eq 1 ] || return 2
+        continue
+      fi
       printf '%s\n' "$id"
       found=0
       candidate=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -438,9 +444,14 @@ fm_slot_disposal_verdict() {
   if refs=$(fm_slot_meta_referencing_tasks "$state" "$self" "$wt"); then
     printf '%s%s' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
     return 0
-  elif [ "$?" -eq 2 ]; then
-    printf 'retain: all-home slot metadata evidence is unavailable'
-    return 0
+  else
+    case "$?" in
+      1) ;;
+      *)
+        printf 'retain: all-home slot metadata evidence is unavailable'
+        return 0
+        ;;
+    esac
   fi
   stamp_path=$(fm_slot_stamp_path "$wt" 2>/dev/null || true)
   if [ -z "$stamp_path" ]; then

@@ -1138,6 +1138,25 @@ test_clean_ownership_disposes() {
   pass "a slot this task alone records and stamps disposes normally"
 }
 
+test_unexpected_metadata_scan_failure_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-scan-failure)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-scan-failure.meta" \
+    "window=firstmate:fm-task-scan-failure" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-scan-failure "$WORLD/home" )
+  verdict=$( \
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_meta_referencing_tasks() { return 3; }
+    fm_slot_disposal_verdict "$WORLD/home/state" task-scan-failure "$WT_DIR" \
+      "$WORLD/home" "$WORLD/home" crewmate closed "" "" )
+  assert_contains "$verdict" "retain: all-home slot metadata evidence is unavailable" \
+    "an unexpected metadata scan failure authorized pooled-slot disposal"
+  pass "unexpected pooled-slot metadata scan failures retain the lease"
+}
+
 test_missing_ownership_stamp_retains() {
   local rec verdict
   rec=$(make_slot_world slot-missing-stamp)
@@ -1627,6 +1646,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_spawn_does_not_promote_an_unproven_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
+test_unexpected_metadata_scan_failure_retains
 test_missing_ownership_stamp_retains
 test_relinquish_refuses_without_ownership_evidence
 test_missing_recorded_worktree_retains

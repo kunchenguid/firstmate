@@ -1814,7 +1814,7 @@ test_endpoint_recovery_pending_without_window_retires_reservation() {
   pass "pending endpoint recovery retires only after confirming no task window exists"
 }
 
-test_endpoint_recovery_pending_reconciles_window() {
+test_endpoint_recovery_pending_preserves_unproven_window() {
   local case_dir rc
   case_dir=$(make_case endpoint-recovery-pending-found)
   fm_write_meta "$case_dir/state/task-x1.meta" \
@@ -1835,12 +1835,12 @@ test_endpoint_recovery_pending_reconciles_window() {
   ) > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 0 "$rc" "endpoint-recovery-pending-found: pending reservation should reconcile"
-  assert_absent "$case_dir/state/task-x1.meta" \
-    "endpoint-recovery-pending-found: reconciled recovery metadata survived teardown"
-  assert_contains "$(cat "$case_dir/tmux.log")" 'kill-window -t @1' \
-    "endpoint-recovery-pending-found: teardown did not use the reconciled stable window id"
-  pass "pending endpoint recovery adopts one exact task window before teardown"
+  expect_code 1 "$rc" "endpoint-recovery-pending-found: unproven window must refuse teardown"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-pending-found: unproven recovery metadata was removed"
+  assert_not_contains "$(cat "$case_dir/tmux.log")" 'kill-window' \
+    "endpoint-recovery-pending-found: teardown killed an unproven window"
+  pass "pending endpoint recovery preserves an unproven matching window"
 }
 
 test_local_only_fork_remote_allows
@@ -1887,4 +1887,4 @@ test_projection_teardown_closes_owned_live_pane
 test_endpoint_recovery_uses_stable_window_id
 test_endpoint_recovery_retains_on_tmux_query_error
 test_endpoint_recovery_pending_without_window_retires_reservation
-test_endpoint_recovery_pending_reconciles_window
+test_endpoint_recovery_pending_preserves_unproven_window

@@ -128,7 +128,6 @@ fm-watch-session
 fm-watch-triage
 fm-watcher-lock
 fm-watcher-protocol
-fm-backend-herdr-presentation-e2e
 fm-backend-herdr-prune-safety-e2e
 fm-backend-herdr-respawn-idem-e2e
 fm-backend-herdr-smoke

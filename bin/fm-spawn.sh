@@ -379,10 +379,15 @@ spawn_abort_recovery_meta() {
     fi
     if [ "${BACKEND:-}" = tmux ] \
       && [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] \
-      && [ "${SPAWN_ENDPOINT_CLEANUP_CONFIRMED:-0}" != 1 ] \
-      && [[ "${WID:-}" =~ ^@[0-9]+$ ]]; then
-      echo "window_id=$WID"
-      echo "endpoint_recovery=1"
+      && [ "${SPAWN_ENDPOINT_CLEANUP_CONFIRMED:-0}" != 1 ]; then
+      if [[ "${WID:-}" =~ ^@[0-9]+$ ]]; then
+        echo "window_id=$WID"
+        echo "endpoint_recovery=1"
+      elif [ "${SPAWN_ENDPOINT_RECOVERY_RESERVATION:-0}" = 1 ]; then
+        echo "window_id=pending"
+        echo "endpoint_recovery=1"
+        echo "endpoint_recovery_pending=1"
+      fi
     fi
     echo "spawn_state=aborted"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
@@ -449,7 +454,7 @@ spawn_endpoint_recovery_reservation() {
 }
 
 spawn_reconcile_pending_endpoint_reservation() {
-  local meta=$1 target session name candidate status tmp
+  local meta=$1 target session name status
   local worktree slot_state slot_holder lease_generation slot_returning
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(awk -F= '$1 == "endpoint_recovery" { print $2; exit }' "$meta")" = 1 ] || return 0
@@ -468,21 +473,11 @@ spawn_reconcile_pending_endpoint_reservation() {
   esac
   [ -n "$session" ] && [ -n "$name" ] || return 1
   fm_backend_source tmux || return 1
-  if candidate=$(fm_backend_tmux_find_task_window_id "$session" "$name"); then
-    tmp=$(mktemp "$STATE/.$ID.spawn-reconcile.XXXXXX") || return 1
-    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-    awk -F= -v window_id="$candidate" '
-      BEGIN { found=0 }
-      $1 == "window_id" { print "window_id=" window_id; found=1; next }
-      $1 == "endpoint_recovery_pending" { next }
-      $1 == "spawn_state" { print "spawn_state=aborted"; next }
-      { print }
-      END { if (!found) print "window_id=" window_id }
-    ' "$meta" > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
-    return 0
+  if fm_backend_tmux_find_task_window_id "$session" "$name" >/dev/null; then
+    return 1
+  else
+    status=$?
   fi
-  status=$?
   case "$status" in
     1)
       rm -f -- "$meta" || return 1
@@ -967,7 +962,7 @@ spawn_abort_cleanup() {
      && [ "$endpoint_cleanup_status" -ne 0 ] \
      && [ "${BACKEND:-}" != herdr ] \
      && [ "${BACKEND:-}" != orca ] \
-     && [ -n "${WID:-}" ]; then
+     && [[ "${WID:-}" =~ ^@[0-9]+$ ]]; then
     if cleanup_spawn_window "$WID"; then
       endpoint_cleanup_status=0
       SPAWN_ENDPOINT_CLEANUP_CONFIRMED=1
@@ -1847,19 +1842,17 @@ cleanup_spawn_window() {
 }
 
 cleanup_unidentified_spawn_window() {
-  local window_ids_after window_id candidate='' candidate_count=0
+  local window_ids_after window_id candidate_count=0
   [ "${SPAWN_ENDPOINT_DISCOVERY_READY:-0}" = 1 ] || return 1
   window_ids_after=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null) || return 1
   while IFS= read -r window_id; do
     [ -n "$window_id" ] || continue
     if ! grep -qxF "$window_id" <<<"$WINDOW_IDS_BEFORE"; then
-      candidate=$window_id
       candidate_count=$((candidate_count + 1))
     fi
   done <<<"$window_ids_after"
   case "$candidate_count" in
     0) return 0 ;;
-    1) fm_backend_kill "$BACKEND" "$candidate" >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
 }
@@ -1952,7 +1945,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
       echo "error: $1 did not yield an isolated worktree of the target project; refusing to launch. $SPAWN_WT_FAIL"
       echo "  resolved: '$WT'"
       echo "  expected: a linked worktree of '$PROJ_ABS' (git common dir '$(proj_git_common_real)')"
-      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. The just-created window is killed and any uncertain lease is retained in recovery metadata."
+      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. A window without provider ownership evidence is left untouched and retained in recovery metadata."
     } >&2
     cleanup_spawn_window "$WID"
     exit 1

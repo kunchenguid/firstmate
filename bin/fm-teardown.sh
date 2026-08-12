@@ -182,7 +182,7 @@ teardown_meta_identity_matches() {
 }
 
 teardown_reconcile_pending_endpoint_recovery() {
-  local target=$ENDPOINT_RECOVERY_WINDOW_TARGET session name candidate status tmp
+  local target=$ENDPOINT_RECOVERY_WINDOW_TARGET session name status
   local worktree slot_state slot_holder lease_generation slot_returning
   worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$META")
   slot_state=$(awk -F= '$1 == "slot_lease_state" { print $2; exit }' "$META")
@@ -197,23 +197,11 @@ teardown_reconcile_pending_endpoint_recovery() {
   esac
   [ -n "$session" ] && [ -n "$name" ] || return 1
   fm_backend_source tmux || return 1
-  if candidate=$(fm_backend_tmux_find_task_window_id "$session" "$name"); then
-    tmp=$(mktemp "$STATE/.$ID.teardown-reconcile.XXXXXX") || return 1
-    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-    awk -F= -v window_id="$candidate" '
-      BEGIN { found=0 }
-      $1 == "window_id" { print "window_id=" window_id; found=1; next }
-      $1 == "endpoint_recovery_pending" { next }
-      $1 == "spawn_state" { print "spawn_state=aborted"; next }
-      { print }
-      END { if (!found) print "window_id=" window_id }
-    ' "$META" > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv "$tmp" "$META" || { rm -f "$tmp"; return 1; }
-    ENDPOINT_RECOVERY_WINDOW_ID=$candidate
-    T=$candidate
-    return 0
+  if fm_backend_tmux_find_task_window_id "$session" "$name" >/dev/null; then
+    return 1
+  else
+    status=$?
   fi
-  status=$?
   case "$status" in
     1)
       rm -f -- "$META" || return 1

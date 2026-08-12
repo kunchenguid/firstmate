@@ -436,22 +436,14 @@ def command_args(job, name):
 assert command_args("lint", "fm-lint.sh")
 portable_runner = command_args("tests", "fm-test-run.sh")
 assert any(
-    "--all" in args
-    and "--exclude-family" in args
-    and args[args.index("--exclude-family") + 1] == "real-herdr-gated"
+    "tests/fm-worker-isolation.test.sh" in args
+    and "tests/fm-slot-occupant-proof.test.sh" in args
+    and "tests/fm-spawn-route.test.sh" in args
+    and "tests/fm-teardown.test.sh" in args
     for args in portable_runner
 )
 assert ci["jobs"]["tests"]["timeout-minutes"] == 25
-herdr_runner = command_args("tests-herdr", "fm-test-run.sh")
-assert any(
-    "--family" in args
-    and args[args.index("--family") + 1] == "real-herdr-gated"
-    and "--fail-on-any-gate-skip" in args
-    for args in herdr_runner
-)
-assert command_args("tests-herdr", "fm-install-herdr.sh")
-assert command_args("tests-herdr", "fm-install-treehouse.sh")
-assert command_args("tests-herdr", "fm-herdr-ci-cleanup.sh")
+assert "tests-herdr" not in ci["jobs"]
 assert all(job.get("continue-on-error") is not True for job in ci["jobs"].values())
 assert all("max-attempts" not in job.get("strategy", {}) for job in ci["jobs"].values())
 assert all(
