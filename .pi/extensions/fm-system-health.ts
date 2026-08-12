@@ -166,17 +166,17 @@ export function metricTone(kind: MetricKind, value: number | undefined): HealthT
   return "muted";
 }
 
-function displayPercent(value: number): string {
-  return `${Math.round(boundedPercent(value))}%`;
+export function displayedPercent(value: number): number {
+  return Math.round(boundedPercent(value));
 }
 
 export function formatHealthStatus(metrics: HealthMetrics): string {
   const parts: string[] = [];
   if (metrics.memoryFreePercent !== undefined) {
-    parts.push(`RAM ${displayPercent(metrics.memoryFreePercent)} free`);
+    parts.push(`RAM ${displayedPercent(metrics.memoryFreePercent)}% free`);
   }
   if (metrics.cpuUtilizationPercent !== undefined) {
-    parts.push(`CPU ${displayPercent(metrics.cpuUtilizationPercent)}`);
+    parts.push(`CPU ${displayedPercent(metrics.cpuUtilizationPercent)}%`);
   }
   return parts.join(" · ");
 }
@@ -184,20 +184,12 @@ export function formatHealthStatus(metrics: HealthMetrics): string {
 export function renderHealthStatus(metrics: HealthMetrics, theme: HealthTheme): string {
   const parts: string[] = [];
   if (metrics.memoryFreePercent !== undefined) {
-    parts.push(
-      theme.fg(
-        metricTone("memory", metrics.memoryFreePercent),
-        `RAM ${displayPercent(metrics.memoryFreePercent)} free`,
-      ),
-    );
+    const shown = displayedPercent(metrics.memoryFreePercent);
+    parts.push(theme.fg(metricTone("memory", shown), `RAM ${shown}% free`));
   }
   if (metrics.cpuUtilizationPercent !== undefined) {
-    parts.push(
-      theme.fg(
-        metricTone("cpu", metrics.cpuUtilizationPercent),
-        `CPU ${displayPercent(metrics.cpuUtilizationPercent)}`,
-      ),
-    );
+    const shown = displayedPercent(metrics.cpuUtilizationPercent);
+    parts.push(theme.fg(metricTone("cpu", shown), `CPU ${shown}%`));
   }
   return parts.join(theme.fg("dim", " · "));
 }

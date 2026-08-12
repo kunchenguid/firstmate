@@ -16,6 +16,7 @@ Use `/system-health` to report the latest values.
 Use `/system-health toggle`, `/system-health on`, or `/system-health off` to control the status display for the current Pi extension lifetime.
 Unavailable sources are omitted from both the status and the command report instead of being represented as invented values.
 Semantic `muted`, `warning`, and `error` tones use Pi's active theme palette, which keeps the default Rose Pine Moon presentation calm until a threshold is crossed.
+Thresholds are evaluated against the same rounded percentage that is displayed, so two readings shown as the same number always carry the same colour.
 
 Regression entry points:
 

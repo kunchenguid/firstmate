@@ -61,6 +61,50 @@ const styled = mod.renderHealthStatus(sampled.metrics, theme);
 assert(styled.includes("<muted>RAM 25% free</muted>"), `memory status lost calm styling: ${styled}`);
 assert(styled.includes("<muted>CPU 60%</muted>"), `CPU status lost calm styling: ${styled}`);
 assertEqual(mod.renderHealthStatus({}, theme), "", "unavailable metrics render no unsupported values");
+
+function toneOf(styled, label) {
+  const match = new RegExp(`<([a-z]+)>${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</`).exec(styled);
+  assert(match, `expected a styled "${label}" segment in ${styled}`);
+  return match[1];
+}
+
+for (const [rawA, rawB, label, tone] of [
+  [9.6, 10.4, "RAM 10% free", "warning"],
+  [19.6, 20.4, "RAM 20% free", "muted"],
+  [8.6, 9.4, "RAM 9% free", "error"],
+]) {
+  const first = mod.renderHealthStatus({ memoryFreePercent: rawA }, theme);
+  const second = mod.renderHealthStatus({ memoryFreePercent: rawB }, theme);
+  assertEqual(first, second, `memory boundary ${rawA}/${rawB} must render identically`);
+  assertEqual(toneOf(first, label), tone, `memory boundary tone for "${label}"`);
+}
+
+for (const [rawA, rawB, label, tone] of [
+  [69.6, 70.4, "CPU 70%", "warning"],
+  [89.6, 90.4, "CPU 90%", "error"],
+  [68.6, 69.4, "CPU 69%", "muted"],
+]) {
+  const first = mod.renderHealthStatus({ cpuUtilizationPercent: rawA }, theme);
+  const second = mod.renderHealthStatus({ cpuUtilizationPercent: rawB }, theme);
+  assertEqual(first, second, `CPU boundary ${rawA}/${rawB} must render identically`);
+  assertEqual(toneOf(first, label), tone, `CPU boundary tone for "${label}"`);
+}
+
+for (const raw of [9.6, 10.4, 19.6, 20.4]) {
+  assert(
+    mod.renderHealthStatus({ memoryFreePercent: raw }, theme).includes(
+      `RAM ${mod.displayedPercent(raw)}% free`,
+    ),
+    `styled memory label must match the compact label for ${raw}`,
+  );
+}
+for (const raw of [69.6, 70.4, 89.6, 90.4]) {
+  assertEqual(
+    mod.formatHealthStatus({ cpuUtilizationPercent: raw }),
+    `CPU ${mod.displayedPercent(raw)}%`,
+    `compact CPU label for ${raw}`,
+  );
+}
 assertEqual(
   mod.formatHealthReport({}),
   "System health: no supported metrics available",
