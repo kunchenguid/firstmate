@@ -429,7 +429,7 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
-  send_lock_identity="$TARGET_BACKEND"$'\t'"$T"$'\t'"$EXPECTED_LABEL"
+  send_lock_identity="$TARGET_BACKEND"$'\t'"$T"
   read -r send_lock_sum send_lock_size _ <<EOF
 $(printf '%s' "$send_lock_identity" | cksum)
 EOF
