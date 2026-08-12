@@ -66,6 +66,11 @@ const SESSION_ENTRY_ID = /^[a-f0-9]{8}$/;
 const OUTBOUND_EVENT_ID = /^out_[a-f0-9]{40}$/;
 const MESSAGE_ID = /^om_[A-Za-z0-9_-]{4,128}$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]{4,128}$/;
+const LOCAL_ROUTINE_ASSISTANT_TEXTS = new Set(["Captain, shipshape.", "Captain，shipshape."]);
+
+function isLocalRoutineAssistantText(text) {
+  return LOCAL_ROUTINE_ASSISTANT_TEXTS.has(text);
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -411,7 +416,7 @@ function validateOutbound(outbox) {
   requireString(outbox.binding_id, "outbound binding", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(outbox.binding_generation, "outbound generation", { min: 1 });
   requireString(outbox.destination_chat_id, "outbound destination", CHAT_ID);
-  if (typeof outbox.text !== "string" || outbox.text.trim().length === 0 || outbox.text === "Captain, shipshape.") throw new Error("invalid Feishu outbound text");
+  if (typeof outbox.text !== "string" || outbox.text.trim().length === 0 || isLocalRoutineAssistantText(outbox.text)) throw new Error("invalid Feishu outbound text");
   if (outbox.text_hash !== `sha256:${sha(outbox.text)}`) throw new Error("Feishu outbound text hash mismatch");
   if (!Array.isArray(outbox.chunks) || outbox.chunks.length === 0) throw new Error("invalid Feishu outbound chunks");
   let combined = "";
@@ -473,7 +478,7 @@ function validateOutboundIntent(intent) {
   requireString(intent.session_id, "outbound intent session", SESSION_ID);
   requireString(intent.binding_id, "outbound intent binding", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(intent.binding_generation, "outbound intent generation", { min: 1 });
-  if (typeof intent.text !== "string" || intent.text.trim().length === 0 || intent.text === "Captain, shipshape." || intent.text_hash !== `sha256:${sha(intent.text)}`) throw new Error("invalid Feishu outbound intent text");
+  if (typeof intent.text !== "string" || intent.text.trim().length === 0 || isLocalRoutineAssistantText(intent.text) || intent.text_hash !== `sha256:${sha(intent.text)}`) throw new Error("invalid Feishu outbound intent text");
   requireIso(intent.session_entry_timestamp, "outbound intent Assistant entry time");
   requireIso(intent.created_at, "outbound intent creation time");
   return intent;
@@ -1798,7 +1803,7 @@ export function persistAssistantOutboundIntent(home, input) {
   const sessionEntryTimestamp = requireIso(input.sessionEntryTimestamp, "outbound intent Assistant entry time");
   const text = typeof input.text === "string" ? input.text : "";
   if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
-  if (text === "Captain, shipshape.") return { status: "skipped", reason: "routine" };
+  if (isLocalRoutineAssistantText(text)) return { status: "skipped", reason: "routine" };
   return withLock(paths, "outbound-state", () => {
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
@@ -1897,7 +1902,7 @@ export function registerAssistantOutbound(home, input) {
   const sessionEntryTimestamp = requireIso(input.sessionEntryTimestamp, "outbound Assistant entry time");
   const text = typeof input.text === "string" ? input.text : "";
   if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
-  if (text === "Captain, shipshape.") return { status: "skipped", reason: "routine" };
+  if (isLocalRoutineAssistantText(text)) return { status: "skipped", reason: "routine" };
   const eventId = outboundEventId(pairing.home_id, { bindingGeneration: binding.generation, sessionId: input.sessionId, assistantEntryId });
   const maxOutboundBytes = positiveInteger(input.maxOutboundBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_BYTES, DEFAULT_MAX_OUTBOUND_BYTES);
   const minFreeBytes = positiveInteger(process.env.FM_FEISHU_MIN_FREE_BYTES, DEFAULT_MIN_FREE_BYTES);

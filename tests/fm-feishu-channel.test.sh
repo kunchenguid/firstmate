@@ -60,8 +60,10 @@ import {
   offerFeishuIngress,
   pathsForHome,
   pendingFeishuIngress,
+  persistAssistantOutboundIntent,
   publishFeishuInbound,
   receiptOutbound,
+  registerAssistantOutbound,
   statusSummary,
   writeTransportHealth,
 } from "./bin/fm-feishu-state.mjs";
@@ -284,6 +286,8 @@ await emit(pi, "message_start", { message: session.entries.at(-1).message }, ses
 await finalizeAssistant("00000005", [{ type: "text", text: "Local TUI answer is mirrored too" }], "2026-08-12T00:00:04.000Z");
 session.entries.push({ type: "message", id: "00000006", parentId: "00000005", timestamp: "2026-08-12T00:00:05.000Z", message: { role: "user", content: "\u2063FIRSTMATE_OP: v1 routine" } });
 await finalizeAssistant("00000007", [{ type: "text", text: "Captain, shipshape." }], "2026-08-12T00:00:06.000Z");
+await finalizeAssistant("0000000c", [{ type: "text", text: "Captain，shipshape." }], "2026-08-12T00:00:06.500Z");
+await finalizeAssistant("0000000d", [{ type: "text", text: "Captain， shipshape." }], "2026-08-12T00:00:06.750Z");
 await finalizeAssistant("00000008", [{ type: "thinking", thinking: "private" }, { type: "toolCall", id: "call-1", name: "read", arguments: {} }], "2026-08-12T00:00:07.000Z");
 session.entries.push({ type: "custom", id: "00000009", parentId: "00000008", timestamp: "2026-08-12T00:00:08.000Z", customType: "tui-only", data: { message: "local alert" } });
 await finalizeAssistant("0000000a", [{ type: "text", text: "Watcher answer is mirrored too" }], "2026-08-12T00:00:09.000Z");
@@ -299,9 +303,28 @@ for (let claim = claimNextOutbound(home); claim; claim = claimNextOutbound(home)
 assert.deepEqual(mirrored, [
   { id: "00000003", text: "Direct Feishu answer https://example.test/full" },
   { id: "00000005", text: "Local TUI answer is mirrored too" },
+  { id: "0000000d", text: "Captain， shipshape." },
   { id: "0000000a", text: "Watcher answer is mirrored too" },
 ]);
 assert.equal(statusSummary(home).outbound_pending, 0);
+
+assert.equal(persistAssistantOutboundIntent(home, {
+  text: "Captain，shipshape.",
+  assistantEntryId: "0000000e",
+  sessionOrder: session.entries.length,
+  sessionEntryTimestamp: "2026-08-12T00:00:11.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+}).status, "skipped", "durable intent path accepted the fullwidth-comma routine response");
+assert.equal(registerAssistantOutbound(home, {
+  text: "Captain，shipshape.",
+  assistantEntryId: "0000000e",
+  sessionOrder: session.entries.length,
+  sessionEntryTimestamp: "2026-08-12T00:00:11.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+}).status, "skipped", "direct outbox path accepted the fullwidth-comma routine response");
+assert.equal(claimNextOutbound(home), undefined, "routine-response sibling paths introduced outbound work");
 
 const pairingPath = pathsForHome(home).pairing;
 const validPairingBytes = readFileSync(pairingPath, "utf8");
@@ -409,7 +432,6 @@ writeFileSync(secretFile, `${JSON.stringify({ type: "session", version: 3, id: s
 const secretBinding = bindSession(secretHome, { sessionId, sessionFile: secretFile, sessionCwd: secretSession, headerId: sessionId, headerCwd: secretSession });
 const paths = pathsForHome(secretHome);
 const beforeIntents = readdirSync(paths.outboundRegistrationIntents).length;
-const { persistAssistantOutboundIntent } = await import("./bin/fm-feishu-state.mjs");
 const refused = persistAssistantOutboundIntent(secretHome, { text: "Authorization: Bearer fixed-secret-value-123456", assistantEntryId: "abcdef01", sessionOrder: 1, sessionEntryTimestamp: "2026-08-12T00:00:00.000Z", sessionId, bindingGeneration: secretBinding.generation });
 assert.equal(refused.status, "secret-refused");
 assert.equal(readdirSync(paths.outboundRegistrationIntents).length, beforeIntents, "secret text was persisted before deterministic refusal");

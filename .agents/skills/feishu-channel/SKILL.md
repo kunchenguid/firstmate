@@ -29,7 +29,7 @@ Pi owns input ordering and scheduling.
 Do not reconstruct a cross-channel queue around it.
 
 Every finalized non-empty Assistant text persisted after the binding boundary is mirrored automatically to the bound Feishu chat, whether the turn came from Feishu, native TUI, watcher, turn-end, or another normal Pi source.
-The exact fixed response `Captain, shipshape.` stays local and is never pushed.
+The exact fixed responses `Captain, shipshape.` and `Captain，shipshape.` stay local and are never pushed.
 Do not add a classifier, summary, rewrite, model call, semantic redaction, typed notification, source-provenance requirement, or separate outbound message.
 Write the captain-facing final answer exactly as it should appear, with complete URLs.
 Fixed credential-pattern refusal, stable persisted Assistant-entry identity, deterministic chunking, and bound-chat delivery are extension-owned.

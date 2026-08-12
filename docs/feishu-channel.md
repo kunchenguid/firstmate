@@ -10,7 +10,7 @@ The network side uses the official `@larksuiteoapi/node-sdk` long-connection cli
 The MVP allows one exact Feishu user in one exact P2P chat.
 Inbound supports plain text only.
 Outbound mirrors every finalized non-empty Assistant text persisted after the binding boundary as Feishu message-card Markdown, regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused the turn.
-The exact fixed response `Captain, shipshape.` stays local and is never pushed.
+The exact fixed responses `Captain, shipshape.` and `Captain，shipshape.` stay local and are never pushed.
 Mirroring adds no classification, summarization, rewriting, or second model call.
 Group chats, inbound cards, card interactions, attachments, webhooks, multi-home routing, remote slash commands, and attachment downloads are unsupported.
 Slash-like Feishu text is ordinary user content and cannot invoke a Pi slash command or prompt template.
@@ -141,7 +141,7 @@ After Pi has persisted a finalized Assistant message, the extension scans sessio
 Each eligible entry is identified by its persisted session-entry ID, session order, timestamp, session ID, binding generation, and exact text hash.
 That identity makes capture and restart replay converge without depending on source markers, originating Feishu messages, transient ordinals, or text hash alone.
 Every finalized non-empty Assistant text is eligible regardless of source, including replies caused by Feishu, native TUI, watcher, and turn-end input.
-The exact fixed response `Captain, shipshape.` and empty Assistant text are skipped.
+The exact fixed responses `Captain, shipshape.` and `Captain，shipshape.`, plus empty Assistant text, are skipped.
 Thinking blocks, partial streams, tool calls and results, user/system/custom messages, and TUI-only alerts are not mirrored.
 
 Each eligible message is sent with SDK `message.create` to the exact bound P2P chat as an `interactive` message card containing exactly one `markdown` element.
