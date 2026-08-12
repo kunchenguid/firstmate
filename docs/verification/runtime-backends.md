@@ -791,7 +791,9 @@ An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
 
 **Cursor parks its terminal cursor outside its composer.**
 With the composer on row 12 (zero-based), `#{cursor_y}` reported 17 both when idle and with real text typed, and `#{cursor_flag}` reported 0.
-The tmux composer verdict for a cursor pane is therefore `unknown` in every state, and submission is acknowledged from the busy transition instead.
+The tmux composer verdict for a cursor pane is therefore `unknown` in every state, and tmux submission is acknowledged from the busy transition instead.
+On the cursorless backends, styled captures from Herdr and Zellij can prove the reverse-video placeholder empty, while cmux and Orca declare `styled=0` and therefore correctly return `unknown` for Cursor's bare placeholder row rather than risk a false `empty`.
+No cursorless busy-transition fallback is claimed: making one safe requires a pre-typing baseline, so delivery on cmux and Orca can remain unconfirmed even though Cursor's recorded worker state remains backend-agnostic through the transcript fold.
 Claude and Codex were checked in the same run and are unaffected: their settled composers report `cursor_flag=1` and classify `empty`.
 
 ### Busy state

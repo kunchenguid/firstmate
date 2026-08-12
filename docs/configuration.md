@@ -208,6 +208,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
 cursor is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate because Cursor Agent CLI has no verified primary supervision protocol.
+On cmux and Orca, Cursor's unstyled bare placeholder composer deliberately reads `unknown`, so a send can remain delivery-unconfirmed; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and the transcript-state boundary.
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
 New harnesses get verified through a supervised trial task before joining the set.
