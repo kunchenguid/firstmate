@@ -218,7 +218,7 @@ This section is the sole owner of that procedure.
 
 **When you promise a final:**
 
-1. Create the typed obligation with `tasks-axi public-followup add` and bind the work with `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
+1. Create the typed obligation with `bin/fm-tasks-axi.sh public-followup add` and bind the work with `bin/fm-tasks-axi.sh public-followup bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
 2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>`.
    This is what makes the commitment reconcilable without you.
 3. Put `bin/fm-public-followup.sh brief <obligation-id>` output straight into the worker's brief.
