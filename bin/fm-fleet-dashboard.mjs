@@ -335,17 +335,12 @@ function readableRowId(prefix, stableValue, canonical, title, forceDiscriminator
 }
 
 function compactRowId(prefix, stableValue, canonical) {
-  // Keep the task-derived token inside the fixed 80-column status row; the model-wide guard below refuses a digest collision.
-  const source = String(stableValue ?? "")
+  const readable = String(stableValue ?? "unknown")
     .toLowerCase()
     .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "");
-  const parts = source.split("-").filter(Boolean);
-  const readable = (parts.length > 1 ? parts.map((part) => part[0]).join("") : source)
-    .slice(0, 2)
-    .padEnd(2, "r");
+    .replaceAll(/^-+|-+$/g, "") || "unknown";
   const discriminator = createHash("sha256").update(canonical).digest("hex").slice(0, 4);
-  return `${prefix}:${readable}${discriminator}`;
+  return `${prefix}:${readable}~${discriminator}`;
 }
 
 function formatDuration(seconds) {
@@ -1265,7 +1260,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       const stablePart = bucket.key === "decisions"
         ? decisionUsesKey ? `${item.id}-${item.stableKey}-${item.identityVerb ?? "row"}` : item.id
         : bucket.key === "ours-in-review"
-          ? `${item.id}-${item.prNumber ?? "pr-unknown"}`
+          ? item.prNumber ?? "pr-unknown"
           : bucket.key === "review-obligations"
             ? item.stableKey
             : String(item.id).replace(/^pr-/, "");
@@ -1416,7 +1411,7 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
       if (group.project) lines.push(paint("dim", `   project ${group.project}`));
       for (const item of group.items) {
         const rowLabel = String(item.number).padStart(numberWidth);
-        const prefix = bucket.key === "ours-in-review" ? ` ${rowLabel} ` : `  ${rowLabel} `;
+        const prefix = bucket.key === "ours-in-review" ? " " : `  ${rowLabel} `;
         const marker = paint(item.marker.color, item.marker.glyph);
         const stablePrefix = `${item.identity} `;
         const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));

@@ -930,7 +930,7 @@ test_registered_pr_number_comes_from_registered_url() {
   pass "registered PR URL outranks a conflicting title number"
 }
 
-test_our_pr_ids_survive_an_engineered_two_hex_collision() {
+test_our_pr_ids_keep_the_pr_number_through_an_engineered_collision() {
   local home fakebin updated out first_shown second_shown duplicates
   home=$(make_home duplicate-our-pr)
   write_live_fixture "$home"
@@ -951,15 +951,15 @@ test_our_pr_ids_survive_an_engineered_two_hex_collision() {
 
   out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
     || fail "engineered two-hex collision refused the complete render"
-  assert_contains "$out" "o:cabf59" "first engineered-collision row lost its four-hex identity"
-  assert_contains "$out" "o:cabf3f" "second engineered-collision row lost its four-hex identity"
-  duplicates=$(printf '%s\n' "$out" | awk '$2 ~ /^[dorv]:/ { print $2 }' | sort | uniq -d)
+  assert_contains "$out" "o:4001~bf59" "first engineered-collision row lost its readable PR identity"
+  assert_contains "$out" "o:4001~bf3f" "second engineered-collision row lost its readable PR identity"
+  duplicates=$(printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[dorv]:/) print $i }' | sort | uniq -d)
   [ -z "$duplicates" ] || fail "dashboard emitted duplicate row identities: $duplicates"
-  first_shown=$(render_terminal "$home" "$fakebin" --show o:cabf59) || fail "first collision row id did not resolve"
-  second_shown=$(render_terminal "$home" "$fakebin" --show o:cabf3f) || fail "second collision row id did not resolve"
+  first_shown=$(render_terminal "$home" "$fakebin" --show o:4001~bf59) || fail "first collision row id did not resolve"
+  second_shown=$(render_terminal "$home" "$fakebin" --show o:4001~bf3f) || fail "second collision row id did not resolve"
   assert_contains "$first_shown" "Follow up on the review branch" "first collision id resolved to the wrong task"
   assert_contains "$second_shown" "Recheck the review branch" "second collision id resolved to the wrong task"
-  pass "our PR ids survive an engineered two-hex collision without refusing the render"
+  pass "our PR ids keep the PR number and survive an engineered digest collision"
 }
 
 test_obligation_round_uses_viewer_review_history_or_stays_unknown() {
@@ -1018,7 +1018,7 @@ EOF
 
 test_shareable_html_omits_unstructured_manual_scripts_by_default
 test_obligation_round_uses_viewer_review_history_or_stays_unknown
-test_our_pr_ids_survive_an_engineered_two_hex_collision
+test_our_pr_ids_keep_the_pr_number_through_an_engineered_collision
 test_cockpit_shows_action_sections_and_full_inventory
 test_pr_truthfulness_regressions
 test_review_relationships_survive_completed_rounds
