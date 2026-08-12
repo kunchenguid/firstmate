@@ -31,6 +31,7 @@ PENDING_TMP=
 GENERATION_TMP=
 GENERATION_RECEIPT_TMP=
 PENDING_ACK_TMP=
+WAKE_QUEUE_LOCK_LOCAL=0
 ROUTINE_DEFER_FIRE=${FM_ROUTINE_DEFER_FIRE:-0}
 ROUTINE_ACK=0
 ROUTINE_ACK_GENERATION=
@@ -54,6 +55,7 @@ routine_cleanup() {
   [ -z "$GENERATION_RECEIPT_TMP" ] || rm -f -- "$GENERATION_RECEIPT_TMP"
   [ -z "$PENDING_ACK_TMP" ] || rm -f -- "$PENDING_ACK_TMP"
   exec 8<&- 2>/dev/null || true
+  [ "$WAKE_QUEUE_LOCK_LOCAL" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true
   fm_lock_release "$LOCK" 2>/dev/null || true
 }
 
@@ -119,6 +121,15 @@ case "$WEEKDAY" in
   *) routine_error "invalid weekday: $WEEKDAY"; exit 1 ;;
 esac
 
+if [ "$ROUTINE_ACK" -eq 1 ] && [ "${FM_ROUTINE_WAKE_QUEUE_LOCK_HELD:-0}" = 0 ]; then
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" \
+    || { routine_error 'could not acquire wake queue lock for acknowledgement'; exit 1; }
+  WAKE_QUEUE_LOCK_LOCAL=1
+  FM_ROUTINE_WAKE_QUEUE_LOCK_HELD=1
+fi
+trap routine_cleanup EXIT
+trap routine_interrupt HUP INT TERM
+
 if ! fm_lock_try_acquire "$LOCK"; then
   if [ "$ROUTINE_ACK" -eq 1 ]; then
     routine_error 'could not acquire routine state lock for acknowledgement'
@@ -126,8 +137,6 @@ if ! fm_lock_try_acquire "$LOCK"; then
   fi
   exit 0
 fi
-trap routine_cleanup EXIT
-trap routine_interrupt HUP INT TERM
 
 trim() {
   local value=$1
