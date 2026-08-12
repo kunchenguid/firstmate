@@ -1757,6 +1757,46 @@ test_private_artifact_publisher_runs_under_system_bash() {
   pass "private artifact publisher is compatible with the system bash path"
 }
 
+test_context_registry_legacy_mtime_uses_gnu_stat_interface() {
+  local home file fakebin out rc
+  home="$TMP_ROOT/registry-gnu-mtime"
+  file="$home/state/x-context/req-legacy.json"
+  private_artifact_dir "$(dirname "$file")"
+  jq -cn '{request_id:"req-legacy",platform:"x",reply_max_chars:"280"}' > "$file"
+  chmod 600 "$file"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/uname" <<'EOF'
+#!/usr/bin/env bash
+echo Linux
+EOF
+  chmod +x "$fakebin/uname"
+  cat > "$fakebin/stat" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  -f)
+    printf '  File: "%s"\n' "$3"
+    printf '    ID: 0        Namelen: 255     Type: tmpfs\n'
+    exit 1
+    ;;
+  -c)
+    [ "$2" = "%Y" ] && [ -e "$3" ] || exit 1
+    printf '%s\n' 1699395200
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$fakebin/stat"
+
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$1/bin/fm-x-lib.sh"; fmx_context_registry_recorded_at "$2" 1700000000' \
+    _ "$ROOT" "$file" 2>&1); rc=$?
+  expect_code 0 "$rc" "legacy registry mtime lookup under GNU stat"
+  [ "$out" = 1699395200 ] \
+    || fail "legacy registry mtime must use only GNU stat -c output (got: $out)"
+  pass "legacy context registry records use the GNU stat interface without filesystem dump leakage"
+}
+
 test_context_registry_prunes_expired_records() {
   local home dir fakebin keep preserved legacy malformed future out rc
   home="$TMP_ROOT/registry-retention"
@@ -2847,6 +2887,7 @@ test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image
 test_poll_records_context_registry_from_relay_platform
 test_context_registry_private_publication_rejects_unsafe_paths
 test_context_registry_rejects_unsafe_reads
+test_context_registry_legacy_mtime_uses_gnu_stat_interface
 test_private_artifact_publisher_runs_under_system_bash
 test_context_registry_prunes_expired_records
 test_context_registry_preserves_first_seen_timestamp
