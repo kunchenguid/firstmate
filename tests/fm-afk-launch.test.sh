@@ -1919,7 +1919,10 @@ unit_legacy_supervisor_fallback_is_usable() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-legacy-fallback.XXXXXX")
   mkdir -p "$st/state"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  # shellcheck disable=SC2016 # The fixture script expands inside its isolated bash process.
+  if env -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u TMUX_PANE \
+    -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     daemon_lock_held_by_live_daemon() { return 1; }
     fm_afk_launch_reconcile() { return 0; }

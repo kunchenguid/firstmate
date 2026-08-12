@@ -69,8 +69,9 @@ test_ci_invokes_the_owner() {
 }
 
 test_nomistakes_invokes_the_owner() {
-  grep -Fqx "  lint: 'bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .'" "$NM" || fail "no-mistakes commands.lint must invoke the shell owner and locked Agent Fleet lint"
-  pass "no-mistakes pre-push lint calls the shell owner and locked Agent Fleet lint"
+  grep -Fqx "  lint: 'bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .'''" "$NM" || fail "no-mistakes commands.lint must dispatch the shell owner and locked Agent Fleet lint"
+  assert_grep 'exec "$@"' "$ROOT/bin/fm-azure-runner-dispatch.sh" "Azure dispatch must preserve local execution as the default"
+  pass "no-mistakes pre-push lint dispatches the exact shell owner and locked Agent Fleet lint"
 }
 
 test_pins_an_explicit_version() {

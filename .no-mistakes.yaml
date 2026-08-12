@@ -32,9 +32,12 @@ disable_project_settings: true
 # (FM_TEST_SKIP_HERDR=1) because their disposable image carries no Herdr, while
 # this gate never skips, so every real-Herdr declaration provisions an owned
 # Herdr lab and the serial route holds those labs to one at a time.
+# The dispatch wrapper is local by default.
+# An operator may opt an exact command class into the private Azure runner; once
+# selected remote, a cloud or result failure is returned without local fallback.
 commands:
-  lint: 'bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; tests/run.sh || rc=1; uv run --directory tools/agent-fleet --locked pytest || rc=1; uv run --directory tools/agent-fleet --locked python -m compileall -q src || rc=1; exit "$rc"'
+  lint: 'bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .'''
+  test: 'bin/fm-no-mistakes-test-command.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:
