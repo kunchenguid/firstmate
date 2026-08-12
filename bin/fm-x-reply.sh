@@ -189,6 +189,7 @@ shift
 FOLLOWUP=0
 REPLY_KIND=answer
 TASK_ID=
+REPLY_AUDIENCE=
 IMAGE_PATH=
 RECEIPT_FILE=
 ARGS=()
@@ -212,6 +213,15 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       TASK_ID=$1
+      ;;
+    --reply-audience)
+      shift
+      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+        echo "fm-x-reply: missing --reply-audience value" >&2
+        usage
+        exit 2
+      fi
+      REPLY_AUDIENCE=$1
       ;;
     --image)
       shift
@@ -308,6 +318,11 @@ fmx_load_config
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; }
 
+case "$REPLY_AUDIENCE" in
+  ''|public|private-trusted) ;;
+  *) echo "fm-x-reply: unsupported --reply-audience '$REPLY_AUDIENCE'" >&2; exit 2 ;;
+esac
+
 # Resolve the reply platform + split budget. An explicit env override wins per
 # axis (fm-x-followup passes recorded task-link context this way); otherwise
 # resolve through the durable per-request context registry, then the still-present
@@ -316,7 +331,7 @@ command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; 
 # the follow-up path so the answer path and every dry-run stay network-free
 # (fm-x-lib.sh owns the resolution-order contract).
 ALLOW_RELAY=0
-if [ -n "${FMX_REPLY_PLATFORM:-}" ] && [ -n "${FMX_REPLY_MAX_CHARS:-}" ]; then
+if [ -n "${FMX_REPLY_PLATFORM:-}" ] && [ -n "${FMX_REPLY_MAX_CHARS:-}" ] && [ -n "$REPLY_AUDIENCE" ]; then
   REQ_PLATFORM=${FMX_REPLY_PLATFORM}
   REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS}
 else
@@ -329,7 +344,9 @@ else
   }
   REQ_PLATFORM=${FMX_REPLY_PLATFORM:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')}
   REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')}
+  REPLY_AUDIENCE=${REPLY_AUDIENCE:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_audience // "public"')}
 fi
+case "$REPLY_AUDIENCE" in private-trusted) ;; *) REPLY_AUDIENCE=public ;; esac
 case "$REQ_PLATFORM" in
   discord|x|'') ;;
   twitter) REQ_PLATFORM=x ;;
@@ -394,6 +411,14 @@ fi
 # Re-check immediately before any preview publication or network post so a
 # task that was unlinked during composition cannot leave a stale "started" claim.
 verify_work_ack_link || exit 1
+
+if [ "$REPLY_AUDIENCE" = private-trusted ]; then
+  fmx_load_config
+  if [ -n "$FMX_AUDIENCE_INVALID" ] || [ "$FMX_AUDIENCE" != private-trusted ]; then
+    echo "fm-x-reply: private-trusted reply requires the current validated loopback transport" >&2
+    exit 1
+  fi
+fi
 
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.
 if [ -n "$FMX_DRY" ]; then

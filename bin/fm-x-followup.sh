@@ -254,9 +254,9 @@ case "$REQ_REPLY_MAX" in
   *) REPLY_ENV+=("FMX_REPLY_MAX_CHARS=$REQ_REPLY_MAX") ;;
 esac
 if [ "${#REPLY_ENV[@]}" -gt 0 ]; then
-  env "${REPLY_ENV[@]}" "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+  env "${REPLY_ENV[@]}" "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --reply-audience "${REQ_AUDIENCE:-public}" --followup "${TS_ARGS[@]}" >/dev/null
 else
-  "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --followup "${TS_ARGS[@]}" >/dev/null
+  "$FM_ROOT/bin/fm-x-reply.sh" "$RID" --reply-audience "${REQ_AUDIENCE:-public}" --followup "${TS_ARGS[@]}" >/dev/null
 fi
 post_rc=$?
 
