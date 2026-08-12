@@ -399,14 +399,41 @@ SH
   : >"$fixture/calls"
   printf '%s\n' 'real' >"$fixture/classify-mode"
 
+  # A second classifier script that records its own invocations and declares nothing
+  # operational. A genuinely reloaded adapter binds this one; an adapter that retained its
+  # old classifier closure keeps calling classify-probe.sh and never touches this file.
+  cat >"$fixture/reloaded-probe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_RELOADED_INPUT_CALLS"
+cat >/dev/null
+exit 1
+SH
+  chmod +x "$fixture/reloaded-probe.sh"
+  : >"$fixture/reloaded-calls"
+
+  # A reloaded copy of the adapter plus its own copy of the classifier module, so the
+  # reloaded adapter resolves a different module-level classifier script exactly as a real
+  # extension reload would. Importing the same file under a query string would share the
+  # already-cached fm-operational-input.ts and could not change that binding.
+  # Calm visibility stays shared so both copies observe the same toggle state; only the
+  # classifier module is duplicated, so the reloaded adapter binds the reloaded script.
+  mkdir -p "$fixture/project/.pi/extensions/reloaded"
+  sed 's#"\./fm-calm-visibility\.ts"#"../lib/fm-calm-visibility.ts"#' \
+    "$OPERATIONAL_USER_LAYOUT" >"$fixture/project/.pi/extensions/reloaded/fm-calm-operational-user-layout.ts"
+  sed 's#process\.env\.FM_OPERATIONAL_INPUT_SCRIPT#process.env.FM_RELOADED_INPUT_SCRIPT#' \
+    "$PI_OPERATIONAL_INPUT" >"$fixture/project/.pi/extensions/reloaded/fm-operational-input.ts"
+
   out=$(cd "$fixture/project" && \
     PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     FM_OPERATIONAL_INPUT_SCRIPT="$fixture/classify-probe.sh" \
+    FM_RELOADED_INPUT_SCRIPT="$fixture/reloaded-probe.sh" \
     FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
     FM_OPERATIONAL_INPUT_CALLS="$fixture/calls" \
+    FM_RELOADED_INPUT_CALLS="$fixture/reloaded-calls" \
     FM_CLASSIFY_MODE_FILE="$fixture/classify-mode" \
     CLASSIFY_MODE_FILE="$fixture/classify-mode" \
     CALLS_FILE="$fixture/calls" \
+    RELOADED_CALLS_FILE="$fixture/reloaded-calls" \
     node --input-type=module 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -597,6 +624,56 @@ layout.installCalmOperationalUserLayout();
 mode.updatePendingMessagesDisplay();
 if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
   throw new Error("restoring the real classifier did not hide the operational dock row again");
+}
+
+// A real extension reload imports a fresh adapter module, which resolves its own
+// classifier script at import time. Reinstalling from that reloaded module must adopt its
+// classifier, not keep the one the first install captured. Clearing the cache alone would
+// not satisfy this: the retained closure would still route every call to the original
+// script, leaving the call log of the reloaded script empty.
+const reloadedCallsFile = process.env.RELOADED_CALLS_FILE;
+const reloadedCalls = () => {
+  const raw = readFileSync(reloadedCallsFile, "utf8").trim();
+  if (!raw) return 0;
+  return raw.split("\n").filter((line) => line === "kind").length;
+};
+const reloadedSpecifier = "./.pi/extensions/reloaded/fm-calm-operational-user-layout.ts";
+const reloadedLayout = await import(reloadedSpecifier);
+writeFileSync(callsFile, "");
+writeFileSync(reloadedCallsFile, "");
+reloadedLayout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (reloadedCalls() === 0) {
+  throw new Error(
+    "reinstalling from a reloaded module kept the previously captured classifier: the reloaded classifier script was never invoked",
+  );
+}
+if (classifyCalls() !== 0) {
+  throw new Error(
+    `reinstalling from a reloaded module still routed ${classifyCalls()} call(s) to the original classifier script`,
+  );
+}
+if (!dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error(
+    "the reloaded classifier declares nothing operational, so its row should have become visible",
+  );
+}
+if (!dockText().includes(genuine)) {
+  throw new Error("the reloaded adapter hid the genuine queued captain message");
+}
+
+// Reinstalling from the original module must swing the binding back.
+writeFileSync(callsFile, "");
+writeFileSync(reloadedCallsFile, "");
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (reloadedCalls() !== 0) {
+  throw new Error(
+    `reinstalling from the original module still routed ${reloadedCalls()} call(s) to the reloaded classifier script`,
+  );
+}
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("reinstalling from the original module did not hide the operational row again");
 }
 
 // The reload must still adopt the reloaded Calm visibility state, so turning Calm off
