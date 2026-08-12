@@ -684,12 +684,6 @@ parse_orca_worktree_result() {
 spawn_abort_cleanup() {
   local status=$?
   [ -z "$SPAWN_TREEHOUSE_ACQUIRE_ERR" ] || rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR" 2>/dev/null || true
-  if [ -n "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
-    if ! (cd "$PROJ_ABS" && treehouse return --force "$SPAWN_TREEHOUSE_LEASE_WT") >/dev/null 2>&1; then
-      echo "warning: could not return treehouse lease after aborted spawn of $ID; inspect '$SPAWN_TREEHOUSE_LEASE_WT'" >&2
-    fi
-    SPAWN_TREEHOUSE_LEASE_WT=
-  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -731,6 +725,18 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  # Return the lease only after the projected-pane cleanup above has finished and
+  # released the presentation order lock. That cleanup must close this spawn's own
+  # pane while the lock is still held, so concurrent aborts stay serialized as
+  # create/close pairs. `treehouse return` resets the worktree under Treehouse's
+  # own pool lock, so a wide fan-out serializes there; no Herdr state depends on
+  # the rollback, so it belongs outside the focus-sensitive critical section.
+  if [ -n "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
+    if ! (cd "$PROJ_ABS" && treehouse return --force "$SPAWN_TREEHOUSE_LEASE_WT") >/dev/null 2>&1; then
+      echo "warning: could not return treehouse lease after aborted spawn of $ID; inspect '$SPAWN_TREEHOUSE_LEASE_WT'" >&2
+    fi
+    SPAWN_TREEHOUSE_LEASE_WT=
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0

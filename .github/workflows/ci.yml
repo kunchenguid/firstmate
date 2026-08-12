@@ -143,6 +143,20 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Install pinned Treehouse
+        run: |
+          set -eu
+          # fm-tangle-guard's lease lifecycle coverage drives real treehouse get
+          # and return to prove a task-scoped lease survives a stopped worker and
+          # concurrently-live workers. Assert the binary rather than skipping, so
+          # a missing pin fails the lane instead of silently dropping that proof.
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Assert Treehouse pin
+        run: |
+          set -eu
+          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          treehouse --version
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
