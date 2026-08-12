@@ -143,8 +143,8 @@ fm_cursor_catalog_has_model() {  # <model>
   '
 }
 
-# Print the canonical absolute path of the Cursor executable to launch, or
-# return 1 with a diagnostic on stderr.
+# Print the stable absolute launcher path for the Cursor executable, or return 1
+# with a diagnostic on stderr.
 #
 # Resolution order, shared by bin/fm-spawn.sh and bin/fm-remote-doctor.sh:
 # cursor-agent on PATH, `agent` on PATH, then the ~/.local/bin installs of
