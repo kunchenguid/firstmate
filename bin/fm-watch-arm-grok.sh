@@ -164,8 +164,15 @@ while :; do
     exit 1
   }
   : > "$stream_dir/output"
+  : > "$stream_dir/terminal"
 
-  tee "$stream_dir/output" < "$stream_dir/stream" &
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$stream_dir/output"
+    case "$line" in
+      'watcher: started '*|'watcher: attached '*) printf '%s\n' "$line" ;;
+      *) printf '%s\n' "$line" >> "$stream_dir/terminal" ;;
+    esac
+  done < "$stream_dir/stream" &
   reader=$!
   "$ARM" > "$stream_dir/stream" 2>&1 &
   child=$!
@@ -212,7 +219,11 @@ while :; do
       wait_until_needed
       continue
     fi
-    [ -z "$completion_failure" ] || printf '%s\n' "$completion_failure"
+    cat "$stream_dir/terminal"
+    if [ -n "$completion_failure" ] \
+      && ! grep -q '^watcher: FAILED' "$stream_dir/terminal" 2>/dev/null; then
+      printf '%s\n' "$completion_failure"
+    fi
     rm -rf "$stream_dir"
     stream_dir=
     exit "$completion_rc"

@@ -108,6 +108,7 @@ SH
   status=$?
   expect_code 7 "$status" "arm failure must propagate through Grok's tracked task"
   assert_contains "$(cat "$out")" "watcher: FAILED - fixture arm failure" "arm failure text was suppressed"
+  [ "$(grep -cF 'watcher: FAILED - fixture arm failure' "$out")" -eq 1 ] || fail "same-owner arm failure was emitted more than once"
   pass "arm failure completes the Grok task loudly"
 }
 
@@ -508,6 +509,7 @@ SH
   assert_contains "$(cat "$home/state/.wake-queue")" "$failure" "away successor could not see the exact arm failure"
   sleep 0.2
   [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "away arm failure was queued more than once"
+  assert_not_contains "$(cat "$out")" "$failure" "old owner emitted arm failure after away transfer"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   pass "away transfer during arm failure classification keeps the old owner dormant"
@@ -539,6 +541,7 @@ SH
   assert_contains "$(cat "$home/state/.wake-queue")" "$failure" "session successor could not see the exact arm failure"
   sleep 0.2
   [ "$(grep -cF "$failure" "$home/state/.wake-queue")" -eq 1 ] || fail "session arm failure was queued more than once"
+  assert_not_contains "$(cat "$out")" "$failure" "old owner emitted arm failure after session transfer"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   pass "session transfer during arm failure classification keeps the old owner dormant"
