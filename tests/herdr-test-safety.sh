@@ -40,3 +40,22 @@ herdr_refuse_if_default() { # <session>
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
+
+herdr_test_poll() { # <attempts> <interval-seconds> <predicate> [args...]
+  local max_attempts=$1 interval=$2 attempt_index=0
+  shift 2
+  while [ "$attempt_index" -lt "$max_attempts" ]; do
+    "$@" && return 0
+    attempt_index=$((attempt_index + 1))
+    [ "$attempt_index" -ge "$max_attempts" ] || sleep "$interval"
+  done
+  return 1
+}
+
+herdr_test_fail() { # <message> <cleanup-function>
+  local message=$1 cleanup=$2
+  trap - EXIT
+  "$cleanup"
+  printf 'not ok - %s\n' "$message" >&2
+  exit 1
+}

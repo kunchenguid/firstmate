@@ -24,8 +24,27 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() {
+  herdr_test_fail "$1" cleanup_all
+}
 pass() { printf 'ok - %s\n' "$1"; }
+
+wait_for_nonempty_file() {  # <path> [attempts]
+  herdr_test_poll "${2:-100}" 0.1 test -s "$1"
+}
+
+wait_for_line_count_above() {  # <path> <minimum-exclusive> [attempts]
+  local path=$1 minimum=$2
+  marker_line_count_is_above() {
+    local count
+    count=$(wc -l < "$path" 2>/dev/null | tr -d '[:space:]')
+    case "$count" in
+      ''|*[!0-9]*) return 1 ;;
+      *) [ "$count" -gt "$minimum" ] ;;
+    esac
+  }
+  herdr_test_poll "${3:-100}" 0.1 marker_line_count_is_above
+}
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
@@ -106,8 +125,8 @@ MARKER="$SCRATCH/heartbeat.log"
 fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
   "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \
   || fail "could not start the live heartbeat process in the startup workspace's pane"
-sleep 2
-[ -s "$MARKER" ] || fail "the live heartbeat process did not start writing its marker file"
+wait_for_nonempty_file "$MARKER" \
+  || fail "the live heartbeat process did not start writing its marker file within 10s"
 BEFORE_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 pass "repro setup: a live long-running process is running in the startup workspace's single tab (label '1'), heartbeating to a marker file"
 
@@ -135,7 +154,8 @@ fi
 if ! herdr pane get "$LIVE_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION (2026-07-02 self-kill): the live startup-workspace pane was CLOSED by create_task"
 fi
-sleep 2
+wait_for_line_count_above "$MARKER" "$BEFORE_COUNT" \
+  || fail "REGRESSION: the live heartbeat process did not write again within 10s after create_task ran"
 AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ] \
   || fail "REGRESSION: the live heartbeat process stopped writing after create_task ran - it was killed even though its pane object survived"

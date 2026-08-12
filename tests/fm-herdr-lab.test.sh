@@ -71,8 +71,8 @@ esac
 SH
 chmod +x "$FAKEBIN/herdr"
 
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-herdr-lab.sh"
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
 
 run_with_fake() {
   PATH="$FAKEBIN:$PATH" \
@@ -234,6 +234,30 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_bounded_polling_and_failure_cleanup() {
+  local attempts=0 status=0 output
+  poll_after_three_attempts() {
+    attempts=$((attempts + 1))
+    [ "$attempts" -ge 3 ]
+  }
+  herdr_test_poll 5 0 poll_after_three_attempts \
+    || fail "bounded test poll did not observe a predicate that became true"
+  [ "$attempts" -eq 3 ] || fail "bounded test poll made $attempts attempts instead of stopping at 3"
+  attempts=0
+  herdr_test_poll 2 0 poll_after_three_attempts >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "bounded test poll must fail after its attempt limit"
+  [ "$attempts" -eq 2 ] || fail "bounded test poll exceeded its two-attempt limit"
+
+  cleanup_probe() { printf 'cleanup diagnostic\n' >&2; }
+  status=0
+  output=$(trap 'printf "duplicate cleanup\n" >&2' EXIT; \
+    herdr_test_fail 'causal assertion' cleanup_probe 2>&1) || status=$?
+  expect_code 1 "$status" "Herdr test failure helper must preserve a failing status"
+  [ "$output" = $'cleanup diagnostic\nnot ok - causal assertion' ] \
+    || fail "cleanup diagnostics did not remain subordinate to one causal assertion: $output"
+  pass "Herdr test safety: polling is bounded and cleanup remains subordinate to the causal assertion"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
@@ -241,3 +265,4 @@ test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
+test_bounded_polling_and_failure_cleanup

@@ -46,7 +46,9 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # as a cross-session parent identity (tests/herdr-test-safety.sh).
 herdr_forget_inherited_pane
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() {
+  herdr_test_fail "$1" cleanup_all
+}
 pass() { printf 'ok - %s\n' "$1"; }
 
 SESSION="fm-lab-afk-herdr-e2e-$$"
@@ -214,6 +216,10 @@ submit_line() {
   report_agent_state idle
 }
 
+# Remove any output emitted by the user's login-shell startup files before the
+# fixture took over the pane. Composer assertions below then inspect only the
+# deterministic no-rc fixture region.
+printf '\033[3J\033[H\033[2J'
 redraw
 while IFS= read -r -n 1 _ch; do
   if [ -z "$_ch" ]; then
@@ -229,9 +235,9 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
+fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" \
+  "exec env BASH_ENV=/dev/null bash --noprofile --norc '$LOOP_SCRIPT' '$LOG_FILE'" \
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
-sleep 1  # let the loop start and settle
 
 # --- herdr shim: forwards to the real binary, optionally swallows one Enter --
 REAL_HERDR=$(command -v herdr)
@@ -249,6 +255,21 @@ fi
 exec "$REAL_HERDR" "\$@"
 SHIM
 chmod +x "$HERDR_SHIM_DIR/herdr"
+
+wait_for_composer_state() {  # <expected> [attempts]
+  local expected=$1 attempts=${2:-100} actual=unknown
+  composer_state_matches() {
+    actual=$(PATH="$HERDR_SHIM_DIR:$PATH" \
+      fm_backend_composer_state herdr "$SUPERVISOR_TARGET" 2>/dev/null)
+    [ "$actual" = "$expected" ]
+  }
+  herdr_test_poll "$attempts" 0.1 composer_state_matches && return 0
+  printf 'last composer state: %s\n' "$actual" >&2
+  return 1
+}
+
+wait_for_composer_state empty \
+  || fail "the no-rc supervisor fixture did not render an empty composer within 10s"
 
 wait_daemon_started() {
   local label=${1:-daemon} start_line=${2:-0} i=0 new_log
@@ -327,13 +348,14 @@ selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "$check_text" \
     || fail "selfcheck: could not send literal text to the scratch pane"
-  sleep 0.5
-  if PATH="$HERDR_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_TARGET" herdr; then
+  if wait_for_composer_state pending \
+    && PATH="$HERDR_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_TARGET" herdr; then
     fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter
-    sleep 0.5
+    wait_for_composer_state empty \
+      || fail "selfcheck: composer did not return to empty after submitting the typed marker"
     return 0
   fi
-  echo "pane_input_pending cannot detect typed text in this real-herdr environment" >&2
+  echo "pane_input_pending cannot detect typed text within 10s in this real-herdr environment" >&2
   fm_backend_herdr_capture "$SUPERVISOR_TARGET" 10 | sed 's/^/    /' >&2
   fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter
   fail "pane_input_pending self-check failed against real herdr"

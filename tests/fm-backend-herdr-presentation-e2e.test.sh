@@ -9,7 +9,9 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() {
+  herdr_test_fail "$1" cleanup_all
+}
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -762,20 +764,29 @@ ORDER_B_META="$HOME_DIR/state/order-b.meta"
 remember_meta_worktree "$ORDER_A_META" >/dev/null
 remember_meta_worktree "$ORDER_B_META" >/dev/null
 
-ORDER_LIST=$(lab workspace list) || fail "could not inspect concurrent presentation ordering"
 CREATED_LABELS=$(projection_labels_from_log "$PROJECTION_ORDER_START")
 EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECTED_LABEL" "$CREATED_LABELS")
-ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[].label')
+ORDER_READY=false
+concurrent_order_is_ready() {
+  ORDER_LIST=$(lab workspace list 2>/dev/null || true)
+  ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[]?.label' 2>/dev/null || true)
+  PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '
+    .result.workspaces[]?
+    | select((.label | startswith("└ ")) or (.label | startswith("firstmate/")))
+    | .workspace_id
+  ' 2>/dev/null || true)
+  MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
+  MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
+  [ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] \
+    && [ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
+    && [ "$MOVE_INDEXES" = $'1\n2\n3' ]
+}
+herdr_test_poll 100 0.1 concurrent_order_is_ready && ORDER_READY=true
+[ "$ORDER_READY" = true ] \
+  || fail "concurrent primary workers did not reach stable contiguous ordering within 10s (labels: $ACTUAL_LABELS; move indexes: $MOVE_INDEXES)"
 [ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, stable primary block, secondmates: $ACTUAL_LABELS"
-PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '
-  .result.workspaces[]
-  | select((.label | startswith("└ ")) or (.label | startswith("firstmate/")))
-  | .workspace_id
-')
-MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
 [ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
   || fail "workspace.move targeted something other than each exact current projected-create id"
-MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
 [ "$MOVE_INDEXES" = $'1\n2\n3' ] \
   || fail "concurrent primary workers did not append stably to the contiguous block: $MOVE_INDEXES"
 SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
