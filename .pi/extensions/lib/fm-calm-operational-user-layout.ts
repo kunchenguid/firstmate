@@ -152,12 +152,14 @@ export function installCalmOperationalUserLayout(): void {
   };
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {
-    // hidesOperationalInput closes over this module's Calm visibility state, so a reload
-    // must adopt the new one. isOperationalInput is deliberately left alone: it classifies
-    // by the same version-stable rules either way, and replacing it would throw away the
-    // warm classification cache and re-spawn the classifier for every already-queued
-    // message on the next dock repaint.
+    // This branch runs when the module was re-imported, which is exactly when the freshly
+    // built closures can differ from the retained ones: fm-operational-input.ts resolves
+    // its classifier script at module-import time, so a reload can bind a different
+    // script. Both closures are therefore replaced, which also drops the cache the old
+    // classifier held. Reusing it could serve verdicts computed under the previous rules.
+    // The cost is one cold classification pass; later repaints reuse the new cache.
     installed.hidesOperationalInput = hidesOperationalInput;
+    installed.isOperationalInput = isOperationalInput;
     return;
   }
 

@@ -389,16 +389,23 @@ test_pi_dock_repaint_reuses_operational_classification() {
   cat >"$fixture/classify-probe.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+if [ "$(cat "$FM_CLASSIFY_MODE_FILE" 2>/dev/null)" = "never-operational" ] && [ "${1-}" = "kind" ]; then
+  cat >/dev/null
+  exit 1
+fi
 exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
 SH
   chmod +x "$fixture/classify-probe.sh"
   : >"$fixture/calls"
+  printf '%s\n' 'real' >"$fixture/classify-mode"
 
   out=$(cd "$fixture/project" && \
     PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     FM_OPERATIONAL_INPUT_SCRIPT="$fixture/classify-probe.sh" \
     FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
     FM_OPERATIONAL_INPUT_CALLS="$fixture/calls" \
+    FM_CLASSIFY_MODE_FILE="$fixture/classify-mode" \
+    CLASSIFY_MODE_FILE="$fixture/classify-mode" \
     CALLS_FILE="$fixture/calls" \
     node --input-type=module 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
@@ -533,8 +540,9 @@ if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
 }
 
 // Reloading the extension re-runs the installer against the already-patched prototype.
-// The warm classification cache must survive that, or a reload during an active run
-// re-spawns the classifier for every message already sitting in the dock.
+// A reload rebinds the classifier, so the reinstall must adopt the new one and drop the
+// verdicts the old one cached: a reloaded module can resolve a different classifier
+// script, and reusing stale verdicts would keep classifying by the previous rules.
 mode.session = {
   getSteeringMessages: () => [operational],
   getFollowUpMessages: () => [genuine],
@@ -543,9 +551,10 @@ mode.updatePendingMessagesDisplay();
 layout.installCalmOperationalUserLayout();
 writeFileSync(callsFile, "");
 mode.updatePendingMessagesDisplay();
-if (classifyCalls() !== 0) {
+const coldPassCalls = classifyCalls();
+if (coldPassCalls !== 1) {
   throw new Error(
-    `reinstalling the adapter discarded the classification cache and re-ran the classifier ${classifyCalls()} time(s)`,
+    `reinstalling the adapter should re-classify each queued operational message exactly once, saw ${coldPassCalls}`,
   );
 }
 if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
@@ -553,6 +562,41 @@ if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
 }
 if (!dockText().includes(genuine)) {
   throw new Error("reinstalling the adapter hid the genuine queued captain message");
+}
+
+// After that single cold pass the new cache must be warm again.
+writeFileSync(callsFile, "");
+for (let repaint = 0; repaint < 3; repaint += 1) {
+  mode.updatePendingMessagesDisplay();
+}
+if (classifyCalls() !== 0) {
+  throw new Error(
+    `repaints after a reinstall should reuse the refreshed cache, saw ${classifyCalls()} classifier run(s)`,
+  );
+}
+
+// Reinstalling must adopt classification rules that changed since the previous install,
+// which is the case a retained classifier closure cannot serve. The probe script switches
+// to declaring nothing operational, so a reinstall that reuses the old cached verdicts
+// would keep hiding a row the current rules call ordinary.
+writeFileSync(process.env.CLASSIFY_MODE_FILE, "never-operational");
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (!dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error(
+    "reinstalling kept stale cached verdicts: the row stayed hidden even though the current classifier declares nothing operational",
+  );
+}
+if (!dockText().includes(genuine)) {
+  throw new Error("the reinstalled adapter hid the genuine queued captain message");
+}
+
+// Restore the real classification rules and confirm a further reinstall picks them up.
+writeFileSync(process.env.CLASSIFY_MODE_FILE, "real");
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("restoring the real classifier did not hide the operational dock row again");
 }
 
 // The reload must still adopt the reloaded Calm visibility state, so turning Calm off
@@ -574,7 +618,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm dock classification-reuse failed: $out"
   [ -z "$out" ] || fail "Pi calm dock classification-reuse printed output: $out"
-  pass "repainting the pending dock reuses cached operational classification across reinstalls, still classifies new messages once, keeps the cache bounded, and still tracks Calm toggles"
+  pass "repainting the pending dock reuses cached operational classification, classifies new messages once, keeps the cache bounded, and on reinstall adopts the current classification rules with one cold pass before caching again"
 }
 
 test_pi_private_member_probe_fails_loudly() {

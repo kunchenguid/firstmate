@@ -450,7 +450,9 @@ A dedicated check deletes each of the five members from the real Pi prototype in
 Classifying operational text shells out to `bin/fm-operational-input.sh` through `spawnSync`, measured at roughly 9ms per call, and Pi repaints the dock on every queue mutation.
 Re-filtering each queued message on each repaint would therefore block the TUI event loop for that cost times the queue length, so the adapter caches the verdict per exact message text behind the existing U+2063 fast path.
 Classification is a pure function of that text, so the cache changes only how often the subprocess runs and never which rows are hidden; it is bounded at 256 entries and evicts in insertion order so a long session cannot grow it without limit.
-Reloading the extension re-runs the installer against the already-patched prototype, so that path refreshes only the Calm visibility closure and keeps the existing classifier: the classification rules are identical across a compatible reload, and rebuilding the classifier would discard the warm cache and re-spawn the subprocess for every message already queued in the dock.
+Reloading the extension re-runs the installer against the already-patched prototype, and that path replaces both closures rather than retaining the classifier.
+A reload is exactly when the rebuilt classifier can differ from the retained one, because `fm-operational-input.ts` resolves its classifier script at module-import time, so a reloaded module can bind a different script; keeping the old closure would also keep verdicts it cached under the previous rules.
+The cost is one cold classification pass over the queue after a reload, after which repaints reuse the refreshed cache.
 The real TUI regression holds an operational follow-up and a genuine Captain follow-up during an active run, proves only the operational dock row is hidden, and then verifies unchanged delivery, ordering, session persistence, restart behavior, Calm-off rendering, and export behavior.
 Claude, Codex, OpenCode, Grok, tmux, Herdr, Zellij, Orca, and cmux do not load this Pi-only presentation adapter, so their delivery and rendering surfaces remain unchanged.
 
@@ -459,7 +461,9 @@ A plain object literal cannot stand in here: Pi's dock renderer calls that membe
 The dock renders each queued message through a single-line `TruncatedText`, so the assertions match a first-line marker of the operational envelope rather than the whole multi-line string, and every dock assertion is gated on Pi's own dequeue hint so a missing repaint fails instead of passing vacuously.
 Removing only the two queue filters from the adapter makes `tests/fm-calm-pi-extension.test.sh` fail with `Calm did not filter current operational text from the pending-message dock`, and restoring them makes it pass, so the regression is genuinely covered.
 The classification-reuse check wraps the classifier script in a counting probe and drives the real dock renderer: it asserts the first paint hides the operational row, that five further repaints of an unchanged queue spawn the classifier zero times and render identically, that a newly queued message is still classified exactly once, and that flooding the cache past its bound forces the evicted entry to be recomputed while staying hidden.
-It then reinstalls the adapter and asserts the next repaint spawns the classifier zero times while still hiding only the operational row, and that toggling Calm off and back on across further reinstalls still restores and re-hides that row.
+It then reinstalls the adapter and asserts the next repaint re-classifies each queued operational message exactly once while still hiding only the operational row, and that three further repaints spawn the classifier zero times because the refreshed cache is warm again.
+It then switches the probe script to declare nothing operational and reinstalls, asserting the previously hidden row becomes visible: a reinstall that reused the old cached verdicts would keep hiding it.
+Restoring the real rules and reinstalling hides it again, and toggling Calm off and back on across further reinstalls still restores and re-hides that row.
 
 The commands below were run with `FM_PI_PACKAGE_DIR` pointed at the installed Pi 0.84.1 package so no Pi-dependent block was skipped.
 
