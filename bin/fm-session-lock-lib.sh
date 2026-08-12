@@ -18,14 +18,14 @@
 
 # Known harness command names; extend when a new adapter is verified. OMP's
 # exact Bun-script shape is verified alongside its primary and worker adapter.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+FM_HARNESS_RE='^(claude|codex|opencode|grok|kimi)(-|$)|^pi$|^pi-signed$|^omp$'
 
 # Exact executable names for the stricter path evidence below. Keep in sync
 # with the non-interpreter names in FM_HARNESS_RE. The exact-component check
 # avoids treating ordinary
 # firstmate paths such as bin/fm-claude-stop-autoarm.sh as harness processes.
 # OMP's Bun shape is matched by its canonical executable or script path below.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi muse pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -179,6 +179,17 @@ fm_harness_identity_matches() {  # <expected> <actual>
   esac
 }
 
+fm_harness_muse_executable_matches() {  # <executable>
+  local executable=${1:-} base
+  [ -n "$executable" ] || return 1
+  base=${executable##*/}
+  base=${base#-}
+  case "$base" in
+    muse|muse-bin-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_harness_process_identity() {  # <comm> <args> [executable] [script] -> harness|shell|other
   local comm=$1 args=${2:-} executable=${3:-} script=${4:-} base argv0 name
   [ -n "$comm" ] || { printf 'unknown'; return 0; }
@@ -189,11 +200,21 @@ fm_harness_process_identity() {  # <comm> <args> [executable] [script] -> harnes
   base=$(basename -- "$comm")
   base=${base#-}
   case "$base" in
-    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+    claude|claude-*) printf 'claude'; return 0 ;;
+    codex|codex-*) printf 'codex'; return 0 ;;
+    opencode|opencode-*) printf 'opencode'; return 0 ;;
+    grok|grok-*) printf 'grok'; return 0 ;;
+    kimi|kimi-*) printf 'kimi'; return 0 ;;
+    muse|muse-bin-*)
+      if fm_harness_muse_executable_matches "$executable"; then
+        printf 'muse'
+        return 0
+      fi
+      ;;
+    pi|pi-signed)
       printf '%s' "$base"
       return 0
       ;;
-    muse-bin-*) printf 'muse'; return 0 ;;
     pi-launcher|Pi) printf 'pi'; return 0 ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell'; return 0 ;;
   esac

@@ -252,6 +252,38 @@ test_omp_identity_requires_canonical_executable_evidence() {
   pass "session-lock: OMP identity requires executable or Bun script evidence"
 }
 
+test_non_omp_identity_preserves_variants_and_muse_proof() {
+  local dir fakebin got
+  dir="$TMP_ROOT/non-omp-identity"
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/muse"
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/muse-bin-0.1.0-R708.1"
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/helper"
+  chmod +x "$fakebin/muse" "$fakebin/muse-bin-0.1.0-R708.1" "$fakebin/helper"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity codex-aarch64-a "codex-aarch64-a"')
+  [ "$got" = codex ] || fail "the documented Codex variant classified as '$got'"
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity kimi-code "kimi-code"')
+  [ "$got" = kimi ] || fail "the documented Kimi variant classified as '$got'"
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity codex-helper "codex-helper"')
+  [ "$got" = codex ] || fail "the anchored Codex variant classified as '$got'"
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity unrelated-codex "unrelated-codex"')
+  [ "$got" = other ] || fail "a non-anchored Codex name classified as '$got'"
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity muse "muse"')
+  [ "$got" = other ] || fail "bare Muse without executable evidence classified as '$got'"
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity muse-bin-0.1.0-R708.1 "muse-bin-0.1.0-R708.1"')
+  [ "$got" = other ] || fail "Muse argv0 evidence without executable proof classified as '$got'"
+  got=$(FM_TEST_MUSE_PATH="$fakebin/muse" lib_eval "$fakebin" 'fm_harness_process_identity muse "muse" "$FM_TEST_MUSE_PATH"')
+  [ "$got" = muse ] || fail "exact Muse executable evidence classified as '$got'"
+  got=$(FM_TEST_MUSE_PATH="$fakebin/muse-bin-0.1.0-R708.1" lib_eval "$fakebin" 'fm_harness_process_identity muse-bin-0.1.0-R708.1 "muse-bin-0.1.0-R708.1" "$FM_TEST_MUSE_PATH"')
+  [ "$got" = muse ] || fail "versioned Muse executable evidence classified as '$got'"
+  got=$(lib_eval "$fakebin" 'fm_harness_process_identity /opt/muse/helper "/opt/muse/helper"')
+  [ "$got" = other ] || fail "an arbitrary /muse/ helper path classified as '$got'"
+  got=$(FM_TEST_MUSE_PATH="$fakebin/helper" lib_eval "$fakebin" 'fm_harness_process_identity muse "muse" "$FM_TEST_MUSE_PATH"')
+  [ "$got" = other ] || fail "a non-Muse executable reported with Muse comm classified as '$got'"
+  pass "session-lock: Codex/Kimi variants and executable-backed Muse identity stay bounded"
+}
+
 test_competing_version_named_session_is_seen_as_live() {
   local dir fakebin
   dir="$TMP_ROOT/competing"
@@ -496,6 +528,7 @@ test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_owner_selection_is_harness_specific
 test_omp_identity_requires_canonical_executable_evidence
+test_non_omp_identity_preserves_variants_and_muse_proof
 test_competing_version_named_session_is_seen_as_live
 test_bun_lock_identity_and_stale_recovery
 test_e2e_version_named_session_claims_the_home
