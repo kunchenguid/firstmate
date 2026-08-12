@@ -739,16 +739,16 @@ fm_backend_endpoint_identity() {  # <backend> <target> [expected-label]
   case "$backend" in
     tmux)
       identity=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
-      case "$identity" in %*) printf '%s:%s' "$backend" "$identity" ;; *) return 1 ;; esac
+      case "$identity" in
+        %*) printf '%s:%s' "$backend" "$identity" ;;
+        *) printf '%s:%s' "$backend" "$target" ;;
+      esac
       ;;
     cmux)
       fm_backend_cmux_target_ready "$target" "$expected_label" || return 1
       printf '%s:%s:%s' "$backend" "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"
       ;;
-    herdr|zellij|orca)
-      fm_backend_target_exists "$backend" "$target" "$expected_label" || return 1
-      printf '%s:%s' "$backend" "$target"
-      ;;
+    herdr|zellij|orca) printf '%s:%s' "$backend" "$target" ;;
     *) return 1 ;;
   esac
 }

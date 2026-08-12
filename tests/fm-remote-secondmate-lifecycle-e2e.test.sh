@@ -79,13 +79,19 @@ case "\${1:-}" in
     case "\$*" in
       *'#{pane_current_path}'*) cut -d'|' -f2- "\$state" ;;
       *'#{pane_current_command}'*) printf 'codex\n' ;;
-      *'#{cursor_y}'*) printf '0\n' ;;
+      *'#{cursor_y}'*) printf '1\n' ;;
       *'#S'*) printf 'firstmate\n' ;;
       *) printf '%%1\n' ;;
     esac
     exit 0
     ;;
-  capture-pane) printf '❯\n'; exit 0 ;;
+  capture-pane)
+    case "\$*" in
+      *'-S 1 -E 1'*) printf '│    │\n' ;;
+      *) printf '╭────╮\n│    │\n╰────╯\n' ;;
+    esac
+    exit 0
+    ;;
   send-keys) [ ! -f "\$fail_send" ] || exit 1; exit 0 ;;
   kill-window) rm -f -- "\$state"; exit 0 ;;
   list-panes) printf 'codex\n'; exit 0 ;;
