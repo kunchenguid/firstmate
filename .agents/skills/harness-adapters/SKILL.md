@@ -234,10 +234,10 @@ The session id is printed on quit.
 Routine effort adjustment for an idle visible crewmate uses `FM_HOME=<home> bin/fm-codex-effort.sh <task-id> <low|medium|high|xhigh>`.
 This is the Firstmate-owned public interface for Codex's installed Chat Increase Reasoning and Chat Decrease Reasoning keybindings.
 It currently supports only the preferred Herdr runtime, because Herdr supplies the required native semantic idle state.
-It writes a durable recovery record before its first chord, verifies the live footer after every step, and updates `state/<id>.meta` only after final confirmation.
+It writes a durable recovery record before its first chord, serializes every chord with ordinary recorded-task `fm-send` input, verifies the live footer after every step, and updates `state/<id>.meta` only after final confirmation.
 After a post-send interruption or refusal, its next locked invocation verifies the unchanged endpoint and reconciles the observed footer into `state/<id>.meta` before delivering any further chord.
 The script header and `--help` output own exact validation, input, polling, and mutation mechanics.
-`docs/verification/runtime-backends.md` owns the Codex 0.146.0 empirical evidence.
+`docs/verification/runtime-backends.md` owns the Codex 0.146.0 keybinding and Codex 0.147.0 footer empirical evidence.
 If the interface refuses because the turn is busy, the endpoint is ambiguous, the composer or footer cannot be verified, or the runtime is unsupported, do not improvise a menu sequence or edit metadata.
 Exit with `/quit` and resume the same session only as an explicit recovery fallback after the unsafe condition is resolved or the in-session interface remains unavailable.
 

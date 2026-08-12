@@ -8,12 +8,15 @@
 # The task must be an idle Codex TUI recorded on Herdr.
 # Herdr is the preferred production path and receives the verified literal
 # Alt+, or Alt+. byte chord through pane send-text.
-# The installed Codex 0.146.0 exposes these bindings as Chat Decrease Reasoning
-# and Chat Increase Reasoning in /keymap.
+# Codex 0.146.0 exposes these bindings as Chat Decrease Reasoning and Chat
+# Increase Reasoning in /keymap.
+# Codex 0.147.0 renders the verified footer with an optional home-abbreviated
+# worktree and a trailing Context percentage.
 #
 # This operation fails closed unless task identity, harness, backend endpoint,
 # live agent, worktree, empty composer, and the current model/effort footer all
 # agree before input.
+# Its per-task endpoint input lock serializes every chord with ordinary steering and repeats the semantic idle and empty-composer checks before every chord.
 # It verifies every one-level transition from the rendered Codex footer and
 # revalidates the unchanged endpoint before atomically replacing effort= in
 # state/<id>.meta.
@@ -78,6 +81,8 @@ fm_task_id_creation_valid "$task_id" || refuse "invalid task id."
 control_lock="$STATE/.control-$task_id.lock"
 meta_lock=$(fm_meta_lock_path "$meta") \
   || refuse "could not resolve the metadata lock for task $task_id."
+input_lock=$(fm_task_input_lock_path "$STATE" "$task_id") \
+  || refuse "could not resolve the endpoint input lock for task $task_id."
 if ! fm_lock_try_acquire "$control_lock"; then
   refuse "another lifecycle action is already running for task $task_id."
 fi
@@ -88,6 +93,7 @@ if ! fm_lock_try_acquire "$meta_lock"; then
   refuse "another metadata update is already running for task $task_id."
 fi
 meta_lock_held=1
+input_lock_held=0
 tmp_meta=
 tmp_recovery=
 recovery="$STATE/$task_id.codex-effort-recovery"
@@ -97,6 +103,10 @@ cleanup() {
   if [ "$meta_lock_held" = 1 ]; then
     fm_lock_release "$meta_lock"
     meta_lock_held=0
+  fi
+  if [ "$input_lock_held" = 1 ]; then
+    fm_lock_release "$input_lock"
+    input_lock_held=0
   fi
   if [ "$control_lock_held" = 1 ]; then
     fm_lock_release "$control_lock"
@@ -134,6 +144,10 @@ meta_fingerprint=$(cksum < "$meta") || refuse "could not fingerprint task metada
 
 fm_backend_source "$backend" || refuse "could not load backend '$backend'."
 
+fm_lock_acquire_wait "$input_lock" \
+  || refuse "could not acquire the endpoint input lock for task $task_id."
+input_lock_held=1
+
 current_path() {
   fm_backend_herdr_current_path "$target"
 }
@@ -143,7 +157,7 @@ capture_tail() {
 }
 
 footer_effort_from_capture() {  # <captured-screen>
-  local cap=$1 line footer=
+  local cap=$1 line footer='' effort displayed_worktree
   while IFS= read -r line; do
     line=${line#"${line%%[![:space:]]*}"}
     line=${line%"${line##*[![:space:]]}"}
@@ -151,13 +165,25 @@ footer_effort_from_capture() {  # <captured-screen>
   done <<EOF
 $cap
 EOF
-  case "$footer" in
-    "$model low · $worktree") printf low ;;
-    "$model medium · $worktree") printf medium ;;
-    "$model high · $worktree") printf high ;;
-    "$model xhigh · $worktree") printf xhigh ;;
-    *) return 1 ;;
-  esac
+  for effort in low medium high xhigh; do
+    displayed_worktree=$worktree
+    case "$footer" in
+      "$model $effort · $displayed_worktree"|"$model $effort · $displayed_worktree · Context "[0-9]*'% use…')
+        printf '%s' "$effort"
+        return 0
+        ;;
+    esac
+    if [ -n "${HOME:-}" ] && [ "${worktree#"$HOME"/}" != "$worktree" ]; then
+      displayed_worktree="~${worktree#"$HOME"}"
+      case "$footer" in
+        "$model $effort · $displayed_worktree"|"$model $effort · $displayed_worktree · Context "[0-9]*'% use…')
+          printf '%s' "$effort"
+          return 0
+          ;;
+      esac
+    fi
+  done
+  return 1
 }
 
 footer_effort() {
@@ -346,6 +372,9 @@ while [ "$current_rank" -ne "$requested_rank" ]; do
     || refuse "cannot move from effort '$live_effort' toward '$requested_effort'."
   metadata_fingerprint_matches \
     || refuse "task $task_id metadata changed before the live effort switch completed."
+  rechecked_effort=$(endpoint_is_safe_idle) || exit 1
+  [ "$rechecked_effort" = "$live_effort" ] \
+    || refuse "task $task_id live effort changed before its reasoning chord."
   send_effort_step "$direction" \
     || refuse "backend '$backend' could not deliver the Codex reasoning keybinding."
   confirmed=

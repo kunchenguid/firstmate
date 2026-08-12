@@ -57,6 +57,7 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+CODEX_EFFORT="$ROOT/bin/fm-codex-effort.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -1324,6 +1325,64 @@ test_teardown_missing_busy_sidecar_completes() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "missing-busy-sidecar: teardown remained incomplete"
   pass "teardown completes when an exact busy-state sidecar is already absent"
+}
+
+test_teardown_retires_codex_effort_recovery_before_task_id_reuse() {
+  local case_dir rc out
+  case_dir=$(make_case codex-effort-recovery-task-id-reuse)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' \
+    'version=1' \
+    'task_id=task-x1' \
+    'backend=herdr' \
+    'target=old-lab:w0:p0' \
+    'harness=codex' \
+    'model=gpt-5.6-sol' \
+    'worktree=/retired/worktree' \
+    'metadata_identity_checksum=0 0' \
+    'recorded_effort=high' \
+    'requested_effort=medium' > "$case_dir/state/task-x1.codex-effort-recovery"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "codex-effort-recovery-task-id-reuse: forced teardown failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.codex-effort-recovery" \
+    "codex-effort-recovery-task-id-reuse: teardown retained the retired task's recovery record"
+
+  # Recreate the same task id with a distinct Herdr endpoint.
+  # If the former task's journal survived, the public helper refuses before runtime input because its identity fields no longer match this incarnation.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=lab:w1:p1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'harness=codex' \
+    'model=gpt-5.6-sol' \
+    'effort=high' \
+    'backend=herdr' \
+    'herdr_session=lab' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t1' \
+    'herdr_pane_id=w1:p1'
+  printf 'high\n' > "$case_dir/effort"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"w1:p1","foreground_cwd":"%s"}}}\n' "$FM_REUSE_WORKTREE" ;;
+  "agent get") printf '%s\n' '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}' ;;
+  "pane read") printf '› \n\ngpt-5.6-sol high · %s\n' "$FM_REUSE_WORKTREE" ;;
+  "pane send-text") exit 9 ;;
+  *) exit 8 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  out=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_REUSE_WORKTREE="$case_dir/wt" \
+    PATH="$case_dir/fakebin:$PATH" "$CODEX_EFFORT" task-x1 high) \
+    || fail "codex-effort-recovery-task-id-reuse: a new task incarnation was poisoned by old recovery state: $out"
+  assert_contains "$out" 'task-x1: gpt-5.6-sol high' \
+    "codex-effort-recovery-task-id-reuse: the recreated task did not reach the public helper"
+  pass "teardown retires Codex effort recovery state before the task id can be reused"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2600,6 +2659,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_retires_codex_effort_recovery_before_task_id_reuse
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

@@ -6,7 +6,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SWITCH="$ROOT/bin/fm-codex-effort.sh"
+SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-codex-effort)
+FIXTURE_ROOT="$ROOT/tests/fixtures/codex-effort"
 
 make_case() {  # <name> [backend]
   local name=$1 backend=${2:-herdr} id=effort-task dir
@@ -95,7 +97,11 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "agent get")
-    printf '{"result":{"agent":{"agent":"codex","agent_status":"%s"}}}\n' "${FM_FAKE_AGENT_STATUS:-idle}"
+    status=${FM_FAKE_AGENT_STATUS:-idle}
+    if [ -n "${FM_FAKE_AGENT_STATUS_FILE:-}" ] && [ -f "$FM_FAKE_AGENT_STATUS_FILE" ]; then
+      status=$(cat "$FM_FAKE_AGENT_STATUS_FILE")
+    fi
+    printf '{"result":{"agent":{"agent":"codex","agent_status":"%s"}}}\n' "$status"
     ;;
   "pane read")
     effort=$(cat "$FM_FAKE_EFFORT_FILE")
@@ -103,7 +109,9 @@ case "${1:-} ${2:-}" in
     if [ "$effort" = "$FM_FAKE_TARGET_EFFORT" ] && [ "$meta_effort" = high ]; then
       : > "$FM_FAKE_VERIFIED_BEFORE_META"
     fi
-    if [ -e "$FM_FAKE_CHANGED_FILE" ]; then
+    if [ -n "${FM_FAKE_FOOTER_FIXTURE:-}" ]; then
+      sed "s/gpt-5.6-sol high ·/gpt-5.6-sol $effort ·/" "$FM_FAKE_FOOTER_FIXTURE"
+    elif [ -e "$FM_FAKE_CHANGED_FILE" ]; then
       printf '%s\n' 'unrecognized Codex screen without a footer'
     elif [ "${FM_FAKE_UI:-footer}" = footer ]; then
       printf 'transcript\n\n› \n\n  gpt-5.6-sol %s · %s\n' "$effort" "$FM_FAKE_WORKTREE"
@@ -119,6 +127,14 @@ case "${1:-} ${2:-}" in
     ;;
   "pane send-text")
     key=${4:-}
+    if [ "${FM_FAKE_BLOCK_ORDINARY_SEND:-0}" = 1 ] \
+      && [ "$key" != "$(printf '\033.')" ] \
+      && [ "$key" != "$(printf '\033,')" ]; then
+      : > "${FM_FAKE_SEND_ENTERED:?}"
+      while [ ! -e "${FM_FAKE_ALLOW_SEND:?}" ]; do sleep 0.01; done
+      [ -z "${FM_FAKE_SENT_TEXT:-}" ] || printf '%s\n' "$key" >> "$FM_FAKE_SENT_TEXT"
+      exit 0
+    fi
     effort=$(cat "$FM_FAKE_EFFORT_FILE")
     case "$key" in
       "$(printf '\033.')")
@@ -129,7 +145,9 @@ case "${1:-} ${2:-}" in
         case "$effort" in xhigh) effort=high ;; high) effort=medium ;; medium) effort=low ;; low) : ;; esac
         printf 'decrease\n' >> "$FM_FAKE_LOG"
         ;;
-      *) exit 9 ;;
+      *)
+        [ -z "${FM_FAKE_SENT_TEXT:-}" ] || printf '%s\n' "$key" >> "$FM_FAKE_SENT_TEXT"
+        ;;
     esac
     if [ "${FM_FAKE_SWALLOW:-0}" != 1 ]; then
       printf '%s\n' "$effort" > "$FM_FAKE_EFFORT_FILE"
@@ -139,6 +157,11 @@ case "${1:-} ${2:-}" in
     fi
     if [ "${FM_FAKE_TERM_AFTER_SEND:-0}" = 1 ]; then
       kill -TERM "$PPID"
+    fi
+    ;;
+  "pane send-keys")
+    if [ "${4:-}" = enter ] && [ -n "${FM_FAKE_AGENT_STATUS_FILE:-}" ]; then
+      printf 'working\n' > "$FM_FAKE_AGENT_STATUS_FILE"
     fi
     ;;
   *) exit 8 ;;
@@ -207,7 +230,7 @@ SH
 run_case() {  # <dir> <effort>
   local dir=$1 effort=$2
   env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_FAKE_LOG="$dir/runtime.log" FM_FAKE_WORKTREE="$dir/worktree" \
+    FM_FAKE_LOG="$dir/runtime.log" FM_FAKE_WORKTREE="${FM_FAKE_WORKTREE:-$dir/worktree}" \
     FM_FAKE_EFFORT_FILE="$dir/effort" \
     FM_FAKE_META="$dir/home/state/effort-task.meta" \
     FM_FAKE_TARGET_EFFORT="$effort" \
@@ -220,9 +243,37 @@ run_case() {  # <dir> <effort>
     FM_FAKE_CHANGE_UI_AFTER_SEND="${FM_FAKE_CHANGE_UI_AFTER_SEND:-0}" \
     FM_FAKE_TERM_AFTER_SEND="${FM_FAKE_TERM_AFTER_SEND:-0}" \
     FM_FAKE_FAIL_META_MV="${FM_FAKE_FAIL_META_MV:-0}" \
+    FM_FAKE_FOOTER_FIXTURE="${FM_FAKE_FOOTER_FIXTURE:-}" \
+    FM_FAKE_AGENT_STATUS_FILE="${FM_FAKE_AGENT_STATUS_FILE:-}" \
+    FM_FAKE_BLOCK_ORDINARY_SEND="${FM_FAKE_BLOCK_ORDINARY_SEND:-0}" \
+    FM_FAKE_SEND_ENTERED="${FM_FAKE_SEND_ENTERED:-}" \
+    FM_FAKE_ALLOW_SEND="${FM_FAKE_ALLOW_SEND:-}" \
+    FM_FAKE_SENT_TEXT="${FM_FAKE_SENT_TEXT:-}" \
     FM_FAKE_REAL_MV="$(command -v mv)" \
     PATH="$dir/fakebin:$PATH" \
     "$SWITCH" effort-task "$effort"
+}
+
+run_send_case() {  # <dir> <message>
+  local dir=$1 message=$2
+  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_LOG="$dir/runtime.log" FM_FAKE_WORKTREE="${FM_FAKE_WORKTREE:-$dir/worktree}" \
+    FM_FAKE_EFFORT_FILE="$dir/effort" \
+    FM_FAKE_META="$dir/home/state/effort-task.meta" \
+    FM_FAKE_TARGET_EFFORT=high \
+    FM_FAKE_CHANGED_FILE="$dir/changed-ui" \
+    FM_FAKE_AGENT_STATUS="${FM_FAKE_AGENT_STATUS:-idle}" \
+    FM_FAKE_PANE_STATE="${FM_FAKE_PANE_STATE:-present}" \
+    FM_FAKE_UI="${FM_FAKE_UI:-footer}" \
+    FM_FAKE_FOOTER_FIXTURE="${FM_FAKE_FOOTER_FIXTURE:-}" \
+    FM_FAKE_AGENT_STATUS_FILE="${FM_FAKE_AGENT_STATUS_FILE:-}" \
+    FM_FAKE_BLOCK_ORDINARY_SEND="${FM_FAKE_BLOCK_ORDINARY_SEND:-0}" \
+    FM_FAKE_SEND_ENTERED="${FM_FAKE_SEND_ENTERED:-}" \
+    FM_FAKE_ALLOW_SEND="${FM_FAKE_ALLOW_SEND:-}" \
+    FM_FAKE_SENT_TEXT="${FM_FAKE_SENT_TEXT:-}" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
+    PATH="$dir/fakebin:$PATH" \
+    "$SEND" effort-task "$message"
 }
 
 test_success_changes_effort_in_place_and_then_metadata() {
@@ -378,6 +429,87 @@ test_footer_requires_the_current_bottom_status_row() {
   pass "fm-codex-effort: requires a structurally current footer instead of transcript prose"
 }
 
+test_captured_real_codex_0147_footers_bind_the_recorded_worktree() {
+  local dir fixture out expected_worktree before rc
+  expected_worktree=/home/pranay/.treehouse/firstmate-7e2c14/5/firstmate
+  for fixture in "$FIXTURE_ROOT/codex-0.147-absolute-footer.txt" \
+    "$FIXTURE_ROOT/codex-0.147-home-abbreviated-footer.txt"; do
+    dir=$(make_case "captured-$(basename "$fixture" .txt)")
+    sed -i "s|^worktree=.*$|worktree=$expected_worktree|" "$dir/home/state/effort-task.meta"
+    out=$(HOME=/home/pranay FM_FAKE_WORKTREE="$expected_worktree" \
+      FM_FAKE_FOOTER_FIXTURE="$fixture" run_case "$dir" medium) \
+      || fail "captured Codex 0.147 footer was rejected: $(cat "$fixture")"
+    [ "$(cat "$dir/effort")" = medium ] \
+      || fail "captured Codex 0.147 footer did not confirm the live effort"
+  done
+
+  dir=$(make_case captured-footer-wrong-worktree)
+  sed -i 's|^worktree=.*$|worktree=/var/lib/not-pranay/firstmate|' "$dir/home/state/effort-task.meta"
+  before=$(cksum < "$dir/home/state/effort-task.meta")
+  out=$(HOME=/home/pranay FM_FAKE_WORKTREE=/var/lib/not-pranay/firstmate \
+    FM_FAKE_FOOTER_FIXTURE="$FIXTURE_ROOT/codex-0.147-home-abbreviated-footer.txt" \
+    run_case "$dir" medium 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a captured Codex footer for another worktree was accepted"
+  assert_contains "$out" 'no verifiable Codex model/effort footer' \
+    "wrong-worktree captured footer refusal was unclear"
+  assert_no_grep 'increase|decrease' "$dir/runtime.log" \
+    "wrong-worktree captured footer received an effort chord"
+  [ "$(cksum < "$dir/home/state/effort-task.meta")" = "$before" ] \
+    || fail "wrong-worktree captured footer changed metadata"
+  pass "fm-codex-effort: accepts captured Codex 0.147 footers only when their displayed path binds the recorded worktree"
+}
+
+test_ordinary_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check() {
+  local dir send_pid effort_pid send_rc effort_rc waited=0
+  dir=$(make_case ordinary-send-race)
+  : > "$dir/agent-status"
+  printf 'idle\n' > "$dir/agent-status"
+
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_BLOCK_ORDINARY_SEND=1 \
+  FM_FAKE_SEND_ENTERED="$dir/send-entered" \
+  FM_FAKE_ALLOW_SEND="$dir/allow-send" \
+  FM_FAKE_SENT_TEXT="$dir/sent-text" \
+    run_send_case "$dir" 'ordinary steer' >"$dir/send.out" 2>"$dir/send.err" &
+  send_pid=$!
+  while [ ! -e "$dir/send-entered" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$dir/send-entered" ]; then
+    : > "$dir/allow-send"
+    wait "$send_pid" || true
+    fail "ordinary send did not reach its deterministic in-flight point"
+  fi
+
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_BLOCK_ORDINARY_SEND=1 \
+  FM_FAKE_SEND_ENTERED="$dir/send-entered" \
+  FM_FAKE_ALLOW_SEND="$dir/allow-send" \
+  FM_FAKE_SENT_TEXT="$dir/sent-text" \
+    run_case "$dir" medium >"$dir/effort.out" 2>"$dir/effort.err" &
+  effort_pid=$!
+  sleep 0.15
+  if grep -Eq 'increase|decrease' "$dir/runtime.log"; then
+    : > "$dir/allow-send"
+    wait "$send_pid" || true
+    wait "$effort_pid" || true
+    fail "effort chord landed while ordinary send held the endpoint input transaction"
+  fi
+
+  : > "$dir/allow-send"
+  send_rc=0; wait "$send_pid" || send_rc=$?
+  effort_rc=0; wait "$effort_pid" || effort_rc=$?
+  expect_code 0 "$send_rc" "ordinary send should complete before the effort helper retries its idle check"
+  [ "$effort_rc" -ne 0 ] || fail "effort helper accepted an endpoint made busy by the serialized ordinary send"
+  assert_contains "$(cat "$dir/effort.err")" "not idle" \
+    "effort helper did not recheck native semantic idle while it held the input lock"
+  assert_no_grep 'increase|decrease' "$dir/runtime.log" \
+    "effort helper delivered a chord after the serialized send began a turn"
+  assert_grep 'ordinary steer' "$dir/sent-text" "ordinary send did not deliver its own text"
+  pass "fm-codex-effort: ordinary fm-send input serializes with chords and receives a fresh semantic idle check"
+}
+
 test_post_send_failures_leave_a_durable_recoverable_record() {
   local dir before out rc
   dir=$(make_case recover-multi-step)
@@ -437,5 +569,7 @@ test_lifecycle_and_metadata_locks_refuse_before_runtime_input
 test_busy_and_ambiguous_runtime_states_refuse
 test_swallowed_input_and_changed_ui_never_report_success
 test_footer_requires_the_current_bottom_status_row
+test_captured_real_codex_0147_footers_bind_the_recorded_worktree
+test_ordinary_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check
 test_post_send_failures_leave_a_durable_recoverable_record
 test_unverified_backends_refuse_before_input

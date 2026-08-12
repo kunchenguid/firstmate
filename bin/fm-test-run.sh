@@ -881,7 +881,7 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
+    bin/fm-watch*|bin/fm-wake-drain.sh|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -907,8 +907,11 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
+    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-wake-lib.sh|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pr-forge
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

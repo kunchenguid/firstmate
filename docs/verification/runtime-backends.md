@@ -8,9 +8,11 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Codex in-session reasoning effort
 
-Codex CLI 0.146.0 was verified on 2026-08-03 against the current [official model guidance](https://learn.chatgpt.com/docs/models.md) and [official CLI slash-command reference](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli).
+Codex CLI 0.146.0 keybindings were verified on 2026-08-03 against the current [official model guidance](https://learn.chatgpt.com/docs/models.md) and [official CLI slash-command reference](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli).
 The official guidance says an interactive CLI session can use `/model` to adjust reasoning effort, and the CLI reference lists `/model` as choosing the active model and effort when available.
 The installed `/keymap` UI exposed Chat Decrease Reasoning as `alt-,` and `shift-down`, and Chat Increase Reasoning as `alt-.` and `shift-up`.
+Codex CLI 0.147.0 footer captures additionally verified the current status row as `<model> <effort> · <worktree> · Context <n>% use…`.
+The CLI abbreviates a worktree below the operator home as `~`, so the parser accepts only an exact recorded absolute path or that exact home abbreviation.
 
 The interfaces considered were:
 
@@ -49,7 +51,7 @@ The exact session was exited and killed after the bounded check.
 `bin/fm-codex-effort.sh` uses literal `ESC .` and `ESC ,` on Herdr.
 It supports only idle Herdr Codex tasks whose endpoint identity, native agent state, live agent, current worktree, empty composer, and current model and effort footer are all verified.
 It treats tmux's observed `M-.` and `M-,` behavior as compatibility evidence only, because current Codex tmux workers have no verified semantic idle source and must refuse before any chord.
-It writes a durable recovery record before its first chord, checks each adjacent transition, revalidates the endpoint, and atomically updates only `effort=` after the final footer confirmation.
+It writes a durable recovery record before its first chord, serializes its chords with ordinary recorded-task steering through a shared endpoint input lock, checks each adjacent transition, revalidates semantic idle and the empty composer under that lock immediately before every chord, and atomically updates only `effort=` after the final footer confirmation.
 If a chord is delivered before an interruption, unreadable UI, or metadata-write failure, the next locked invocation verifies the unchanged endpoint and reconciles the observed footer into metadata before it can send another chord.
 Zellij, Orca, and cmux remain refused because their current backend adapters return `unverified` from the recovery-grade agent-state interface, even though they have generic input and capture primitives.
 This is an evidence gap rather than a claim that their terminal transports cannot carry the keys.
@@ -59,9 +61,10 @@ Behavior regression coverage is owned by:
 
 ```sh
 tests/fm-codex-effort.test.sh
+tests/fm-teardown.test.sh
 ```
 
-The suite covers successful Herdr switching, tmux refusal without semantic idle evidence, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, structural footer confirmation, swallowed input, changed UI, durable post-send recovery, unsupported backends, and no false success.
+The suites cover successful Herdr switching, captured Codex 0.147 footer variants, tmux refusal without semantic idle evidence, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, structural footer confirmation, serialized ordinary steering, swallowed input, changed UI, durable post-send recovery, task-id-reuse cleanup, unsupported backends, and no false success.
 
 ## tmux
 

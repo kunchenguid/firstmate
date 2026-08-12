@@ -1098,10 +1098,38 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_task_input_lock_path_uses_the_task_id_safety_boundary() {
+  local dir state out
+  dir=$(make_case task-input-lock-path)
+  state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_task_input_lock_path "$2" task-a
+  ' _ "$LIB" "$state") \
+    || fail "task input lock path refused a valid task id"
+  [ "$out" = "$state/.input-task-a.lock" ] \
+    || fail "task input lock path was not scoped to its state/task identity: $out"
+  out=$(cd "$dir" && FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_task_input_lock_path state task-a
+  ' _ "$LIB") || fail "task input lock path did not canonicalize a relative state directory"
+  [ "$out" = "$state/.input-task-a.lock" ] \
+    || fail "relative state directory did not resolve to the shared endpoint lock: $out"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    ! fm_task_input_lock_path "$2" .hidden \
+      && ! fm_task_input_lock_path "$2" "bad/id" \
+      && ! fm_task_input_lock_path "$2/absent" task-a
+  ' _ "$LIB" "$state" \
+    || fail "task input lock path accepted an unsafe task identity or absent state directory"
+  pass "task input lock path binds each safe task identity to one canonical state endpoint"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
+test_task_input_lock_path_uses_the_task_id_safety_boundary
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
