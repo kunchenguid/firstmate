@@ -107,6 +107,8 @@ fi
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-checked-submit-lib.sh
+. "$SCRIPT_DIR/fm-checked-submit-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -183,36 +185,6 @@ fm_send_count_colons() {  # <string>
   local s=$1 no_colons
   no_colons=${s//:/}
   printf '%s' $(( ${#s} - ${#no_colons} ))
-}
-
-fm_send_lock_namespace_mode() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%Lp' "$1" 2>/dev/null
-  else
-    stat -c '%a' "$1" 2>/dev/null
-  fi
-}
-
-fm_send_lock_namespace_uid() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%u' "$1" 2>/dev/null
-  else
-    stat -c '%u' "$1" 2>/dev/null
-  fi
-}
-
-fm_send_lock_namespace() {
-  local uid dir owner mode
-  uid=$(id -u 2>/dev/null) || return 1
-  dir="/tmp/firstmate-send-$uid"
-  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
-    mkdir -m 700 "$dir" 2>/dev/null || true
-  fi
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  owner=$(fm_send_lock_namespace_uid "$dir") || return 1
-  mode=$(fm_send_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$uid" ] && [ "$mode" = 700 ] || return 1
-  printf '%s' "$dir"
 }
 
 fm_send_resolve_target() {  # <raw-target>
@@ -459,17 +431,6 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
-  send_lock_identity="$TARGET_BACKEND"$'\t'"$T"
-  read -r send_lock_sum send_lock_size _ <<EOF
-$(printf '%s' "$send_lock_identity" | cksum)
-EOF
-  send_lock_namespace=$(fm_send_lock_namespace) || {
-    echo "error: text not sent to $T (cannot establish the shared send-lock namespace)" >&2
-    exit 1
-  }
-  SEND_TEXT_LOCK="$send_lock_namespace/endpoint-$send_lock_sum-$send_lock_size.lock"
-  fm_lock_acquire_wait "$SEND_TEXT_LOCK"
-  trap 'fm_lock_release "$SEND_TEXT_LOCK"' EXIT
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
@@ -515,18 +476,6 @@ EOF
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  if [ "$TARGET_BACKEND" != remote ]; then
-    if ! composer_before=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL"); then
-      composer_before=unknown
-    fi
-    if [ "$composer_before" != empty ]; then
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: text not sent to $T (composer is not empty; verdict=${composer_before:-unknown}; refusing to append to or submit existing input; tried $RESOLUTION_TRIED)" >&2
-      exit 1
-    fi
-  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
@@ -537,7 +486,7 @@ EOF
       send_rc=$?
       verdict=send-failed
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  elif verdict=$(fm_backend_checked_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?
@@ -556,6 +505,14 @@ EOF
   fi
   case "$verdict" in
     empty)
+      ;;
+    composer-*)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      composer_before=${verdict#composer-}
+      echo "error: text not sent to $T (composer is not empty; verdict=${composer_before:-unknown}; refusing to append to or submit existing input; tried $RESOLUTION_TRIED)" >&2
+      exit 1
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -592,8 +549,6 @@ EOF
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
-  fm_lock_release "$SEND_TEXT_LOCK"
-  trap - EXIT
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the

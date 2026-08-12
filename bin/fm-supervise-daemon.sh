@@ -156,6 +156,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_DAEMON_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-checked-submit-lib.sh
+. "$FM_DAEMON_DIR/fm-checked-submit-lib.sh"
 
 # Canonical construction and parsing for every Firstmate operational input.
 # shellcheck source=bin/fm-operational-input.sh
@@ -1114,7 +1116,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict encoded
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1149,11 +1151,6 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
-  if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
-    return 1
-  fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
@@ -1163,10 +1160,19 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    FM_STATE_OVERRIDE="$state" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
+  fi
+  verdict=$(fm_backend_checked_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
+  case "$verdict" in
+    composer-*)
+      log "inject deferred: supervisor composer not confirmed-empty (state=${verdict#composer-}: pending input, dead-shell prompt, or unreadable pane)"
+      return 1
+      ;;
+  esac
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
 }

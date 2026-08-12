@@ -306,7 +306,8 @@ test_concurrent_sends_serialize_per_endpoint() {
 
   PATH="$fb:$PATH" TMPDIR="$second_tmp" FM_HOME="$second_home" FM_ROOT_OVERRIDE="$second_home" FM_TMUX_LOG="$log" \
     FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_TYPE_HOLD="$hold" FM_SEND_SETTLE=0 \
-    "$SEND" "$endpoint" "second intended steer" >/dev/null 2>"$dir/second.err" &
+    bash -c '. "$1/bin/fm-backend.sh"; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-checked-submit-lib.sh"; [ "$(fm_backend_checked_send_text_submit tmux "$2" "second intended steer" 3 0 0)" = empty ]' \
+      _ "$ROOT" "$endpoint" >/dev/null 2>"$dir/second.err" &
   second_pid=$!
   /bin/sleep 0.1
   : > "$hold.release"
@@ -318,7 +319,7 @@ test_concurrent_sends_serialize_per_endpoint() {
   [ ! -e "$hold.overlap" ] || fail "two sends entered the shared endpoint type boundary concurrently"
   [ "$(grep -c 'literal=1 arg=.* intended steer' "$log")" -eq 2 ] \
     || fail "serialized sends did not each type exactly once: $(cat "$log")"
-  pass "fm-send delivery: cross-home aliases and TMPDIRs serialize per resolved endpoint"
+  pass "fm-send delivery: send and shared injection submit serialize per resolved endpoint"
 }
 
 # A --key send is how firstmate interrupts a worker, so its exit status is the
