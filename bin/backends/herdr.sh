@@ -1047,9 +1047,7 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
 # <seeded_tab_id>, the auto-created default tab id that THIS SAME
 # fm_backend_herdr_workspace_ensure call captured straight from its own
 # `workspace create` response (never re-derived from a label pattern at
-# create_task time - see the incident note below). Best-effort: a failure
-# here never fails the caller, mirroring the fm_backend_herdr_kill `|| true`
-# contract.
+# create_task time - see the incident note below).
 #
 # Live-fire incident fix (2026-07-02): the prior implementation
 # (fm_backend_herdr_workspace_prune_default_tabs, removed) re-derived
@@ -1086,16 +1084,30 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
 # exists alongside it, never right after workspace creation - and this
 # function independently re-checks the tab count as a second layer.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
-  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id state
+  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count seeded_count current_label pane_id state
   local focus_before active_tab
   [ -n "$tab_id" ] || return 0
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
-  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
-  case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
-  current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
-  [ "$current_label" = "1" ] || return 0
-  pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
-  [ -n "$pane_id" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '
+    (.result.tabs | type) == "array"
+    and (if (.result.tabs | type) == "array"
+         then all(.result.tabs[]; (.tab_id | type) == "string" and (.label | type) == "string")
+         else false
+         end)
+  ' >/dev/null 2>&1 || return 1
+  tab_count=$(printf '%s' "$tabs" | jq -er '.result.tabs | length' 2>/dev/null) || return 1
+  case "$tab_count" in ''|*[!0-9]*) return 1 ;; esac
+  seeded_count=$(printf '%s' "$tabs" | jq -er --arg t "$tab_id" '[.result.tabs[] | select(.tab_id == $t)] | length' 2>/dev/null) || return 1
+  case "$seeded_count" in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  [ "$tab_count" -gt 1 ] || return 1
+  current_label=$(printf '%s' "$tabs" | jq -er --arg t "$tab_id" '.result.tabs[] | select(.tab_id == $t) | .label' 2>/dev/null) || return 1
+  [ "$current_label" = "1" ] || return 1
+  pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
+  [ -n "$pane_id" ] || return 1
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
   [ "$state" = no-agent ] || return 1
   case "$close_mode" in
@@ -1477,7 +1489,12 @@ EOF
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
-  [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
+  if [ -n "$seeded_tab_id" ] \
+    && ! fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"; then
+    fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
+    echo "error: could not safely prune the exact seeded Herdr tab" >&2
+    return 1
+  fi
   if [ -n "$dup_tab_ids" ]; then
     while IFS=$'\t' read -r dup dup_pane; do
       [ -n "$dup" ] || continue

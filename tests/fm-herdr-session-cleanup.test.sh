@@ -21,8 +21,10 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 fm_fake_exit0 "$FAKEBIN" herdr
 export PATH="$FAKEBIN:$PATH"
 export FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1
+export FM_SESSION_LOCK_BOOTSTRAP=1
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-herdr-session-cleanup.sh"
+unset FM_SESSION_LOCK_BOOTSTRAP
 unset FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY
 
 LINUX_PROCESS_INFO='{"result":{"process_info":{"foreground_processes":[{"argv":["/bin/sh"],"name":"sh","pid":67}]}}}'
@@ -46,6 +48,19 @@ LOCK_LOG="$TMP_ROOT/locks.log"
 CLOSE_LOG="$TMP_ROOT/closes.log"
 mkdir -p "$FIXTURE_DIR"
 
+BOUND_CLOSE_HELPER="$TMP_ROOT/herdr-bound-close"
+cat > "$BOUND_CLOSE_HELPER" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${2:-}" = --tab ] || exit 2
+printf '%s\n' "$*" >> "${FM_HERDR_CLEANUP_CLOSE_LOG:?}"
+: > "${FM_HERDR_CLEANUP_CLOSED_FLAG:?}"
+SH
+chmod +x "$BOUND_CLOSE_HELPER"
+export FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$BOUND_CLOSE_HELPER"
+export FM_HERDR_CLEANUP_CLOSE_LOG="$CLOSE_LOG"
+export FM_HERDR_CLEANUP_CLOSED_FLAG="$TMP_ROOT/closed"
+
 fm_backend_name() { printf herdr; }
 fm_backend_herdr_session() { printf test; }
 fm_backend_herdr_presentation_session_lock_path() { printf '%s/presentation.lock' "$TMP_ROOT"; }
@@ -57,8 +72,11 @@ fm_lock_release() { rm -rf -- "$1"; }
 fm_herdr_cleanup_process_is_idle_shell() { [ ! -e "$FIXTURE_DIR/process-unsafe" ]; }
 fm_backend_herdr_projection_focus_snapshot() {
   [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
+  [ ! -e "$FIXTURE_DIR/focus-refuse" ] || return 1
   printf 'w1\t%s' "$(cat "$FIXTURE_DIR/active-tab")"
 }
+fm_backend_herdr_projection_focus_restore() { return 0; }
+fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake-herdr.sock; }
 
 fixture_workspace_json() {
   local title=$1 tabs=$2 panes=$3 focused=false active=$TAB
@@ -112,7 +130,7 @@ fm_backend_herdr_cli() {
   local _session=$1 first=${2:-} second=${3:-} title tabs panes
   shift
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
-  if [ -e "$FIXTURE_DIR/closed" ]; then
+  if [ -e "$TMP_ROOT/closed" ]; then
     case "$first $second" in
       "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; return 1 ;;
       "workspace list") printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1}]}}'; return 0 ;;
@@ -134,6 +152,9 @@ fm_backend_herdr_cli() {
       ;;
     "tab list")
       printf '{"result":{"tabs":'; fixture_tabs; printf '}}\n'
+      ;;
+    "tab get")
+      printf '%s\n' '{"result":{"tab":{"workspace_id":"w2","tab_id":"w2:t1"}}}'
       ;;
     "pane list")
       printf '{"result":{"panes":'; fixture_panes; printf '}}\n'
@@ -166,13 +187,6 @@ fm_backend_herdr_cli() {
   esac
 }
 
-fm_backend_herdr_projection_close_pane_focus_preserving() {
-  [ ! -e "$FIXTURE_DIR/focus-refuse" ] || return 1
-  [ "${3:-}" = no-agent ] || return 1
-  printf '%s\n' "$*" >> "$CLOSE_LOG"
-  : > "$FIXTURE_DIR/closed"
-}
-
 write_v1() { # <id> [token]
   local id=$1 token=${2:-$TOKEN}
   {
@@ -200,7 +214,7 @@ write_cross_home_v2() {
 }
 
 reset_fixture() {
-  rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "${FM_STATE_OVERRIDE:?}/"*
+  rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "$TMP_ROOT/closed" "${FM_STATE_OVERRIDE:?}/"*
   mkdir -p "$FIXTURE_DIR"
   : > "$LOCK_LOG"; : > "$CLOSE_LOG"
   printf '%s\n' "$TITLE" > "$FIXTURE_DIR/title"

@@ -105,15 +105,6 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
-The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
-
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-herdr-session-cleanup-e2e.test.sh
-```
-
-Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
-
 ### Composer and operational input
 
 Real captures verified these active distinctions:

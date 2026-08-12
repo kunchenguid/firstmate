@@ -16,7 +16,7 @@
 # the pane contains only one idle recognized shell with no child process. A
 # version 2 journal must also bind the exact workspace, tab, and pane.
 # Topology is first checked from one locked API snapshot, then every mutation
-# prerequisite is immediately rechecked before the existing exact-pane
+# prerequisite is immediately rechecked before the existing exact-tab
 # focus-preserving close helper is called.
 # The script never closes a workspace. It removes only the matching journal,
 # and only after the exact pane is confirmed gone. Every error warns and returns
@@ -250,7 +250,7 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
 fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
-  local tab pane state close_status=0
+  local tab pane state close_status=0 close_workspace close_tab close_pane
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0
@@ -311,8 +311,11 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
     return 0
   fi
 
-  fm_backend_herdr_projection_close_pane_focus_preserving \
-    "$session" "$pane" no-agent || close_status=$?
+  close_workspace=${bound_workspace:-$workspace}
+  close_tab=${bound_tab:-$tab}
+  close_pane=${bound_pane:-$pane}
+  fm_backend_herdr_close_tab_focus_preserving \
+    "$session" "$close_workspace" "$close_tab" "" husk "$close_pane" || close_status=$?
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \

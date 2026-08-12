@@ -681,6 +681,25 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
 }
 
+test_create_task_propagates_seeded_prune_refusal() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/create-task-prune-refusal"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"topology_unreadable"}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_BOUND_CLOSE_HELPER="$fb/herdr-bound-close" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-prune-refusal /tmp/proj seeded-tab' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when seeded-tab pruning cannot prove the tab list"
+  assert_contains "$out" "could not safely prune the exact seeded Herdr tab" \
+    "create_task did not report the seeded-tab prune refusal"
+  assert_not_contains "$(cat "$log")" 'BOUND_TAB_CLOSE' \
+    "create_task attempted a bound close after an unproven seeded-tab prune"
+  pass "fm_backend_herdr_create_task: propagates seeded-tab prune uncertainty"
+}
+
 test_create_task_rolls_back_partial_and_focus_unsafe_mutations() {
   local dir out
   dir="$TMP_ROOT/create-task-rollback"
@@ -3156,12 +3175,8 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   fake_herdr_set_agent_status "$state" "$seeded_pane" working
 
   ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-busytest" "$seeded" ) \
-    || fail "create_task failed against the stateful fake"
-  read -r _ pane <<EOF
-$ids
-EOF
-  [ -n "$pane" ] || fail "create_task returned no pane id"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-busytest" "$seeded" 2>&1 )
+  [ "$?" -ne 0 ] || fail "create_task must refuse when seeded-tab pruning sees a working agent"
 
   jq -e --arg t "$seeded" '.tabs[] | select(.tab_id == $t)' "$state" >/dev/null \
     || fail "the seeded default tab was closed despite its pane reporting a working agent (defense-in-depth failed)"
@@ -3508,6 +3523,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
+test_create_task_propagates_seeded_prune_refusal
 test_create_task_rolls_back_partial_and_focus_unsafe_mutations
 test_create_task_exposes_identity_when_rollback_fails
 test_create_task_exposes_idless_mutation_uncertainty
