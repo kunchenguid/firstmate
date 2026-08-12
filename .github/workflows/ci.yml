@@ -172,7 +172,7 @@ jobs:
     runs-on: ubuntu-latest
     # Real Herdr is slower than the portable suite; this is a hang tripwire,
     # not the expected healthy end of the lane (estimate 15-40 min first cut).
-    timeout-minutes: 40
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
