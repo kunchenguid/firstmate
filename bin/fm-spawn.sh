@@ -1227,6 +1227,26 @@ case "$ARG3" in
     ;;
 esac
 
+# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
+# instance, so it needs a primary supervision protocol; muse has none, and its
+# Claude-compatible hook dialect explicitly rejects the model-reawakening and
+# asyncRewake handlers that firstmate's primary turn-end supervision is built on
+# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
+# secondmate whose supervision cycle could never be armed.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
+  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# Cursor is verified only for task workers.
+# Its CLI has no verified primary turn-end or watcher supervision integration,
+# so a Cursor secondmate would start successfully but could never satisfy the
+# persistent primary-session contract.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = cursor ]; then
+  echo "error: cursor is a verified crewmate/scout adapter only and cannot run a secondmate; no primary supervision protocol has been verified for Cursor Agent CLI" >&2
+  exit 1
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -1257,26 +1277,6 @@ case "$HARNESS" in
     fi
     ;;
 esac
-
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-
-# Cursor is verified only for task workers.
-# Its CLI has no verified primary turn-end or watcher supervision integration,
-# so a Cursor secondmate would start successfully but could never satisfy the
-# persistent primary-session contract.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = cursor ]; then
-  echo "error: cursor is a verified crewmate/scout adapter only and cannot run a secondmate; no primary supervision protocol has been verified for Cursor Agent CLI" >&2
-  exit 1
-fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
