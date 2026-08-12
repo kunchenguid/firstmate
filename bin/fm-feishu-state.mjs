@@ -49,6 +49,16 @@ const LOCK_STALE_MS = 30000;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60000;
 const MODULE_FILE = fileURLToPath(import.meta.url);
+
+export class FeishuStateLockContentionError extends Error {
+  constructor(lockName) {
+    super(`timed out acquiring Feishu ${lockName} state lock`);
+    this.name = "FeishuStateLockContentionError";
+    this.code = "FM_FEISHU_LOCK_CONTENDED";
+    this.lockName = lockName;
+  }
+}
+
 const RECORD_HASH = /^sha256:[a-f0-9]{64}$/;
 const SESSION_ID = /^[0-9a-fA-F-]{16,128}$/;
 const DELIVERY_REF = /^in_[a-f0-9]{24}$/;
@@ -162,6 +172,26 @@ function pidAlive(pid) {
   }
 }
 
+function inspectStateLock(lock, name, { requireOwner = false } = {}) {
+  try {
+    const stat = lstatSync(lock);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+      throw new Error(`unsafe Feishu ${name} state lock`);
+    }
+    const age = Date.now() - stat.mtimeMs;
+    const raw = readFileSync(lock, "utf8");
+    const owner = /^[1-9][0-9]*\n$/.test(raw) ? Number(raw.trim()) : undefined;
+    if (owner === undefined || !Number.isSafeInteger(owner) || owner <= 1) {
+      if (requireOwner || age >= LOCK_WAIT_MS) throw new Error(`malformed Feishu ${name} state lock`);
+      return { changed: false, age, owner: undefined };
+    }
+    return { changed: false, age, owner };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { changed: true };
+    throw error;
+  }
+}
+
 function withLock(paths, name, callback) {
   const lock = join(paths.stateRoot, `.${name}.lock`);
   const started = Date.now();
@@ -177,20 +207,17 @@ function withLock(paths, name, callback) {
     } catch (error) {
       if (fd !== undefined) closeSync(fd);
       if (error?.code !== "EEXIST") throw error;
-      let stale = false;
-      try {
-        const age = Date.now() - statSync(lock).mtimeMs;
-        const owner = Number(readFileSync(lock, "utf8").trim());
-        stale = age > LOCK_STALE_MS && !pidAlive(owner);
-      } catch {
-        stale = false;
-      }
-      if (stale) {
+      const observed = inspectStateLock(lock, name);
+      if (observed.changed) continue;
+      if (observed.owner !== undefined && observed.age > LOCK_STALE_MS && !pidAlive(observed.owner)) {
         try { unlinkSync(lock); } catch {}
         continue;
       }
       if (Date.now() - started >= LOCK_WAIT_MS) {
-        throw new Error(`timed out acquiring Feishu ${name} state lock`);
+        const lockOwner = inspectStateLock(lock, name, { requireOwner: true });
+        if (lockOwner.changed) continue;
+        if (pidAlive(lockOwner.owner)) throw new FeishuStateLockContentionError(name);
+        throw new Error(`Feishu ${name} state lock owner is not live within the stale-owner grace period`);
       }
       sleepSync(10);
     }

@@ -15,6 +15,7 @@ import type {
   TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
+  FeishuStateLockContentionError,
   claimLiveSession,
   completeAssistantOutboundIntent,
   findInboundByDeliveryRef,
@@ -60,6 +61,9 @@ interface ActiveRuntime {
   identity: SessionIdentity;
   active: boolean;
   pumping: boolean;
+  lockRetryAttempt: number;
+  nextPumpAt: number;
+  lockContentionNotified: boolean;
   timer: ReturnType<typeof setInterval> | null;
   captureAfterEntryId: string | null;
   registrationAlerts: Set<string>;
@@ -74,6 +78,8 @@ const lockStatusScript = process.env.FM_FEISHU_LOCK_STATUS_SCRIPT || `${fmRoot}/
 const lifecycleScript = process.env.FM_FEISHU_LIFECYCLE_SCRIPT || `${fmRoot}/bin/fm-feishu-lifecycle.mjs`;
 const configFile = `${fmHome}/config/feishu.env`;
 const markerPattern = /^\u2063FIRSTMATE_FEISHU: v1 ref=(in_[a-f0-9]{24}) g=([1-9][0-9]*)$/u;
+const LOCK_RETRY_BASE_MS = 250;
+const LOCK_RETRY_MAX_MS = 4000;
 const registeredApis = new WeakSet<object>();
 let activeRuntime: ActiveRuntime | null = null;
 let lifecycleTask: Promise<void> = Promise.resolve();
@@ -321,6 +327,12 @@ function flushAssistantOutbound(runtime: ActiveRuntime): void {
   }
 }
 
+function clearLockRetry(runtime: ActiveRuntime): void {
+  runtime.lockRetryAttempt = 0;
+  runtime.nextPumpAt = 0;
+  runtime.lockContentionNotified = false;
+}
+
 async function pump(runtime: ActiveRuntime): Promise<void> {
   if (runtime.pumping) return;
   runtime.pumping = true;
@@ -332,7 +344,10 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
     updateStatus(runtime);
     captureAssistantHistory(runtime);
     flushAssistantOutbound(runtime);
-    if (!transportAllowsDispatch(runtime)) return;
+    if (!transportAllowsDispatch(runtime)) {
+      clearLockRetry(runtime);
+      return;
+    }
     const fence = {
       sessionId: runtime.identity.sessionId,
       bindingId: runtime.binding.binding_id,
@@ -347,14 +362,27 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
         releaseFeishuIngressOffer(fmHome, offered.event.delivery_ref, error);
       }
     }
+    clearLockRetry(runtime);
   } finally {
     runtime.pumping = false;
   }
 }
 
 function schedulePump(runtime: ActiveRuntime): void {
+  if (!runtime.active || Date.now() < runtime.nextPumpAt) return;
   setImmediate(() => {
+    if (!runtime.active || Date.now() < runtime.nextPumpAt) return;
     void pump(runtime).catch((error) => {
+      if (error instanceof FeishuStateLockContentionError && runtime.active && activeRuntime === runtime) {
+        const delay = Math.min(LOCK_RETRY_BASE_MS * (2 ** Math.min(runtime.lockRetryAttempt, 4)), LOCK_RETRY_MAX_MS);
+        runtime.lockRetryAttempt = Math.min(runtime.lockRetryAttempt + 1, 5);
+        runtime.nextPumpAt = Date.now() + delay;
+        if (!runtime.lockContentionNotified) {
+          runtime.lockContentionNotified = true;
+          runtime.ctx.ui.notify("Feishu ingress is delayed by transient state-lock contention; durable input remains pending and retry will continue automatically.", "warning");
+        }
+        return;
+      }
       runtime.ctx.ui.notify(`Feishu ingress stopped safely: ${String(error)}`, "error");
       stopRuntime(runtime);
     });
@@ -391,6 +419,9 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     identity,
     active: true,
     pumping: false,
+    lockRetryAttempt: 0,
+    nextPumpAt: 0,
+    lockContentionNotified: false,
     timer: null,
     captureAfterEntryId: binding.outbound_after_entry_id,
     registrationAlerts: new Set(),

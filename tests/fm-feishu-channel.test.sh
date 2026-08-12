@@ -45,7 +45,8 @@ SID="$SID" \
 APP_FINGERPRINT="$APP_FINGERPRINT" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   bindSession,
@@ -58,6 +59,7 @@ import {
   ingressCounts,
   offerFeishuIngress,
   pathsForHome,
+  pendingFeishuIngress,
   publishFeishuInbound,
   receiptOutbound,
   statusSummary,
@@ -178,6 +180,34 @@ async function emit(pi, name, event, ctx) {
   return results;
 }
 
+async function holdLiveStateLock(path, milliseconds) {
+  const ready = `${path}.ready`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { closeSync, fsyncSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+    const fd = openSync(process.env.LOCK_PATH, "wx", 0o600);
+    writeFileSync(fd, String(process.pid) + "\\n", "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    writeFileSync(process.env.READY_PATH, "ready\\n");
+    setTimeout(() => { unlinkSync(process.env.LOCK_PATH); }, Number(process.env.HOLD_MS));
+  `], {
+    env: { ...process.env, LOCK_PATH: path, READY_PATH: ready, HOLD_MS: String(milliseconds) },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exited = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`lock holder exited ${code}: ${stderr}`)));
+  });
+  for (let attempt = 0; attempt < 100 && !existsSync(ready); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert(existsSync(ready), "concurrent lock holder did not acquire the fixture lock");
+  return { exited };
+}
+
 function remote(overrides = {}) {
   return {
     type: "im.message.receive_v1",
@@ -209,12 +239,21 @@ assert.equal(ingressCounts(home).pending, 1);
 const session = context(sessionId, sessionFile, sessionCwd, [preBindingAssistant]);
 const pi = fakePi();
 registerFeishuNativeChannel(pi);
+const pairingLockHolder = await holdLiveStateLock(join(pathsForHome(home).stateRoot, ".pairing.lock"), 6000);
 assert(!pi.handlers.has("input"), "Feishu extension intercepted native TUI input");
 assert(!pi.handlers.has("message_end") && !pi.handlers.has("turn_start"), "removed TUI transformation or acknowledgement hooks remained registered");
 assert(!pi.handlers.has("tool_call"), "Feishu extension retained a special tool-effect policy");
 await emit(pi, "session_start", { reason: "startup" }, session.ctx);
-await new Promise((resolve) => setTimeout(resolve, 320));
-assert.equal(pi.sends.length, 1, `accepted Feishu input was not submitted to Pi's native queue: ${JSON.stringify([...session.statuses])} ${JSON.stringify(session.notifications)}`);
+await new Promise((resolve) => setImmediate(resolve));
+await pairingLockHolder.exited;
+for (let attempt = 0; attempt < 30 && pi.sends.length === 0; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert.equal(pi.sends.length, 1, `accepted Feishu input did not recover after live state-lock contention: ${JSON.stringify([...session.statuses])} ${JSON.stringify(session.notifications)}`);
+assert.equal(session.notifications.filter(({ message }) => message.includes("transient state-lock contention")).length, 1, "live lock contention did not produce one bounded-retry notice");
+assert(!session.notifications.some(({ message }) => message.includes("ingress stopped safely")), "live lock contention stopped the converged ingress runtime");
+await new Promise((resolve) => setTimeout(resolve, 800));
+assert.equal(pi.sends.length, 1, "repeated pump ticks duplicated the recovered native-queue offer");
 assert.equal(pi.sends[0].options?.deliverAs, "steer", "Feishu input did not use Pi's native steering queue");
 const marker = parseFeishuMarker(pi.sends[0].content);
 assert.equal(marker?.deliveryRef, first.deliveryRef);
@@ -264,6 +303,18 @@ assert.deepEqual(mirrored, [
 ]);
 assert.equal(statusSummary(home).outbound_pending, 0);
 
+const pairingPath = pathsForHome(home).pairing;
+const validPairingBytes = readFileSync(pairingPath, "utf8");
+writeFileSync(pairingPath, "{malformed\n");
+for (let attempt = 0; attempt < 20 && !session.notifications.some(({ message }) => message.includes("malformed Feishu JSON")); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+assert(session.notifications.some(({ message }) => message.includes("Feishu ingress stopped safely") && message.includes("malformed Feishu JSON")), "non-retryable state corruption did not stop ingress distinctly");
+writeFileSync(pairingPath, validPairingBytes);
+const stoppedSendCount = pi.sends.length;
+await new Promise((resolve) => setTimeout(resolve, 500));
+assert.equal(pi.sends.length, stoppedSendCount, "a stopped non-retryable runtime restarted without a lifecycle boundary");
+
 await emit(pi, "session_shutdown", {}, session.ctx);
 const resumedPi = fakePi();
 registerFeishuNativeChannel(resumedPi);
@@ -311,6 +362,7 @@ const rebindFile = join(rebindSession, "s.jsonl");
 writeFileSync(rebindFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: rebindSession })}\n`);
 const rebindBinding = bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession });
 const rebindInbound = publishFeishuInbound(rebindHome, remote({ event_id: "evt_rebind", message_id: "om_rebindSource1234" }));
+assert.throws(() => offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation + 1 }), /binding fence mismatch/, "changed generation reached the native Pi queue");
 offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation });
 assert.throws(() => bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession }, { rebind: true }), /belongs to the current Pi native queue/);
 const replacementId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -344,7 +396,34 @@ const refused = persistAssistantOutboundIntent(secretHome, { text: "Authorizatio
 assert.equal(refused.status, "secret-refused");
 assert.equal(readdirSync(paths.outboundRegistrationIntents).length, beforeIntents, "secret text was persisted before deterministic refusal");
 
-console.log("ok - native Pi steering, all-origin Assistant mirroring, durable state, and TUI-equivalent tool path");
+const lockHome = join(home, "lock-home");
+mkdirSync(join(lockHome, "data"), { recursive: true });
+mkdirSync(join(lockHome, "state"), { recursive: true });
+createPairing(lockHome, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
+const lockSession = join(lockHome, "session");
+mkdirSync(lockSession);
+const lockSessionFile = join(lockSession, "s.jsonl");
+writeFileSync(lockSessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: lockSession })}\n`);
+const lockBinding = bindSession(lockHome, { sessionId, sessionFile: lockSessionFile, sessionCwd: lockSession, headerId: sessionId, headerCwd: lockSession });
+const lockFence = { sessionId, bindingId: lockBinding.binding_id, bindingGeneration: lockBinding.generation };
+const lockPaths = pathsForHome(lockHome);
+const pairingLock = join(lockPaths.stateRoot, ".pairing.lock");
+writeFileSync(pairingLock, "2147483647\n", { mode: 0o600 });
+const old = new Date(Date.now() - 31000);
+utimesSync(pairingLock, old, old);
+assert.deepEqual(pendingFeishuIngress(lockHome, lockFence), [], "stale dead-owner lock was not reclaimed");
+writeFileSync(pairingLock, "2147483647\n", { mode: 0o600 });
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /owner is not live within the stale-owner grace period/);
+unlinkSync(pairingLock);
+writeFileSync(pairingLock, "not-a-pid\n", { mode: 0o600 });
+utimesSync(pairingLock, old, old);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /malformed Feishu pairing state lock/);
+unlinkSync(pairingLock);
+symlinkSync(lockPaths.pairing, pairingLock);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /unsafe Feishu pairing state lock/);
+unlinkSync(pairingLock);
+
+console.log("ok - native Pi steering, lock-contention recovery, state safety, and all-origin Assistant mirroring");
 JS
 
 BOOTSTRAP_INERT_HOME="$TMP_ROOT/bootstrap-inert-home"

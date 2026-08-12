@@ -12,6 +12,12 @@ export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES: number;
 export const DEFAULT_MAX_PENDING_OUTBOUND: number;
 export const IDEMPOTENCY_WINDOW_MS: number;
 
+export class FeishuStateLockContentionError extends Error {
+  readonly code: "FM_FEISHU_LOCK_CONTENDED";
+  readonly lockName: string;
+  constructor(lockName: string);
+}
+
 export interface PairingRecord {
   schema: string;
   home_id: string;
