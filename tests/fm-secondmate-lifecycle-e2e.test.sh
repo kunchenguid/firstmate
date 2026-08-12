@@ -135,7 +135,7 @@ phase_spawn() {
 
 phase_send() {
   : > "$LOG"
-  : > "$PANE"
+  printf '❯\n' > "$PANE"
   # The home-scoped meta window must win over a foreign same-named
   # window returned by list-windows.
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="other-session:fm-design" \

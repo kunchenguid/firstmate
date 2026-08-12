@@ -103,7 +103,9 @@ binmode STDOUT;
 my $buf = '';
 
 sub redraw {
-  print "\r\033[K$buf";
+  # Render the real Codex bare-composer shape so the production classifier has
+  # positive container proof; an unidentified blank pane must remain unsafe.
+  print "\r\033[K\xe2\x80\xba $buf";
 }
 
 sub submit_line {
