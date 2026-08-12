@@ -32,12 +32,11 @@
 #   host missing a tool provisioning itself needs
 #   (python3, or any bounded-execution mechanism). Every gap is named on stderr,
 #   in the provisioning log, in the summary the caller records as task metadata,
-#   and - the only one of the four the LANE itself can read - in
-#   .fm-provisioning.md at the root of the worktree, git-excluded before it is
-#   written and removed before every lease decides anything, so a pool slot
-#   never carries one task's report into the next. What was NOT provisioned is
-#   as loud as what was, on a surface the crewmate reaches without knowing the
-#   firstmate home layout.
+#   and - when the project already ignores it - in .fm-provisioning.md at the
+#   worktree root, the only one of the four the LANE can read. An unignored
+#   report is skipped with a warning rather than dirtied into the checkout.
+#   The path is removed before every lease decides anything, so a pool slot
+#   never carries one task's report into the next.
 #   A FAILURE is an attempt that was made and did not complete. It REFUSES the
 #   spawn and names both the cause and the opt-out, because a lane launched on
 #   a half-built environment is worse than no lane. The failures are: a tunable
