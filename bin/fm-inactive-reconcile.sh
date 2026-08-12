@@ -337,7 +337,15 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
-  [ "$state_rc" -ne 124 ] || return 3
+  # 124 is fm_run_timed's own bound firing. When the outer aggregate scan
+  # budget fires first instead, the signal can strike this nested `timeout`
+  # process too (bin/fm-timeout-lib.sh only isolates the process it directly
+  # wraps into a new process group, so a nested call shares its parent's
+  # group), which is reported as an ordinary signal death - 128+signal, e.g.
+  # 143 for TERM - not 124. That is still an interrupted read, not the tool
+  # answering with nothing to report, so treat every code from 124 up the
+  # same way: resume the scan rather than drop the child.
+  [ "$state_rc" -lt 124 ] || return 3
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
