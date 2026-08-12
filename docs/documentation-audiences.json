@@ -253,6 +253,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/crew-skills.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
