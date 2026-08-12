@@ -41,12 +41,13 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
 #   malformed, gen-mismatch, source-mismatch, kimi-unverified,
-#   codex-unverified, capture-failed, no-target
+#   codex-unverified, cursor-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
+#   2a. Cursor before semantic verification       -> unknown cursor-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
@@ -625,6 +626,14 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'unknown codex-unverified'
         return 0
       fi
+      ;;
+    cursor*)
+      # The observed TUI exposes a rendered "Working" footer, but no stable
+      # semantic lifecycle source or idle complement has been verified yet.
+      # Keep both rendered text and Herdr's narrower streaming state out of the
+      # verdict until a real Cursor source brackets complete turns.
+      printf 'unknown cursor-unverified'
+      return 0
       ;;
   esac
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?

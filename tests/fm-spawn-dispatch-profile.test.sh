@@ -490,6 +490,28 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
+test_cursor_threads_model_workspace_and_omits_effort_axis() {
+  local rec id out status launch
+  id=profile-cursor-z6c
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.5-high --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor agent --trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
+  assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
+  assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
+  assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
+  assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
+  pass "cursor receives its model-qualified reasoning class and exact task workspace"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -740,6 +762,7 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_cursor_threads_model_workspace_and_omits_effort_axis
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi

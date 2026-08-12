@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -159,6 +159,7 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __WORKTREE__  absolute path to the task worktree
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -428,6 +429,12 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
+    cursor)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: cursor is a verified crewmate/scout adapter only and cannot run a remote secondmate; no primary supervision protocol has been verified for Cursor Agent CLI" >&2
+      return 1
+      ;;
     claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
     *)
       fm_lock_release "$registry_lock" || true
@@ -1035,7 +1042,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1125,6 +1132,13 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Cursor Agent CLI: --trust suppresses the fresh-worktree trust prompt,
+    # --yolo is the --force alias whose TUI label is "Run Everything", and an
+    # explicit workspace keeps Cursor on the exact treehouse worktree even when
+    # its launcher is reached through the Cursor application shim. Cursor's
+    # model ids already encode effort (for example cursor-grok-4.5-high), so the
+    # shared effort axis is deliberately omitted.
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS cursor agent --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1215,6 +1229,15 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# Cursor is verified only for task workers.
+# Its CLI has no verified primary turn-end or watcher supervision integration,
+# so a Cursor secondmate would start successfully but could never satisfy the
+# persistent primary-session contract.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = cursor ]; then
+  echo "error: cursor is a verified crewmate/scout adapter only and cannot run a secondmate; no primary supervision protocol has been verified for Cursor Agent CLI" >&2
   exit 1
 fi
 
@@ -1321,7 +1344,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1378,7 +1401,9 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # task metadata but never reaches the launch command. Cursor encodes effort
+    # in model ids such as cursor-grok-4.5-high, so it also receives no separate
+    # effort flag.
   esac
 }
 
@@ -2646,6 +2671,7 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2659,6 +2685,7 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 esac
+LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

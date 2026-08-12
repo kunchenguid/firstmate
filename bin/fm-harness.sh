@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -30,8 +30,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # kimi, and muse are markerless, so a foreign marker retained in a terminal
+  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
+  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -50,6 +50,11 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # Cursor Agent CLI's installed launcher exports its invocation identity to
+  # child/tool processes. Match only the agent executable value: other
+  # CURSOR_* settings such as credentials and endpoints do not prove that this
+  # process is running under the agent.
+  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
@@ -66,6 +71,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      cursor-agent) echo cursor; return ;;
       kimi) echo kimi; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
@@ -83,6 +89,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *cursor-agent*) echo cursor; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
