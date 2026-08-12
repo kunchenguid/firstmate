@@ -56,13 +56,8 @@ ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/omp"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
-# muse's installed binary is muse-bin-<version>: the launcher execs it, so the
-# version is the LIVE process name and it changes on every auto-update. Unlike
-# Claude Code's version-named binary there is no `muse` path component to fall
-# back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
-# signal, and `muse` alone is a common English fragment that must not widen into
-# a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
+# The Muse positives below are real executable fixtures. The symlinked names
+# remain decoys because their resolved executable is the generic sleep binary.
 ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
@@ -198,15 +193,33 @@ wait_for_state "$SESSION:ompbun-decoy" ambiguous \
   || fail "a Bun script path that merely contains 'omp' must not classify as a live agent pane"
 pass "tmux liveness: a Bun script path that only contains 'omp' stays ambiguous"
 
-# --- muse's version-suffixed binary name ------------------------------------
+# --- muse's executable-backed binary names ----------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
 # worker would be torn down or relaunched. The decoys below are what keep the
 # fix from being a substring match that claims unrelated programs.
 
-new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
-wait_for_state "$SESSION:muse" alive \
-  || fail "muse's version-suffixed binary name must classify alive"
-pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -n "$CC_BIN" ] &&
+  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
+  "$CC_BIN" -o "$LAB/bin/muse" "$LAB/spin.c" 2>/dev/null &&
+  "$CC_BIN" -o "$LAB/bin/muse-bin-0.1.0-R708.1" "$LAB/spin.c" 2>/dev/null; then
+  new_window muse "$LAB/bin/muse" 900
+  wait_for_state "$SESSION:muse" alive \
+    || fail "an actual Muse executable must classify alive"
+  pass "tmux liveness: an actual muse executable classifies alive"
+
+  new_window muse-bin "$LAB/bin/muse-bin-0.1.0-R708.1" 900
+  wait_for_state "$SESSION:muse-bin" alive \
+    || fail "an actual muse-bin-<version> executable must classify alive"
+  pass "tmux liveness: an actual muse-bin-<version> executable classifies alive"
+else
+  echo "skip: no C compiler, so actual Muse executable cases cannot run"
+fi
+
+new_window muse-name-only "$BASH_BIN" -c "exec -a muse '$LAB/bin/notaharness' 900"
+wait_for_state "$SESSION:muse-name-only" ambiguous \
+  || fail "a name-only Muse identity must not classify as a live agent pane"
+pass "tmux liveness: a name-only Muse identity stays ambiguous"
 
 for decoy in musescore amuse muse-binary muse-bind; do
   new_window "decoy-$decoy" "$LAB/bin/$decoy" 900

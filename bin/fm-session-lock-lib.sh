@@ -180,9 +180,10 @@ fm_harness_identity_matches() {  # <expected> <actual>
 }
 
 fm_harness_muse_executable_matches() {  # <executable>
-  local executable=${1:-} base
+  local executable=${1:-} resolved base
   [ -n "$executable" ] || return 1
-  base=${executable##*/}
+  resolved=$(fm_harness_omp_resolve_path "$executable") || return 1
+  base=${resolved##*/}
   base=${base#-}
   case "$base" in
     muse|muse-bin-*) return 0 ;;
