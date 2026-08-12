@@ -15,6 +15,7 @@ for argument in "$@"; do
   if [ "$previous" = "-p" ]; then pid=$argument; fi
   previous=$argument
 done
+[ "$pid" = 999999 ] && exit 1
 printf 'Mon Jan  1 00:00:00 2024 fm-test-process-%s\n' "$pid"
 SH
 chmod +x "$TEST_BOOTSTRAP_BIN/ps"
@@ -82,25 +83,52 @@ if [ "${1:-}" = "search" ]; then
     printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-29T00:00:00Z","number":940,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Re-review the address refresh","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/940"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-30T00:00:00Z","number":941,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review the audit export","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/941"}]'
     exit 0
   fi
-  printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-20T00:00:00Z","number":930,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Tile cache manual validation required and outstanding","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/930"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-31T00:00:00Z","number":912,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Payment refactor","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/912"}]'
+  extra_request=''
+  [ -f "$FM_HOME/new-review-request-fixture" ] \
+    && extra_request=',{"author":{"login":"colleague-three"},"createdAt":"2026-08-02T00:01:00Z","number":942,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"New review request","updatedAt":"2026-08-02T00:01:00Z","url":"https://github.com/monalee/artemis/pull/942"}'
+  printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-20T00:00:00Z","number":930,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Tile cache manual validation required and outstanding","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/930"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-31T00:00:00Z","number":912,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Payment refactor","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/912"}%s]' "$extra_request"
   exit 0
 fi
 if [ "${1:-}" = "api" ]; then
   case " $* " in
+    *" graphql "*)
+      if [ -f "$FM_HOME/no-thread-fixture" ] && [[ " $* " = *" number=4001 "* ]]; then
+        printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
+      elif [ -f "$FM_HOME/external-thread-resolved-fixture" ] && [[ " $* " = *" number=4001 "* ]]; then
+        printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-1","isResolved":true,"resolvedBy":{"login":"reviewer-one"},"comments":{"nodes":[{"author":{"login":"reviewer-one"},"createdAt":"2026-08-01T01:30:00Z"}]}}]}}}}}'
+      elif [ -f "$FM_HOME/own-thread-resolution-fixture" ] && [[ " $* " = *" number=4001 "* ]]; then
+        printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-1","isResolved":true,"resolvedBy":{"login":"pedromuller-del"},"comments":{"nodes":[{"author":{"login":"reviewer-one"},"createdAt":"2026-08-01T01:30:00Z"}]}}]}}}}}'
+      elif [[ " $* " = *" number=4001 "* ]]; then
+        printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-1","isResolved":false,"resolvedBy":null,"comments":{"nodes":[{"author":{"login":"reviewer-one"},"createdAt":"2026-08-01T01:30:00Z"}]}}]}}}}}'
+      else
+        printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
+      fi
+      ;;
     *" user "*)
+      if [ -f "$FM_HOME/review-request-outage-fixture" ]; then
+        printf 'temporary GitHub outage\n' >&2
+        exit 1
+      fi
       printf 'pedromuller-del\n'
       ;;
     *" repos/monalee/artemis/issues/930/timeline "*)
       printf '[{"event":"review_requested","created_at":"2026-07-20T00:00:00Z","requested_team":{"name":"webdev","slug":"webdev"}}]'
       ;;
     *" repos/monalee/artemis/issues/912/timeline "*)
-      printf '[{"event":"review_requested","created_at":"2026-07-31T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      if [ -f "$FM_HOME/review-request-date-unknown-fixture" ]; then
+        printf '[]'
+      else
+        printf '[{"event":"review_requested","created_at":"2026-07-31T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      fi
       ;;
     *" repos/monalee/artemis/issues/940/timeline "*)
       printf '[{"event":"review_requested","created_at":"2026-07-29T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
       ;;
     *" repos/monalee/artemis/issues/941/timeline "*)
       printf '[{"event":"review_requested","created_at":"2026-07-30T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      ;;
+    *" repos/monalee/artemis/issues/942/timeline "*)
+      printf '[{"event":"review_requested","created_at":"2026-08-02T00:01:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
       ;;
     *" repos/monalee/artemis/pulls/930/requested_reviewers "*)
       printf '{"users":[],"teams":[{"name":"webdev","slug":"webdev"}]}'
@@ -109,6 +137,9 @@ if [ "${1:-}" = "api" ]; then
       printf '{"users":[{"login":"pedromuller-del"}],"teams":[]}'
       ;;
     *" repos/monalee/artemis/pulls/940/requested_reviewers "*|*" repos/monalee/artemis/pulls/941/requested_reviewers "*)
+      printf '{"users":[{"login":"pedromuller-del"}],"teams":[]}'
+      ;;
+    *" repos/monalee/artemis/pulls/942/requested_reviewers "*)
       printf '{"users":[{"login":"pedromuller-del"}],"teams":[]}'
       ;;
     *)
@@ -120,7 +151,26 @@ fi
 url=${3:-}
 case "$url" in
   *pull/4001*)
-    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"reviewer-one"},"state":"CHANGES_REQUESTED","submittedAt":"2026-08-01T01:00:00Z"},{"author":{"login":"reviewer-two"},"state":"CHANGES_REQUESTED","submittedAt":"2026-08-01T02:00:00Z"},{"author":{"login":"reviewer-one"},"state":"APPROVED","submittedAt":"2026-08-01T03:00:00Z"}],"reviewRequests":[]}'
+    pr_state=OPEN
+    mergeable=MERGEABLE
+    review_decision=CHANGES_REQUESTED
+    if [ -f "$FM_HOME/merged-ours-fixture" ]; then
+      pr_state=MERGED
+      mergeable=UNKNOWN
+      review_decision=APPROVED
+    fi
+    check='{"status":"COMPLETED","conclusion":"SUCCESS"}'
+    [ -f "$FM_HOME/ci-red-fixture" ] && check='{"status":"COMPLETED","conclusion":"FAILURE"}'
+    [ -f "$FM_HOME/ci-running-fixture" ] && check='{"status":"IN_PROGRESS","conclusion":null}'
+    own_review=''
+    [ -f "$FM_HOME/own-review-fixture" ] \
+      && own_review=',{"author":{"login":"pedromuller-del"},"state":"APPROVED","submittedAt":"2026-08-01T04:00:00Z"}'
+    latest_verdict=APPROVED
+    [ -f "$FM_HOME/unattributable-dismissal-fixture" ] && latest_verdict=DISMISSED
+    external_review=''
+    [ -f "$FM_HOME/external-review-fixture" ] \
+      && external_review=',{"author":{"login":"reviewer-three"},"state":"APPROVED","submittedAt":"2026-08-01T05:00:00Z"}'
+    printf '{"state":"%s","isDraft":false,"mergeable":"%s","reviewDecision":"%s","statusCheckRollup":[%s],"reviews":[{"author":{"login":"reviewer-one"},"state":"CHANGES_REQUESTED","submittedAt":"2026-08-01T01:00:00Z"},{"author":{"login":"reviewer-two"},"state":"CHANGES_REQUESTED","submittedAt":"2026-08-01T02:00:00Z"},{"author":{"login":"reviewer-one"},"state":"%s","submittedAt":"2026-08-01T03:00:00Z"}%s%s],"reviewRequests":[]}' "$pr_state" "$mergeable" "$review_decision" "$check" "$latest_verdict" "$own_review" "$external_review"
     ;;
   *pull/4004*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}],"reviews":[],"reviewRequests":[{"login":"local-reviewer"}]}'
@@ -128,8 +178,19 @@ case "$url" in
   *pull/930*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[{"login":"pedromuller-del"}],"headRefOid":"d4d4d4d"}'
     ;;
-  *pull/912*|*pull/4188*)
-    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
+  *pull/4188*)
+    if [ -f "$FM_HOME/merged-review-fixture" ]; then
+      printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
+    else
+      printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
+    fi
+    ;;
+  *pull/912*)
+    if [ -f "$FM_HOME/merged-review-fixture" ]; then
+      printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
+    else
+      printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
+    fi
     ;;
   *pull/940*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[{"author":{"login":"pedromuller-del"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-28T00:00:00Z","commit":{"oid":"aaa111"}}],"reviewRequests":[{"login":"pedromuller-del"}],"headRefOid":"bbb222"}'
@@ -139,6 +200,9 @@ case "$url" in
     ;;
   *pull/95[0-5]*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
+    ;;
+  *pull/942*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[{"login":"pedromuller-del"}]}'
     ;;
   *pull/40[1][0-6]*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"reviewRequests":[]}'
@@ -296,6 +360,13 @@ render_terminal() {  # <home> <fakebin> [extra args...]
   local home=$1 fakebin=$2
   shift 2
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" "$@"
+}
+
+render_terminal_at() {  # <home> <fakebin> <snapshot-now> [extra args...]
+  local home=$1 fakebin=$2 snapshot_now=$3
+  shift 3
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW="$snapshot_now" \
     "$DASHBOARD" "$@"
 }
 
@@ -1064,6 +1135,454 @@ EOF
   pass "shareable HTML omits unstructured manual scripts while terminal detail retains them"
 }
 
+test_first_newness_run_seeds_without_flagging_rows() {
+  local home fakebin out store
+  home=$(make_home newness-first-run)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+
+  [ ! -e "$store" ] || fail "newness fixture unexpectedly started with a store"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "first newness render failed"
+  assert_not_contains "$out" "[NEW]" "first render cried wolf by flagging seeded rows"
+  [ -f "$store" ] || fail "first render did not seed the observation store"
+  pass "first newness run seeds observations without flagging rows"
+}
+
+test_identical_newness_render_stays_quiet_and_does_not_mark_seen() {
+  local home fakebin first_checksum second_checksum out store
+  home=$(make_home newness-identical)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "newness baseline render failed"
+  [ -f "$store" ] || fail "baseline render did not create the observation store"
+  first_checksum=$(cksum "$store")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "identical newness render failed"
+  second_checksum=$(cksum "$store")
+  assert_not_contains "$out" "[NEW]" "identical observed values were flagged as new"
+  [ "$first_checksum" = "$second_checksum" ] || fail "list rendering marked observations seen"
+  pass "identical renders stay quiet and list rendering does not mark rows seen"
+}
+
+test_expansion_marks_only_the_selected_row_seen() {
+  local home fakebin changed after decision_id decision_line new_count html_path
+  home=$(make_home newness-expansion)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "newness baseline render failed"
+  touch "$home/ci-red-fixture"
+  printf 'needs-decision [key=api-shape]: Choose the versioned public API shape.\n' \
+    > "$home/state/decision-task.status"
+  changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "changed newness render failed"
+  new_count=$(printf '%s\n' "$changed" | grep -F -o '[NEW]' | wc -l | tr -d ' ')
+  [ "$new_count" = 2 ] || fail "expected two changed rows before expansion, got $new_count"
+
+  html_path="$home/cockpit.html"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" --output "$html_path" >/dev/null || fail "newness HTML render failed"
+  changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "post-HTML newness render failed"
+  new_count=$(printf '%s\n' "$changed" | grep -F -o '[NEW]' | wc -l | tr -d ' ')
+  [ "$new_count" = 2 ] || fail "static HTML rendering acknowledged a NEW row"
+
+  decision_id=$(printf '%s\n' "$changed" | grep -F "Decide the public API" | awk '{print $2}')
+  render_terminal "$home" "$fakebin" --show "$decision_id" >/dev/null \
+    || fail "new decision row expansion failed"
+  after=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "post-expansion newness render failed"
+  decision_line=$(printf '%s\n' "$after" | grep -F "Decide the public API")
+  assert_not_contains "$decision_line" "[NEW]" "expanded row remained new"
+  assert_contains "$after" "PR 4001" "unexpanded changed row disappeared"
+  printf '%s\n' "$after" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "expanding one row marked another row seen"
+  pass "expansion marks only the selected row seen"
+}
+
+test_unseen_newness_survives_a_watched_value_reverting() {
+  local home fakebin out
+  home=$(make_home newness-pending-reversion)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "newness baseline render failed"
+  touch "$home/ci-red-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "red CI render failed"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "red CI did not become NEW"
+  rm "$home/ci-red-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "reverted CI render failed"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "rendering forgot an unseen CI change after the value reverted"
+  pass "unseen newness survives watched-value reversion until expansion"
+}
+
+test_review_request_enrichment_drift_stays_quiet() {
+  local home fakebin out
+  home=$(make_home newness-review-request-drift)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "review-request baseline render failed"
+  touch "$home/review-request-date-unknown-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "review-request enrichment-loss render failed"
+  assert_not_contains "$out" "[NEW]" "request-date availability drift became a new review request"
+  pass "review-request date enrichment drift stays quiet"
+}
+
+test_external_reviews_require_new_attributable_activity() {
+  local home fakebin out
+  home=$(make_home newness-external-review)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "external-review baseline render failed"
+  touch "$home/unattributable-dismissal-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "dismissal render failed"
+  assert_not_contains "$out" "[NEW]" "verdict-only dismissal was misattributed to the original reviewer"
+
+  rm "$home/unattributable-dismissal-fixture"
+  touch "$home/external-review-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "external-review activity render failed"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "a newly submitted external review was not NEW"
+  pass "only newly attributable external review activity becomes NEW"
+}
+
+test_external_thread_changes_require_an_external_actor() {
+  local home fakebin out opening_home opening_fakebin reopen_home reopen_fakebin
+  home=$(make_home newness-external-thread)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "external-thread baseline render failed"
+  touch "$home/own-thread-resolution-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "own thread-resolution render failed"
+  assert_not_contains "$out" "[NEW]" "our own thread resolution was treated as NEW"
+
+  rm "$home/own-thread-resolution-fixture"
+  touch "$home/external-thread-resolved-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "external thread-resolution render failed"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "a thread resolved by someone else was not NEW"
+
+  opening_home=$(make_home newness-external-thread-opened)
+  write_live_fixture "$opening_home"
+  opening_fakebin=$(make_fakebin "$opening_home")
+  touch "$opening_home/no-thread-fixture"
+  NO_COLOR=1 render_terminal "$opening_home" "$opening_fakebin" --width 80 --all >/dev/null \
+    || fail "thread-opening baseline render failed"
+  rm "$opening_home/no-thread-fixture"
+  out=$(NO_COLOR=1 render_terminal "$opening_home" "$opening_fakebin" --width 80 --all) \
+    || fail "external thread-opening render failed"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "a thread opened by someone else was not NEW"
+
+  reopen_home=$(make_home newness-unattributable-thread-reopen)
+  write_live_fixture "$reopen_home"
+  reopen_fakebin=$(make_fakebin "$reopen_home")
+  touch "$reopen_home/external-thread-resolved-fixture"
+  NO_COLOR=1 render_terminal "$reopen_home" "$reopen_fakebin" --width 80 --all >/dev/null \
+    || fail "thread-reopen baseline render failed"
+  rm "$reopen_home/external-thread-resolved-fixture"
+  out=$(NO_COLOR=1 render_terminal "$reopen_home" "$reopen_fakebin" --width 80 --all) \
+    || fail "unattributable thread-reopen render failed"
+  assert_not_contains "$out" "[NEW]" "a thread reopen with no actor was misattributed to the opener"
+  pass "external thread openings and resolutions become NEW while our own resolution stays quiet"
+}
+
+test_new_review_request_and_worker_failure_become_new() {
+  local home fakebin out new_count
+  home=$(make_home newness-request-failure)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "request-and-failure baseline render failed"
+  touch "$home/new-review-request-fixture"
+  printf 'failed: implementation worker crashed.\n' > "$home/state/review-task.status"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "request-and-failure changed render failed"
+  new_count=$(printf '%s\n' "$out" | grep -F -o '[NEW]' | wc -l | tr -d ' ')
+  [ "$new_count" = 2 ] || fail "new review request plus worker failure flagged $new_count rows"
+  printf '%s\n' "$out" | grep -F "PR 942" | grep -F "[NEW]" >/dev/null \
+    || fail "new review request was not NEW"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "worker failure was not NEW"
+  pass "new review requests and worker failures become NEW"
+}
+
+test_terminal_review_relationship_surfaces_once_as_new() {
+  local home fakebin out id after
+  home=$(make_home newness-terminal-review)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "terminal-review baseline render failed"
+  touch "$home/merged-review-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "merged-review render failed"
+  printf '%s\n' "$out" | grep -F "r:912" | grep -F "[NEW]" >/dev/null \
+    || fail "a newly merged review relationship did not surface as NEW"
+  id=$(printf '%s\n' "$out" | grep -F "r:912" | awk '{print $2}')
+  render_terminal "$home" "$fakebin" --show "$id" >/dev/null \
+    || fail "merged-review expansion failed"
+  after=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "post-acknowledgement terminal-review render failed"
+  assert_not_contains "$after" "r:912" "acknowledged terminal review relationship remained in the cockpit"
+  pass "terminal review relationships surface once and retire after expansion"
+}
+
+test_completed_ours_surfaces_terminal_forge_change_once() {
+  local home fakebin out id after
+  home=$(make_home newness-terminal-ours)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "terminal-OURS baseline render failed"
+  sed -i '' '/^- \[ \] review-task /d' "$home/data/backlog.md"
+  sed -i '' '/^## Done$/a\
+- [x] review-task - Ship the review branch (repo: artemis) (kind: ship) (reported 2026-08-02)
+' "$home/data/backlog.md"
+  rm "$home/state/review-task.meta" "$home/state/review-task.status"
+  touch "$home/merged-ours-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "merged-OURS render failed"
+  printf '%s\n' "$out" | grep -F "o:4001" | grep -F "[NEW]" >/dev/null \
+    || fail "a completed OURS row did not preserve its newly merged forge event"
+  id=$(printf '%s\n' "$out" | grep -F "o:4001" | awk '{print $2}')
+  render_terminal "$home" "$fakebin" --show "$id" >/dev/null \
+    || fail "merged-OURS expansion failed"
+  after=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "post-acknowledgement merged-OURS render failed"
+  assert_not_contains "$after" "o:4001" "acknowledged merged OURS row remained in the cockpit"
+  pass "completed OURS rows surface terminal forge changes once"
+}
+
+test_source_outages_do_not_erase_newness_baselines() {
+  local home fakebin out
+  home=$(make_home newness-source-outages)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "source-outage baseline render failed"
+  touch "$home/review-request-outage-fixture"
+  mv "$home/data/backlog.md" "$home/data/backlog.md.absent"
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "source-outage render failed"
+  rm "$home/review-request-outage-fixture"
+  mv "$home/data/backlog.md.absent" "$home/data/backlog.md"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "source-recovery render failed"
+  assert_not_contains "$out" "[NEW]" "source outage erased baselines and made unchanged rows NEW"
+  pass "source outages preserve decision and review-request baselines"
+}
+
+test_stale_model_cannot_acknowledge_a_newer_pending_event() {
+  local home fakebin out id store future
+  home=$(make_home newness-stale-expansion)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "stale-expansion baseline render failed"
+  touch "$home/ci-red-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "stale-expansion changed render failed"
+  id=$(printf '%s\n' "$out" | grep -F "PR 4001" | awk '{print $2}')
+  future=$(( $(date +%s) * 1000 + 60000 ))
+  jq --arg id "$id" --argjson future "$future" \
+    '.rows[$id].pendingRevision.forge = $future' "$store" > "$store.tmp"
+  mv "$store.tmp" "$store"
+  render_terminal "$home" "$fakebin" --show "$id" >/dev/null \
+    || fail "stale row expansion failed"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "post-stale-expansion render failed"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "a stale expansion cleared a newer pending event"
+  pass "stale models cannot acknowledge newer pending events"
+}
+
+test_stale_observation_lock_recovery_is_serialized() {
+  local home fakebin lock out1 out2 pid1 pid2
+  home=$(make_home newness-stale-lock)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  lock="$home/state/.fleet-dashboard-observations.lock"
+  mkdir "$lock"
+  printf '{"pid":999999,"processStart":"definitely-not-the-current-process","token":"stale"}\n' \
+    > "$lock/owner.json"
+
+  render_terminal "$home" "$fakebin" --width 80 --all > "$home/out1" & pid1=$!
+  render_terminal "$home" "$fakebin" --width 80 --all > "$home/out2" & pid2=$!
+  wait "$pid1" || fail "first stale-lock contender failed"
+  wait "$pid2" || fail "second stale-lock contender failed"
+  out1=$(<"$home/out1")
+  out2=$(<"$home/out2")
+  assert_not_contains "$out1$out2" "[NEW]" "serialized stale-lock recovery produced false NEW rows"
+  [ ! -e "$lock" ] || fail "observation lock remained after serialized recovery"
+  [ ! -e "$home/state/.fleet-dashboard-observations-recovery.lock" ] \
+    || fail "observation recovery lock remained after serialized recovery"
+  pass "stale observation-lock recovery serializes concurrent contenders"
+}
+
+test_observation_store_is_private() {
+  local home fakebin mode
+  home=$(make_home newness-private-store)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "private-store baseline render failed"
+  mode=$(stat -f '%Lp' "$home/state/fleet-dashboard-observations.json") \
+    || fail "could not inspect observation-store mode"
+  [ "$mode" = 600 ] || fail "observation store mode is $mode, expected 600"
+  pass "observation store is private to the captain's account"
+}
+
+test_concurrent_expansions_preserve_both_acknowledgements() {
+  local home fakebin baseline changed decision_id pr_id after new_count
+  home=$(make_home newness-concurrent-expansion)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "concurrent-expansion baseline render failed"
+  baseline="$home/state/fleet-dashboard-observations.baseline.json"
+  cp "$home/state/fleet-dashboard-observations.json" "$baseline"
+  touch "$home/ci-red-fixture"
+  printf 'needs-decision [key=api-shape]: Choose the versioned public API shape.\n' \
+    > "$home/state/decision-task.status"
+  changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "concurrent-expansion changed render failed"
+  decision_id=$(printf '%s\n' "$changed" | grep -F "Decide the public API" | awk '{print $2}')
+  pr_id=$(printf '%s\n' "$changed" | grep -F "PR 4001" | awk '{print $2}')
+
+  for _ in 1 2; do
+    cp "$baseline" "$home/state/fleet-dashboard-observations.json"
+    render_terminal "$home" "$fakebin" --show "$decision_id" >/dev/null &
+    local decision_pid=$!
+    render_terminal "$home" "$fakebin" --show "$pr_id" >/dev/null &
+    local pr_pid=$!
+    wait "$decision_pid" || fail "concurrent decision expansion failed"
+    wait "$pr_pid" || fail "concurrent PR expansion failed"
+    after=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+      || fail "post-concurrency render failed"
+    new_count=$(printf '%s\n' "$after" | grep -F -o '[NEW]' | wc -l | tr -d ' ')
+    [ "$new_count" = 0 ] || fail "concurrent expansion lost an acknowledgement ($new_count rows still NEW)"
+  done
+  pass "concurrent expansions preserve both row acknowledgements"
+}
+
+test_watched_field_change_flags_exactly_one_row() {
+  local home fakebin out new_count
+  home=$(make_home newness-watched-change)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "newness baseline render failed"
+  touch "$home/ci-red-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "watched-field render failed"
+  new_count=$(printf '%s\n' "$out" | grep -F -o '[NEW]' | wc -l | tr -d ' ')
+  [ "$new_count" = 1 ] || fail "one CI outcome change flagged $new_count rows"
+  printf '%s\n' "$out" | grep -F "PR 4001" | grep -F "[NEW]" >/dev/null \
+    || fail "CI outcome change did not flag its own row"
+  pass "a watched field change flags exactly its row"
+}
+
+test_excluded_events_never_flag_newness() {
+  local home fakebin out
+  home=$(make_home newness-exclusions)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "newness baseline render failed"
+  [ -f "$home/state/fleet-dashboard-observations.json" ] \
+    || fail "baseline render did not create the observation store"
+  out=$(NO_COLOR=1 render_terminal_at "$home" "$fakebin" 2026-08-03T00:05:00Z --width 80 --all) \
+    || fail "elapsed-time render failed"
+  assert_not_contains "$out" "[NEW]" "elapsed time was treated as new"
+
+  touch "$home/ci-running-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "in-progress render failed"
+  assert_not_contains "$out" "[NEW]" "an in-progress check was treated as new"
+
+  rm "$home/ci-running-fixture"
+  printf 'working: implementation is still in progress.\n' > "$home/state/review-task.status"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "working-state render failed"
+  assert_not_contains "$out" "[NEW]" "a run still in progress was treated as new"
+  printf 'heartbeat: worker remains responsive.\n' >> "$home/state/review-task.status"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "heartbeat render failed"
+  assert_not_contains "$out" "[NEW]" "a heartbeat was treated as new"
+
+  touch "$home/own-review-fixture"
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "own-action render failed"
+  assert_not_contains "$out" "[NEW]" "the authenticated viewer's own review was treated as new"
+  pass "elapsed time, running work, heartbeats, and our own review stay quiet"
+}
+
+test_newness_render_fixture_can_be_inspected() {
+  local home fakebin baseline changed html_path
+  home=$(make_home newness-render)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "newness visual baseline failed"
+  touch "$home/ci-red-fixture"
+  printf 'needs-decision [key=api-shape]: Choose the versioned public API shape.\n' \
+    > "$home/state/decision-task.status"
+  baseline="$TMP_ROOT/newness-width-130.txt"
+  changed="$TMP_ROOT/newness-width-80.txt"
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 130 --all > "$baseline" \
+    || fail "width-130 newness render failed"
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all > "$changed" \
+    || fail "width-80 newness render failed"
+  html_path="$TMP_ROOT/newness.html"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" --output "$html_path" >/dev/null || fail "newness HTML render failed"
+  printf 'NEWNESS_RENDER_HOME=%s\nWIDTH_130=%s\nWIDTH_80=%s\nHTML=%s\n' \
+    "$home" "$baseline" "$changed" "$html_path"
+  printf '%s\n' '--- WIDTH 130 ---'
+  cat "$baseline"
+  printf '%s\n' '--- WIDTH 80 ---'
+  cat "$changed"
+}
+
+if [ -n "${FM_DASHBOARD_TEST_ONLY:-}" ]; then
+  "$FM_DASHBOARD_TEST_ONLY"
+  exit
+fi
+
 test_shareable_html_omits_unstructured_manual_scripts_by_default
 test_obligation_round_uses_viewer_review_history_or_stays_unknown
 test_our_pr_ids_keep_the_pr_number_through_an_engineered_collision
@@ -1089,3 +1608,20 @@ test_detail_contract_uses_report_evidence_and_slow_quota_without_fabrication
 test_review_obligations_are_distinct_and_oldest_first
 test_decision_ids_bind_task_key_and_verb_across_membership_changes
 test_registered_pr_number_comes_from_registered_url
+test_first_newness_run_seeds_without_flagging_rows
+test_identical_newness_render_stays_quiet_and_does_not_mark_seen
+test_expansion_marks_only_the_selected_row_seen
+test_watched_field_change_flags_exactly_one_row
+test_excluded_events_never_flag_newness
+test_unseen_newness_survives_a_watched_value_reverting
+test_review_request_enrichment_drift_stays_quiet
+test_external_reviews_require_new_attributable_activity
+test_external_thread_changes_require_an_external_actor
+test_new_review_request_and_worker_failure_become_new
+test_terminal_review_relationship_surfaces_once_as_new
+test_completed_ours_surfaces_terminal_forge_change_once
+test_source_outages_do_not_erase_newness_baselines
+test_stale_model_cannot_acknowledge_a_newer_pending_event
+test_stale_observation_lock_recovery_is_serialized
+test_observation_store_is_private
+test_concurrent_expansions_preserve_both_acknowledgements

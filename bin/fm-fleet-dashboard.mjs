@@ -8,11 +8,13 @@
 // The default is a fixed-measure one-line list; --show and watch selection own
 // full context so titles never compete with status prose during a scan.
 //
-// Sources stay read-only: fm-fleet-snapshot.sh (built on fm-crew-state.sh and
-// fm-classify-lib.sh) owns meta/status/backlog classification for this home
-// and for the reviews domain's home, fm-model-telemetry.sh owns its attempt
-// sheet, and the gh CLI supplies forge state for our own recorded PRs on a
-// deliberately slow cadence with its data age printed plainly.
+// Fleet sources stay read-only: fm-fleet-snapshot.sh (built on
+// fm-crew-state.sh and fm-classify-lib.sh) owns meta/status/backlog
+// classification for this home and for the reviews domain's home,
+// fm-model-telemetry.sh owns its attempt sheet, and the gh CLI supplies forge
+// state on a deliberately slow cadence with its data age printed plainly.
+// The dashboard owns one operational write: state/fleet-dashboard-observations.json
+// stores the explicit values last acknowledged through row expansion.
 //
 // Outputs:
 //   default            one-shot ANSI terminal cockpit on stdout
@@ -20,10 +22,13 @@
 //                      GitHub state refreshes slowly and shows its age
 //   --output <path>    self-contained HTML page (never under data/, state/,
 //                      or config/)
+//   observation store  seeded silently on first render; terminal expansion
+//                      atomically acknowledges only the selected row
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -44,6 +49,9 @@ const stateDirectory = resolve(process.env.FM_STATE_OVERRIDE || resolve(fleetHom
 const configDirectory = resolve(process.env.FM_CONFIG_OVERRIDE || resolve(fleetHome, "config"));
 const telemetryPath = resolve(dataDirectory, "routing-outcomes.jsonl");
 const secondmatesPath = resolve(dataDirectory, "secondmates.md");
+const observationStorePath = resolve(stateDirectory, "fleet-dashboard-observations.json");
+const observationStoreLockPath = resolve(stateDirectory, ".fleet-dashboard-observations.lock");
+const observationStoreRecoveryLockPath = resolve(stateDirectory, ".fleet-dashboard-observations-recovery.lock");
 
 const WATCH_LOCAL_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_LOCAL_SECONDS || "5", 10);
 const WATCH_GITHUB_SECONDS = Number.parseInt(process.env.FM_FLEET_WATCH_GITHUB_SECONDS || "120", 10);
@@ -51,6 +59,22 @@ const GITHUB_OPTIONAL_PR_LIMIT = 6;
 const REVIEW_REQUEST_LIMIT = 1000;
 const REVIEW_REQUEST_TIMELINE_LIMIT = 20;
 const READABLE_ID_LIMIT = 28;
+const OBSERVATION_STORE_VERSION = 1;
+const REVIEW_THREADS_QUERY = `
+query FleetDashboardReviewThreads($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          resolvedBy { login }
+          comments(first: 1) { nodes { author { login } createdAt } }
+        }
+      }
+    }
+  }
+}`;
 const MARKERS = Object.freeze({
   yellow: { glyph: "◆", label: "needs Pedro", color: "yellow" },
   red: { glyph: "×", label: "stuck", color: "red" },
@@ -68,7 +92,8 @@ review with actionable status, and the reviews domain's PR relationships.
 --width <columns>  terminal frame width request (minimum 40; output capped at 80)
 --all              compatibility flag; the compact default already lists every item
 --show <row|id>    print one row's full context by position or exact stable id;
-                   append * to request an unambiguous id-prefix match
+                   append * to request an unambiguous id-prefix match; expansion
+                   marks only that row's current watched values seen
 --watch            live redraw: local state every ${WATCH_LOCAL_SECONDS}s, GitHub state every
                    ${WATCH_GITHUB_SECONDS}s; type a row number and Enter to expand, b goes back
 --output <path>    write the self-contained HTML page to <path> instead
@@ -189,19 +214,19 @@ function markdownSection(text, names) {
 
 function reportEvidence(reportPath) {
   if (!reportPath || !existsSync(reportPath)) {
-    return { impact: null, manualScript: null, credentialsOmitted: false };
+    return { impact: null, manualScript: null, manualScriptOmittedFromHtml: false };
   }
   let text;
   try {
     text = readFileSync(reportPath, "utf8");
   } catch {
-    return { impact: null, manualScript: null, credentialsOmitted: false };
+    return { impact: null, manualScript: null, manualScriptOmittedFromHtml: false };
   }
   const manualScript = markdownSection(text, ["Manual test script", "Manual validation script"]);
   return {
     impact: markdownSection(text, ["What this affects", "User impact"]),
     manualScript,
-    credentialsOmitted: manualScript !== null,
+    manualScriptOmittedFromHtml: manualScript !== null,
   };
 }
 
@@ -331,15 +356,6 @@ function readableRowId(prefix, stableValue, canonical, title, forceDiscriminator
     readable = candidate;
   }
   if (!readable) readable = source.slice(0, available);
-  return `${prefix}:${readable}~${discriminator}`;
-}
-
-function compactRowId(prefix, stableValue, canonical) {
-  const readable = String(stableValue ?? "unknown")
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "") || "unknown";
-  const discriminator = createHash("sha256").update(canonical).digest("hex").slice(0, 4);
   return `${prefix}:${readable}~${discriminator}`;
 }
 
@@ -618,11 +634,20 @@ function githubStatus(data) {
   const checks = Array.isArray(data.statusCheckRollup) ? data.statusCheckRollup : [];
   const reviews = Array.isArray(data.reviews) ? data.reviews : null;
   const latestStateByAuthor = new Map();
+  const latestActivityByAuthor = new Map();
   for (let index = 0; index < (reviews ?? []).length; index += 1) {
     const review = reviews[index];
     const author = review.author?.login ?? null;
-    if (!author || !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
+    if (!author) continue;
     const submittedAtMs = Date.parse(review.submittedAt || "");
+    const previousActivity = latestActivityByAuthor.get(author);
+    const laterThanPreviousActivity = previousActivity && Number.isFinite(submittedAtMs) && Number.isFinite(previousActivity.submittedAtMs)
+      ? submittedAtMs >= previousActivity.submittedAtMs
+      : previousActivity && index > previousActivity.index;
+    if (!previousActivity || laterThanPreviousActivity) {
+      latestActivityByAuthor.set(author, { review, submittedAtMs, index });
+    }
+    if (!["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
     const previous = latestStateByAuthor.get(author);
     const laterThanPrevious = previous && Number.isFinite(submittedAtMs) && Number.isFinite(previous.submittedAtMs)
       ? submittedAtMs >= previous.submittedAtMs
@@ -659,6 +684,14 @@ function githubStatus(data) {
     submittedAt: review.submittedAt ?? null,
     commitOid: review.commit?.oid ?? null,
   }));
+  const reviewObservations = Object.fromEntries(
+    [...latestActivityByAuthor.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([author, activity]) => [author, {
+        lastReviewAt: activity.review.submittedAt ?? null,
+        verdict: latestStateByAuthor.get(author)?.review.state ?? null,
+      }]),
+  );
   const conclusions = checks.map((check) => check.conclusion ?? check.state ?? null);
   const ciRed = conclusions.some((conclusion) =>
     ["ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE", "TIMED_OUT"].includes(conclusion),
@@ -700,6 +733,7 @@ function githubStatus(data) {
     terminal: data.state === "MERGED" || data.state === "CLOSED",
     reviewSummary,
     reviewRecords,
+    reviewObservations,
     changeRequesters,
     requestedReviewers,
     headRefOid: data.headRefOid ?? null,
@@ -721,6 +755,13 @@ function checksLabel(ci) {
     "CI unknown (GitHub unavailable)": "checks unknown - GitHub unavailable",
   };
   return labels[ci] ?? "checks unknown";
+}
+
+function notYetCheckedLabel(github, nowMs = Date.now()) {
+  if (!github?.fetchedAtMs) return "checks unknown - not checked";
+  const ageSeconds = secondsSince(github.fetchedAtMs, nowMs) ?? 0;
+  const remainingSeconds = Math.max(0, WATCH_GITHUB_SECONDS - ageSeconds);
+  return `not yet checked - next refresh ${formatDuration(remainingSeconds)}`;
 }
 
 function readinessLabel(githubResult) {
@@ -809,7 +850,35 @@ function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber, 
 // GitHub state is fetched on its own slow cadence because it is expensive and
 // rate-limited, and its age is always printed so a cached CI result is never
 // read as live.
-function fetchGithubStatuses(urls) {
+function fetchGithubThreadObservations(url, viewer) {
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/i);
+  if (!match || !viewer) return null;
+  try {
+    const data = JSON.parse(run("gh", [
+      "api", "graphql",
+      "-f", `query=${REVIEW_THREADS_QUERY}`,
+      "-f", `owner=${match[1]}`,
+      "-f", `name=${match[2]}`,
+      "-F", `number=${match[3]}`,
+    ]));
+    const nodes = data?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+    if (!Array.isArray(nodes)) return null;
+    return Object.fromEntries(nodes.flatMap((thread) => {
+      const firstComment = thread.comments?.nodes?.[0] ?? null;
+      const actor = thread.isResolved ? thread.resolvedBy?.login : firstComment?.author?.login;
+      if (!thread.id || !actor || actor.toLowerCase() === viewer.toLowerCase()) return [];
+      return [[thread.id, {
+        state: thread.isResolved ? "resolved" : "open",
+        actor,
+        openedAt: firstComment?.createdAt ?? null,
+      }]];
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function fetchGithubStatuses(urls, viewer = null) {
   const results = new Map();
   let error = null;
   for (const url of urls) {
@@ -829,7 +898,11 @@ function fetchGithubStatuses(urls) {
         "--json",
         "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews,reviewRequests,headRefOid",
       ]);
-      results.set(url, { ok: true, ...githubStatus(JSON.parse(text)) });
+      results.set(url, {
+        ok: true,
+        ...githubStatus(JSON.parse(text)),
+        threadObservations: fetchGithubThreadObservations(url, viewer),
+      });
     } catch (fetchError) {
       results.set(url, {
         ok: false,
@@ -990,10 +1063,14 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       ? cleanProse(currentRecord.title).match(/\bPR\s*#?(\d+)\b/i)
       : null;
     const registeredPr = task.pr?.url && task.pr?.source === "meta";
-    if (task.kind !== "secondmate" && !completedIds.has(task.id) && (registeredPr || stageMatch)) {
+    const githubResult = registeredPr ? github?.results?.get(task.pr.url) ?? null : null;
+    const completedTerminalPr = completedIds.has(task.id) && registeredPr && githubResult?.terminal;
+    if (
+      task.kind !== "secondmate" &&
+      ((!completedIds.has(task.id) && (registeredPr || stageMatch)) || completedTerminalPr)
+    ) {
       const lastEvent = cleanProse(task.hints?.last_event_text).replaceAll(/https?:\/\/\S+/g, "").trim();
       const recorded = detail || lastEvent || "no status recorded";
-      const githubResult = registeredPr ? github?.results?.get(task.pr.url) ?? null : null;
       const registeredPrNumber = registeredPr ? task.pr.url.match(/\/pull\/(\d+)/)?.[1] ?? null : null;
       const prNumber = registeredPrNumber ?? stageMatch?.[1] ?? null;
       const firstmatePr = base.project === "firstmate" || (registeredPr && isFirstmatePr(task.pr.url));
@@ -1008,7 +1085,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           ? "local checks unknown"
         : !registeredPr
           ? "checks unknown (unregistered)"
-          : checksLabel(githubResult?.ci ?? "CI unknown (not checked yet)");
+          : githubResult
+            ? checksLabel(githubResult.ci)
+            : notYetCheckedLabel(github);
       const reviewStatus = !registeredPr
         ? "readiness unknown (unregistered)"
         : firstmatePr
@@ -1038,6 +1117,10 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         review: registeredPr
           ? githubResult?.reviewSummary ?? "reviewers unknown (not checked yet)"
           : "reviewers unknown (PR not registered)",
+        newnessSource: registeredPr
+          ? { github: effectiveGithubResult, viewer: reviewRequests?.viewer ?? null }
+          : null,
+        hideWhenSeen: Boolean(completedTerminalPr),
         recommendation: ourPrRecommendation({
           markerKey: marker.key,
           registeredPr,
@@ -1046,17 +1129,51 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           firstmatePr,
         }),
         why: registeredPr
-          ? "our PR recorded in task metadata and not yet landed in the backlog"
+          ? completedTerminalPr
+            ? "our PR was previously observed in review and now has terminal forge evidence"
+            : "our PR recorded in task metadata and not yet landed in the backlog"
           : `current ship backlog record names PR ${prNumber ?? "unknown"}, but task metadata never registered it; last recorded: ${recorded}`,
       });
     }
   }
 
+  const representedOurUrls = new Set(ours.map((item) => item.pr?.url).filter(Boolean));
+  for (const entry of Object.values(readObservationStore()?.rows ?? {})) {
+    const retained = entry?.row;
+    if (
+      retained?.kind !== "ours" ||
+      !retained.url ||
+      representedOurUrls.has(retained.url)
+    ) continue;
+    const githubResult = github?.results?.get(retained.url) ?? null;
+    if (!githubResult?.terminal) continue;
+    ours.push({
+      tag: "OURS",
+      name: retained.name,
+      id: retained.taskId,
+      project: retained.project,
+      prNumber: retained.prNumber,
+      listLabel: `PR ${retained.prNumber} | ${checksLabel(githubResult.ci)} | ${readinessLabel(githubResult)}`,
+      prose: `${checksLabel(githubResult.ci)} · ${readinessLabel(githubResult)}`,
+      note: retained.url,
+      age: { seconds: null, label: "age unknown" },
+      live: false,
+      currentState: githubResult.forgeState,
+      pr: { url: retained.url, source: "dashboard observation store" },
+      markerKey: "green",
+      markerSource: "forge",
+      blocker: githubResult.readiness,
+      review: githubResult.reviewSummary,
+      newnessSource: { github: githubResult, viewer: reviewRequests?.viewer ?? null },
+      hideWhenSeen: true,
+      recommendation: "No action for Pedro; the PR is merged or closed.",
+      evidence: { impact: null, manualScript: null, manualScriptOmittedFromHtml: false },
+      why: "a previously observed PR reached terminal forge state after its task metadata was retired",
+    });
+  }
+
   for (const relationship of reviews.relationships) {
     const githubResult = relationship.link ? github?.results?.get(relationship.link) ?? null : null;
-    if (githubResult?.terminal) {
-      continue;
-    }
     const forgeState = relationship.link
       ? githubResult
         ? githubResult.ok
@@ -1064,14 +1181,18 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
           : githubResult.readiness
         : "forge state unknown (not checked yet)"
       : "forge state unknown (PR link not recorded)";
-    const marker = !relationship.link || !githubResult?.ok
+    const marker = githubResult?.terminal
+      ? { key: "green", source: "forge" }
+      : !relationship.link || !githubResult?.ok
       ? { key: "unknown", source: "forge" }
       : relationship.holdReason || relationship.workflowState === "done"
         ? { key: "blue", source: "forge" }
         : relationship.workflowState === "in_flight"
           ? { key: "green", source: "forge" }
           : { key: "unknown", source: "forge" };
-    const recommendation = marker.key === "blue"
+    const recommendation = githubResult?.terminal
+      ? "No action for Pedro; the reviewed PR is merged or closed."
+      : marker.key === "blue"
       ? "Wait for the author or external party; chase them only if the review stalls."
       : marker.key === "green"
         ? "No action for Pedro; the review round is progressing."
@@ -1093,8 +1214,12 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       markerSource: marker.source,
       blocker: relationship.holdReason ?? relationship.status,
       review: relationship.status,
+      newnessSource: relationship.link
+        ? { github: githubResult, viewer: reviewRequests?.viewer ?? null }
+        : null,
+      hideWhenSeen: Boolean(githubResult?.terminal),
       recommendation,
-      evidence: { impact: null, manualScript: null, credentialsOmitted: false },
+      evidence: { impact: null, manualScript: null, manualScriptOmittedFromHtml: false },
       why: relationship.linkSource === "verified_project_remote"
         ? "review records grouped by PR; link established from the recorded PR number and verified project GitHub remote"
         : "review records grouped by PR; completed rounds remain until terminal PR evidence exists",
@@ -1159,10 +1284,11 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         ? `Pedro has been a requested reviewer since ${request.requestedAt}`
         : "GitHub reports Pedro as requested reviewer; request date is unknown",
       review: stateParts.join(" · "),
+      newnessSource: { reviewRequested: true },
       recommendation: manualOutstanding
         ? "Run the recorded manual validation, then submit the requested review."
         : "Review the current head and submit the requested review.",
-      evidence: { impact: null, manualScript: null, credentialsOmitted: false },
+      evidence: { impact: null, manualScript: null, manualScriptOmittedFromHtml: false },
       why: "GitHub currently reports the authenticated viewer as a requested reviewer",
     });
   }
@@ -1249,12 +1375,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     ],
   };
 
-  let rowNumber = 0;
   const rowByIdentity = new Map();
   for (const bucket of model.buckets) {
     for (const item of bucket.items) {
-      rowNumber += 1;
-      item.number = rowNumber;
       item.bucketName = bucket.name;
       const decisionUsesKey = bucket.key === "decisions" && item.stableKey && item.stableKey !== item.id;
       const stablePart = bucket.key === "decisions"
@@ -1272,9 +1395,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
             ? "v"
             : "r";
       const canonical = `${bucket.key}/${item.id}/${item.stableKey ?? ""}/${item.identityVerb ?? bucket.key}`;
-      item.identity = bucket.key === "ours-in-review"
-        ? compactRowId(prefix, stablePart, canonical)
-        : readableRowId(prefix, stablePart, canonical, item.name);
+      item.identity = readableRowId(
+        prefix,
+        stablePart,
+        canonical,
+        item.name,
+        bucket.key === "ours-in-review",
+      );
       const previous = rowByIdentity.get(item.identity);
       if (previous) {
         throw new Error(`duplicate cockpit row id ${item.identity}: ${previous.bucketName}/${previous.id} and ${item.bucketName}/${item.id}`);
@@ -1282,8 +1409,19 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       rowByIdentity.set(item.identity, item);
     }
   }
-  model.totalRows = rowNumber;
+  numberModelRows(model);
   return model;
+}
+
+function numberModelRows(model) {
+  let rowNumber = 0;
+  for (const bucket of model.buckets) {
+    for (const item of bucket.items) {
+      rowNumber += 1;
+      item.number = rowNumber;
+    }
+  }
+  model.totalRows = rowNumber;
 }
 
 const ANSI = {
@@ -1414,9 +1552,13 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
         const prefix = `  ${rowLabel} `;
         const marker = paint(item.marker.color, item.marker.glyph);
         const stablePrefix = `${item.identity} `;
-        const title = clip(item.listLabel ?? item.name, Math.max(1, width - prefix.length - stablePrefix.length - 2));
+        const newnessSuffix = item.isNew ? " [NEW]" : "";
+        const title = clip(
+          item.listLabel ?? item.name,
+          Math.max(1, width - prefix.length - stablePrefix.length - newnessSuffix.length - 2),
+        );
         lines.push(
-          `${paint("dim", `${prefix}${stablePrefix}`)}${marker} ${paint(item.attentionClass === "aged" ? "dim" : null, title)}`,
+          `${paint("dim", `${prefix}${stablePrefix}`)}${marker} ${paint(item.attentionClass === "aged" ? "dim" : null, title)}${item.isNew ? paint("yellow", newnessSuffix) : ""}`,
         );
       }
     }
@@ -1463,6 +1605,7 @@ function renderExpandedItem(item, model, options = {}) {
   lines.push(item.name || "(unnamed)");
   lines.push("");
   lines.push(`row id: ${item.identity}`);
+  lines.push(`new since last look: ${item.isNew ? "yes" : "no"}`);
   lines.push(`current state: ${item.currentState || "unknown"}`);
   lines.push(`age: ${item.age.label}`);
   lines.push("token usage: not measured");
@@ -1490,7 +1633,7 @@ function renderExpandedItem(item, model, options = {}) {
   lines.push(`why here: ${item.why || "routing reason not recorded"}`);
   lines.push(`what this affects: ${item.evidence?.impact ? cleanProse(item.evidence.impact) : "not recorded in the task report"}`);
   const manualScript = item.evidence?.manualScript;
-  if (options.forHtml && item.evidence?.credentialsOmitted) {
+  if (options.forHtml && item.evidence?.manualScriptOmittedFromHtml) {
     lines.push(`manual test script: omitted from shareable HTML; use --show ${item.identity} in the interactive terminal detail.`);
   } else if (manualScript) {
     lines.push("manual test script (task report):");
@@ -1558,7 +1701,9 @@ function expandRow(model, selection) {
     }
     throw new Error(`--show ${selection.identity}: no row has that id`);
   }
-  return renderExpandedItem(item, model);
+  const expanded = renderExpandedItem(item, model);
+  markRowSeen(item);
+  return expanded;
 }
 
 function escapeHtml(value) {
@@ -1571,13 +1716,14 @@ function escapeHtml(value) {
 }
 
 function htmlRow(item, model) {
-  return `<li class="row${item.attentionClass === "aged" ? " row-aged" : ""}">
+  return `<li class="row${item.attentionClass === "aged" ? " row-aged" : ""}${item.isNew ? " row-new" : ""}">
     <details>
       <summary>
         <span class="row-number">${item.number}</span>
         <span class="row-id">${escapeHtml(item.identity)}</span>
         <span class="marker marker-${escapeHtml(item.markerKey)}" aria-label="${escapeHtml(item.marker.label)}">${escapeHtml(item.marker.glyph)}</span>
         <span class="row-title">${escapeHtml(item.listLabel ?? item.name ?? "detail absent")}</span>
+        <span class="new-badge">${item.isNew ? "NEW" : ""}</span>
       </summary>
       <pre>${escapeHtml(renderExpandedItem(item, model, { forHtml: true }))}</pre>
     </details>
@@ -1656,13 +1802,14 @@ function renderHtml(model) {
     .rows { display:grid; gap:2px; margin:0; padding:0; list-style:none; }
     .row { min-width:0; padding:5px 0; }
     .row details,.row summary { min-width:0; }
-    .row summary { display:grid; grid-template-columns:3ch max-content 2ch minmax(0,1fr); gap:8px; align-items:baseline; cursor:pointer; list-style:none; }
+    .row summary { display:grid; grid-template-columns:3ch max-content 2ch minmax(0,1fr) max-content; gap:8px; align-items:baseline; cursor:pointer; list-style:none; }
     .row summary::-webkit-details-marker { display:none; }
     .row pre { overflow:auto; margin:10px 0 8px 3ch; padding:12px; border-left:1px solid var(--line); color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; }
     .row-number,.row-id { color:var(--muted); font-variant-numeric:tabular-nums; }
     .row-number { text-align:right; }
     .row-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .row-aged .row-title { color:var(--muted); }
+    .new-badge { color:var(--yellow); font-size:.72rem; font-weight:800; letter-spacing:.08em; }
     .marker { font-weight:800; }
     .marker-yellow { color:var(--yellow); }
     .marker-red { color:var(--red); }
@@ -1742,13 +1889,20 @@ function githubPrUrls(inputs, reviewRequests = null) {
   const completed = new Set(
     records.filter((record) => record.structured && record.id && record.state === "done").map((record) => record.id),
   );
+  const observationStore = readObservationStore();
+  const retainedOurUrls = Object.values(observationStore?.rows ?? {})
+    .map((entry) => entry?.row?.kind === "ours" ? entry.row.url : null)
+    .filter(Boolean);
   const ours = (inputs.snapshot.tasks || [])
     .filter(
-      (task) =>
-        task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && !completed.has(task.id),
+      (task) => {
+        return task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && (
+          !completed.has(task.id) || retainedOurUrls.includes(task.pr.url)
+        );
+      },
     )
     .map((task) => task.pr.url);
-  const required = [...new Set(ours)];
+  const required = [...new Set([...ours, ...retainedOurUrls])];
   const requiredSet = new Set(required);
   const theirs = (inputs.reviews.relationships || []).map((relationship) => relationship.link).filter(Boolean);
   const requested = (reviewRequests?.items || []).map((request) => request.url).filter(Boolean);
@@ -1758,15 +1912,308 @@ function githubPrUrls(inputs, reviewRequests = null) {
   return [...required, ...optional];
 }
 
-function writeAtomically(outputPath, html) {
+function writeAtomically(outputPath, contents, mode = 0o644) {
   mkdirSync(dirname(outputPath), { recursive: true });
   const temporaryPath = `${outputPath}.tmp-${process.pid}`;
   try {
-    writeFileSync(temporaryPath, html, { encoding: "utf8", mode: 0o644 });
+    writeFileSync(temporaryPath, contents, { encoding: "utf8", mode });
+    chmodSync(temporaryPath, mode);
     renameSync(temporaryPath, outputPath);
   } finally {
     rmSync(temporaryPath, { force: true });
   }
+}
+
+function readObservationStore() {
+  if (!existsSync(observationStorePath)) return null;
+  let store;
+  try {
+    store = JSON.parse(readFileSync(observationStorePath, "utf8"));
+  } catch (error) {
+    throw new Error(`fleet dashboard observation store is unreadable: ${error.message}`);
+  }
+  if (
+    store?.version !== OBSERVATION_STORE_VERSION ||
+    !store.rows ||
+    typeof store.rows !== "object" ||
+    Array.isArray(store.rows)
+  ) {
+    throw new Error(`fleet dashboard observation store has an unsupported shape: ${observationStorePath}`);
+  }
+  return store;
+}
+
+function writeObservationStore(store) {
+  writeAtomically(observationStorePath, `${JSON.stringify(store, null, 2)}\n`, 0o600);
+}
+
+const observationLockSleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+function processStartIdentity(pid) {
+  try {
+    return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function observationLockOwnerIsDead() {
+  try {
+    const owner = JSON.parse(readFileSync(resolve(observationStoreLockPath, "owner.json"), "utf8"));
+    if (!Number.isInteger(owner.pid) || owner.pid < 1 || typeof owner.processStart !== "string") return false;
+    const currentStart = processStartIdentity(owner.pid);
+    return currentStart === null || currentStart !== owner.processStart;
+  } catch {
+    return false;
+  }
+}
+
+function recoverStaleObservationLock() {
+  try {
+    mkdirSync(observationStoreRecoveryLockPath, { mode: 0o700 });
+  } catch (error) {
+    if (error.code === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    if (!existsSync(observationStoreLockPath) || !observationLockOwnerIsDead()) return false;
+    rmSync(observationStoreLockPath, { recursive: true, force: true });
+    return true;
+  } finally {
+    rmSync(observationStoreRecoveryLockPath, { recursive: true, force: true });
+  }
+}
+
+function withObservationStoreLock(callback) {
+  mkdirSync(stateDirectory, { recursive: true });
+  const token = `${process.pid}:${Date.now()}:${Math.random()}`;
+  const processStart = processStartIdentity(process.pid);
+  if (!processStart) throw new Error("could not identify the fleet dashboard process for observation locking");
+  const deadline = Date.now() + 5000;
+  let acquired = false;
+  while (!acquired) {
+    try {
+      mkdirSync(observationStoreLockPath, { mode: 0o700 });
+      try {
+        writeFileSync(
+          resolve(observationStoreLockPath, "owner.json"),
+          `${JSON.stringify({ pid: process.pid, processStart, token })}\n`,
+          { encoding: "utf8", mode: 0o600 },
+        );
+        acquired = true;
+      } catch (error) {
+        rmSync(observationStoreLockPath, { recursive: true, force: true });
+        throw error;
+      }
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (recoverStaleObservationLock()) {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for fleet dashboard observation lock: ${observationStoreLockPath}`);
+      }
+      Atomics.wait(observationLockSleepBuffer, 0, 0, 10);
+    }
+  }
+  try {
+    return callback();
+  } finally {
+    try {
+      const owner = JSON.parse(readFileSync(resolve(observationStoreLockPath, "owner.json"), "utf8"));
+      if (owner.token === token) rmSync(observationStoreLockPath, { recursive: true, force: true });
+    } catch {
+      // A missing owner means this process no longer owns the lock; do not
+      // remove a replacement acquired by another dashboard process.
+    }
+  }
+}
+
+function externalReviewObservations(source) {
+  const viewer = source?.viewer;
+  const observations = source?.github?.ok ? source.github.reviewObservations : null;
+  if (!viewer || !observations || typeof observations !== "object") return null;
+  return Object.fromEntries(
+    Object.entries(observations)
+      .filter(([author]) => author.toLowerCase() !== viewer.toLowerCase())
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function watchedFingerprint(kind, value) {
+  if (!value) return null;
+  return `${kind}:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+// This is the complete watched-field set. Age, active/running state, local
+// heartbeats, presentation labels, and unattributable reviews cannot enter it.
+function watchedValuesForItem(item) {
+  const github = item.newnessSource?.github?.ok ? item.newnessSource.github : null;
+  return {
+    attention: item.bucketName === "DECISIONS"
+      ? watchedFingerprint(item.identityVerb ?? "attention", cleanProse(item.blocker))
+      : null,
+    failure: isStuckState(item.currentState)
+      ? watchedFingerprint(item.currentState, cleanProse(item.blocker || item.prose))
+      : null,
+    ci: github?.ci ?? null,
+    forgeState: github?.forgeState ?? null,
+    externalReviews: externalReviewObservations(item.newnessSource),
+    externalThreads: github?.threadObservations ?? null,
+    reviewRequest: item.bucketName === "REVIEWS WAITING ON PEDRO"
+      ? item.newnessSource?.reviewRequested === true
+      : null,
+  };
+}
+
+function retainedRowForItem(item) {
+  if (item.bucketName !== "OUR PRS IN REVIEW" || !item.pr?.url || !item.prNumber) return null;
+  return {
+    kind: "ours",
+    taskId: item.id,
+    name: item.name,
+    project: item.project,
+    prNumber: item.prNumber,
+    url: item.pr.url,
+  };
+}
+
+function observationRevisionForItem(item, model) {
+  return {
+    local: Date.parse(model.generated || "") || null,
+    forge: item.newnessSource?.github ? model.github?.fetchedAtMs ?? null : null,
+  };
+}
+
+function revisionCovers(candidate, required) {
+  if (!required) return true;
+  return ["local", "forge"].every((key) =>
+    required[key] === null || (
+      Number.isFinite(candidate?.[key]) && candidate[key] >= required[key]
+    ),
+  );
+}
+
+function hasExternalThreadChange(current, previous) {
+  if (!current || !previous || typeof previous !== "object") return false;
+  return Object.entries(current).some(([threadId, observation]) => {
+    const prior = previous[threadId];
+    if (!prior) return true;
+    // GitHub identifies who resolved a thread, but not who reopened one.
+    // A resolved -> open transition is therefore unattributable and quiet.
+    return prior.state === "open" && observation.state === "resolved";
+  });
+}
+
+function hasExternalReviewChange(current, previous) {
+  if (!current || !previous || typeof previous !== "object") return false;
+  return Object.entries(current).some(([author, observation]) => {
+    const currentAt = Date.parse(observation?.lastReviewAt ?? "");
+    if (!Number.isFinite(currentAt)) return false;
+    const previousObservation = previous[author];
+    if (!previousObservation) return true;
+    const previousAt = Date.parse(previousObservation.lastReviewAt ?? "");
+    return Number.isFinite(previousAt) && currentAt > previousAt;
+  });
+}
+
+function hasMeaningfulNewness(current, previous) {
+  if (!previous) {
+    return Boolean(current.attention || current.failure || current.reviewRequest);
+  }
+  if (current.attention && current.attention !== previous.attention) return true;
+  if (current.failure && current.failure !== previous.failure) return true;
+  if (current.reviewRequest && current.reviewRequest !== previous.reviewRequest) return true;
+  if (
+    ["CI red", "CI green"].includes(current.ci) &&
+    ["CI red", "CI green", "CI running", "CI none reported"].includes(previous.ci) &&
+    current.ci !== previous.ci
+  ) return true;
+  if (
+    ["merged", "closed"].includes(current.forgeState) &&
+    current.forgeState !== previous.forgeState
+  ) return true;
+  return hasExternalReviewChange(current.externalReviews, previous.externalReviews) ||
+    hasExternalThreadChange(current.externalThreads, previous.externalThreads);
+}
+
+function applyNewness(model) {
+  withObservationStoreLock(() => {
+    const items = model.buckets.flatMap((bucket) => bucket.items);
+    const existingStore = readObservationStore();
+    const firstRun = existingStore === null;
+    const store = existingStore ?? { version: OBSERVATION_STORE_VERSION, rows: {} };
+    let storeChanged = firstRun;
+    for (const item of items) {
+      const watched = watchedValuesForItem(item);
+      const revision = observationRevisionForItem(item, model);
+      const entry = store.rows[item.identity] ?? null;
+      const newlyMeaningful = firstRun ? false : hasMeaningfulNewness(watched, entry?.watched ?? null);
+      const pending = entry?.pending === true || newlyMeaningful;
+      item.isNew = pending;
+      item.observationSnapshot = { watched, pending, revision };
+      if (!entry) {
+        if (!item.hideWhenSeen || pending) {
+          store.rows[item.identity] = {
+            watched,
+            pending,
+            pendingRevision: pending ? revision : null,
+            row: retainedRowForItem(item),
+          };
+          storeChanged = true;
+        }
+      } else if (pending !== (entry.pending === true)) {
+        entry.pending = pending;
+        entry.pendingRevision = pending ? revision : null;
+        storeChanged = true;
+      }
+      const retainedRow = retainedRowForItem(item);
+      if (JSON.stringify(entry?.row ?? null) !== JSON.stringify(retainedRow)) {
+        if (store.rows[item.identity]) store.rows[item.identity].row = retainedRow;
+        storeChanged = true;
+      }
+      if (item.hideWhenSeen && !pending && store.rows[item.identity]) {
+        delete store.rows[item.identity];
+        storeChanged = true;
+      }
+    }
+    const currentIdentities = new Set(items.map((item) => item.identity));
+    for (const identity of Object.keys(store.rows)) {
+      const decisionRetired = identity.startsWith("d:") && model.backlogPresent;
+      const requestRetired = identity.startsWith("v:") && model.reviewRequests?.available === true;
+      if (!currentIdentities.has(identity) && (decisionRetired || requestRetired)) {
+        delete store.rows[identity];
+        storeChanged = true;
+      }
+    }
+    for (const bucket of model.buckets) {
+      bucket.items = bucket.items.filter((item) => !item.hideWhenSeen || item.isNew);
+    }
+    numberModelRows(model);
+    if (storeChanged) writeObservationStore(store);
+  });
+}
+
+function markRowSeen(item) {
+  withObservationStoreLock(() => {
+    const store = readObservationStore() ?? { version: OBSERVATION_STORE_VERSION, rows: {} };
+    const watched = watchedValuesForItem(item);
+    const current = store.rows[item.identity] ?? null;
+    const observed = item.observationSnapshot;
+    if (
+      observed &&
+      (current?.pending === true) === observed.pending &&
+      revisionCovers(observed.revision, current?.pendingRevision ?? null) &&
+      (JSON.stringify(current.watched) !== JSON.stringify(watched) || current.pending === true)
+    ) {
+      store.rows[item.identity] = { ...current, watched, pending: false, pendingRevision: null };
+      writeObservationStore(store);
+    }
+  });
+  item.isNew = false;
 }
 
 // Internal loop rather than external watch(1) because the GitHub cache must
@@ -1793,6 +2240,7 @@ function watchLoop(width, useColor, showAll) {
   let quota = null;
   let model = null;
   let selectedIdentity = null;
+  let selectedAcknowledged = false;
   let input = "";
   let inputError = null;
   let refreshTimer = null;
@@ -1802,7 +2250,15 @@ function watchLoop(width, useColor, showAll) {
     const frameWidth = width ?? process.stdout.columns ?? 80;
     let body;
     if (selectedIdentity !== null) {
-      body = expandRow(model, { identity: selectedIdentity });
+      if (selectedAcknowledged) {
+        const selected = model.buckets
+          .flatMap((bucket) => bucket.items)
+          .find((item) => item.identity === selectedIdentity);
+        body = renderExpandedItem(selected, model);
+      } else {
+        body = expandRow(model, { identity: selectedIdentity });
+        selectedAcknowledged = true;
+      }
       body += "\nb or escape: back | q: exit\n";
     } else {
       body = renderTerminal(model, frameWidth, useColor, showAll, Date.now());
@@ -1819,15 +2275,17 @@ function watchLoop(width, useColor, showAll) {
         reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
           ? fetchReviewRequests()
           : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
-        github = fetchGithubStatuses(githubPrUrls(inputs, reviewRequests));
+        github = fetchGithubStatuses(githubPrUrls(inputs, reviewRequests), reviewRequests.viewer);
         quota = fetchQuota();
       }
       model = buildModel({ ...inputs, github, reviewRequests, quota });
+      applyNewness(model);
       if (
         selectedIdentity !== null &&
         !model.buckets.flatMap((bucket) => bucket.items).some((item) => item.identity === selectedIdentity)
       ) {
         selectedIdentity = null;
+        selectedAcknowledged = false;
       }
       draw();
     } catch (error) {
@@ -1841,6 +2299,7 @@ function watchLoop(width, useColor, showAll) {
     if (selectedIdentity !== null) {
       if (key?.name === "b" || key?.name === "escape") {
         selectedIdentity = null;
+        selectedAcknowledged = false;
         inputError = null;
         draw();
       }
@@ -1864,6 +2323,7 @@ function watchLoop(width, useColor, showAll) {
         selectedIdentity = model.buckets
           .flatMap((bucket) => bucket.items)
           .find((item) => item.number === candidate).identity;
+        selectedAcknowledged = false;
         input = "";
         inputError = null;
       } else {
@@ -1891,9 +2351,10 @@ try {
       ? fetchReviewRequests()
       : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
     const urls = githubPrUrls(inputs, reviewRequests);
-    const github = urls.length > 0 ? fetchGithubStatuses(urls) : null;
+    const github = urls.length > 0 ? fetchGithubStatuses(urls, reviewRequests.viewer) : null;
     const quota = fetchQuota();
     const model = buildModel({ ...inputs, github, reviewRequests, quota });
+    applyNewness(model);
     if (showRow !== null) {
       process.stdout.write(expandRow(
         model,
