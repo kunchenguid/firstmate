@@ -51,7 +51,6 @@ Never add an agent name as a commit co-author.
 Each secondmate has a persistent isolated `FM_HOME`, including its own state, backlog, projects, and session lock.
 `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
 
-Section 1 lists the shared tracked material.
 `data/` holds durable private fleet records, `state/` holds volatile runtime records, `config/` holds local operating choices, and `projects/` contains project clones.
 `.env` and `.no-mistakes/` are local and gitignored.
 
