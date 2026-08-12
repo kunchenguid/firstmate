@@ -551,6 +551,27 @@ test_create_task_refuses_duplicate_label() {
   pass "fm_backend_herdr_create_task: refuses a duplicate tab label (herdr's own tab create has no uniqueness check)"
 }
 
+test_pane_presence_rejects_multidocument_response() {
+  local case_name dir log resp fb out
+  for case_name in live-then-dead dead-then-live; do
+    dir="$TMP_ROOT/pane-presence-$case_name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    if [ "$case_name" = live-then-dead ]; then
+      printf '%s\n%s\n' \
+        '{"result":{"pane":{"pane_id":"w1:p2"}}}' \
+        '{"error":{"code":"pane_not_found"}}' > "$resp/1.out"
+    else
+      printf '%s\n%s\n' \
+        '{"error":{"code":"pane_not_found"}}' \
+        '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/1.out"
+    fi
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_presence_state fmtest w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "$case_name pane response was classified as '$out' instead of unknown"
+  done
+  pass "fm_backend_herdr_pane_presence_state: refuses multi-document live/dead mixtures"
+}
+
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
 #
 # herdr persists and restores its whole session layout (workspaces/tabs/
@@ -4372,6 +4393,7 @@ test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
+test_pane_presence_rejects_multidocument_response
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk

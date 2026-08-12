@@ -56,6 +56,7 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
+  [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
   exit "$(cat "$RESP/$n.exit")"
 fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
@@ -690,6 +691,54 @@ test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails() 
   pass "fm_backend_cmux_create_task: retains an unresolved record when the new workspace id cannot be proven"
 }
 
+test_create_task_preserves_exact_workspace_on_nonzero_create() {
+  local dir fb out status title workspace_id
+  dir="$TMP_ROOT/create-task-nonzero-exact"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-nonzero)
+  workspace_id=eeeeeeee-4444-4444-4444-444444444444
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"workspace_id":"%s"}' "$workspace_id" > "$dir/responses/2.out"
+  printf '1\n' > "$dir/responses/2.exit"
+  cmux_workspace_list_response "$dir" 3 "$workspace_id" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_BACKEND_ACQUISITION_FILE="$dir/acquisition" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-nonzero /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should preserve the provider failure status"
+  assert_contains "$out" "$workspace_id" "nonzero cmux creation did not return the exact workspace fallback"
+  assert_grep 'kind=cmux-workspace' "$dir/acquisition" \
+    "nonzero cmux creation did not publish the exact workspace cleanup record"
+  assert_grep "workspace_id=$workspace_id" "$dir/acquisition" \
+    "nonzero cmux creation published the wrong workspace cleanup identity"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
+    "nonzero cmux creation tried to acquire a surface after preserving the workspace"
+  pass "fm_backend_cmux_create_task: preserves exact workspace ownership after a nonzero provider create"
+}
+
+test_create_task_retains_unresolved_record_on_nonzero_create_without_identity() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-task-nonzero-unresolved"; mkdir -p "$dir/responses"
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf '{"error":{"code":"provider_failed"}}' > "$dir/responses/2.out"
+  printf '1\n' > "$dir/responses/2.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_BACKEND_ACQUISITION_FILE="$dir/acquisition" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-nonzero-unresolved /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when nonzero creation has no exact identity"
+  assert_contains "$out" "cmux-unresolved" \
+    "nonzero cmux creation without identity did not return the unresolved fallback"
+  assert_grep 'kind=cmux-unresolved' "$dir/acquisition" \
+    "nonzero cmux creation without identity did not publish unresolved ownership"
+  assert_not_contains "$(cat "$dir/acquisition")" 'workspace_candidate_id=' \
+    "nonzero cmux creation without identity published an unproven candidate"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
+    "nonzero cmux creation without identity tried to acquire a surface"
+  pass "fm_backend_cmux_create_task: retains unresolved ownership after nonzero creation without an identity"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -735,6 +784,42 @@ test_target_ready_rejects_label_mismatch() {
   assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
     "target_ready should not call list-panes after a label mismatch"
   pass "fm_backend_cmux_target_ready: rejects a workspace id reused under a different title"
+}
+
+test_target_ready_rejects_untrusted_list_panes_response() {
+  local case_name dir fb status target
+  target=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+  while IFS='|' read -r case_name; do
+    [ -n "$case_name" ] || continue
+    dir="$TMP_ROOT/ready-untrusted-$case_name"; mkdir -p "$dir/responses"
+    case "$case_name" in
+      multidoc)
+        printf '%s\n%s\n' '{"panes":[]}' \
+          '{"panes":[{"surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]}]}' > "$dir/responses/1.out"
+        ;;
+      duplicate)
+        printf '%s' '{"panes":[{"surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]},{"surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]}]}' > "$dir/responses/1.out"
+        ;;
+      malformed)
+        printf '%s' '{"panes":[{"surface_ids":"not-an-array"},{"surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]}]}' > "$dir/responses/1.out"
+        ;;
+      control-id)
+        printf '%s' '{"panes":[{"surface_ids":["bad\nvalue","bbbbbbbb-1111-1111-1111-111111111111"]}]}' > "$dir/responses/1.out"
+        ;;
+      *) fail "unknown list-panes fixture: $case_name" ;;
+    esac
+    fb=$(make_cmux_fakebin "$dir")
+    PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "$1"' "$ROOT" "$target"
+    status=$?
+    [ "$status" -ne 0 ] || fail "$case_name list-panes response should not prove target readiness"
+  done <<'CASES'
+multidoc
+duplicate
+malformed
+control-id
+CASES
+  pass "fm_backend_cmux_target_ready: rejects malformed, duplicate, control-bearing, and multi-document list-panes responses"
 }
 
 test_stale_recovery_requires_unique_valid_inventory() {
@@ -1548,9 +1633,12 @@ test_unresolved_record_preserves_previous_record_on_publish_failure
 test_unresolved_record_rejects_replaced_destination_path
 test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup
 test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails
+test_create_task_preserves_exact_workspace_on_nonzero_create
+test_create_task_retains_unresolved_record_on_nonzero_create_without_identity
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
+test_target_ready_rejects_untrusted_list_panes_response
 test_stale_recovery_requires_unique_valid_inventory
 test_kill_refuses_ambiguous_stale_recovery
 test_capture_trims_locally

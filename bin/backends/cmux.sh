@@ -706,7 +706,7 @@ fm_backend_cmux_unresolved_acquisition_record() {
 }
 
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title before_ids out wsid sfid
+  local label=$1 cwd=$2 title before_ids out wsid sfid create_status
   title=$(fm_backend_cmux_scoped_title "$label")
   before_ids=$(fm_backend_cmux_workspace_ids_for_label "$title") || {
     echo "error: could not inspect existing cmux workspaces for '$title'" >&2
@@ -716,11 +716,21 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
-  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids --json 2>&1) || {
-    echo "error: cmux new-workspace failed for '$title': $out" >&2
+  if out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids --json 2>&1); then
+    create_status=0
+  else
+    create_status=$?
+  fi
+  if ! wsid=$(fm_backend_cmux_created_workspace_id "$out"); then
+    if ! fm_backend_cmux_unresolved_acquisition_record "$label" "$title"; then
+      echo "error: cmux new-workspace failed for '$title' without a provable workspace identity or an unresolved acquisition record" >&2
+    else
+      echo "error: cmux new-workspace failed for '$title' without a provable workspace identity; retaining a non-destructive unresolved acquisition record" >&2
+    fi
+    printf 'cmux-unresolved\n'
     return 1
-  }
-  if ! wsid=$(fm_backend_cmux_created_workspace_id "$out") || ! fm_backend_cmux_workspace_matches_context "$wsid" "$title"; then
+  fi
+  if ! fm_backend_cmux_workspace_matches_context "$wsid" "$title"; then
     if ! fm_backend_cmux_unresolved_acquisition_record "$label" "$title" "$wsid"; then
       echo "error: could not prove the new cmux workspace identity or persist an unresolved acquisition record for '$title'" >&2
     else
@@ -730,6 +740,11 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     return 1
   fi
   if ! fm_backend_cmux_acquisition_record "$label" "$wsid"; then
+    printf '%s\n' "$wsid"
+    return 1
+  fi
+  if [ "$create_status" -ne 0 ]; then
+    echo "error: cmux new-workspace reported failure after returning verified workspace '$wsid'; retaining its exact cleanup identity" >&2
     printf '%s\n' "$wsid"
     return 1
   fi
@@ -774,9 +789,43 @@ fm_backend_cmux_parse_target() {  # <target>
 # (fm_backend_zellij_pane_exists) rather than the design sketch's original
 # read-screen-based suggestion.
 fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
-  local wsid=$1 sfid=$2
-  fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
-    | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
+  local wsid=$1 sfid=$2 response
+  fm_backend_cmux_workspace_id_valid "$wsid" || return 1
+  fm_backend_cmux_provider_id_valid "$sfid" || return 1
+  response=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$response" | jq -s -e --arg s "$sfid" '
+    def valid_id:
+      if type != "string" then false
+      elif length == 0 then false
+      else test("^[^[:cntrl:] =:]+$")
+      end;
+    if length != 1 or (.[0] | type) != "object" then
+      false
+    elif (.[0].panes | type) != "array" then
+      false
+    else
+      .[0].panes as $panes
+      | if any($panes[]?;
+          (type != "object")
+          or ((.surface_ids | type) != "array")
+          or ((.surface_ids | length) == 0)
+          or (any(.surface_ids[]?; (valid_id | not)))
+          or ((.surface_ids | unique | length) != (.surface_ids | length))
+          or (has("selected_surface_id") and ((.selected_surface_id | valid_id) | not))
+          or (has("selected_surface_id") and (. as $pane | ($pane.surface_ids | index($pane.selected_surface_id)) == null))
+          or (has("pane_id") and ((.pane_id | valid_id) | not))
+          or (has("workspace_id") and ((.workspace_id | valid_id) | not))
+          or (has("tab_id") and ((.tab_id | valid_id) | not))
+        ) then
+          false
+        elif ([$panes[] | .surface_ids[]] | unique | length)
+             != ([$panes[] | .surface_ids[]] | length) then
+          false
+        else
+          ([$panes[] | .surface_ids[] | select(. == $s)] | length) == 1
+        end
+    end
+  ' >/dev/null 2>&1
 }
 
 # fm_backend_cmux_target_ready: parse the target and verify it is live via

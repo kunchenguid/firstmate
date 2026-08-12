@@ -1855,15 +1855,50 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-
 # fm_backend_herdr_pane_presence_state: classify one exact pane get response
 # as dead|present|unknown from its JSON body, never from process exit status.
 fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code pid
-  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
-  if [ -n "$code" ]; then
-    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+  local session=$1 pane_id=$2 out state
+  fm_backend_herdr_acquisition_value_valid "$pane_id" || {
+    printf 'unknown'
     return 0
-  fi
-  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-  [ "$pid" = "$pane_id" ] && printf 'present' || printf 'unknown'
+  }
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1) || true
+  state=$(printf '%s' "$out" | jq -s -e -r --arg pane_id "$pane_id" '
+    def clean:
+      if type != "string" then false
+      elif length == 0 then false
+      else (test("[[:cntrl:]]") | not)
+      end;
+    if length != 1 or (.[0] | type) != "object" then
+      "unknown"
+    else
+      .[0] as $response
+      | ($response | has("error")) as $has_error
+      | ($response | has("result")) as $has_result
+      | ($response.error
+         | if type == "object" then
+             if (.code | clean) and (.code == "pane_not_found") then true else false end
+           else false
+           end) as $dead
+      | ($response.result
+         | if type == "object" and (.pane | type) == "object" then
+             if (.pane.pane_id | clean) and (.pane.pane_id == $pane_id) then true else false end
+           else false
+           end) as $present
+      | if ($has_error and $has_result)
+           or (($has_error | not) and ($has_result | not)) then
+          "unknown"
+        elif $has_error then
+          if $dead then "dead" else "unknown" end
+        elif $present then
+          "present"
+        else
+          "unknown"
+        end
+    end
+  ' 2>/dev/null) || state=unknown
+  case "$state" in
+    dead|present) printf '%s' "$state" ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
