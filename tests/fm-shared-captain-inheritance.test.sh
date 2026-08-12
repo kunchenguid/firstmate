@@ -303,7 +303,7 @@ EOF
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data_override" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" codex --secondmate >/dev/null 2>&1 || true
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" codex --secondmate --backend tmux >/dev/null 2>&1 || true
 
   cmp -s "$data_override/captain-shared.md" "$sm/data/captain-shared.md" \
     || fail "spawn convergence point did not copy shared captain preferences from FM_DATA_OVERRIDE"
