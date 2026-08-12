@@ -186,7 +186,7 @@ test_kimi_launch_then_send_is_verified() {
   read_spawn_record "$rec"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
-    --model kimi-code/k3 --effort high)
+    --model kimi-code/k3)
   rc=$?
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
@@ -204,7 +204,6 @@ test_kimi_launch_then_send_is_verified() {
     || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
-  assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
@@ -214,6 +213,48 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_kimi_nondefault_effort_refuses_before_metadata_or_launch() {
+  local id rec out rc
+  id=kimi-effort-refuse-z1
+  rec=$(make_spawn_case effort-refuse "$id")
+  read_spawn_record "$rec"
+
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3 --effort high) || rc=$?
+  expect_code 1 "$rc" "Kimi high effort without an exact launch flag must refuse"
+  assert_contains "$out" "error: refusing kimi spawn with effort 'high'" \
+    "Kimi effort refusal did not name the unsupported exact effort"
+  assert_absent "$HOME_DIR/state/$id.meta" "Kimi effort refusal wrote metadata"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi effort refusal sent a launch command"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi effort refusal sent a brief pointer"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "Kimi effort refusal created a tmux container or pane"
+  fi
+  pass "fm-spawn: Kimi non-default effort refuses before metadata and launch"
+}
+
+test_kimi_effort_sentinel_refuses_before_metadata_or_launch() {
+  local id rec out rc
+  id=kimi-effort-sentinel-refuse-z1
+  rec=$(make_spawn_case effort-sentinel-refuse "$id")
+  read_spawn_record "$rec"
+
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3 --effort -) || rc=$?
+  expect_code 1 "$rc" "Kimi effort sentinel must remain an invalid local request"
+  assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
+    "Kimi effort sentinel refusal did not reject the invalid local request"
+  assert_absent "$HOME_DIR/state/$id.meta" "Kimi effort sentinel refusal wrote metadata"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi effort sentinel refusal sent a launch command"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi effort sentinel refusal sent a brief pointer"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "Kimi effort sentinel refusal created a tmux container or pane"
+  fi
+  pass "fm-spawn: local Kimi effort sentinel refuses before metadata and launch"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -662,6 +703,8 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_nondefault_effort_refuses_before_metadata_or_launch
+test_kimi_effort_sentinel_refuses_before_metadata_or_launch
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token
