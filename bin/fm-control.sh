@@ -351,7 +351,7 @@ send_interrupt_keys() {
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
-  fm_backend_endpoint_lock_acquire "$BACKEND" "$T" \
+  fm_backend_endpoint_lock_acquire "$BACKEND" "$T" "$LABEL" \
     || die "could not acquire the endpoint lock before interrupting task $ID on $BACKEND"
   while [ "$i" -lt "$repeat" ]; do
     if ! fm_backend_send_key_unlocked "$BACKEND" "$T" "$key" "$LABEL"; then

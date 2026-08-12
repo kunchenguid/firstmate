@@ -623,6 +623,25 @@ test_send_key_recovers_stale_target_by_label() {
   pass "fm_backend_cmux_send_key: recovers stale workspace/surface ids by expected label"
 }
 
+test_serialized_send_key_recovers_stale_target_by_label() {
+  local dir fb title
+  dir="$TMP_ROOT/serialized-sendkey-stale-target"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-label)
+  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
+  cmux_workspace_list_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 6 "dddddddd-3333-3333-3333-333333333333"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key cmux "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT"
+  expect_code 0 $? "serialized send_key should recover a stale cmux target when the expected label is live"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''cccccccc-2222-2222-2222-222222222222'$'\x1f''--surface'$'\x1f''dddddddd-3333-3333-3333-333333333333'$'\x1f''enter' \
+    "serialized send_key did not use the refreshed cmux workspace/surface ids"
+  pass "fm_backend_send_key: locking preserves cmux stale-target label recovery"
+}
+
 test_send_literal_uses_separator_for_option_shaped_text() {
   local dir fb
   dir="$TMP_ROOT/sendliteral"; mkdir -p "$dir/responses"
@@ -1138,6 +1157,7 @@ test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
 test_send_key_normalizes_and_targets
 test_send_key_recovers_stale_target_by_label
+test_serialized_send_key_recovers_stale_target_by_label
 test_send_literal_uses_separator_for_option_shaped_text
 test_send_text_line_clears_partial_input_when_enter_fails
 test_send_text_line_reports_unsafe_input_when_cleanup_fails

@@ -424,7 +424,7 @@ if [ "${1:-}" = "--key" ]; then
       exit 1
     fi
   else
-    fm_backend_endpoint_lock_acquire "$TARGET_BACKEND" "$T" || {
+    fm_backend_endpoint_lock_acquire "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" || {
       echo "error: key '$key' not sent to $T (cannot acquire endpoint lock; tried $RESOLUTION_TRIED)" >&2
       exit 1
     }

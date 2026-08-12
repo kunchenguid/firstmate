@@ -731,16 +731,20 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   fm_backend_serialized_send_key "$@"
 }
 
-fm_backend_endpoint_identity() {  # <backend> <target>
-  local backend=$1 target=$2 identity
+fm_backend_endpoint_identity() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-} identity
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux)
       identity=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
       case "$identity" in %*) printf '%s:%s' "$backend" "$identity" ;; *) return 1 ;; esac
       ;;
-    herdr|zellij|orca|cmux)
-      fm_backend_target_exists "$backend" "$target" || return 1
+    cmux)
+      fm_backend_cmux_target_ready "$target" "$expected_label" || return 1
+      printf '%s:%s:%s' "$backend" "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"
+      ;;
+    herdr|zellij|orca)
+      fm_backend_target_exists "$backend" "$target" "$expected_label" || return 1
       printf '%s:%s' "$backend" "$target"
       ;;
     *) return 1 ;;
