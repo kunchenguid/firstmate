@@ -405,14 +405,14 @@ test_web_ship_brief_requires_visual_verification() {
   web="$home/data/web-visual-gate-a1/brief.md"
   grep -qx "Surface contract: web" "$web" \
     || fail "web ship brief missing its machine-readable surface contract"
-  grep -qx "Web gate contract: custom-domain/interceptor/revision-marker/screenshot" "$web" \
+  grep -qx "Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot" "$web" \
     || fail "web ship brief missing its machine-readable visual gate contract"
   assert_grep "custom production domain" "$web" \
     "web ship brief missing custom production domain verification"
-  assert_grep "fresh-browser visual verification with the existing Interceptor skill" "$web" \
-    "web ship brief missing fresh-browser Interceptor verification"
-  assert_grep 'interceptor open <custom-production-domain>' "$web" \
-    "web ship brief missing the Interceptor open command"
+  assert_grep "fresh-page visual verification against the real custom production domain with the existing chrome-devtools-axi tool" "$web" \
+    "web ship brief missing fresh-page chrome-devtools verification"
+  assert_grep 'chrome-devtools-axi open <custom-production-domain>' "$web" \
+    "web ship brief missing the chrome-devtools open command"
   assert_grep "distinguishing revision content" "$web" \
     "web ship brief missing distinguishing revision content"
   assert_grep "Capture screenshot evidence" "$web" \
@@ -434,7 +434,7 @@ test_web_ship_brief_requires_visual_verification() {
     || fail "non-web ship brief missing its machine-readable surface contract"
   assert_no_grep "Website deployment completion gate" "$nonweb" \
     "non-web ship brief received the website completion gate"
-  assert_no_grep "Interceptor" "$nonweb" \
+  assert_no_grep "Website deployment completion gate" "$nonweb" \
     "non-web ship brief received false visual-verification requirements"
   pass "fm-brief.sh: --web structurally requires custom-domain visual evidence and rejects HTTP-only acceptance"
 }

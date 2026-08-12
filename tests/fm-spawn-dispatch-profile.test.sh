@@ -171,7 +171,7 @@ test_ship_spawn_rejects_incomplete_web_gate_body() {
   id=profile-incomplete-web-gate-z9
   rec=$(make_spawn_case incomplete-web-gate claude "$id")
   read_case_record "$rec"
-  printf 'Delivery contract: mode=no-mistakes\nSurface contract: web\nWeb gate contract: custom-domain/interceptor/revision-marker/screenshot\n' > "$HOME_DIR/data/$id/brief.md"
+  printf 'Delivery contract: mode=no-mistakes\nSurface contract: web\nWeb gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot\n' > "$HOME_DIR/data/$id/brief.md"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?

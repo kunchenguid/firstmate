@@ -149,7 +149,7 @@ if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_
   exit 1
 fi
 if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ]; then
-  existing_gate_count=$(grep -Ec '^Web gate contract: custom-domain/interceptor/revision-marker/screenshot$' "$BRIEF" || true)
+  existing_gate_count=$(grep -Ec '^Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot$' "$BRIEF" || true)
   if [ "$existing_gate_count" -ne 1 ] \
     || ! fm_web_gate_provenance_present "$BRIEF"; then
     echo "error: $BRIEF declares web but lacks the canonical Web gate contract or body; promotion refused" >&2
@@ -172,7 +172,7 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
     }
     if (surface_line_count == 0) print "Surface contract: " surface
     if (web == 1 && gate_line_count == 0) {
-      print "Web gate contract: custom-domain/interceptor/revision-marker/screenshot"
+      print "Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot"
       print "Web gate provenance: surface=web sha256:pending"
     }
     inserted_surface = 1
@@ -195,7 +195,7 @@ if [ "$WEB" -eq 1 ]; then
       exit 1
     }
   fi
-  promoted_gate_count=$(grep -Ec '^Web gate contract: custom-domain/interceptor/revision-marker/screenshot$' "$BRIEF_TMP" || true)
+  promoted_gate_count=$(grep -Ec '^Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot$' "$BRIEF_TMP" || true)
   if [ "$promoted_gate_count" -ne 1 ] \
     || ! fm_web_gate_provenance_present "$BRIEF_TMP"; then
     rm -f -- "$BRIEF_TMP" "$WEB_GATE_TMP"

@@ -250,7 +250,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   web_bad_meta="$home/state/promote-web-bad-d2.meta"
   printf 'window=fm-promote-web-bad-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_bad_meta"
   mkdir -p "$home/data/promote-web-bad-d2"
-  printf '# Definition of done\nSurface contract: web\nWeb gate contract: custom-domain/interceptor/revision-marker/screenshot\n' > "$home/data/promote-web-bad-d2/brief.md"
+  printf '# Definition of done\nSurface contract: web\nWeb gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot\n' > "$home/data/promote-web-bad-d2/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-bad-d2 --mode local-only --yolo off --web 2>&1)
   status=$?
   expect_code 1 "$status" "promotion with an incomplete web gate body should fail"
@@ -313,7 +313,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   expect_code 0 "$status" "web promotion should succeed"
   assert_grep 'kind=ship' "$web_meta" "web promotion did not restore ship teardown protection"
   assert_grep 'Surface contract: web' "$home/data/promote-web-d2/brief.md" "web promotion did not persist its surface contract"
-  assert_grep 'Web gate contract: custom-domain/interceptor/revision-marker/screenshot' "$home/data/promote-web-d2/brief.md" "web promotion did not persist its visual gate contract"
+  assert_grep 'Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot' "$home/data/promote-web-d2/brief.md" "web promotion did not persist its visual gate contract"
   gate_line=$(grep -n '^## Website deployment completion gate$' "$home/data/promote-web-d2/brief.md" | cut -d: -f1)
   done_line=$(grep -n 'Scout work complete' "$home/data/promote-web-d2/brief.md" | cut -d: -f1)
   [ "$gate_line" -lt "$done_line" ] || fail "web promotion placed its gate after the completion instruction"

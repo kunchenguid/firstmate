@@ -25,7 +25,7 @@
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   --web or --no-web is mandatory for every ship brief.
-#   --web adds the custom-domain, Interceptor, revision-marker, and screenshot gate.
+#   --web adds the custom-domain, chrome-devtools-axi, revision-marker, and screenshot gate.
 #   The declaration must be explicit because {TASK} is filled after scaffolding and
 #   the caller-supplied repo string cannot reliably identify this repo.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
@@ -446,7 +446,7 @@ fi
 
 if [ "$WEB" -eq 1 ]; then
   DOD=${DOD/"# Definition of done"/"# Definition of done"$'\n'"$(fm_web_gate_body_text)"}
-  DOD=${DOD/"Web gate contract: custom-domain/interceptor/revision-marker/screenshot"/"Web gate contract: custom-domain/interceptor/revision-marker/screenshot"$'\n'"$(fm_web_gate_provenance_placeholder)"}
+  DOD=${DOD/"Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot"/"Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot"$'\n'"$(fm_web_gate_provenance_placeholder)"}
 fi
 
 cat > "$BRIEF" <<EOF

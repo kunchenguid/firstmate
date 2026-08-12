@@ -1674,7 +1674,7 @@ if [ "$KIND" = ship ]; then
   case "$BRIEF_SURFACE" in
     non-web) ;;
     web)
-      BRIEF_WEB_GATE_COUNT=$(grep -Ec '^Web gate contract: custom-domain/interceptor/revision-marker/screenshot$' "$BRIEF" || true)
+      BRIEF_WEB_GATE_COUNT=$(grep -Ec '^Web gate contract: custom-domain/chrome-devtools-axi/revision-marker/screenshot$' "$BRIEF" || true)
       if [ "$BRIEF_WEB_GATE_COUNT" -ne 1 ] || ! fm_web_gate_provenance_present "$BRIEF"; then
         echo "error: $BRIEF declares web but lacks the canonical Web gate body; re-scaffold the ship brief with --web" >&2
         exit 1
