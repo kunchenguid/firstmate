@@ -1495,6 +1495,64 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
   pass "secondmate spawn refuses operational directories outside the subhome"
 }
 
+test_secondmate_spawn_refuses_home_identity_overlap() {
+  local home identity_base identity code_root subhome relation expected opdir fakebin log err
+  home="$TMP_ROOT/spawn-identity-home"
+  identity_base="$TMP_ROOT/spawn-home-identity"
+  identity="$identity_base/primary"
+  code_root="$TMP_ROOT/spawn-identity-code-root"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-identity-fake")
+  log="$TMP_ROOT/spawn-identity-fake/tmux.log"
+  err="$TMP_ROOT/spawn-identity.err"
+  mkdir -p "$home/data" "$home/state" "$identity/data" "$code_root/bin"
+  cat > "$code_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$code_root/bin/fm-guard.sh"
+
+  while IFS='|' read -r relation expected; do
+    [ -n "$relation" ] || continue
+    case "$relation" in
+      exact) subhome="$identity" ;;
+      ancestor) subhome="$identity_base" ;;
+      descendant) subhome="$identity/nested" ;;
+    esac
+    mkdir -p "$subhome/data" "$subhome/state"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
+    printf 'charter\n' > "$subhome/data/charter.md"
+    : > "$log"
+    if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-identity-fake/pane.txt" \
+      "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+      fail "secondmate spawn accepted a home $relation to the preserved home identity"
+    fi
+    grep -F "$expected" "$err" >/dev/null || fail "spawn did not explain $relation home-identity rejection"
+    grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before $relation home-identity rejection"
+  done <<'ROWS'
+exact|cannot be the firstmate home identity
+ancestor|cannot be an ancestor of the firstmate home identity
+descendant|cannot be inside the firstmate home identity
+ROWS
+
+  for opdir in data state config projects; do
+    subhome="$TMP_ROOT/spawn-identity-subhome-$opdir"
+    mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$identity/$opdir"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
+    printf 'charter\n' > "$subhome/data/charter.md"
+    rm -rf "${subhome:?}/${opdir:?}"
+    ln -s "$identity/$opdir" "$subhome/$opdir"
+    : > "$log"
+    if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-identity-fake/pane.txt" \
+      "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+      fail "secondmate spawn accepted $opdir inside the preserved home identity"
+    fi
+    grep -F "secondmate $opdir directory cannot be inside the firstmate home identity" "$err" >/dev/null \
+      || fail "spawn did not explain unsafe $opdir home-identity rejection"
+    grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before $opdir home-identity rejection"
+  done
+  pass "secondmate spawn preserves the relocated home-identity boundary"
+}
+
 test_fm_send_refuses_bare_window_without_home_meta() {
   # The happy path (a bare fm-<id> resolves the window recorded in THIS home's
   # meta and never a foreign same-named window) is asserted in the lifecycle e2e.
@@ -3119,6 +3177,7 @@ test_home_seed_refuses_unsafe_leaf_files
 test_home_seed_preserves_existing_parent_binding
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
+test_secondmate_spawn_refuses_home_identity_overlap
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings

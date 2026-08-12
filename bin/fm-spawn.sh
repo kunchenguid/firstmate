@@ -1448,10 +1448,11 @@ path_is_ancestor_of() {
 }
 
 validate_firstmate_home_for_spawn() {
-  local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
+  local id=$1 home=$2 abs_home abs_active_home abs_root abs_home_identity marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
+  abs_home_identity=$(resolved_existing_dir "$FM_HOME_IDENTITY")
   if [ "$abs_home" = "/" ]; then
     echo "error: secondmate home cannot be the filesystem root: $home" >&2
     return 1
@@ -1464,12 +1465,20 @@ validate_firstmate_home_for_spawn() {
     echo "error: secondmate home cannot be the firstmate repo: $home" >&2
     return 1
   fi
+  if [ "$abs_home" = "$abs_home_identity" ]; then
+    echo "error: secondmate home cannot be the firstmate home identity: $home" >&2
+    return 1
+  fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
     echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
     echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home_identity" "$abs_home"; then
+    echo "error: secondmate home cannot be inside the firstmate home identity: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
@@ -1480,7 +1489,11 @@ validate_firstmate_home_for_spawn() {
     echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
     return 1
   fi
-  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
+  if path_is_ancestor_of "$abs_home" "$abs_home_identity"; then
+    echo "error: secondmate home cannot be an ancestor of the firstmate home identity: $home" >&2
+    return 1
+  fi
+  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" "$abs_home_identity" || return 1
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
     echo "error: firstmate home $home is not a seeded secondmate home" >&2
     return 1
@@ -1502,7 +1515,7 @@ validate_firstmate_home_for_spawn() {
 }
 
 validate_firstmate_operational_dirs() {
-  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
+  local abs_home=$1 abs_active_home=$2 abs_root=$3 abs_home_identity=$4 name dir abs_dir
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
@@ -1527,6 +1540,14 @@ validate_firstmate_operational_dirs() {
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
       echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
+      return 1
+    fi
+    if [ "$abs_dir" = "$abs_home_identity" ] || path_is_ancestor_of "$abs_home_identity" "$abs_dir"; then
+      echo "error: secondmate $name directory cannot be inside the firstmate home identity: $dir" >&2
+      return 1
+    fi
+    if path_is_ancestor_of "$abs_dir" "$abs_home_identity"; then
+      echo "error: secondmate $name directory cannot be an ancestor of the firstmate home identity: $dir" >&2
       return 1
     fi
   done
