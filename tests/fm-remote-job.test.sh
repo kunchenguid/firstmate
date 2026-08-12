@@ -694,7 +694,7 @@ done
 assert_present "$CLAIM_ORPHAN_STATE/worker.ready" \
   "worker did not start with an orphaned job-claim scratch file present"
 for _ in $(seq 1 300); do
-  [ ! -e "$CLAIM_ORPHAN_JOB/.claim" ] && break
+  [ -f "$CLAIM_ORPHAN_JOB/exit" ] && break
   sleep 0.05
 done
 assert_absent "$CLAIM_ORPHAN_JOB/.claim" \
