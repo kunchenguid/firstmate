@@ -193,6 +193,28 @@ test_cursor_marker_outranks_inherited_claudecode() {
   pass "fm-harness.sh: cursor's marker outranks an inherited CLAUDECODE"
 }
 
+test_harness_ancestry_rejects_cursor_named_node_script() {
+  command -v node >/dev/null 2>&1 || return 0
+  local helper="$TMP_ROOT/cursor-agent-helper.js" out
+  cat > "$helper" <<'JS'
+const { spawnSync } = require('child_process');
+const env = { ...process.env };
+delete env.CURSOR_AGENT;
+delete env.CURSOR_INVOKED_AS;
+delete env.CLAUDECODE;
+delete env.PI_CODING_AGENT;
+delete env.GROK_AGENT;
+const result = spawnSync(process.argv[2], [], { encoding: 'utf8', env });
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+process.exit(result.status === null ? 1 : result.status);
+JS
+  out=$(node "$helper" "$HARNESS")
+  [ "$out" != cursor ] \
+    || fail "a node script merely containing cursor-agent in its filename must not identify as cursor"
+  pass "fm-harness.sh: cursor-like node script names do not establish ancestry identity"
+}
+
 # --- 4. The transcript busy fold --------------------------------------------
 
 # Build a bound cursor workspace: a project dir keyed by .workspace-trusted, a
@@ -315,6 +337,7 @@ test_verify_executable_refuses_unrelated_agent
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode
+test_harness_ancestry_rejects_cursor_named_node_script
 test_transcript_fold_brackets_a_turn
 test_transcript_fold_is_unknown_never_idle_when_unresolvable
 test_transcript_binding_matches_workspace_exactly
