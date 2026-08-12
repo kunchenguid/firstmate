@@ -111,8 +111,23 @@ function nextWorkingDirectory(position, cwd) {
 function dispatcherChainPosition(position) {
   let index = position.index;
   let command = position.words[index];
+  const dispatcherPayloads = [];
   for (let depth = 0; command && depth < 8; depth += 1) {
-    if (!DISPATCHER_OPTIONS[basename(command.value)]) return { ...position, index, command };
+    if (basename(command.value) === "env") {
+      const envPosition = commandPosition(position.words.slice(index));
+      if (envPosition.unresolvedWrapperOption) {
+        return { ...position, index, command, dispatcherUnresolved: true, dispatcherPayloads };
+      }
+      dispatcherPayloads.push(...envPosition.wrapperPayloads);
+      if (!envPosition.command) return { ...position, index, command, dispatcherPayloads };
+      index = position.words.findIndex((word, wordIndex) => wordIndex >= index && word === envPosition.command);
+      if (index < 0) return null;
+      command = envPosition.command;
+      continue;
+    }
+    if (!DISPATCHER_OPTIONS[basename(command.value)]) {
+      return { ...position, index, command, dispatcherPayloads };
+    }
     const target = dispatcherTarget({ ...position, index, command });
     if (!target) return null;
     index = position.words.findIndex((word, wordIndex) => wordIndex > index && word === target);
@@ -255,7 +270,13 @@ function containsOmpCommand(source, depth = 0, cwd = process.cwd()) {
     }
     if (!position.command) continue;
     if (commandInvokesOmp(position, nodeCwd)) return true;
-    if (commandInvokesOmp(dispatcherChainPosition(position), nodeCwd)) return true;
+    const dispatched = dispatcherChainPosition(position);
+    if (!dispatched?.dispatcherUnresolved) {
+      for (const payload of dispatched?.dispatcherPayloads || []) {
+        if (containsOmpCommand(payload, depth + 1, nodeCwd)) return true;
+      }
+      if (commandInvokesOmp(dispatched, nodeCwd)) return true;
+    }
     if (isOmpWord(xargsTarget(position), nodeCwd)) return true;
 
     const command = basename(position.command.value);

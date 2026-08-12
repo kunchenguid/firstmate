@@ -832,6 +832,10 @@ test_raw_omp_dispatch_policy_is_structural() {
     "env FOO=bar $canonical_omp --raw-flag" \
     "env --ignore-environment $canonical_omp --raw-flag" \
     "env --split-string='$canonical_omp --raw-flag'" \
+    "nice env -S '$canonical_omp --raw-flag'" \
+    "time --format=%E env --split-string='$canonical_omp --raw-flag'" \
+    "setsid env FOO=bar $canonical_omp --raw-flag" \
+    "nice env -S 'start-omp.sh --raw-flag'" \
     "$canonical_bun $canonical_omp --raw-flag" \
     "$canonical_bun run $canonical_omp --raw-flag"; do
     result=$(PATH="$canonical_dir:$PATH" "$node_bin" "$policy" --command "$command")
@@ -848,7 +852,11 @@ test_raw_omp_dispatch_policy_is_structural() {
     "env FOO=omp echo safe" \
     "env -S 'echo omp'" \
     "env -S" \
+    "nice env -S 'echo omp'" \
+    "nice env -S" \
+    "nice env --ignore-environment" \
     "env --unknown $canonical_omp --raw-flag" \
+    "nice env --unknown $canonical_omp --raw-flag" \
     "bash $agent_script"; do
     result=$(PATH="$canonical_dir:$PATH" "$node_bin" "$policy" --command "$command")
     [ "$result" = other ] || fail "non-OMP command '$command' was classified as '$result'"
