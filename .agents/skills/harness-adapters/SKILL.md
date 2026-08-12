@@ -138,7 +138,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | Harness | Authoritative discovery surface |
 |---|---|
 | claude | Open the current interactive session's `/model` picker; `claude --help` documents the accepted alias or full-model-name input shape. |
-| codex | Open the current interactive session's `/model` picker. |
+| codex | Run `codex debug models` and inspect `supported_reasoning_levels` in the installed catalog; the interactive `/model` picker remains the account/session availability surface. |
 | opencode | Run `opencode models [provider]`, which lists available provider/model identifiers. |
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
@@ -148,8 +148,8 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-For local crewmate and scout launches, when a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness. Remote secondmate launches are stricter: unsupported or unverifiable effort, including an omitted/default effort without verified adapter semantics, refuses before readiness, inheritance or private-material transfer, and endpoint metadata publication. Codex `max` is additionally model-qualified: an explicitly known non-supporting model or an unknown model capability refuses before endpoint, metadata, or launch creation, so `effort=max` cannot masquerade as an applied setting.
-This preserves local launch success without passing a known-bad value while keeping remote runtime truthfulness fail-closed.
+The local-versus-remote effort contract, malformed-input handling, and Codex model-qualified `max` capability are owned by [`docs/configuration.md`](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
+At this risk point, never infer applied effort from an omitted adapter flag; remote secondmate preflight and reuse require verified effective-effort truth.
 
 ## no-mistakes skill invocation
 
@@ -199,7 +199,7 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
+## codex (baseline mechanics verified 2026-06-11 on codex-cli 0.139.0; max-effort profile refreshed 2026-08-12 on codex-cli 0.147.0)
 
 | Fact | Value |
 |---|---|

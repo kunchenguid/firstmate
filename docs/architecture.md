@@ -176,8 +176,8 @@ The shell scripts validate the JSON shape and verified harness/effort combinatio
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
-For local crewmate and scout launches, unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept. Remote secondmate launches refuse unsupported or unverifiable effort before readiness, inheritance or private-material transfer, and endpoint metadata publication. Codex `max` is the model-qualified exception: Firstmate emits it only for current catalog models that advertise `max`, and refuses before metadata or launch for a known non-supporting or unknown model.
-That keeps local spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit; remote routes remain fail-closed when runtime effort truth is unavailable.
+Profile effort semantics, including malformed-input rejection, local unsupported-effort omission, remote effective-effort preflight, and Codex model-qualified `max` capability, are owned by [configuration.md](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
+The architecture boundary remains that local launch preserves an unsupported requested profile for audit, while remote routes stay fail-closed when runtime effort truth is unavailable.
 
 ## Optional secondmates
 
