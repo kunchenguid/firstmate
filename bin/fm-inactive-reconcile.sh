@@ -203,7 +203,7 @@ queue_notice_once() { # <record> <key> <payload>
   fi
   fm_wake_append check "$key" "$payload" || return 2
   record_field_set "$record" notice_emitted 1 || return 2
-  printf 'actionable: %s\n' "$payload"
+  printf '%s\tactionable: %s\n' "$FM_WAKE_APPENDED_EPOCH" "$payload"
   return 0
 }
 
@@ -214,7 +214,7 @@ queue_presentation() { # <record> <fingerprint> <payload>
     return 1
   fi
   fm_wake_append check "$key" "$payload" || return 2
-  printf 'actionable: %s\n' "$payload"
+  printf '%s\tactionable: %s\n' "$FM_WAKE_APPENDED_EPOCH" "$payload"
   return 0
 }
 

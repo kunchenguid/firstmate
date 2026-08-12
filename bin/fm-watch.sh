@@ -866,9 +866,12 @@ while :; do
   # This is mechanical and silent unless a durable terminal-outcome obligation
   # was created, so quiet cycles never wake firstmate or consume model tokens.
   inactive_out=
+  FM_WAKE_APPENDED_EPOCH=
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
+      FM_WAKE_APPENDED_EPOCH=$(printf '%s\n' "$inactive_out" \
+        | awk -F '\t' '$1 ~ /^[0-9]+$/ && (!epoch || $1 < epoch) { epoch=$1 } END { print epoch }')
       wake "check: inactive-outcome"
     fi
   else

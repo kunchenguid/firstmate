@@ -331,10 +331,10 @@ test_nonterminal_and_captain_held_states_do_not_report() {
 # The actual watcher poll invokes the helper, while an idle secondmate remains
 # exempt from wedge escalation and emits no false wake.
 test_watcher_hook_and_idle_secondmate_exemption() {
-  local out pid i
+  local out pid i epoch expected
   make_world watcher; write_child "$MAIN" child 'done: green'; prime_seen "$MAIN/state" "$MAIN/state/child.status"
   out="$WORLD/watch.out"
-  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+  TZ=UTC PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_FAKE_CREW_STATE='done' "$WATCH" > "$out" 2>&1 &
@@ -347,7 +347,10 @@ test_watcher_hook_and_idle_secondmate_exemption() {
     i=$((i + 1))
   done
   wait "$pid" 2>/dev/null || true
-  grep -Fq 'check: inactive-outcome' "$out" || fail "watcher did not surface its reconciliation result"
+  epoch=$(awk -F '\t' '$3 == "check" && $4 ~ /^inactive-outcome:/ { print $1; exit }' "$MAIN/state/.wake-queue")
+  expected=$(TZ=UTC FM_STATE_OVERRIDE="$MAIN/state" bash -c \
+    '. "$1"; fm_wake_format_reason "$2" "check: inactive-outcome"' _ "$ROOT/bin/fm-wake-lib.sh" "$epoch")
+  [ "$(cat "$out")" = "$expected" ] || fail "watcher did not surface reconciliation with its durable epoch: $(cat "$out")"
 
   make_world idle-secondmate; bind_secondmate local; write_mate_meta; prime_seen "$MAIN/state" "$MAIN/state/mate.status"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
