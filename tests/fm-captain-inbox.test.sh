@@ -108,16 +108,27 @@ function assistant(content, timestamp, stopReason = "stop") {
   };
 }
 
+function emit(runtime, event, payload) {
+  runtime.handlers.get(event)?.(payload, runtime.ctx);
+}
+
 async function deliver(runtime, {
   source = "interactive",
   text = "Captain request",
   prompt = text,
+  beforeAgentStart = true,
   message = assistant([{ type: "text", text: "Captain response" }], Date.parse("2026-08-01T00:00:00.000Z")),
 } = {}) {
-  runtime.handlers.get("input")({ source, text }, runtime.ctx);
-  runtime.handlers.get("before_agent_start")({ prompt }, runtime.ctx);
-  runtime.handlers.get("message_end")({ message }, runtime.ctx);
-  runtime.handlers.get("agent_settled")({}, runtime.ctx);
+  emit(runtime, "input", { source, text });
+  if (beforeAgentStart) emit(runtime, "before_agent_start", { prompt });
+  emit(runtime, "message_end", { message });
+  emit(runtime, "agent_settled", {});
+}
+
+function queueOperationalFollowUp(runtime, text) {
+  // Pi emits input when sendUserMessage queues a follow-up while the agent is
+  // streaming, but that queued continuation has no matching before_agent_start.
+  emit(runtime, "input", { source: "extension", text });
 }
 
 const disabled = await makeHome("disabled", { enabled: false });
@@ -147,40 +158,86 @@ await deliver(runtime, { message: first });
 await delay(50);
 assert.equal((await list(home)).messages.length, 1, "duplicate completed event created another message");
 
+const queuedOperational = execFileSync(operationalInput, ["encode", "watcher"], {
+  encoding: "utf8",
+  input: "a watcher notification queued while Pi is streaming",
+}).trimEnd();
+const knowledgebaseOperational = execFileSync(operationalInput, ["encode", "watcher"], {
+  encoding: "utf8",
+  input: "Project Knowledgebase MVP ready",
+}).trimEnd();
+const dashboardOperational = execFileSync(operationalInput, ["encode", "watcher"], {
+  encoding: "utf8",
+  input: "dashboard update ready",
+}).trimEnd();
+const knowledgebaseResponse = "Captain, the Project Knowledgebase MVP is ready.";
+const dashboardResponse = "Captain, the dashboard update is ready.";
+const logResponse = "Captain, Captain’s Log test received after the dashboard update.";
+
+// This is the exact poisoning sequence from the Pi extension API.
+// An operational follow-up emits input while streaming and has no matching
+// before_agent_start, so the old FIFO left a false eligibility entry behind.
+// The later idle operational runs and fresh direct input each shifted that stale
+// false entry and their finalized visible assistant messages were dropped.
+queueOperationalFollowUp(runtime, queuedOperational);
+await deliver(runtime, {
+  source: "extension",
+  text: knowledgebaseOperational,
+  prompt: knowledgebaseOperational,
+  message: assistant([{ type: "text", text: knowledgebaseResponse }], firstTimestamp + 5),
+});
+await deliver(runtime, {
+  source: "extension",
+  text: dashboardOperational,
+  prompt: dashboardOperational,
+  message: assistant([{ type: "text", text: dashboardResponse }], firstTimestamp + 6),
+});
+await deliver(runtime, {
+  text: "captains log test",
+  message: assistant([{ type: "text", text: logResponse }], firstTimestamp + 7),
+});
+await eventually(async () => (await list(home)).messages.length === 4, "operational or post-operational direct responses were not captured");
+inbox = await list(home);
+assert.deepEqual(
+  inbox.messages.map((message) => message.body).sort(),
+  [body, knowledgebaseResponse, dashboardResponse, logResponse].sort(),
+  "the direct and operational finalized assistant responses did not reach the dashboard",
+);
+
 const ignoredCases = [
   {
-    message: { role: "user", content: "Captain prompt", timestamp: firstTimestamp + 1 },
+    message: { role: "user", content: "Captain prompt", timestamp: firstTimestamp + 8 },
   },
   {
-    message: assistant([{ type: "thinking", thinking: "private only" }], firstTimestamp + 2),
+    message: assistant([{ type: "thinking", thinking: "private only" }], firstTimestamp + 9),
   },
   {
-    message: assistant([{ type: "text", text: "intermediate" }, { type: "toolCall", id: "tool", name: "read", arguments: {} }], firstTimestamp + 3, "toolUse"),
+    message: assistant([{ type: "text", text: "intermediate" }, { type: "toolCall", id: "tool", name: "read", arguments: {} }], firstTimestamp + 10, "toolUse"),
   },
   {
     source: "extension",
-    text: "routine internal notification",
-    message: assistant([{ type: "text", text: "routine internal response" }], firstTimestamp + 4),
+    text: "extension-only notification",
+    message: { role: "custom", content: "extension-only notification", timestamp: firstTimestamp + 11 },
+  },
+  {
+    source: "extension",
+    text: queuedOperational,
+    prompt: queuedOperational,
+    message: assistant([{ type: "text", text: "Captain, shipshape." }], firstTimestamp + 12),
+  },
+  {
+    message: assistant([{ type: "text", text: "Captain, shipshape." }], firstTimestamp + 13),
   },
 ];
 for (const ignored of ignoredCases) await deliver(runtime, ignored);
-const encodedOperational = execFileSync(operationalInput, ["encode", "watcher"], {
-  encoding: "utf8",
-  input: "internal watcher notification",
-}).trimEnd();
-await deliver(runtime, {
-  text: encodedOperational,
-  prompt: encodedOperational,
-  message: assistant([{ type: "text", text: "operational response" }], firstTimestamp + 5),
-});
 await delay(50);
-assert.equal((await list(home)).messages.length, 1, "filter captured a prompt, tool path, or operational response");
+assert.equal((await list(home)).messages.length, 4, "filter captured a prompt, tool path, extension entry, or routine acknowledgement");
 
 await runCli(home, "mark", firstId, "read");
 inbox = await list(home);
-assert.equal(inbox.messages[0].read, true, "mark read did not persist independently");
+assert.equal(inbox.messages.find((message) => message.id === firstId)?.read, true, "mark read did not persist independently");
 await runCli(home, "mark", firstId, "unread");
-assert.equal((await list(home)).messages[0].read, false, "mark unread did not persist independently");
+assert.equal((await list(home)).messages.find((message) => message.id === firstId)?.read, false, "mark unread did not persist independently");
 await expectCliFailure(home, ["list", "/tmp/unrelated"], /invalid/);
 
 if (process.platform !== "win32") {
