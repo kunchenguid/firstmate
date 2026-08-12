@@ -20,13 +20,22 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
-last=
+session=
+separator_seen=0
+previous=
 for arg in "$@"; do
-  previous=$last
-  last=$arg
+  if [ "$arg" = -- ]; then
+    separator_seen=1
+    previous=
+    continue
+  fi
+  if [ "$previous" = --session ]; then
+    [ "$separator_seen" = 0 ] || { echo "fake herdr: --session occurs after -- separator" >&2; exit 90; }
+    session=$arg
+  fi
+  previous=$arg
 done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
+[ -n "$session" ] || { echo "fake herdr: missing --session before -- separator" >&2; exit 90; }
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
@@ -109,6 +118,8 @@ test_provision_run_and_guarded_teardown() {
   assert_present "$TRIPWIRES/$name.fleet-state.json" "provision did not record the fleet-state tripwire"
 
   run_with_fake fm_herdr_lab_cli "$name" workspace list >/dev/null || fail "safe run command failed"
+  run_with_fake fm_herdr_lab_cli "$name" agent start worker -- bin/worker --flag >/dev/null \
+    || fail "safe separator command failed"
   run_with_fake fm_herdr_lab_cli "$name" server >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "bare server start outside provision must be refused"
   status=0
@@ -139,10 +150,15 @@ test_provision_run_and_guarded_teardown() {
 
   while IFS= read -r line; do
     case "$line" in
-      *"--session $name") : ;;
-      *) fail "Herdr call lacks a trailing lab session: $line" ;;
+      *"-- "*"--session $name"*) fail "Herdr call placed the lab session after the separator: $line" ;;
+      *"--session $name"*) : ;;
+      *) fail "Herdr call lacks an explicit lab session: $line" ;;
     esac
   done < "$FAKE_LOG"
+  grep -F "workspace list --session $name" "$FAKE_LOG" >/dev/null \
+    || fail "non-separator call did not append the explicit lab session"
+  grep -F "agent start worker --session $name -- bin/worker --flag" "$FAKE_LOG" >/dev/null \
+    || fail "separator call did not place the explicit lab session before the separator"
   line_count=$(wc -l < "$FAKE_LOG" | tr -d ' ')
   stop_line=$(grep -n "^session stop $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
   delete_line=$(grep -n "^session delete $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)

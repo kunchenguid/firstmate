@@ -13,7 +13,8 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
-# Every Herdr call made here carries a trailing --session <session>.
+# Every Herdr call made here carries --session <session> before the first --
+# separator, or at the end when there is no separator.
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
 # operation.
@@ -49,9 +50,26 @@ fm_herdr_lab_tripwire_path() { # <session>
 }
 
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
-  local name=$1
+  local name=$1 arg
+  local separator_seen=0
+  local -a scoped_args=()
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  fm_herdr_lab_validate_name "$name" || return 1
+  [ "$#" -gt 0 ] || {
+    fm_herdr_lab_error "refusing Herdr call without a subcommand; lab isolation cannot be established"
+    return 1
+  }
+  for arg in "$@"; do
+    if [ "$separator_seen" = 0 ] && [ "$arg" = -- ]; then
+      scoped_args+=(--session "$name")
+      separator_seen=1
+    fi
+    scoped_args+=("$arg")
+  done
+  if [ "$separator_seen" = 0 ]; then
+    scoped_args+=(--session "$name")
+  fi
+  HERDR_SESSION="$name" herdr "${scoped_args[@]}"
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -134,7 +152,7 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   for arg in "$@"; do
     case "$arg" in
       --session|--session=*)
-        fm_herdr_lab_error "run forbids caller-supplied --session; the helper appends the lab session"
+        fm_herdr_lab_error "run forbids caller-supplied --session; the helper supplies the lab session"
         return 1
         ;;
     esac
