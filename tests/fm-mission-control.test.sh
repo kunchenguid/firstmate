@@ -895,7 +895,7 @@ test_absent_sources_render_empty_sections() {
   assert_grep 'Nothing blocked or failed.' "$board" "an empty home must report clear fleet health"
   assert_grep 'No project registry found' "$board" "an absent registry must be reported, not crash"
   assert_grep 'No second mates registered.' "$board" "an absent secondmate registry must be reported"
-  assert_grep 'Allowance unavailable' "$board" "a skipped allowance read must be disclosed"
+  assert_grep 'Allowance information is unavailable' "$board" "a skipped allowance read must be disclosed"
   pass "absent sources render as explicit empty sections instead of failing"
 }
 
@@ -1987,341 +1987,93 @@ test_secondmate_child_count_shapes_render_safely() {
   pass "secondmate child counts stay honest across numeric, zero, missing, and malformed inputs"
 }
 
-# A captured Token Dashboard API response drives the board through the same
-# public payload the standalone service serves. The board keeps the pace-first
-# hierarchy but narrows the payload before rendering, so session rows and action
-# reasons cannot leak into Mission Control.
-write_token_payload() {  # <path>
-  cat > "$1" <<'EOF'
-{
-  "latest": {
-    "capturedAt": "2026-01-02T14:50:00Z",
-    "windows": [
-      {"key":"claude:five_hour","provider":"claude","providerLabel":"Claude Max","id":"five_hour","label":"Claude · 5-hour","shortLabel":"Claude 5-hour","percentUsed":30,"percentRemaining":70,"resetsAt":"2026-01-02T17:00:00Z","windowSeconds":18000,"pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":30,"burnMultiple":0.5,"projectedExhaustedAt":"2026-01-02T18:00:00Z"}},
-      {"key":"claude:seven_day","provider":"claude","providerLabel":"Claude Max","id":"seven_day","label":"Claude · 7-day","shortLabel":"Claude 7-day","percentUsed":80,"percentRemaining":20,"resetsAt":"2026-01-03T08:10:00Z","windowSeconds":604800,"pace":{"status":"ahead","elapsedPercent":90,"reservePercentPoints":10,"burnMultiple":0.89,"projectedExhaustedAt":"2026-01-03T07:00:00Z"}},
-      {"key":"codex:weekly","provider":"codex","providerLabel":"ChatGPT Pro (OpenAI)","id":"weekly","label":"ChatGPT · weekly","shortLabel":"ChatGPT weekly","percentUsed":80,"percentRemaining":20,"resetsAt":"2026-01-04T05:30:00Z","windowSeconds":604800,"pace":{"status":"ahead","elapsedPercent":77,"reservePercentPoints":-3,"burnMultiple":1.04,"projectedExhaustedAt":"2026-01-03T20:30:00Z"}}
-    ]
-  },
-  "history": [
-    {"capturedAt":"2026-01-02T13:00:00Z","windows":[{"key":"claude:five_hour","percentUsed":10,"resetsAt":"2026-01-02T17:00:00Z"},{"key":"claude:seven_day","percentUsed":70,"resetsAt":"2026-01-03T08:10:00Z"},{"key":"codex:weekly","percentUsed":70,"resetsAt":"2026-01-04T05:30:00Z"}]},
-    {"capturedAt":"2026-01-02T14:00:00Z","windows":[{"key":"claude:five_hour","percentUsed":20,"resetsAt":"2026-01-02T17:00:00Z"},{"key":"claude:seven_day","percentUsed":75,"resetsAt":"2026-01-03T08:10:00Z"},{"key":"codex:weekly","percentUsed":75,"resetsAt":"2026-01-04T05:30:00Z"}]},
-    {"capturedAt":"2026-01-02T14:50:00Z","windows":[{"key":"claude:five_hour","percentUsed":30,"resetsAt":"2026-01-02T17:00:00Z"},{"key":"claude:seven_day","percentUsed":80,"resetsAt":"2026-01-03T08:10:00Z"},{"key":"codex:weekly","percentUsed":80,"resetsAt":"2026-01-04T05:30:00Z"}]}
-  ],
-  "settings":{"paceThresholds":{"fiveHour":{"comfortable":20,"edge":8},"weekly":{"comfortable":15,"edge":5}}},
-  "lastError":null,
-  "balancing":{"error":null,"actions":[
-    {"ts":"2026-01-02T14:40:00Z","action":"route_visual_to_chatgpt","providerEased":"claude","auto":true,"tokens":1234,"reason":"TOP_SECRET_REASON","detail":"TOP_SECRET_DETAIL"},
-    {"ts":"2026-01-02T12:00:00Z","action":"manual_override","providerEased":"codex","auto":false}
-  ]},
-  "metering":{"ranges":[{"providers":{"claude":{"sessions":[{"sessionId":"TOP_SECRET_SESSION"}]}}}]},
-  "credentials":{"token":"TOP_SECRET_CREDENTIAL"},
-  "refreshIntervalMs":900000
-}
-EOF
-}
-
-write_grok_quota_payload() {  # <path> [remaining]
-  local remaining=${2:-97}
-  cat > "$1" <<EOF
-{
-  "providers": [{
-    "provider": "grok",
-    "label": "Grok / SuperGrok",
-    "windows": [
-      {"id":"credits","label":"credits","percentUsed":$((100 - remaining)),"percentRemaining":$remaining,"resetsAt":"2026-01-09T15:00:00Z","pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":$((remaining - 40)),"cycleSeconds":604800,"burnMultiple":0.5,"projectedExhaustedAt":"2026-01-10T15:00:00Z"}},
-      {"id":"product:grok_build","label":"Grok Build","percentUsed":2,"percentRemaining":98,"resetsAt":"2026-01-09T15:00:00Z","pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":38,"cycleSeconds":604800,"burnMultiple":0.05,"projectedExhaustedAt":"2026-01-10T15:00:00Z"}},
-      {"id":"product:chat","label":"Chat","percentUsed":1,"percentRemaining":99,"resetsAt":"2026-01-09T15:00:00Z","pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":39,"cycleSeconds":604800,"burnMultiple":0.025,"projectedExhaustedAt":"2026-01-10T15:00:00Z"}}
-    ],
-    "credits": {"remaining": 1234, "unit": "credits"},
-    "state": {"status":"fresh","authStatus":"usable"}
-  }]
-}
-EOF
-}
-
-test_rich_token_dashboard_is_one_pace_first_allowance_view() {
-  local snap token board cards
-  snap=$TMP_ROOT/rich-token-snapshot.json
-  token=$TMP_ROOT/rich-token.json
-  board=$TMP_ROOT/rich-token.html
-  snapshot_json '[]' '[]' > "$snap"
-  write_token_payload "$token"
-
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a rich local token payload must render"
-
-  assert_grep 'Allowance &amp; pace' "$board" \
-    "the richer view must replace the old allowance heading rather than compete with it"
-  cards=$(grep -o 'class="qwindow tone-' "$board" | wc -l | tr -d ' ')
-  [ "$cards" = 3 ] || fail "the three primary allowance windows must render once each, got $cards"
-  assert_grep '<strong>70%</strong><span>remaining</span>' "$board" \
-    "current allowance must lead a window card"
-  assert_grep 'Comfortably under pace' "$board" "a roomy window must carry the configured pace verdict"
-  assert_grep 'Near your pace edge' "$board" "a narrowing window must carry the configured pace verdict"
-  assert_grep 'Past your pace edge' "$board" "an over-pace window must carry the configured pace verdict"
-  assert_grep '30% used · 60% through cycle · 30 pt pace buffer' "$board" \
-    "used allowance, cycle position, and reserve must remain one supporting pace line"
-  assert_grep 'Projected runway reaches reset' "$board" \
-    "a projection beyond reset must be stated as runway through reset"
-  assert_grep 'Projected exhaustion' "$board" \
-    "a projection before reset must state exhaustion rather than implying enough runway"
-  assert_grep '3 saved rounds · +20 pts observed' "$board" \
-    "the compact trend must state its observed history rather than inventing a forecast"
-  assert_grep 'Automatic balancing</strong> · 1 recent shift' "$board" \
-    "automatic balancing must remain visible without expanding into a monitoring wall"
-  assert_grep 'Route visual to chatgpt' "$board" "the newest automatic balancing action must be inspectable"
-  assert_no_grep 'Manual override' "$board" "manual activity must not be relabelled as automatic balancing"
-  assert_no_grep 'TOP_SECRET' "$board" \
-    "session rows, credentials, action reasons, and unknown fields must not enter Mission Control"
-  assert_no_grep '<h3>Allowance</h3>' "$board" \
-    "the legacy gauge pane must not duplicate the richer allowance view"
-  pass "rich local token data renders as one pace-first Mission Control allowance view"
-}
-
-test_unavailable_token_sources_are_explicit() {
-  local snap token quota board
-  snap=$TMP_ROOT/unavailable-token-snapshot.json
-  token=$TMP_ROOT/unavailable-token.json
-  quota=$TMP_ROOT/unavailable-quota.json
-  board=$TMP_ROOT/unavailable-token.html
-  snapshot_json '[]' '[]' > "$snap"
-  printf '%s\n' '{"latest":null,"history":[],"balancing":{"actions":[]},"refreshIntervalMs":900000}' > "$token"
-  printf '%s\n' '[]' > "$quota"
-
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "unavailable token sources must still render the board"
-  assert_grep 'Allowance unavailable' "$board" "an absent rich and raw reading must never look like zero"
-  assert_grep 'local token history has no successful reading' "$board" \
-    "the missing richer source must be named"
-  assert_no_grep '<strong>0%</strong><span>remaining</span>' "$board" \
-    "an unavailable allowance must not render as exhausted"
-  pass "unavailable rich and raw allowance sources render an explicit unavailable state"
-}
-
-test_token_dashboard_url_cannot_leave_the_local_machine() {
-  local snap board fakebin calls
-  snap=$TMP_ROOT/local-token-url-snapshot.json
-  board=$TMP_ROOT/local-token-url.html
-  calls=$TMP_ROOT/local-token-url.calls
-  snapshot_json '[]' '[]' > "$snap"
-  fakebin=$(fm_fakebin "$TMP_ROOT/local-token-url-bin")
-  cat > "$fakebin/curl" <<EOF
+# Allowance rendering is intentionally exercised only through the board's
+# executable interface.  The fake command behaves like quota-axi's one-shot
+# terminal view, including its ANSI styling and fixed-width box drawing.
+write_quota_axi() {  # <fake-bin> <mode>
+  local bin=$1 mode=$2
+  cat > "$bin/quota-axi" <<EOF
 #!/usr/bin/env bash
-printf '%s\\n' called >> '$calls'
-printf '%s\\n' '{"latest":{"capturedAt":"2026-01-02T14:50:00Z","windows":[]}}'
+case "\${1:-}:\${2:-}" in
+  --tui:--once) ;;
+  *) exit 64 ;;
+esac
+case "$mode" in
+  happy)
+    printf '\\033[1;36mquota-axi · fixture allowance\\033[0m\\n'
+    printf '\\033]8;;https://example.invalid/\\033\\\\quota docs\\033]8;;\\033\\\\\\n'
+    printf '╭──────────────────────────────────────────────────────────────────────────╮\\n'
+    printf '│  72%% week  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━          │\\n'
+    printf '│  <img src=x onerror=alert(1)>                                             │\\n'
+    printf '╰──────────────────────────────────────────────────────────────────────────╯\\n'
+    ;;
+  failed) exit 7 ;;
+esac
 EOF
-  cat > "$fakebin/quota-axi" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' '{"providers":[]}'
-EOF
-  chmod +x "$fakebin/curl" "$fakebin/quota-axi"
-
-  PATH="$fakebin:$PATH" FM_MISSION_CONTROL_TOKEN_URL='http://localhost:4173@outside.invalid/api/dashboard' \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a non-local token URL must fall back without leaving the machine"
-  assert_absent "$calls" "a userinfo-shaped URL must not trick the local-only reader into calling outside"
-  assert_grep 'token dashboard URL must be local' "$board" \
-    "the live-only fallback must say why richer local history was refused"
-  pass "the Token Dashboard reader cannot be redirected outside the local machine"
+  chmod +x "$bin/quota-axi"
 }
 
-test_stale_token_history_is_labelled_without_hiding_it() {
-  local snap token quota board
-  snap=$TMP_ROOT/stale-token-snapshot.json
-  token=$TMP_ROOT/stale-token.json
-  quota=$TMP_ROOT/stale-token-quota.json
-  board=$TMP_ROOT/stale-token.html
+test_quota_axi_tui_snapshot_renders_safely() {
+  local snap board fakebin
+  snap=$TMP_ROOT/quota-tui-snapshot.json
+  board=$TMP_ROOT/quota-tui.html
+  fakebin=$(fm_fakebin "$TMP_ROOT/quota-tui-bin")
   snapshot_json '[]' '[]' > "$snap"
-  write_token_payload "$token"
-  write_grok_quota_payload "$quota"
+  write_quota_axi "$fakebin" happy
 
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    FM_MISSION_CONTROL_NOW_EPOCH="$((NOW_EPOCH + 7200))" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a stale saved token reading must still render"
-  assert_grep 'Token Dashboard allowance data is stale' "$board" \
-    "the stale warning must identify the historical source rather than the live Grok cards"
-  assert_grep '2h ago' "$board" "staleness must be judged against the board clock"
-  assert_grep '<strong>70%</strong><span>remaining</span>' "$board" \
-    "stale data must remain inspectable rather than disappearing"
-  assert_grep '3 saved snapshots' "$board" "saved history must remain visible in the stale state"
-  pass "stale token history stays visible with an explicit freshness warning"
+  PATH="$fakebin:$PATH" "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a quota-axi TUI snapshot must render"
+  assert_grep 'quota-axi · fixture allowance' "$board" \
+    "the board must retain quota-axi's snapshot heading"
+  assert_grep 'quota docs' "$board" "safe text inside an ANSI hyperlink must remain visible"
+  assert_grep '72% week' "$board" "the board must retain quota-axi's allowance numbers"
+  assert_grep '━━━━━━━━━━━━━━━━' "$board" "the board must retain quota-axi's text bars"
+  assert_no_grep '\[1;36m' "$board" "ANSI styling parameters must not become visible text"
+  assert_no_grep '\[0m' "$board" "ANSI resets must not become visible text"
+  assert_no_grep 'example.invalid' "$board" "ANSI hyperlink controls must not become visible text"
+  assert_grep 'class="quota-snapshot"' "$board" "the snapshot must have its own scrollable surface"
+  assert_grep '&lt;img src=x onerror=alert(1)&gt;' "$board" \
+    "quota output must be escaped as text"
+  assert_no_grep '<img src=x onerror=alert(1)>' "$board" \
+    "quota output must never become markup"
+  assert_no_grep 'saved allowance' "$board" "the board must not render token-dashboard history"
+  assert_no_grep 'pace buffer' "$board" "the board must not render homemade pace tracking"
+  pass "quota-axi's one-shot TUI snapshot renders safely"
 }
 
-test_narrow_token_shapes_keep_every_value_wrappable() {
-  local snap token board long
-  snap=$TMP_ROOT/narrow-token-snapshot.json
-  token=$TMP_ROOT/narrow-token.json
-  board=$TMP_ROOT/narrow-token.html
+test_missing_quota_axi_is_explicit() {
+  local snap board fakebin jq_path python_path
+  snap=$TMP_ROOT/missing-quota-tui-snapshot.json
+  board=$TMP_ROOT/missing-quota-tui.html
+  fakebin=$(fm_fakebin "$TMP_ROOT/missing-quota-tui-bin")
+  jq_path=$(command -v jq)
+  python_path=$(command -v python3)
+  ln -s "$jq_path" "$fakebin/jq"
+  ln -s "$python_path" "$fakebin/python3"
   snapshot_json '[]' '[]' > "$snap"
-  write_token_payload "$token"
-  long='ClaudeAllowanceWindowWithAnIntentionallyLongUnbrokenOperatorFacingName1234567890'
-  jq --arg long "$long" \
-    '.latest.windows[0].shortLabel = $long | .latest.windows[0].providerLabel = ($long + $long)' \
-    "$token" > "$token.tmp" && mv "$token.tmp" "$token"
 
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a narrow-screen-shaped token payload must render"
-  assert_grep "$long" "$board" "a long honest label must stay present rather than being clipped from the payload"
-  assert_narrow_board_geometry "$board" "$long" "$long$long" \
-    || fail "long allowance labels must fit the rendered board without horizontal overflow"
-  pass "narrow-screen token shapes keep every operator value present and wrappable"
+  PATH="$fakebin:/usr/bin:/bin" "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a missing quota-axi binary must not stop the board"
+  assert_grep 'Allowance information is unavailable - quota-axi is not installed.' "$board" \
+    "a missing quota-axi binary must be named"
+  pass "a missing quota-axi binary is explicit"
 }
 
-test_unmeasurable_allowance_is_not_a_zero_gauge() {
-  local snap quota board
-  snap=$TMP_ROOT/quota-snap.json
-  quota=$TMP_ROOT/quota.json
-  board=$TMP_ROOT/quota.html
+test_failed_quota_axi_is_explicit() {
+  local snap board fakebin
+  snap=$TMP_ROOT/failed-quota-tui-snapshot.json
+  board=$TMP_ROOT/failed-quota-tui.html
+  fakebin=$(fm_fakebin "$TMP_ROOT/failed-quota-tui-bin")
   snapshot_json '[]' '[]' > "$snap"
-  cat > "$quota" <<'EOF'
-{"providers": [
-  {"provider": "claude", "label": "Claude", "windows": [],
-   "state": {"status": "auth_required", "error": "Claude sign-in required"}},
-  {"provider": "codex", "label": "Codex", "windows": [
-    {"id": "weekly", "label": "week", "percentRemaining": 68, "resetsAt": "2026-01-09T21:10:04.000Z"}]}
-]}
-EOF
-  FM_MISSION_CONTROL_QUOTA_JSON="$quota" "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "an allowance reading must render"
-  assert_grep '68%' "$board" "a measured allowance window must render as a gauge"
-  assert_grep 'Claude sign-in required' "$board" "an unavailable provider must state why"
-  # A sign-in gap is not an exhausted allowance, so it must never draw as 0%.
-  assert_no_grep '>0%<' "$board" "an unmeasurable provider must not render as a zero gauge"
-  pass "an unmeasurable allowance reports its reason instead of an empty gauge"
-}
+  write_quota_axi "$fakebin" failed
 
-test_grok_live_windows_fill_a_dashboard_gap() {
-  local snap token quota board cards
-  snap=$TMP_ROOT/grok-dashboard-gap-snapshot.json
-  token=$TMP_ROOT/grok-dashboard-gap-token.json
-  quota=$TMP_ROOT/grok-dashboard-gap-quota.json
-  board=$TMP_ROOT/grok-dashboard-gap.html
-  snapshot_json '[]' '[]' > "$snap"
-  write_token_payload "$token"
-  write_grok_quota_payload "$quota"
-
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a live Grok reading must fill a Token Dashboard provider gap"
-
-  cards=$(grep -o 'class="qwindow tone-' "$board" | wc -l | tr -d ' ')
-  [ "$cards" = 6 ] || fail "the three existing and three Grok windows must render, got $cards"
-  assert_grep '>Credits</span>' "$board" "the Grok credits window title must be human-readable"
-  assert_no_grep '>credits</span>' "$board" "the raw Grok credits identifier must not leak into the card title"
-  assert_grep '>Grok Build</span>' "$board" "the Grok Build product window must render"
-  assert_grep '>Chat</span>' "$board" "the Chat product window must render"
-  assert_grep '>Grok / SuperGrok</span>' "$board" "Grok cards must retain their provider label"
-  assert_grep '<strong>97%</strong><span>remaining</span>' "$board" \
-    "the Grok credits window percentage must render as remaining allowance"
-  assert_grep '60% through cycle' "$board" "Grok pace data must remain visible on the compact card"
-  assert_grep 'Projected runway reaches reset' "$board" "Grok runway must render when the live probe supplies it"
-  assert_no_grep '1234' "$board" "a prepaid credits balance must not be represented as a percentage or allowance window"
-  assert_narrow_board_geometry "$board" "Grok Build" "Grok / SuperGrok" \
-    || fail "Grok cards must fit a 390px allowance view"
-  pass "live Grok windows fill a missing Token Dashboard provider without using prepaid credits"
-}
-
-test_grok_quota_fallback_keeps_live_windows() {
-  local snap token quota board cards
-  snap=$TMP_ROOT/grok-quota-fallback-snapshot.json
-  token=$TMP_ROOT/grok-quota-fallback-token.json
-  quota=$TMP_ROOT/grok-quota-fallback-quota.json
-  board=$TMP_ROOT/grok-quota-fallback.html
-  snapshot_json '[]' '[]' > "$snap"
-  printf '%s\n' '{"latest":null,"history":[],"balancing":{"actions":[]}}' > "$token"
-  write_grok_quota_payload "$quota"
-  jq '.providers += [{"provider":"claude","label":"Claude Max","windows":[{"id":"five_hour","label":"5-hour","percentRemaining":68,"resetsAt":"2026-01-09T15:00:00Z"}],"state":{"status":"fresh"}}]' \
-    "$quota" > "$quota.tmp" && mv "$quota.tmp" "$quota"
-
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a Grok-only quota fallback must render"
-
-  cards=$(grep -o 'class="qwindow tone-' "$board" | wc -l | tr -d ' ')
-  [ "$cards" = 3 ] || fail "the three Grok fallback windows must use compact cards, got $cards"
-  assert_grep '>Grok Build</span>' "$board" "the compact fallback must retain Grok product windows"
-  assert_grep '<strong>98%</strong><span>remaining</span>' "$board" \
-    "the compact fallback must retain Grok window percentages"
-  assert_grep '60% through cycle' "$board" "the compact fallback must retain supplied Grok pace"
-  assert_grep 'Projected runway reaches reset' "$board" \
-    "the compact fallback must retain supplied Grok runway"
-  assert_grep 'Claude Max / 5-hour' "$board" \
-    "an existing provider must retain its legacy fallback gauge"
-  assert_no_grep '1234' "$board" "the quota fallback must not render prepaid credits as allowance"
-  pass "the raw quota fallback carries Grok windows through unchanged"
-}
-
-test_token_dashboard_grok_data_stays_preferred() {
-  local snap token quota board
-  snap=$TMP_ROOT/grok-dashboard-preferred-snapshot.json
-  token=$TMP_ROOT/grok-dashboard-preferred-token.json
-  quota=$TMP_ROOT/grok-dashboard-preferred-quota.json
-  board=$TMP_ROOT/grok-dashboard-preferred.html
-  snapshot_json '[]' '[]' > "$snap"
-  write_token_payload "$token"
-  jq '.latest.windows += [{"key":"grok:product:grok_build","provider":"grok","providerLabel":"Grok / SuperGrok","id":"product:grok_build","label":"Dashboard Grok Build","shortLabel":"Dashboard Grok Build","percentUsed":23,"percentRemaining":77,"resetsAt":"2026-01-09T15:00:00Z","windowSeconds":604800,"pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":17,"burnMultiple":0.6,"projectedExhaustedAt":"2026-01-10T15:00:00Z"}},{"key":"grok:credits","provider":"grok","providerLabel":"Grok / SuperGrok","id":"credits","label":"credits","shortLabel":"credits","percentUsed":9,"percentRemaining":91,"resetsAt":"2026-01-09T15:00:00Z","windowSeconds":604800,"pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":31,"burnMultiple":0.2,"projectedExhaustedAt":"2026-01-10T15:00:00Z"}}]' \
-    "$token" > "$token.tmp" && mv "$token.tmp" "$token"
-  write_grok_quota_payload "$quota" 12
-
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a Token Dashboard Grok reading must render"
-
-  assert_grep '>Dashboard Grok Build</span>' "$board" \
-    "the normalized Token Dashboard Grok window must render"
-  assert_grep '>Credits</span>' "$board" \
-    "the normalized Token Dashboard credits title must be human-readable"
-  assert_no_grep '>credits</span>' "$board" \
-    "the normalized Token Dashboard credits title must not remain lowercase"
-  assert_grep '<strong>77%</strong><span>remaining</span>' "$board" \
-    "the normalized Token Dashboard reading must remain authoritative"
-  assert_no_grep '<strong>12%</strong><span>remaining</span>' "$board" \
-    "a live Grok fallback must not replace normalized Token Dashboard data"
-  pass "Token Dashboard Grok data remains preferred over the live fallback"
-}
-
-test_grok_unmeasurable_and_sign_in_states_use_existing_allowance_copy() {
-  local snap token quota board
-  snap=$TMP_ROOT/grok-unmeasurable-snapshot.json
-  token=$TMP_ROOT/grok-unmeasurable-token.json
-  quota=$TMP_ROOT/grok-unmeasurable-quota.json
-  board=$TMP_ROOT/grok-unmeasurable.html
-  snapshot_json '[]' '[]' > "$snap"
-  write_token_payload "$token"
-
-  cat > "$quota" <<'EOF'
-{"providers":[{"provider":"grok","label":"Grok / SuperGrok","windows":[],"credits":{"remaining":456,"unit":"credits"},"state":{"status":"fresh"}}]}
-EOF
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a prepaid-credits-only Grok source must render"
-  assert_grep '<span>Grok / SuperGrok</span><span class="gval">fresh</span>' "$board" \
-    "a prepaid-credits-only source must use the existing no-window state"
-  assert_no_grep '456' "$board" "a prepaid credits balance must remain out of the allowance UI"
-
-  cat > "$quota" <<'EOF'
-{"providers":[{"provider":"grok","label":"Grok / SuperGrok","windows":[{"id":"product:chat","label":"Chat"}],"state":{"status":"unavailable","error":"Grok usage unavailable"}}]}
-EOF
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "an unmeasurable Grok source must render"
-  assert_grep 'Grok usage unavailable' "$board" \
-    "an unmeasurable Grok window must use the existing provider reason"
-
-  cat > "$quota" <<'EOF'
-{"providers":[{"provider":"grok","label":"Grok / SuperGrok","windows":[],"state":{"status":"auth_required","error":"Grok sign-in required"}}]}
-EOF
-  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
-    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
-    || fail "a Grok sign-in-required source must render"
-  assert_grep 'Grok sign-in required' "$board" \
-    "a Grok sign-in gap must use the existing provider reason"
-  assert_no_grep '>0%<' "$board" "unavailable Grok data must not render as exhausted allowance"
-  pass "Grok prepaid, unmeasurable, and sign-in states use existing allowance equivalents"
+  PATH="$fakebin:$PATH" "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a failed quota-axi command must not stop the board"
+  assert_grep 'Allowance information is unavailable - quota-axi could not provide an allowance snapshot.' "$board" \
+    "a failed quota-axi command must be explicit"
+  assert_no_grep 'fixture allowance' "$board" \
+    "a failed command must not leave a stale snapshot behind"
+  pass "a failed quota-axi command is explicit"
 }
 
 test_usage_errors_refuse() {
@@ -3784,16 +3536,9 @@ test_live_work_outside_the_registry_stays_visible
 test_unregistered_live_project_uses_clone_change_time
 test_secondmate_health_and_activity_use_authoritative_counts
 test_secondmate_child_count_shapes_render_safely
-test_rich_token_dashboard_is_one_pace_first_allowance_view
-test_unavailable_token_sources_are_explicit
-test_token_dashboard_url_cannot_leave_the_local_machine
-test_stale_token_history_is_labelled_without_hiding_it
-test_narrow_token_shapes_keep_every_value_wrappable
-test_unmeasurable_allowance_is_not_a_zero_gauge
-test_grok_live_windows_fill_a_dashboard_gap
-test_grok_quota_fallback_keeps_live_windows
-test_token_dashboard_grok_data_stays_preferred
-test_grok_unmeasurable_and_sign_in_states_use_existing_allowance_copy
+test_quota_axi_tui_snapshot_renders_safely
+test_missing_quota_axi_is_explicit
+test_failed_quota_axi_is_explicit
 test_usage_errors_refuse
 test_self_reload_is_wired
 test_favicon_is_self_contained_in_every_board

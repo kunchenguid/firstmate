@@ -3,7 +3,7 @@
 `bin/fm-mission-control.sh` renders the fleet's current state into one self-contained HTML board that the captain keeps open.
 It is a generator, not a server: each run writes one file, and the page reloads itself so a regenerated file appears without a click.
 
-The board is a compact executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, a very recent autonomous-actions feed, and a quiet System view carrying fleet health plus allowance pace.
+The board is a compact executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, a very recent autonomous-actions feed, and a quiet System view carrying fleet health plus a provider allowance snapshot.
 Its neutral Grok-inspired visual system uses dark as the explicit CSS fallback and default, then follows a light system preference for bright contexts.
 The renderer's inline style is the sole board CSS owner and documents the role-token contract and semantic mappings.
 Components consume those roles instead of owning palette literals.
@@ -16,7 +16,7 @@ The script's own header and `--help` own its exact flags, environment variables,
 
 The board shows state.
 By default it shows nothing else: no reply controls, no review surface, no browser network requests, and no supervision wiring.
-The generator's allowance read is a bounded loopback GET to the local Token Dashboard, never a request from the rendered page or to a remote host.
+The generator's allowance read is a bounded `quota-axi --tui --once` subprocess on the board's existing regeneration cadence, never a live terminal or a request from the rendered page.
 `--controls` adds the captain reply layer described under "Replying from the board", which records requests and still performs nothing itself.
 That layer is the only thing that makes the page itself reach the network, and only to the URL it was loaded from.
 
@@ -94,15 +94,13 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   Raw JSON remains available only in an expandable shelf.
   The canonical schema and all field semantics remain in [`docs/configuration.md`](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
   The view also notes that secondmate homes receive this same file when inherited configuration is pushed.
-- **Model-provider allowance & pace** integrates the local Token Dashboard into the System view rather than repeating its numbers in a separate dashboard-shaped panel.
+- **Model-provider allowance** shows `quota-axi`'s own one-shot terminal screen in the System view.
   Reciprocal links connect this provider-budget surface with Dispatch directly above it without adding routing or selection logic.
-  Each primary allowance window leads with current remaining allowance, then keeps pace against the reset, observed cycle history, and projected runway or exhaustion in one compact card.
-  Recent automatic balancing is a quiet collapsed shelf under those cards, so its activity remains visible without becoming another monitoring feed.
-  Mission Control consumes normalized allowance windows, bounded history, pace thresholds, and the safe balancing summary from the Token Dashboard API, adding a narrowed live Grok window set from `quota-axi` only while that source has no Grok windows.
-  Session rows, credentials, action reasons, action details, and unknown payload fields are discarded before rendering.
-  An old successful Token Dashboard reading is labelled stale, a failed latest collection is stated, and an absent dashboard keeps existing providers on the original live `quota-axi` gauges while Grok uses compact cards with supplied pace, reset, and runway; saved history and balancing remain explicitly unavailable.
-  Missing Grok measurements use the existing unavailable, unmeasurable, or sign-in-required state instead of zero, and the separate prepaid credits balance is never treated as a percentage.
-  The renderer only reads the standalone service and never refreshes, changes, stops, or replaces it.
+  Mission Control does not interpret, augment, or reproduce the snapshot's allowance numbers, pace, layout, or history.
+  The fixed-width screen is plain text inside a themed, horizontally scrollable surface, with terminal control sequences removed and every character HTML-escaped before rendering.
+  At phone width the screen uses a smaller monospace presentation with box-drawing coverage so more of its grid remains legible while the page body stays contained.
+  If `quota-axi` is missing, fails, times out, or returns no output, the section plainly states that allowance information is unavailable without inventing numbers or restoring the old charts.
+  Token Dashboard logging and its saved history remain untouched, but Mission Control no longer reads or renders them.
 
 An idle second mate is healthy and is rendered as such, never as an alarm.
 
@@ -287,7 +285,7 @@ If the request log stops matching the recorded cursor - it was replaced, truncat
 `bin/fm-mission-control.sh --help` owns the exact commands for setting a decision aside and bringing it back, including the reason-preservation hazard.
 
 Any source may be absent.
-An absent backlog, project registry, secondmate table, Token Dashboard reading, or live allowance fallback renders an explicit unavailable or empty notice that states what is missing, and never a misleading zero.
+An absent backlog, project registry, secondmate table, or allowance snapshot renders an explicit unavailable or empty notice that states what is missing, and never a misleading zero.
 
 ## Where the data comes from
 
@@ -299,10 +297,9 @@ Paths come from that snapshot's own resolved roots, so the board follows the act
 Four concerns come from outside the snapshot because the snapshot does not own them:
 
 - `data/projects.md` is the delivery-posture registry that the project cards group by.
-- The local Token Dashboard API is the preferred allowance source because that service owns normalized pace thresholds, append-only quota history, projected runway, and the automatic balancing feed.
-  The board narrows the response to its display contract before rendering and never carries session-level metering into its HTML.
-  If the local service has no successful reading or cannot be reached, `quota-axi --json` remains the live-only fallback.
-  A provider with no readable window is reported with its reason, because a sign-in gap is not an exhausted allowance.
+- `quota-axi --tui --once` is the sole allowance source for Mission Control and owns the snapshot's content and terminal layout.
+  The board captures it only while regenerating, removes terminal control sequences, and embeds the remaining text in the self-contained page.
+  This display path does not change the separate `quota-axi --json` contract used for dispatch routing.
 - `state/autonomous-actions.ndjson` is the private, append-only source for the narrow recent autonomous-actions feed.
   It is read only by the board and never derived from task status prose.
 - Each project card's last-change time.
@@ -320,7 +317,7 @@ Both name the same project, so both fold onto the same rollup row and display as
 [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns which structured context fields a captain decision records and how they are backfilled through the supported hold interface.
 The canonical backlog parser and secondmate-home summary carry that context to renderers, so Mission Control does not parse private body conventions itself.
 
-Every value that comes from fleet state, the registry, the autonomous-action record, or either allowance source is HTML-escaped before it reaches the page.
+Every value that comes from fleet state, the registry, the autonomous-action record, or the allowance snapshot is HTML-escaped before it reaches the page.
 
 ## Recording autonomous actions
 
@@ -348,7 +345,7 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, known and unavailable header render times, the empty and populated recent autonomous-actions feed, its 12-hour expiry and newest-first order, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, the deferred shelf, and labelled structured decision context.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and captured fleet snapshots, covering present and absent sources, known and unavailable header render times, the empty and populated recent autonomous-actions feed, its 12-hour expiry and newest-first order, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, the one-shot allowance snapshot's happy, missing-binary, and failed-command paths, its safe text rendering and fixed-width containment, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, the deferred shelf, and labelled structured decision context.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 The decision-context case renders a structured and an old-style decision from one fixture home and pins the count of rendered context blocks, so leaving the old-style decision alone is proven rather than inferred from it happening to look bare.
 The dependency case adds a titled dependent, an unavailable secondmate-dependent title, and a decision with no dependents, then pins the titled line, id fallback, and absence of an extra line.

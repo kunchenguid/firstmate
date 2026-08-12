@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-herdr-lab.sh using a stateful fake Herdr client.
+# Behavior tests for Herdr support scripts using fake executable interfaces.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -234,6 +234,73 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_installer_retries_transient_download_failure() {
+  local tmp fakebin destination failed_destination out rc
+  tmp=$(fm_test_tmproot fm-herdr-installer)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$CURL_COUNT"
+[ "${CURL_ALWAYS_FAIL:-0}" != 1 ] || exit 22
+[ "$count" -gt 1 ] || exit 22
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    cat > "$2" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'herdr 0.7.4\n' ;;
+  status) printf '{"client":{"protocol":16}}\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  *herdr-linux-x86_64) sum=bc0fc02d4ba500f9cac2353a43e67fe036785ecca6eb55378e050fac3c103059 ;;
+  *herdr-linux-aarch64) sum=544e0002de42806d1ab64ccdef3a7e7414f24717b0b6b022bc9e57d2eefd26a2 ;;
+  *herdr-macos-aarch64) sum=24992e1625dbdcb18354a59e299e4b263c312400b31396cdc07cd46ed57f24a7 ;;
+  *herdr-macos-x86_64) sum=ddf430133352e1712413d5d865b34a485546f4658893fc89986257d65a7585a8 ;;
+  *) exit 2 ;;
+esac
+printf '%s  %s\n' "$sum" "$1"
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/sleep"
+
+  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-install-herdr.sh" "$destination" 2>&1) \
+    || fail "Herdr installer did not recover from a transient HTTP failure"$'\n'"$out"
+  [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "Herdr installer did not retry exactly once after recovery"
+  assert_contains "$out" "download attempt 1 failed; retrying" "Herdr installer did not disclose its retry"
+  assert_contains "$out" "installed herdr 0.7.4 (protocol 16)" "Herdr installer skipped its post-install gates"
+  [ -x "$destination/herdr" ] || fail "Herdr installer did not install the verified binary after retrying"
+
+  failed_destination="$tmp/failed-bin"
+  rm -f "$tmp/curl-count"
+  rc=0
+  out=$(CURL_ALWAYS_FAIL=1 CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-install-herdr.sh" "$failed_destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Herdr installer accepted a persistently failed download"
+  [ "$(cat "$tmp/curl-count")" -eq 3 ] || fail "Herdr installer did not bound a persistent failure at three attempts"
+  assert_contains "$out" "download failed" "Herdr installer did not report its bounded download failure"
+  [ ! -e "$failed_destination/herdr" ] || fail "Herdr installer installed a binary after persistent download failure"
+  pass "Herdr installer retries a transient release download failure"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
@@ -241,3 +308,4 @@ test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
+test_installer_retries_transient_download_failure

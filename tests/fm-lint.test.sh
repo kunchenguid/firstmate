@@ -46,7 +46,7 @@ test_pins_an_explicit_version() {
   pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"
 }
 
-test_installer_retries_transient_download_failure() {
+test_installer_outlasts_three_transient_download_failures() {
   local tmp fakebin destination out
   tmp=$(fm_test_tmproot fm-shellcheck-download)
   fakebin=$(fm_fakebin "$tmp")
@@ -58,7 +58,7 @@ count=0
 [ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
 count=$((count + 1))
 printf '%s\n' "$count" > "$CURL_COUNT"
-[ "$count" -gt 1 ] || exit 35
+[ "$count" -gt 3 ] || exit 35
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
     : > "$2"
@@ -96,10 +96,11 @@ SH
 
   out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
-  [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "installer did not retry exactly once after recovery"
+  [ "$(cat "$tmp/curl-count")" -eq 4 ] || fail "installer did not recover on the fourth download attempt"
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
+  assert_contains "$out" "download attempt 3 failed; retrying" "installer stopped at the former retry limit"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
-  pass "ShellCheck installer retries a transient download failure"
+  pass "ShellCheck installer outlasts three transient download failures"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -428,7 +429,7 @@ SH
 
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
-test_installer_retries_transient_download_failure
+test_installer_outlasts_three_transient_download_failures
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts

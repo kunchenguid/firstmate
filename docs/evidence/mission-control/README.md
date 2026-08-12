@@ -32,9 +32,8 @@ The after images keep `Write your own answer` beside the two explicit labels, wh
 `before-local-report-mobile.png` and `after-local-report-mobile.png` reproduce the reported 390px Qwen bounded-judgment card before and after local report paths stopped being links.
 The after image identifies `data/local-lane-bakeoff-v2-powered/report.md` as local report context and removes the navigation chevron; the browser regression additionally performs a real emulated mobile touch on that exact text and confirms the page does not navigate.
 
-`before-token-integration-desktop.png` and `after-token-integration-desktop.png` show the full desktop board System view before and after the local pace-first allowance integration.
-`before-token-integration-mobile.png` and `after-token-integration-mobile.png` show the same comparison at the captain's 390px viewport.
-The after view keeps fleet health distinct, presents each primary allowance window once, and leaves automatic balancing collapsed.
+The eight images under [`../mission-control-quota-axi/`](../mission-control-quota-axi/) compare the previous allowance charts with `quota-axi`'s one-shot terminal screen at 1280px by 900px and a 390px by 844px CSS viewport, in light and dark themes.
+The after images keep the fixed-width terminal snapshot inside its own horizontal scroller without widening the 390px page body.
 
 `before-new-work-intake-desktop.png` and `after-new-work-intake-desktop.png` show the Decisions view before and after the board gained its one-shot Start something new composer at 1280px by 844px.
 `before-new-work-intake-mobile.png` and `after-new-work-intake-mobile.png` show the same comparison at exactly 390px by 844px.
@@ -49,7 +48,7 @@ The after images keep the new-work intake visually separate from the continuing 
 `after-answer-fact-desktop.png` and `after-answer-fact-mobile.png` show the same durable-record acknowledgement after a structured fact submission, with the remaining decision and new-work surfaces still fitting at both widths.
 `after-answer-rejected-desktop.png` and `after-answer-rejected-mobile.png` show a refused oversized answer remaining open, editable, and explicitly marked `Not sent` rather than receiving an acknowledgement.
 
-`after-dispatch-list-desktop.png` and `after-dispatch-list-mobile.png` show a 13-rule crew dispatch file in the System view, including a long natural-language task type, a two-profile quota array, provider labels, visible configured fallback profiles, independence summaries, the collapsed rationale controls, and the link to model-provider allowance and pace.
+`after-dispatch-list-desktop.png` and `after-dispatch-list-mobile.png` show a 13-rule crew dispatch file in the System view, including a long natural-language task type, a two-profile quota array, provider labels, visible configured fallback profiles, independence summaries, the collapsed rationale controls, and the link to model-provider allowance.
 `after-dispatch-edit-desktop.png` and `after-dispatch-edit-mobile.png` show the bounded existing-profile model and effort editor open for that long rule.
 `after-dispatch-success-desktop.png` and `after-dispatch-success-mobile.png` show the regenerated board confirming the validated assignment `codex / gpt-5.6 / xhigh`.
 `after-dispatch-rejected-desktop.png` and `after-dispatch-rejected-mobile.png` show the same board after `codex:max` was rejected, with the source file left unchanged and the reason visible beside the rule.
@@ -68,10 +67,8 @@ The same browser regression replaced the served HTML with fixtures that inserted
 The freshness header was verified on 2026-08-11 with `chrome-devtools-axi 0.1.27` at 1280px by 844px and 390px by 844px.
 Both timestamp states kept the header inside the viewport, and the unavailable label remained on one line at 390px.
 
-The allowance integration was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27`.
-The desktop run used `chrome-devtools-axi emulate --viewport '1280x1000x1'`, rendered all three allowance cards at 228.28125px by 254px, and returned `overflow: false` for the 1280px document.
-The mobile run used `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`, rendered all three cards at 320px by 261.25px, and returned a 390px document width with `overflow: false`.
-At that same 390px viewport, the Decisions rows measured 352px wide, the Projects cards measured 354px wide, and both views returned `overflow: false`, preserving the existing decision and in-progress content around the new System view.
+The `quota-axi` allowance screen was captured on 2026-08-12 at 1280px by 900px and at `390x844x3,mobile,touch`, with both viewports repeated in light and dark themes.
+The 390px after images retain a 390px page body while exposing the wider terminal grid through the allowance scroller.
 
 The decision-context evidence was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27` and the same isolated browser session used for the functional inspection.
 The desktop and mobile checks returned document widths of 1280px and 390px respectively, reported no horizontal overflow, and confirmed that the Answer form was open in all four images.
