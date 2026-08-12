@@ -368,7 +368,7 @@ The tracked Claude hook entries whose event Grok already covers through its own 
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
 
-## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11, Cursor Agent CLI 2026.08.11-e8db854)
+## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11 on tmux and 2026-08-12 on Herdr, Cursor Agent CLI 2026.08.11-e8db854)
 
 Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
 `bin/fm-spawn.sh` refuses local and remote `--secondmate` launches, and `bin/fm-control-lib.sh` refuses a secondmate relaunch, because no primary turn-end or watcher supervision protocol has been verified for Cursor.
@@ -379,7 +379,7 @@ Do not confuse `harness=cursor` using a `cursor-grok-4.5-*` model with `harness=
 | Binary | Resolved through `fm_cursor_resolve_binary` (bin/fm-cursor-lib.sh). `cursor` is NOT the CLI: the installed names are `cursor-agent` and the legacy alias `agent`, both symlinked into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`. The STABLE launcher is used, never the versioned target, which the CLI replaces on its own auto-update. |
 | Launch | A positional prompt with `--trust`, `--yolo`, `--model <model>` when selected, and `--workspace <absolute-task-worktree>`, behind `env -u` of the foreign primary markers. |
 | Models | Validate against `cursor-agent --list-models` for the current account rather than a fixed list; that list has already drifted once. The live catalog contains only `-high` Grok ids (`cursor-grok-4.5-high`, `cursor-grok-4.5-high-fast`) and several `xhigh` ids, so an assumed low/medium Grok id is invalid. |
-| Busy state | Its own per-conversation transcript, folded on demand by `bin/fm-busy-lib.sh` (source `cursor-transcript`). Each turn is bracketed by a `role:user` open and a typed `turn_ended` close covering `success` and `aborted`, so unlike Claude's `Stop` hook this source covers manual interruption. Nothing is armed and no record is ever seeded. |
+| Busy state | Its own per-conversation transcript, folded on demand by `bin/fm-busy-lib.sh` (source `cursor-transcript`). Each turn is bracketed by a `role:user` open and a typed `turn_ended` close covering `success` and `aborted`, so unlike Claude's `Stop` hook this source covers manual interruption. Nothing is armed and no record is ever seeded. Backend-agnostic, and confirmed identical on tmux and Herdr. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape. The composer returns to its placeholder rather than the cancelled prompt, so NO clear key is needed (unlike muse). `bin/fm-control-lib.sh` claims no cancellation acknowledgement: the aborted transcript close appeared within seconds in some runs and not within twenty in others. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills; `/no-mistakes` autocompleted with firstmate's own description and invoked the skill. |
@@ -407,7 +407,15 @@ The tmux composer verdict for a cursor pane is therefore `unknown` in EVERY stat
 Submission is acknowledged from the idle-to-busy transition instead, which is why cursor's `ctrl+c to stop` token is part of the delivery busy union in `bin/fm-composer-lib.sh`.
 Match that TOKEN and never the spinner verb: the same version rendered `Working` in one turn and `Running` in the next.
 
+**Delivery confirmation is verified on tmux and Herdr only.**
+Herdr reports a Cursor pane `blocked` in EVERY state - idle, mid-turn, and after - so its native idle-baseline submit path is unreachable for Cursor and the composer branch runs instead; that branch reads a mid-turn row carrying the placeholder beside `ctrl+c to stop`, which is `pending`.
+`bin/backends/herdr.sh` therefore confirms a Cursor submit from a rendered-footer idle-to-busy transition, taking the baseline before the first Enter so an already-busy pane never confirms.
+Zellij, cmux, and Orca share a submit core that never consults that footer, so a Cursor steer there LANDS but `bin/fm-send.sh` reports delivery unconfirmed and exits non-zero.
+Treat that as a known limitation of those three backends rather than a lost message: the steer is in the pane and the worker's own recorded state still comes from its transcript fold.
+Teaching the shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those three backends and needs its own live validation on each.
+
 The composer's reverse-video placeholder remnant is taught to the ONE fleet-wide screen classifier in `bin/fm-composer-lib.sh`, not to any adapter.
+Herdr additionally draws the composer's rules with half-block glyphs, which the same shared classifier owns as structural edges; without them a bare composer's wrap region swallows the footer below it and an idle pane reads `pending`.
 `docs/verification/runtime-backends.md` "Cursor Agent CLI" owns the dated captures, and the drift guard that refreshes them is:
 
 ```bash

@@ -793,7 +793,8 @@ An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
 With the composer on row 12 (zero-based), `#{cursor_y}` reported 17 both when idle and with real text typed, and `#{cursor_flag}` reported 0.
 The tmux composer verdict for a cursor pane is therefore `unknown` in every state, and tmux submission is acknowledged from the busy transition instead.
 On the cursorless backends, styled captures from Herdr and Zellij can prove the reverse-video placeholder empty, while cmux and Orca declare `styled=0` and therefore correctly return `unknown` for Cursor's bare placeholder row rather than risk a false `empty`.
-No cursorless busy-transition fallback is claimed: making one safe requires a pre-typing baseline, so delivery on cmux and Orca can remain unconfirmed even though Cursor's recorded worker state remains backend-agnostic through the transcript fold.
+Herdr later grew its own pre-typing footer baseline and confirms delivery through it (see [Herdr backend](#herdr-backend) below).
+The shared cursorless submit core still claims no busy-transition fallback, so delivery on Zellij, cmux, and Orca can remain unconfirmed even though Cursor's recorded worker state remains backend-agnostic through the transcript fold.
 Claude and Codex were checked in the same run and are unaffected: their settled composers report `cursor_flag=1` and classify `empty`.
 
 ### Busy state
@@ -840,7 +841,44 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` o
 6. `bin/fm-control.sh <id> exit` stopped the agent;
 7. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record.
 
-The portable regression is `tests/fm-cursor-harness.test.sh`, and the composer captures are pinned in `tests/fm-composer-lib.test.sh`.
+### Herdr backend
+
+The tmux run above is the reference; this section is the separate Herdr proof, produced on 2026-08-12 against Herdr 0.8.0 (client and server, protocol 19) and the same signed `cursor-agent` 2026.08.11-e8db854 on macOS 26.5.2 arm64.
+Every step ran inside an isolated `fm-lab-` session provisioned by `bin/fm-herdr-lab.sh`, launched from a neutral parent outside any Herdr pane, with the live default session's pane count checked before, during, and after; it stayed at 7 throughout.
+
+**Herdr's native agent state is unusable for Cursor.**
+A 60-sample probe of `agent get` across a full turn reported `agent_status=blocked` in every state - idle, mid-turn, and after.
+The submit path's idle baseline is therefore structurally unreachable for Cursor, and every send falls into the composer branch.
+
+| Pane state | Composer verdict | Rendered footer |
+| --- | --- | --- |
+| Idle | `empty` | no busy token |
+| Text typed, not submitted | `pending` | no busy token |
+| Mid-turn | `pending` (placeholder plus `ctrl+c to stop` on one row) | `ctrl+c to stop` |
+
+Herdr draws the composer's rules with the half-block glyphs U+2584 and U+2580 rather than the box-drawing family.
+Before those were taught to the shared edge detector, a bare composer's wrap region ran through its own closing rule and swallowed the model and path footer, so an idle pane read `pending`.
+Measured as an A/B on the same live pane, the pre-fix classifier returned `pending` and the current one returned `empty`.
+
+The idle fix alone did not confirm delivery, because the composer branch reads the mid-turn row instead.
+With the rendered-footer transition in place, `bin/fm-send.sh` exited 0 and the steer executed in the pane; the same send previously exited 1 with `delivery unconfirmed; verdict=pending` on a message that had actually landed.
+
+The rest of the lifecycle was driven end to end on that worker:
+
+1. `bin/fm-spawn.sh --scout --backend herdr` placed the worker and it executed its brief;
+2. the transcript fold read `busy` mid-turn and `idle` after, unchanged from tmux, so the recorded worker state is backend-agnostic;
+3. `bin/fm-control.sh <id> interrupt` reported `cancel=unconfirmed` by design and the pane showed `Cancelled`, with the footer and the fold both returning to idle;
+4. `bin/fm-control.sh <id> exit` stopped the agent through the slash popup and the pane returned to its shell;
+5. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record and returned the worktree.
+
+Other harnesses on Herdr are unaffected by the edge-detector change.
+All seven live panes of the running default session - one Pi, four Claude, two plain shells - classified identically under the pre-fix and current classifiers.
+
+**Delivery confirmation is verified on tmux and Herdr only.**
+Zellij, cmux, and Orca share a submit core that never consults the busy footer, so a Cursor steer there lands but reports delivery unconfirmed.
+Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those three backends and needs its own live validation on each.
+
+The portable regression is `tests/fm-cursor-harness.test.sh`, the composer captures are pinned in `tests/fm-composer-lib.test.sh`, and the Herdr submit and footer behavior is pinned in `tests/fm-backend-herdr.test.sh`.
 Refresh this harness-dependent proof before accepting a cursor upgrade:
 
 ```sh
