@@ -39,6 +39,16 @@ case "${1:-}" in
       && [ "${1:-}" = "$FM_FAKE_TMUX_SEND_KEY_FAIL" ]; then
       exit 1
     fi
+    if [ -n "${FM_FAKE_TMUX_COMPOSER:-}" ]; then
+      if [ "$literal" = 1 ]; then
+        printf '╭──────────────────────────────╮\n│ > %-27.27s│\n╰──────────────────────────────╯\n' "${1:-}" > "$FM_FAKE_TMUX_COMPOSER"
+        [ "${FM_FAKE_TMUX_SWALLOW_ENTER:-0}" != 1 ] || printf 'esc to interrupt\n' >> "$FM_FAKE_TMUX_COMPOSER"
+      elif [ "${1:-}" = Enter ]; then
+        if [ "${FM_FAKE_TMUX_SWALLOW_ENTER:-0}" != 1 ]; then
+          printf '╭────╮\n│    │\n╰────╯\n' > "$FM_FAKE_TMUX_COMPOSER"
+        fi
+      fi
+    fi
     exit 0 ;;
   display-message)
     target=
@@ -57,7 +67,12 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '╭────╮\n│    │\n╰────╯\n'
+    printf 'capture-pane\n' >> "$FM_TMUX_LOG"
+    if [ -n "${FM_FAKE_TMUX_COMPOSER:-}" ]; then
+      cat "$FM_FAKE_TMUX_COMPOSER"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -197,6 +212,66 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_stale_composer_refuses_before_typing() {
+  local dir fb home err log composer rc
+  dir="$TMP_ROOT/stale-composer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home stalecomposer); err="$dir/send.err"; log="$dir/tmux.log"; composer="$dir/composer"
+  : > "$log"
+  printf '╭──────────────────────────────╮\n│ > %-27s│\n╰──────────────────────────────╯\n' 'stale instruction' > "$composer"
+  fm_write_meta "$home/state/parked-codex.meta" "window=sess:fm-parked-codex" "kind=ship" "harness=codex"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMPOSER="$composer" FM_SEND_SETTLE=0 \
+    "$SEND" parked-codex "new intended steer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a parked Codex lane with stale composer text reported successful delivery"
+  assert_contains "$(cat "$err")" "composer is not empty" "stale-composer refusal should name the unsafe baseline"
+  assert_no_grep 'send-keys .*literal=1' "$log" "stale-composer refusal must not append the intended steer"
+  assert_no_grep 'send-keys .*arg=Enter' "$log" "stale-composer refusal must not submit the stale instruction"
+  assert_contains "$(cat "$composer")" "stale instruction" "stale-composer refusal must preserve the existing draft"
+  pass "fm-send delivery: stale parked-lane composer refuses before typing or submitting"
+}
+
+test_empty_composer_delivers_intended_text_once() {
+  local dir fb home err log composer rc
+  dir="$TMP_ROOT/accepted-delivery"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home accepted); err="$dir/send.err"; log="$dir/tmux.log"; composer="$dir/composer"
+  : > "$log"
+  printf '╭────╮\n│    │\n╰────╯\n' > "$composer"
+  fm_write_meta "$home/state/ready-codex.meta" "window=sess:fm-ready-codex" "kind=ship" "harness=codex"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMPOSER="$composer" FM_SEND_SETTLE=0 \
+    "$SEND" ready-codex "new intended steer" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an empty Codex composer should accept the intended steer"
+  [ "$(grep -c 'literal=1 arg=new intended steer' "$log")" -eq 1 ] \
+    || fail "the intended steer was not typed exactly once: $(cat "$log")"
+  [ "$(grep -c 'literal=0 arg=Enter' "$log")" -eq 1 ] \
+    || fail "the intended steer was not submitted exactly once: $(cat "$log")"
+  [ "$(sed -n '2p' "$composer")" = '│    │' ] \
+    || fail "the accepted delivery did not clear the composer: $(cat "$composer")"
+  pass "fm-send delivery: an empty composer accepts the intended steer exactly once"
+}
+
+test_busy_queue_confirmation_survives_empty_preflight() {
+  local dir fb home err log composer rc
+  dir="$TMP_ROOT/busy-queue"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home busyqueue); err="$dir/send.err"; log="$dir/tmux.log"; composer="$dir/composer"
+  : > "$log"
+  printf '╭────╮\n│    │\n╰────╯\nesc to interrupt\n' > "$composer"
+  fm_write_meta "$home/state/busy-codex.meta" "window=sess:fm-busy-codex" "kind=ship" "harness=codex"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMPOSER="$composer" FM_FAKE_TMUX_SWALLOW_ENTER=1 \
+    FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$SEND" busy-codex "queued intended steer" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a busy lane should retain the proven queued-Enter confirmation"
+  [ "$(grep -c 'literal=1 arg=queued intended steer' "$log")" -eq 1 ] \
+    || fail "the busy-queued steer was not typed exactly once: $(cat "$log")"
+  [ "$(grep -c 'literal=0 arg=Enter' "$log")" -eq 3 ] \
+    || fail "the busy-queued steer did not consume the Enter retry budget: $(cat "$log")"
+  pass "fm-send delivery: empty preflight preserves proven busy-queue acceptance"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -227,6 +302,9 @@ test_key_send_exit_status_follows_delivery() {
 
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
+test_stale_composer_refuses_before_typing
+test_empty_composer_delivers_intended_text_once
+test_busy_queue_confirmation_survives_empty_preflight
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails

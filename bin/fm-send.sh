@@ -10,11 +10,13 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the target backend confirms a
-# submit or reports an inconclusive send. If a swallowed Enter is positively
-# confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
+# Text submission is verified at both boundaries: the target composer must be
+# positively empty before the line is typed ONCE, then Enter is sent and retried
+# (Enter only, never retyped) until the target backend confirms a submit or
+# reports an inconclusive send. The empty preflight prevents a parked lane's
+# stale draft from being concatenated with and submitted as the new steer. If
+# either boundary is unconfirmed, fm-send exits NON-ZERO so success means the
+# intended steer, rather than merely some composer content, was accepted.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -428,6 +430,21 @@ else
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
+  # Prove the new steer owns an empty composer before creating any pending-reply
+  # expectation, transforming the message, or typing a byte. Post-Enter empty
+  # alone is insufficient: stale text in a parked lane can absorb the new text,
+  # submit the combined draft, clear successfully, and make the wrong instruction
+  # look delivered. Remote sends run fm-send again against their host-local
+  # explicit endpoint, so the inner send owns this same preflight there.
+  if [ "$TARGET_BACKEND" != remote ]; then
+    if ! composer_before=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL"); then
+      composer_before=unknown
+    fi
+    if [ "$composer_before" != empty ]; then
+      echo "error: text not sent to $T (composer is not empty; verdict=${composer_before:-unknown}; refusing to append to or submit existing input; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+    fi
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
