@@ -10,11 +10,14 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#   - Identity: only when THIS session's harness ancestor holds state/.lock and
+#     its immutable owner-and-process-group lease still matches. A numeric owner
+#     in this ancestry with an outdated lease, or a prior owner that the shared
+#     liveness boundary classifies as reclaimable, delegates guarded recovery to
+#     bin/fm-lock.sh and then re-verifies ownership. A stopped owner group is
+#     fenced there only after its complete identity and stopped state are proven.
+#     A live external or unclassifiable owner, missing or nonnumeric lock,
+#     malformed prior-owner lease, or unresolved ancestry remains inert.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -87,19 +90,28 @@ cat >/dev/null 2>&1 || true
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
+# A prior session may have exited or stopped after leaving its numeric harness
+# pid in .lock. Recognize only owner states that fm-lock.sh can reclaim safely.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# idle or away home remains byte-for-byte inert. Missing or malformed locks and
+# unclassifiable owners remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
-  esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
-  RECOVER_SESSION_LOCK=1
+  if fm_session_lock_pid_owned_by_self "$STATE"; then
+    RECOVER_SESSION_LOCK=1
+  else
+    LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+    case "$LOCK_PID" in
+      ''|*[!0-9]*) exit 0 ;;
+    esac
+    if fm_harness_pid_alive "$LOCK_PID"; then
+      exit 0
+    else
+      LOCK_STATE=$?
+      [ "$LOCK_STATE" -eq 1 ] || [ "$LOCK_STATE" -eq 3 ] || exit 0
+    fi
+    RECOVER_SESSION_LOCK=1
+  fi
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
@@ -111,10 +123,10 @@ need_supervision() {
 }
 need_supervision || exit 0
 
-# --- stale session-lock recovery ---------------------------------------------
-# Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
-# remain the single acquisition owner, then re-verify current-session identity
-# before touching any auto-arm state.
+# --- reclaimable session-lock recovery ---------------------------------------
+# Delegate the claim to fm-lock.sh so its owner classification, fencing, and
+# write semantics remain with the single acquisition owner, then re-verify
+# current-session identity before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0

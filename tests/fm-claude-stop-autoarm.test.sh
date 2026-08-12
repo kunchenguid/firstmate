@@ -21,6 +21,10 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
+SLEEP_HARNESS_DIR="$TMP_ROOT/sleep-harness"
+mkdir -p "$SLEEP_HARNESS_DIR"
+ln -s /bin/sleep "$SLEEP_HARNESS_DIR/claude"
+SLEEP_CLAUDE="$SLEEP_HARNESS_DIR/claude"
 
 # Copy the hook and its sourced dependencies into a fixture checkout.
 install_autoarm_scripts() {
@@ -222,14 +226,39 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+test_repairs_current_owner_identity_before_arming() {
+  local dir out status expected_pid expected_identity recorded_pid recorded_identity lease_lines
+  dir=$(make_primary_dir "$TMP_ROOT/current-owner-identity")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(printf '%s\n' '{"session_id":"identity"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        . "$FM_HOME/bin/fm-wake-lib.sh"
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+        fm_pid_identity "$$" > "$FM_HOME/state/expected-identity"
+        printf "%s\n%s\n" "$$" stale-identity > "$FM_HOME/state/.lock.pid-identity"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 2 "$status" "a current owner with stale identity must upgrade its lock before arming"
+  expected_pid=$(cat "$dir/state/expected-owner")
+  expected_identity=$(cat "$dir/state/expected-identity")
+  recorded_pid=$(sed -n '1p' "$dir/state/.lock.pid-identity")
+  recorded_identity=$(sed -n '2p' "$dir/state/.lock.pid-identity")
+  lease_lines=$(wc -l < "$dir/state/.lock.pid-identity" | tr -d '[:space:]')
+  [ "$recorded_pid" = "$expected_pid" ] && [ "$recorded_identity" = "$expected_identity" ] \
+    || fail "current-owner recovery did not publish the exact PID-and-birth-identity pair"
+  [ "$lease_lines" = 4 ] || fail "current-owner recovery did not publish a fixed owner-and-group lease"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after upgrading current-owner identity"
+  pass "auto-arm: current numeric owners upgrade stale identity before arming"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  # The trailing no-op keeps the fake harness process alive instead of allowing
-  # bash to exec the final sleep into a non-harness process.
-  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  "$SLEEP_CLAUDE" 60 &
   other=$!
   printf '%s\n' "$other" > "$dir/state/.lock"
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
@@ -241,6 +270,49 @@ test_inert_when_lock_held_by_other_harness() {
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while another session owned the lock"
   [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch while another session owned the lock"
   pass "auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home"
+}
+
+test_inert_when_other_harness_state_is_unknown() {
+  local dir other fakebin out status owner_after
+  dir=$(make_primary_dir "$TMP_ROOT/unknown-other-lock")
+  fakebin=$(fm_fakebin "$TMP_ROOT/unknown-owner-ps")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$SLEEP_CLAUDE" 60 &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+args=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_UNREADABLE_PID" ] && [ "$field" = "stat=" ]; then
+  exit 1
+fi
+exec /bin/ps "${args[@]}"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(printf '%s\n' '{"session_id":"s"}' \
+    | FM_HOME="$dir" FM_TEST_UNREADABLE_PID="$other" PATH="$fakebin:$PATH" \
+      "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1)
+  status=$?
+  owner_after=$(cat "$dir/state/.lock")
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "hook must stay inert when another owner's process state is unreadable"
+  [ "$owner_after" = "$other" ] \
+    || fail "hook replaced an owner whose process state was unclassifiable: expected $other, got $owner_after"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while another owner's state was unclassifiable"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] \
+    || fail "hook wrote an epoch while another owner's state was unclassifiable"
+  pass "auto-arm: an unclassifiable harness owner stays inert and retains the session lock"
 }
 
 test_inert_when_afk() {
@@ -578,7 +650,9 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
+test_repairs_current_owner_identity_before_arming
 test_inert_when_lock_held_by_other_harness
+test_inert_when_other_harness_state_is_unknown
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain

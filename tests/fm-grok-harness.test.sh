@@ -128,6 +128,7 @@ test_fm_lock_recognizes_grok_holder() {
 case "$*" in
   *"comm="*) printf '%s\n' '/usr/local/bin/grok'; exit 0 ;;
   *"args="*) printf '%s\n' 'grok'; exit 0 ;;
+  *"stat="*) printf '%s\n' 'S'; exit 0 ;;
 esac
 exit 1
 SH

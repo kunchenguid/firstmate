@@ -11,8 +11,9 @@ A failed follow-up never cancels continuity restoration.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
-A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
-The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
+The hook accepts current ownership only when the numeric lock owner is in this session's harness ancestry and the recorded immutable owner-and-process-group lease still matches.
+After the existing AFK and supervision-need gates pass, a current-ancestry owner with an outdated lease or a prior owner that is positively reclaimable delegates recovery to `bin/fm-lock.sh` before any auto-arm state changes.
+That boundary preserves a live external owner, refuses an unclassifiable or partly active owner group, and fences a fully stopped owner group only after its recorded identities and stopped state are proven; a missing or nonnumeric lock or malformed prior-owner lease also keeps the hook inert.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
 Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice until the turn-end guard consumes the attended fail-open.

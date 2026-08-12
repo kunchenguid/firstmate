@@ -31,9 +31,9 @@ It takes `--source <name>` when the adapter knows the source natively, and other
 This deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
 Compaction is covered where a tracked adapter delivers that source because a compacted session has lost exactly the digest it needs, and resume is excluded from the run because it restores that digest instead of losing it.
 
-Current harness ownership of the lock and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
+Current harness ownership requires both a numeric lock owner in this session's ancestry and matching immutable owner-and-process-group identities; that verified lease and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
 The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
-`bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
+`bin/fm-lock.sh` upgrades an active current harness's outdated lease before re-verifying ownership, so a proven `clear` or `compact` re-emit proceeds, while another active owner, a partly active stopped-owner group, or an unclassifiable ownership state still produces the ordinary read-only digest.
 On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its own ancestry check stays silent whenever this process already holds the lock.
 
 `bin/fm-session-start.sh --reemit` owns which work a re-emit skips, its true-start AGENTS.md baseline, and its supported stale-instruction refresh pairs; its header is the single owner of those mechanics.

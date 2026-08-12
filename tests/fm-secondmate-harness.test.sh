@@ -162,8 +162,10 @@ case "$pid:$field:${FM_TEST_SIGNED_SHAPE:-exact}" in
   100:ppid=:*) printf '%s\n' 200 ;;
   200:comm=:exact) printf '%s\n' '/opt/test/bin/pi-signed' ;;
   200:args=:exact) printf '%s\n' 'pi-signed --model test/model' ;;
+  200:stat=:exact) printf '%s\n' 'S' ;;
   200:comm=:helper) printf '%s\n' '/opt/test/bin/pi-signed-helper' ;;
   200:args=:helper) printf '%s\n' 'pi-signed-helper' ;;
+  200:stat=:helper) printf '%s\n' 'S' ;;
   200:comm=:plain) printf '%s\n' '/bin/zsh' ;;
   200:args=:plain) printf '%s\n' 'zsh' ;;
   200:ppid=:*) printf '%s\n' 1 ;;
@@ -224,6 +226,7 @@ case "$pid:$field" in
   4242:ppid=) printf '%s\n' 1 ;;
   5252:comm=) printf '%s\n' '-codex' ;;
   5252:args=) printf '%s\n' '-codex' ;;
+  5252:stat=) printf '%s\n' 'S' ;;
   5252:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' '-zsh' ;;
   *:args=) printf '%s\n' '-zsh' ;;

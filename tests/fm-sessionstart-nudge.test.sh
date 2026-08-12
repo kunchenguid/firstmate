@@ -419,7 +419,8 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
-    "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+    "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-wake-lib.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'PI_LARGE_DIGEST_PREFIX\n'
@@ -507,18 +508,24 @@ test_run_unknown_source_takes_the_helm() {
 }
 
 test_run_gate_and_scope_are_silent() {
-  local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
+  local root="$TMP_ROOT/run-gate" fresh="$TMP_ROOT/run-fresh" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
   make_run_primary "$root"
+  rmdir "$root/state"
   expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
     FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
-  assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
+  assert_absent "$root/state" "a gate agent's session open modified its ineligible home"
+
+  make_run_primary "$fresh"
+  rmdir "$fresh/state"
+  expect_silent_zero "fresh checkout run" run_hook "$fresh" --source startup
+  assert_absent "$fresh/state" "a fresh checkout created state and qualified its own session start"
 
   fm_git_worktree "$base" "$linked" fm/run-linked
-  mkdir -p "$linked/bin" "$linked/state"
+  mkdir -p "$linked/bin"
   : > "$linked/AGENTS.md"
   expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
-  assert_absent "$linked/state/.lock" "an unmarked task worktree still took the fleet lock"
-  pass "run wrapper: a gate agent and an unmarked task worktree never run a session start"
+  assert_absent "$linked/state" "an unmarked task worktree's session open modified its ineligible home"
+  pass "run wrapper: ineligible homes stay silent and unmodified without self-qualifying"
 }
 
 test_run_reports_a_failed_session_start_as_digest_text() {

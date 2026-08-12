@@ -30,9 +30,10 @@
 #     running the digest states by name what is not yet confirmed.
 #   - Mutation authority is leased. The worker outlives the command that launched
 #     it, so it takes the same acquisition lease a new session must hold before
-#     replacing a dead owner, re-checks the captured owner under that lease, and
-#     holds it through the bounded mutating run. A takeover stays read-only until
-#     that run settles, so old and new owners can never sweep concurrently.
+#     replacing a safely reclaimable owner, re-checks the captured owner under
+#     that lease, and holds it through the bounded mutating run. A takeover stays
+#     read-only until that run settles, so old and new owners can never sweep
+#     concurrently.
 #
 # Usage: fm-startup-network.sh start --locked <0|1> --harvest-pid <pid>
 #          Launch the detached worker and return immediately. Single-flight: a
@@ -60,10 +61,11 @@
 #          For operators and tests only; a session start never waits.
 #
 # STATE, all under this home's state/ and gitignored with it:
-#   .startup-network.status   key=value record - generation, lock_pid, state,
-#                             pid, started, finished, rc, locked, phases, and
-#                             whether the report was published. The single
-#                             source of truth for what ran and how it ended.
+#   .startup-network.status   key=value record - generation, lock_pid,
+#                             lock_identity, state, pid, started, finished, rc,
+#                             locked, phases, and whether the report was
+#                             published. The single source of truth for what ran
+#                             and how it ended.
 #   .startup-network.report   the sweep output, byte for byte as
 #                             bin/fm-bootstrap.sh produced it, plus a
 #                             NETWORK_CHECKS: line whenever the stage itself
@@ -190,7 +192,7 @@ phase_label() {  # <phases>
 # --- start -------------------------------------------------------------------
 
 cmd_start() {  # <locked> <harvest-pid>
-  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
+  local locked=$1 harvest_pid=$2 lock_pid lock_identity='' generation worker_pid phases started
   mkdir -p "$STATE" 2>/dev/null || return 1
   # Captured HERE, at the moment the caller still holds the lock, and carried to
   # the worker: re-reading the lock later would only prove that SOME session
@@ -199,10 +201,14 @@ cmd_start() {  # <locked> <harvest-pid>
   if [ "$locked" = 1 ] && ! fm_session_lock_owned_by_self "$STATE"; then
     return 1
   fi
+  if [ "$locked" = 1 ]; then
+    lock_identity=$(fm_session_lock_recorded_identity "$STATE" "$lock_pid" 2>/dev/null) || return 1
+  fi
 
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get state)" = running ] && worker_alive \
-    && { [ "$locked" != 1 ] || [ "$(status_get lock_pid)" = "$lock_pid" ]; }; then
+    && { [ "$locked" != 1 ] || { [ "$(status_get lock_pid)" = "$lock_pid" ] \
+      && [ "$(status_get lock_identity)" = "$lock_identity" ]; }; }; then
     # A worker from this or a previous session is still going. Starting a second
     # one would run the same mutating sweeps concurrently, so leave it alone and
     # let the harvest report its real state.
@@ -224,6 +230,7 @@ locked=$locked
 phases=$phases
 generation=$generation
 lock_pid=$lock_pid
+lock_identity=$lock_identity
 EOF
   then
     fm_lock_release "$PUBLISH_LOCK"
@@ -247,6 +254,7 @@ EOF
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
   nohup "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
+    --lock-identity "$lock_identity" \
     --generation "$generation" \
     >/dev/null 2>&1 </dev/null &
   worker_pid=$!
@@ -258,6 +266,7 @@ locked=$locked
 phases=$phases
 generation=$generation
 lock_pid=$lock_pid
+lock_identity=$lock_identity
 EOF
   then
     kill "$worker_pid" 2>/dev/null || true
@@ -280,18 +289,20 @@ EOF
 # The question is deliberately "does the lock still name the session that asked
 # for this work?", not "is that session still alive". The hazard being closed is
 # a SECOND session sweeping concurrently, and taking the lock is exactly what
-# rewrites this value - bin/fm-lock.sh overwrites a dead holder's pid with its
-# own. An unchanged value therefore proves no one else owns the sweeps, which is
-# the whole guarantee. Requiring liveness instead would refuse to finish work
-# nobody else has claimed, and the sweeps are idempotent, so finishing it is
-# strictly better than abandoning it. A missing, unreadable, or replaced lock all
-# fail closed to the read-only probe.
-lock_unchanged() {  # <expected-pid>
-  local expected=$1 current
+# rewrites its PID-and-birth-identity pair. An unchanged pair therefore proves no
+# one else owns the sweeps, which is the whole guarantee. Requiring liveness
+# instead would refuse to finish work nobody else has claimed, and the sweeps are
+# idempotent, so finishing it is strictly better than abandoning it. A missing,
+# unreadable, or replaced lock all fail closed to the read-only probe.
+lock_unchanged() {  # <expected-pid> <expected-identity>
+  local expected=$1 expected_identity=$2 current current_identity
   case "$expected" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$expected_identity" ] || return 1
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
-  [ "$current" = "$expected" ]
+  [ "$current" = "$expected" ] || return 1
+  current_identity=$(fm_session_lock_recorded_identity "$STATE" "$current" 2>/dev/null) || return 1
+  [ "$current_identity" = "$expected_identity" ]
 }
 
 await_delivery() {  # <generation> <state>
@@ -374,33 +385,40 @@ locked=$locked
 phases=$phases
 generation=$generation
 lock_pid=$(status_get lock_pid)
+lock_identity=$(status_get lock_identity)
 report_published=$report_published
 EOF
   fm_lock_release "$PUBLISH_LOCK"
   await_delivery "$generation" "$state"
 }
 
-cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
+cmd_run() {  # <locked> <lock-pid> <lock-identity> <generation>
+  local locked=$1 lock_pid=$2 lock_identity=$3 generation=$4 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
   phases=probe
   if [ -n "$generation" ]; then
     fm_lock_acquire_wait "$PUBLISH_LOCK"
-    if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ]; then
+    if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ] \
+      && [ "$(status_get lock_pid)" = "$lock_pid" ] \
+      && [ "$(status_get lock_identity)" = "$lock_identity" ]; then
       internal=1
       started=$(status_get started)
     fi
     fm_lock_release "$PUBLISH_LOCK"
     [ "$internal" -eq 1 ] || return 1
-  elif [ "$locked" = 1 ] && ! fm_session_lock_owned_by_self "$STATE"; then
-    downgraded=1
-    locked=0
+  elif [ "$locked" = 1 ]; then
+    if ! fm_session_lock_owned_by_self "$STATE"; then
+      downgraded=1
+      locked=0
+    else
+      lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+      lock_identity=$(fm_session_lock_recorded_identity "$STATE" "$lock_pid" 2>/dev/null || true)
+    fi
   fi
   if [ "$locked" = 1 ]; then
-    [ "$internal" -eq 1 ] || lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-    if lock_unchanged "$lock_pid"; then
+    if lock_unchanged "$lock_pid" "$lock_identity"; then
       sweep_locked=1
       phases=probe,sweeps
     else
@@ -423,6 +441,7 @@ locked=$sweep_locked
 phases=$phases
 generation=$generation
 lock_pid=$lock_pid
+lock_identity=$lock_identity
 EOF
     fm_lock_release "$PUBLISH_LOCK"
   fi
@@ -440,7 +459,7 @@ EOF
   if [ "$sweep_locked" -eq 1 ]; then
     fm_lock_acquire_wait "$STATE/.lock.acquire"
     lease_held=1
-    if ! lock_unchanged "$lock_pid"; then
+    if ! lock_unchanged "$lock_pid" "$lock_identity"; then
       sweep_locked=0
       phases=probe
       downgraded=1
@@ -449,6 +468,7 @@ EOF
   if [ "$sweep_locked" -eq 1 ]; then
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only \
       FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
+      FM_BOOTSTRAP_NETWORK_LOCK_IDENTITY="$lock_identity" \
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
@@ -587,6 +607,7 @@ cmd_wait() {  # <seconds>
 LOCKED=0
 HARVEST_PID=
 LOCK_PID=
+LOCK_IDENTITY=
 GENERATION=
 MODE=${1:-}
 [ $# -eq 0 ] || shift
@@ -595,6 +616,7 @@ while [ $# -gt 0 ]; do
     --locked) LOCKED=${2:-0}; shift; [ $# -eq 0 ] || shift ;;
     --harvest-pid|--pid) HARVEST_PID=${2:-}; shift; [ $# -eq 0 ] || shift ;;
     --lock-pid) LOCK_PID=${2:-}; shift; [ $# -eq 0 ] || shift ;;
+    --lock-identity) LOCK_IDENTITY=${2:-}; shift; [ $# -eq 0 ] || shift ;;
     --generation) GENERATION=${2:-}; shift; [ $# -eq 0 ] || shift ;;
     -h|--help) usage; exit 0 ;;
     *) break ;;
@@ -604,7 +626,7 @@ case "$LOCKED" in 0|1) ;; *) LOCKED=0 ;; esac
 
 case "$MODE" in
   start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" ;;
-  run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" ;;
+  run) cmd_run "$LOCKED" "$LOCK_PID" "$LOCK_IDENTITY" "$GENERATION" ;;
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
   report) print_state; print_timings ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;

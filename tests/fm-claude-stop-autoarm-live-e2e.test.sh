@@ -144,10 +144,13 @@ fi
 # project. The competing hook must not replace the session lock, arm, write an
 # epoch, or rewake.
 FAKE_CLAUDE="$LAB/claude"
+OWNER_CLAUDE="$LAB/owner/claude"
+mkdir -p "${OWNER_CLAUDE%/*}"
 ln -s /bin/bash "$FAKE_CLAUDE"
+ln -s /bin/sleep "$OWNER_CLAUDE"
 mkdir -p "$LIVE_OWNER_HOME/state" "$LIVE_OWNER_HOME/config"
 printf 'project=fixture\n' > "$LIVE_OWNER_HOME/state/task.meta"
-"$FAKE_CLAUDE" -c 'sleep 3; :' &
+"$OWNER_CLAUDE" 3 &
 LIVE_OWNER_PID=$!
 printf '%s\n' "$LIVE_OWNER_PID" > "$LIVE_OWNER_HOME/state/.lock"
 LIVE_OWNER_RC=0

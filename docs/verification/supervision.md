@@ -241,6 +241,35 @@ The current Stop-owned main/secondmate inclusion and child-worktree exclusion ar
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+The same suite verifies the shared liveness boundary against Linux procps and macOS BSD `ps -o stat=` state codes and process-probe errors, then drives a synthetic harness through the real `bin/fm-lock.sh` interface to prove an active owner excludes a challenger, a fully stopped owner group is identity-bound and fenced before replacement, identity-less legacy stopped-owner recovery requires corroborating completion evidence, and an unclassifiable or partly active group stays read-only.
+It also proves that each acquired lock records immutable owner and process-group identities, PID reuse cannot inherit ownership, and a dead leader cannot hide surviving execution in its recorded group.
+`tests/fm-claude-stop-autoarm.test.sh` proves that the shared boundary upgrades an outdated current-session lease before arming and otherwise leaves the Stop hook inert without replacing a live owner whose process state is unreadable.
+The process-state boundary was verified on 2026-08-11 with these isolated behavior commands:
+
+```sh
+tests/fm-session-lock-ancestry.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+```
+
+Observed relevant output:
+
+```text
+ok - session-lock: process probes and Linux and macOS states distinguish absent, active, stopped, terminal, and unknown owners
+ok - session-lock: real acquisition excludes active owners, fences stopped owners, and fails closed on unknown state
+ok - auto-arm: an unclassifiable harness owner stays inert and retains the session lock
+```
+
+The caller integrations are pinned by these additional deterministic entry points:
+
+```sh
+tests/fm-session-start.test.sh
+tests/fm-sessionstart-nudge.test.sh
+tests/fm-bootstrap.test.sh
+tests/fm-startup-network.test.sh
+```
+
+They require full lease verification before a completed startup can re-emit, bind deferred mutating sweeps to the captured owner identity, downgrade on identity replacement, and preserve the acquisition lease until a bounded mutating sweep settles.
+
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
