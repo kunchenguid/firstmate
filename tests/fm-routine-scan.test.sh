@@ -92,7 +92,7 @@ test_bootstrap_seeds_and_arms_private_routine() {
   pass "bootstrap seeds and arms the private recurring routine"
 }
 test_setup_persists_canonical_path_overrides() {
-  local base home data state run_dir check out expected
+  local base home data state run_dir check out expected generation
   base="$TMP_ROOT/path-overrides"
   home="$base/home"
   data="$base/private-data"
@@ -114,7 +114,8 @@ test_setup_persists_canonical_path_overrides() {
   expected='routine-due: example-daily-check | captain | check priorities'
   [ "$out" = "$expected" ] || fail "routine check did not retain its provisioned registry path"
   [ -f "$state/.routine-pending" ] || fail "routine check did not retain its provisioned pending state path"
-  "$check" --ack >/dev/null \
+  generation=$(cat "$state/.routine-generation")
+  "$check" --ack --generation "$generation" >/dev/null \
     || fail "routine check could not acknowledge its pending state"
   [ -f "$state/.routine-fired" ] || fail "routine check did not retain its provisioned fire state path"
   [ ! -e "$home/state/.routine-fired" ] || fail "routine check wrote fire state under the relative runtime cwd"
@@ -248,7 +249,7 @@ test_duplicate_id_cannot_alternate_fired_cadences() {
   pass "duplicate ids cannot alternate fired cadences"
 }
 test_deferred_check_acknowledges_after_wake() {
-  local home check first second ack third
+  local home check first second ack third generation out rc
   home=$(make_home deferred)
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
     || fail "routine setup could not create the deferred check"
@@ -269,7 +270,18 @@ test_deferred_check_acknowledges_after_wake() {
     "$ROOT/bin/fm-wake-lib.sh" "$first" \
     || fail "the routine due wake could not enter the existing wake rail"
   [ -s "$home/state/.wake-queue" ] || fail "the routine due wake was not durable"
-  ack=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack)
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "bare routine acknowledgement bypassed generation binding"
+  case "$out" in
+    *'routine acknowledgement requires a generation'*) ;;
+    *) fail "bare routine acknowledgement lacked an actionable diagnostic: $out" ;
+  esac
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  ack=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation")
   [ -z "$ack" ] || fail "routine acknowledgement produced check output"
   [ "$(cat "$home/state/.routine-fired")" = 'deferred-item|daily|2026-08-10' ] \
     || fail "routine acknowledgement did not commit fire state"
@@ -278,6 +290,29 @@ test_deferred_check_acknowledges_after_wake() {
   third=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   [ -z "$third" ] || fail "acknowledged routine fired again"
   pass "routine fire state commits after wake acknowledgement"
+}
+test_pending_generation_stays_bound_after_rescan() {
+  local home check first second third generation
+  home=$(make_home pending-generation)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the pending-generation fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- stable-item | daily | captain | preserve its wake'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
+    || fail "the first routine wake could not enter the wake rail"
+  second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ "$second" = "$first" ] || fail "the pending routine changed during a rescan"
+  [ "$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")" = "$generation" ] \
+    || fail "the rescan relabeled the pending routine generation"
+  "$check" --ack --generation "$generation" \
+    || fail "the original routine wake could not acknowledge its pending record"
+  third=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ -z "$third" ] || fail "a handled routine wake fired again after a rescan"
+  pass "pending routine records retain their published generation"
 }
 test_deferred_publication_does_not_refire_after_restart() {
   local home check first second generation
@@ -305,7 +340,7 @@ test_deferred_publication_does_not_refire_after_restart() {
   pass "a handled routine wake does not fire again after restart"
 }
 test_ack_fails_when_routine_state_lock_is_held() {
-  local home check lock_ready lock_pid rc out
+  local home check lock_ready lock_pid rc out generation
   home=$(make_home ack-lock)
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
     || fail "routine setup could not create the lock fixture"
@@ -324,7 +359,8 @@ test_ack_fails_when_routine_state_lock_is_held() {
     sleep 0.01
   done
   [ -f "$lock_ready" ] || fail "the lock fixture did not acquire routine state lock"
-  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack 2>&1); then
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation" 2>&1); then
     rc=0
   else
     rc=$?
@@ -461,27 +497,30 @@ SH
     exit 1
   ) &
   later_pid=$!
+  export FM_ROUTINE_DATE=2026-08-10
   export FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK=1
   run_bounded_watcher \
     "$home" "$home/watch.out" "$fakebin"
   rc=$?
+  unset FM_ROUTINE_DATE
   unset FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK
   wait "$later_pid" || fail "the later routine scan did not run during acknowledgement"
   [ "$rc" -eq 0 ] || fail "the watcher did not complete the normal-ack race fixture"
-  [ ! -s "$home/state/.routine-fired" ] \
-    || fail "normal acknowledgement promoted a later scan generation"
+  [ "$(cat "$home/state/.routine-fired")" = 'item-a|daily|2026-08-10' ] \
+    || fail "normal acknowledgement did not promote its own scan generation"
   grep -q '^item-b|daily|2026-08-10|' "$home/state/.routine-pending" \
     || fail "normal acknowledgement discarded later pending routine work"
   pass "normal acknowledgement remains bound to its scan generation"
 }
 test_ack_rejects_dangling_pending_symlink() {
-  local home check out rc
+  local home check out rc generation
   home=$(make_home dangling-pending)
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
     || fail "routine setup could not create the dangling-state fixture"
   check="$home/state/routine-scan.check.sh"
   ln -s "$home/state/missing-pending" "$home/state/.routine-pending"
-  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack 2>&1); then
+  generation=1
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation" 2>&1); then
     rc=0
   else
     rc=$?
@@ -551,6 +590,7 @@ test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
+test_pending_generation_stays_bound_after_rescan
 test_deferred_publication_does_not_refire_after_restart
 test_ack_fails_when_routine_state_lock_is_held
 test_watcher_acknowledges_only_after_complete_scan

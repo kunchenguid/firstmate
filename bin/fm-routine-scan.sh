@@ -67,7 +67,7 @@ case "${1:-}" in
   --ack)
     ROUTINE_ACK=1
     case "${2:-}" in
-      '') [ "$#" -eq 1 ] || { routine_error "unexpected argument: ${2:-}"; exit 2; } ;;
+      '') routine_error 'routine acknowledgement requires a generation'; exit 2 ;;
       --generation)
         ROUTINE_ACK_GENERATION=${3:-}
         case "$ROUTINE_ACK_GENERATION" in
@@ -339,7 +339,7 @@ if [ "$ROUTINE_DEFER_FIRE" -eq 1 ] && [ -e "$PENDING" ]; then
     DUE_IDS+=("$pending_id")
     DUE_RECORDS+=("$pending_id|$pending_cadence|$pending_date")
     DUE_LINES+=("routine-due: $pending_id | $pending_owner | $pending_action")
-    DUE_PENDING_LINES+=("$pending_id|$pending_cadence|$pending_date|$pending_owner|$pending_action|$ROUTINE_GENERATION")
+    DUE_PENDING_LINES+=("$pending_id|$pending_cadence|$pending_date|$pending_owner|$pending_action|$pending_generation")
   done < "$PENDING"
 fi
 if [ -e "$REGISTRY" ]; then
