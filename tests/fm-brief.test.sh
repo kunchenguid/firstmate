@@ -256,8 +256,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "Immediately after committing the implementation, invoke the no-mistakes skill" "$brief" \
+    "explicit no-mistakes brief did not keep validation with the implementation worker"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -329,6 +329,18 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "the task is not complete at that commit" "$brief" \
+    "no-mistakes DOD still treats the implementation commit as task completion"
+  assert_grep "The same worker that implemented the change must keep driving validation" "$brief" \
+    "no-mistakes DOD did not keep validation with the implementation worker"
+  assert_grep "until the configured ready point below" "$brief" \
+    "no-mistakes DOD did not defer done until the configured ready point"
+  assert_grep "After no-mistakes reports CI green (the configured CI-ready return point" "$brief" \
+    "no-mistakes DOD lost its configured ready-point completion gate"
+  assert_no_grep "append \`done: {summary}\`" "$brief" \
+    "no-mistakes DOD retained the premature implementation-complete done status"
+  assert_no_grep "/no-mistakes" "$brief" \
+    "no-mistakes DOD hard-coded a harness-specific skill invocation form"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
