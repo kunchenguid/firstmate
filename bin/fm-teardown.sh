@@ -2502,11 +2502,12 @@ if [ "$ENDPOINT_RECOVERY" = 1 ]; then
       echo "REFUSED: could not close the endpoint recovery window for $ID; preserving its recovery record" >&2
       exit 1
     }
+    endpoint_recovery_presence=0
   else
     endpoint_recovery_presence=$?
   fi
   case "$endpoint_recovery_presence" in
-    1) ;;
+    0|1) ;;
     2)
       echo "REFUSED: could not establish whether the endpoint recovery window for $ID still exists; preserving its recovery record" >&2
       exit 1
