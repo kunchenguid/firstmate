@@ -1929,8 +1929,8 @@ function readObservationStore() {
   let store;
   try {
     store = JSON.parse(readFileSync(observationStorePath, "utf8"));
-  } catch (error) {
-    throw new Error(`fleet dashboard observation store is unreadable: ${error.message}`);
+  } catch {
+    return null;
   }
   if (
     store?.version !== OBSERVATION_STORE_VERSION ||
@@ -1938,7 +1938,7 @@ function readObservationStore() {
     typeof store.rows !== "object" ||
     Array.isArray(store.rows)
   ) {
-    throw new Error(`fleet dashboard observation store has an unsupported shape: ${observationStorePath}`);
+    return null;
   }
   return store;
 }

@@ -1150,6 +1150,44 @@ test_first_newness_run_seeds_without_flagging_rows() {
   pass "first newness run seeds observations without flagging rows"
 }
 
+test_corrupt_observation_store_reseeds_silently() {
+  local home fakebin out store
+  home=$(make_home newness-corrupt-store)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+  printf '{ this is not json' > "$store"
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "corrupt observation store prevented the cockpit from rendering"
+  assert_contains "$out" "FIRSTMATE FLEET" "corrupt-store recovery omitted the cockpit header"
+  assert_contains "$out" "OUR PRS IN REVIEW" "corrupt-store recovery omitted supported rows"
+  assert_contains "$out" "PR 4001" "corrupt-store recovery omitted a supported PR row"
+  assert_not_contains "$out" "[NEW]" "corrupt-store recovery cried wolf after reseeding"
+  jq -e '.version == 1 and (.rows | type == "object")' "$store" >/dev/null \
+    || fail "corrupt observation store was not replaced with a valid seed"
+  pass "corrupt observation stores reseed silently and preserve cockpit rendering"
+}
+
+test_empty_observation_store_reseeds_silently() {
+  local home fakebin out store
+  home=$(make_home newness-empty-store)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+  : > "$store"
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "empty observation store prevented the cockpit from rendering"
+  assert_contains "$out" "FIRSTMATE FLEET" "empty-store recovery omitted the cockpit header"
+  assert_contains "$out" "OUR PRS IN REVIEW" "empty-store recovery omitted supported rows"
+  assert_contains "$out" "PR 4001" "empty-store recovery omitted a supported PR row"
+  assert_not_contains "$out" "[NEW]" "empty-store recovery cried wolf after reseeding"
+  jq -e '.version == 1 and (.rows | type == "object")' "$store" >/dev/null \
+    || fail "empty observation store was not replaced with a valid seed"
+  pass "empty observation stores reseed silently and preserve cockpit rendering"
+}
+
 test_identical_newness_render_stays_quiet_and_does_not_mark_seen() {
   local home fakebin first_checksum second_checksum out store
   home=$(make_home newness-identical)
@@ -1609,6 +1647,8 @@ test_review_obligations_are_distinct_and_oldest_first
 test_decision_ids_bind_task_key_and_verb_across_membership_changes
 test_registered_pr_number_comes_from_registered_url
 test_first_newness_run_seeds_without_flagging_rows
+test_corrupt_observation_store_reseeds_silently
+test_empty_observation_store_reseeds_silently
 test_identical_newness_render_stays_quiet_and_does_not_mark_seen
 test_expansion_marks_only_the_selected_row_seen
 test_watched_field_change_flags_exactly_one_row
