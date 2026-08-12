@@ -1498,6 +1498,8 @@ SH
 make_herdr_teardown_fake() {
   local case_dir=$1
   printf '%s\n' '{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w9","label":"PROJECTION_LABEL","focused":false,"active_tab_id":"w9:t2"}],"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","focused":true,"label":"firstmate"},{"tab_id":"w9:t2","workspace_id":"w9","focused":false,"label":"fm-task-x1"}],"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}]}' > "$case_dir/herdr-state.json"
+  jq --arg cwd "$case_dir/wt" '.panes[0].foreground_cwd=$cwd' "$case_dir/herdr-state.json" > "$case_dir/herdr-state.tmp"
+  mv "$case_dir/herdr-state.tmp" "$case_dir/herdr-state.json"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u

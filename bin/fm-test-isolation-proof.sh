@@ -158,7 +158,6 @@ tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
-tests/fm-instruction-owners.test.sh
 tests/fm-lint.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-send-popup-settle.test.sh

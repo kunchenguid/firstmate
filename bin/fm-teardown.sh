@@ -167,6 +167,14 @@ teardown_meta_identity_matches() {
   [ "$(teardown_meta_identity "$META")" = "$TEARDOWN_META_IDENTITY" ]
 }
 
+teardown_directory_identity() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%d:%i' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
 validated_task_tmp_cleanup_path() {
   local recorded=$1 expected parent base suffix marker expected_marker marker_content
   [ -n "$recorded" ] || return 0
@@ -203,6 +211,10 @@ validated_task_tmp_cleanup_path() {
       ;;
   esac
   parent=$(cd "$parent" 2>/dev/null && pwd -P) || {
+    echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+    return 1
+  }
+  TASK_TMP_PARENT_IDENTITY=$(teardown_directory_identity "$parent") || {
     echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
     return 1
   }
@@ -556,8 +568,9 @@ teardown_release_herdr_presentation_lock() {
 
 teardown_herdr_task_endpoint_identity_proven() {
   local child_id=$1 child_meta=$2 target=$3 expected_state=${4:-}
+  local expected_home=${5:-} expected_path=${6:-}
   local session pane workspace tab label expected_label expected_key label_key raw_state info
-  local meta_session meta_pane identity agent agent_status expected_harness
+  local meta_session meta_pane identity agent agent_status expected_harness index pid current_path child_kind
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
@@ -597,6 +610,27 @@ teardown_herdr_task_endpoint_identity_proven() {
     [ "$label" = "fm-$child_id" ] || return 1
   fi
   if [ "$raw_state" = live ]; then
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$expected_home" ] || {
+      if [ "$child_kind" = secondmate ]; then
+        expected_home=$(meta_value "$child_meta" home)
+      else
+        expected_home=${FM_HOME:-}
+      fi
+    }
+    [ -n "$expected_path" ] || {
+      if [ "$child_kind" = secondmate ]; then
+        expected_path=$(meta_value "$child_meta" home)
+      else
+        expected_path=$(meta_value "$child_meta" worktree)
+      fi
+    }
+    [ -n "$expected_home" ] && [ -n "$expected_path" ] || return 1
+    index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
+    pid=$(fm_agent_pid_for_task "$child_id" "$index" "$expected_home") || return 1
+    fm_agent_worker_identity_matches "$pid" "$child_id" "$expected_home" || return 1
+    current_path=$(fm_backend_herdr_current_path "$target") || return 1
+    fm_agent_paths_same "$current_path" "$expected_path" || return 1
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 1
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
@@ -616,6 +650,7 @@ teardown_herdr_endpoint_focus_safe() {
   local parent_home=${5:-} child_wt=${6:-}
   local session pane state close_status=1 acquired_here=0
   local expected_workspace= expected_tab= expected_label= expected_harness=
+  local expected_home= expected_task_path=
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
@@ -626,8 +661,19 @@ teardown_herdr_endpoint_focus_safe() {
     teardown_acquire_herdr_presentation_lock "$target" || return 1
     acquired_here=1
   fi
+  if [ -n "$child_id" ]; then
+    if [ "$child_kind" = secondmate ]; then
+      expected_home=$(meta_value "$child_meta" home)
+      expected_task_path=$expected_home
+    else
+      expected_home=$parent_home
+      expected_task_path=$child_wt
+    fi
+    [ -n "$expected_home" ] || expected_home=$parent_home
+    [ -n "$expected_task_path" ] || expected_task_path=$(meta_value "$child_meta" worktree)
+  fi
   if [ -n "$child_id" ] && ! teardown_herdr_task_endpoint_identity_proven \
-    "$child_id" "$child_meta" "$target" "$state"; then
+    "$child_id" "$child_meta" "$target" "$state" "$expected_home" "$expected_task_path"; then
     if [ "$acquired_here" = 1 ]; then
       teardown_release_herdr_presentation_lock || true
     fi
@@ -638,9 +684,19 @@ teardown_herdr_endpoint_focus_safe() {
     expected_tab=$(meta_value "$child_meta" herdr_tab_id)
     expected_label=$(meta_value "$child_meta" display_label)
     expected_harness=$(meta_value "$child_meta" harness)
+    if [ "$child_kind" = secondmate ]; then
+      expected_home=$(meta_value "$child_meta" home)
+      expected_task_path=$expected_home
+    else
+      expected_home=$parent_home
+      expected_task_path=$child_wt
+    fi
+    [ -n "$expected_home" ] || expected_home=$parent_home
+    [ -n "$expected_task_path" ] || expected_task_path=$(meta_value "$child_meta" worktree)
   fi
   if fm_backend_herdr_projection_teardown_close "$session" "$pane" "$state" \
-    "$expected_workspace" "$expected_tab" "$expected_label" "$expected_harness"; then
+    "$expected_workspace" "$expected_tab" "$expected_label" "$expected_harness" \
+    "$child_id" "$expected_task_path" "$expected_home"; then
     close_status=0
   else
     close_status=$?
@@ -701,6 +757,9 @@ teardown_unresolved_endpoint_identity_proven() {
     pane=$FM_BACKEND_HERDR_PANE
     raw_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
     if [ "$raw_state" = no-agent ]; then
+      local path
+      path=$(fm_backend_herdr_current_path "$target") || return 1
+      teardown_endpoint_process_census_empty "$path" || return 1
       index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
       teardown_task_pid_index_empty "$id" "$index" || return 1
       teardown_herdr_endpoint_focus_safe "$target" "$id" "$meta" "${KIND:-ship}" "${FM_HOME:-}" "${WT:-}" || return 1
@@ -853,7 +912,7 @@ teardown_child_endpoint_identity_proven() {
       ;;
     herdr)
       teardown_herdr_task_endpoint_identity_proven \
-        "$child_id" "$child_meta" "$target" live || return 1
+        "$child_id" "$child_meta" "$target" live "$expected_home" "$occupancy_path" || return 1
       ;;
     *) return 1 ;;
   esac
@@ -988,15 +1047,30 @@ teardown_grok_real_directory() {
 }
 
 teardown_grok_registry_expected_dir() {
-  local state_dir=$1 id=$2 meta expected root
+  local state_dir=$1 id=$2 meta expected root recorded_root
   meta="$state_dir/$id.meta"
   expected=$(grep '^grok_registry_dir=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  recorded_root=$(grep '^grok_registry_root=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   if [ -n "$expected" ]; then
     case "$expected" in
       /*) ;;
       *) return 1 ;;
     esac
     case "$expected" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    root=$recorded_root
+    if [ -z "$root" ]; then
+      case "$expected" in
+        */hooks/fm-turn-end.d) root=${expected%/hooks/fm-turn-end.d} ;;
+        *) return 1 ;;
+      esac
+    fi
+    case "$root" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    case "$root" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    [ "$expected" = "$root/hooks/fm-turn-end.d" ] || return 1
+    teardown_grok_real_directory "$root" || return 1
     printf '%s' "$expected"
     return 0
   fi
@@ -1006,6 +1080,7 @@ teardown_grok_registry_expected_dir() {
     *) return 1 ;;
   esac
   case "$root" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  teardown_grok_real_directory "$root" || return 1
   printf '%s/hooks/fm-turn-end.d' "$root"
 }
 
@@ -1100,6 +1175,7 @@ remove_grok_turnend_artifacts() {
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     return 0
   fi
+  teardown_meta_identity_matches || return 1
   teardown_grok_registry_read "$state_dir" "$id" || return 1
   teardown_remove_owned_file "$GROK_REGISTRY_AUTH_FILE" \
     "$GROK_REGISTRY_AUTH_INODE" "$GROK_REGISTRY_AUTH_DIGEST" || return 1
@@ -1540,9 +1616,35 @@ validate_child_worktree_for_removal() {
 }
 
 safe_rm_rf() {
-  local target=$1 label=$2
+  local target=$1 label=$2 expected_parent_identity=${3:-} parent
   validate_removal_target "$target" "$label" >/dev/null || return 1
+  if [ -n "$expected_parent_identity" ]; then
+    parent=${target%/*}
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    [ "$(teardown_directory_identity "$parent")" = "$expected_parent_identity" ] || return 1
+  fi
   rm -rf -- "$target"
+}
+
+teardown_remove_task_tmp() {
+  local target=$1 parent base marker expected marker_content parent_identity
+  [ -n "$target" ] || return 0
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    return 0
+  fi
+  [ -d "$target" ] && [ ! -L "$target" ] || return 1
+  parent=${target%/*}
+  base=${target##*/}
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  parent_identity=$(teardown_directory_identity "$parent") || return 1
+  [ "$parent_identity" = "${TASK_TMP_PARENT_IDENTITY:-}" ] || return 1
+  [ "$target" = "$parent/$base" ] || return 1
+  marker="$target/.fm-tasktmp-owner"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  expected=$(printf 'task=%s\npath=%s' "$ID" "$target")
+  marker_content=$(cat "$marker" 2>/dev/null || true)
+  [ "$marker_content" = "$expected" ] || return 1
+  safe_rm_rf "$target" "task temp" "$parent_identity"
 }
 
 safe_rm_rf_child_worktree() {
@@ -2626,6 +2728,10 @@ elif [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   exit 0
 fi
 if [ "$TOP_GROK_ARTIFACTS_RETAINED" != 1 ]; then
+  teardown_meta_identity_matches || {
+    echo "error: task metadata changed before Grok cleanup for $ID; preserving task state" >&2
+    exit 1
+  }
   remove_grok_turnend_artifacts "$STATE" "$ID" || {
     echo "REFUSED: could not prove task $ID Grok registry ownership; preserving task state" >&2
     exit 1
@@ -2633,7 +2739,10 @@ if [ "$TOP_GROK_ARTIFACTS_RETAINED" != 1 ]; then
 fi
 # Remove the per-task temp root recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
+teardown_remove_task_tmp "$TASK_TMP_CLEANUP" || {
+  echo "error: could not prove task temp ownership for $ID; preserving task state" >&2
+  exit 1
+}
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2

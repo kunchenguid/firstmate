@@ -20,6 +20,7 @@ cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 [ "${GH_TOKEN:-}" = synthetic-gh-token ] || exit 91
 printf '%s\n' "$*" > "$SIGNATURE_GH_LOG"
+[ -z "${SIGNATURE_LIVE_BODY:-}" ] || printf '%s\n' "$SIGNATURE_LIVE_BODY"
 SH
 cat > "$FAKEBIN/date" <<'SH'
 #!/usr/bin/env bash
@@ -90,10 +91,11 @@ apply_signature_env() {
 }
 
 signature_result() {
-  local body=$1 script
+  local body=$1 live_body=${2:-} script
   script=$(extract_signature_script)
   : > "$SIGNATURE_DATE_STATE"
   : > "$SIGNATURE_GH_LOG"
+  export SIGNATURE_LIVE_BODY="$live_body"
   export GITHUB_REPOSITORY=JTInventory/firstmate
   apply_signature_env "$body" || return 1
   export PATH="$FAKEBIN:$PATH"
@@ -147,6 +149,9 @@ test_signature_sequence_at_fixed_head() {
     "unsigned edited event did not reach the compliance rejection"
   assert_grep 'api repos/JTInventory/firstmate/pulls/418 --jq .body' "$SIGNATURE_GH_LOG" \
     "unsigned edited event did not use the controlled live-body lookup"
+  signature_result 'Synthetic unsigned edit' "$MARKER" || fail "valid live-body fallback must succeed"
+  assert_grep 'api repos/JTInventory/firstmate/pulls/418 --jq .body' "$SIGNATURE_GH_LOG" \
+    "live-body fallback did not use the controlled lookup"
   signature_result "Synthetic signed edit\n$MARKER" || fail "signed edited event must succeed"
   pass "fixed-head signed opened, unsigned edited, signed edited yields 0/1/0"
 }

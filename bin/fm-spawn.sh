@@ -242,6 +242,7 @@ SPAWN_WORKTREE_PROVEN=0
 SPAWN_WORKTREE_PATH_SOURCE=
 SPAWN_META_PUBLISHED=0
 SPAWN_RECOVERY_META_PUBLISHED=0
+SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=0
 SPAWN_RECOVERY_META_REPLACE_ALLOWED=0
 SPAWN_SLOT_STAMPED=0
 SPAWN_SLOT_LOCK_HELD=0
@@ -364,6 +365,7 @@ spawn_abort_recovery_meta() {
       echo "herdr_pane_id=${HERDR_PANE_ID:-}"
     fi
     [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
+    [ -z "${GROK_HOME_DIR:-}" ] || echo "grok_registry_root=$GROK_HOME_DIR"
     [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
     if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
       echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
@@ -377,6 +379,33 @@ spawn_abort_recovery_meta() {
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_RECOVERY_META_PUBLISHED=1
+}
+
+spawn_endpoint_recovery_meta() {
+  local tmp meta="$STATE/$ID.meta"
+  [ -n "${T:-}" ] && [ -n "${WID:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    if [ "${SPAWN_RECOVERY_META_REPLACE_ALLOWED:-0}" != 1 ]; then
+      return 0
+    fi
+    [ ! -L "$meta" ] || return 1
+  fi
+  mkdir -p "$STATE" 2>/dev/null || return 1
+  tmp=$(mktemp "$STATE/.$ID.spawn-endpoint.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    printf 'window=%s\n' "$T"
+    printf 'project=%s\n' "$PROJ_ABS"
+    printf 'harness=%s\n' "${HARNESS:-unknown}"
+    printf 'kind=%s\n' "${KIND:-ship}"
+    printf 'mode=%s\n' "${MODE:-no-mistakes}"
+    printf 'yolo=%s\n' "${YOLO:-off}"
+    printf 'backend=tmux\n'
+    printf 'endpoint_recovery=1\n'
+    printf 'spawn_state=aborted\n'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
 }
 
 spawn_slot_stamp_owned() {
@@ -861,6 +890,14 @@ spawn_abort_cleanup() {
   if [ "$status" -ne 0 ] && [ "$endpoint_cleanup_status" -eq 0 ]; then
     if spawn_abort_artifacts_cleanup; then
       SPAWN_ARTIFACTS_CLEAN=1
+      if [ "${SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED:-0}" = 1 ] \
+         && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ] \
+         && [ "${SPAWN_WORKTREE_LEASED:-0}" != 1 ] \
+         && [ "$(grep '^endpoint_recovery=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = 1 ] \
+         && [ "$(grep '^window=' "$STATE/$ID.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" = "$T" ]; then
+        rm -f "$STATE/$ID.meta" || echo "warning: spawn abort removed the endpoint but could not remove its recovery record" >&2
+        [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ] || SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=0
+      fi
     else
       echo "warning: spawn abort could not remove every task artifact; preserving recovery metadata" >&2
     fi
@@ -926,8 +963,8 @@ spawn_abort_cleanup() {
     fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" || true
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+    spawn_herdr_presentation_order_lock_release \
+      || echo "warning: spawn abort could not release the Herdr presentation lock; preserving its ownership marker for retry" >&2
   fi
   if [ "${SPAWN_HOME_LOCK_HELD:-0}" = 1 ]; then
     spawn_release_home_lock || true
@@ -964,8 +1001,11 @@ spawn_herdr_presentation_order_lock_acquire() {
 
 spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
-  HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-  fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  if fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK"; then
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    return 0
+  fi
+  return 1
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -1563,7 +1603,7 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state old_slot_state
-  local old_spawn_state old_worktree old_slot_returned target_session target_pane
+  local old_worktree old_slot_returned old_slot_returning old_slot_holder old_lease_generation target_session target_pane
   HERDR_RECOVERY_BACKEND=""
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
@@ -1573,11 +1613,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     echo "error: existing task $ID has an unresolved pooled-slot lease; reconcile its recovery record before retrying" >&2
     return 1
   fi
-  old_spawn_state=$(awk -F= '$1 == "spawn_state" { print $2; exit }' "$meta" 2>/dev/null || true)
   old_worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
   old_slot_returned=$(awk -F= '$1 == "slot_returned" { print $2; exit }' "$meta" 2>/dev/null || true)
-  if [ "$old_spawn_state" = aborted ] && [ -n "$old_worktree" ] && [ "$old_slot_returned" != 1 ]; then
-    echo "error: existing task $ID has an aborted pooled-slot lease on $old_worktree; reconcile its recovery record before retrying" >&2
+  old_slot_returning=$(awk -F= '$1 == "slot_returning" { print $2; exit }' "$meta" 2>/dev/null || true)
+  old_slot_holder=$(awk -F= '$1 == "slot_lease_holder" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  old_lease_generation=$(awk -F= '$1 == "slot_lease_generation" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  if [ "$old_slot_returning" = 1 ] || { [ "$old_slot_returned" != 1 ] \
+     && { [ -n "$old_worktree" ] || [ -n "$old_slot_state" ] || [ -n "$old_slot_holder" ] || [ -n "$old_lease_generation" ]; }; }; then
+    echo "error: existing task $ID has unreconciled pooled-slot ownership${old_worktree:+ on $old_worktree}; reconcile its recovery record before retrying" >&2
     return 1
   fi
   old_backend=$(fm_backend_of_meta "$meta")
@@ -1784,6 +1827,11 @@ case "$BACKEND" in
       exit 1
     fi
     SPAWN_ENDPOINT_CREATED=1
+    spawn_endpoint_recovery_meta || {
+      cleanup_spawn_window "$WID" || true
+      echo "error: could not persist a recovery record for the tmux endpoint $T; refusing to continue" >&2
+      exit 1
+    }
     if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
       cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to disable automatic window renaming for $T" >&2
@@ -2319,6 +2367,7 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
+  [ -z "${GROK_HOME_DIR:-}" ] || echo "grok_registry_root=$GROK_HOME_DIR"
   [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
   if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
     echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
@@ -2414,7 +2463,8 @@ fm_backend_send_key "$BACKEND" "$WID" Enter
       || echo "warning: $ID launched but its pooled-slot ownership lock $SPAWN_SLOT_LOCK_PATH could not be released; clear the stale lock file manually" >&2
   fi
 if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
-  spawn_herdr_presentation_order_lock_release
+  spawn_herdr_presentation_order_lock_release \
+    || echo "warning: $ID launched but its Herdr presentation lock could not be released; the exit cleanup will retry" >&2
 fi
 if [ "$SPAWN_HOME_LOCK_HELD" = 1 ]; then
   spawn_release_home_lock \
