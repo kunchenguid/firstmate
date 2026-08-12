@@ -1,10 +1,10 @@
 # Away-mode delivery alarm
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into Firstmate's own pane.
-When delivery identity cannot be verified, entry refuses and raises the alarm immediately.
+When delivery identity cannot be verified, entry refuses, emits an error, writes `state/.subsuper-delivery-unavailable`, and raises the alarm immediately.
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises the same alarm on a rate-limited cadence so the stall never stays invisible.
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
-The refusal marker is `state/.subsuper-delivery-unavailable`; the wedge marker and tmux flash remain as additional signals after an established delivery path stalls.
+After an established delivery path stalls, `state/.subsuper-inject-wedged` and the tmux flash remain as additional signals.
 
 ## Channels
 

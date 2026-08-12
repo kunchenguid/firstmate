@@ -111,7 +111,8 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode delivery identity is unavailable, or injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud alarm.
-Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+An unavailable delivery endpoint emits an error and writes `state/.subsuper-delivery-unavailable`; a later injection wedge writes `state/.subsuper-inject-wedged` and adds a tmux status-line flash when applicable.
+Both conditions attempt a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
