@@ -11,6 +11,7 @@ fm-arm-pretool-check.test.sh	hermetic
 fm-auto-reap-herdr-e2e.test.sh	herdr-lab
 fm-auto-reap.test.sh	hermetic
 fm-autocompact.test.sh	hermetic
+fm-azure-pilot.test.sh	hermetic
 fm-backend-autodetect-smoke.test.sh	herdr-lab
 fm-backend-cmux-smoke.test.sh	hermetic
 fm-backend-cmux.test.sh	hermetic
@@ -34,6 +35,7 @@ fm-bounded-io.test.sh	hermetic
 fm-brief.test.sh	hermetic
 fm-captain-item-check.test.sh	hermetic
 fm-cd-pretool-check.test.sh	hermetic
+fm-checkout-identity-cost.test.sh	hermetic
 fm-checkout-refresh.test.sh	hermetic
 fm-checkout-return-boundary.test.sh	hermetic
 fm-composer-ghost.test.sh	hermetic

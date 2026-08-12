@@ -1,0 +1,2072 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "tenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "Exact tenant selected by the operator. Never commit a value."
+      }
+    },
+    "subscriptionId": {
+      "type": "string",
+      "metadata": {
+        "description": "Exact subscription selected by the operator. Never commit a value."
+      }
+    },
+    "administratorNotificationEmail": {
+      "type": "secureString",
+      "metadata": {
+        "description": "Verified billing administrator notification address."
+      }
+    },
+    "adminUsername": {
+      "type": "secureString",
+      "metadata": {
+        "description": "Local VM administrator name."
+      }
+    },
+    "adminSshPublicKey": {
+      "type": "secureString",
+      "metadata": {
+        "description": "SSH public key used only over the private overlay."
+      }
+    },
+    "ownerTag": {
+      "type": "string",
+      "minLength": 1,
+      "metadata": {
+        "description": "Non-secret cleanup owner tag."
+      }
+    },
+    "deploymentGeneration": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "metadata": {
+        "description": "Stable generation used to bind homes, sessions, VMs, and tasks without collisions."
+      }
+    },
+    "namingPrefix": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 12,
+      "metadata": {
+        "description": "Lowercase alphanumeric deployment prefix."
+      }
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "defaultValue": "rg-firstmate-pilot-eastus-001"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 24
+    },
+    "keyVaultName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 24
+    },
+    "region": {
+      "type": "string",
+      "defaultValue": "eastus",
+      "allowedValues": [
+        "eastus"
+      ]
+    },
+    "capacityProfile": {
+      "type": "string",
+      "defaultValue": "foundation",
+      "allowedValues": [
+        "foundation",
+        "commissioning",
+        "full"
+      ],
+      "metadata": {
+        "description": "Foundation is the immediate validation/review substrate with zero author VMs; full remains the later interactive-worker target."
+      }
+    },
+    "authorCapacityMode": {
+      "type": "string",
+      "defaultValue": "mixed-current",
+      "allowedValues": [
+        "mixed-current",
+        "homogeneous-dasv6"
+      ],
+      "metadata": {
+        "description": "One resource-class contract backed by reviewed homogeneous Dasv6 or deterministic no-support mixed pools."
+      }
+    },
+    "vmFamily": {
+      "type": "string",
+      "defaultValue": "Dasv6",
+      "allowedValues": [
+        "Dasv6",
+        "Dasv5"
+      ],
+      "metadata": {
+        "description": "Reviewed family. Dasv6 is the production default; Dasv5 is compatibility-only and remains quota-gated."
+      }
+    },
+    "requiredRegionalFreeVcpus": {
+      "type": "int",
+      "defaultValue": 128,
+      "minValue": 128,
+      "maxValue": 128
+    },
+    "requiredAuthorFamilyFreeVcpus": {
+      "type": "int",
+      "defaultValue": 96,
+      "minValue": 96,
+      "maxValue": 96
+    },
+    "reservedLandingVcpus": {
+      "type": "int",
+      "defaultValue": 62,
+      "minValue": 62,
+      "maxValue": 62,
+      "metadata": {
+        "description": "Regional scheduler headroom reserved for isolated validation, policy review, browser, replacement, and ancillary capacity."
+      }
+    },
+    "workerSlots": {
+      "type": "array",
+      "defaultValue": [],
+      "minLength": 0,
+      "maxLength": 16,
+      "metadata": {
+        "description": "Worker slots to create or reconcile. Incremental deployment never removes omitted retained disks."
+      }
+    },
+    "workerSkus": {
+      "type": "array",
+      "defaultValue": [],
+      "minLength": 0,
+      "maxLength": 16,
+      "metadata": {
+        "description": "Exact reviewed SKU for each worker slot; the scheduler must reject any incompatible or undersized value."
+      }
+    },
+    "commissioningBudgetCeilingUsd": {
+      "type": "int",
+      "defaultValue": 1500,
+      "minValue": 1500,
+      "maxValue": 1500
+    },
+    "steadyStateBudgetTargetUsd": {
+      "type": "int",
+      "defaultValue": 1000,
+      "minValue": 500,
+      "maxValue": 1500,
+      "metadata": {
+        "description": "Configurable scheduler target after real telemetry exists; it does not terminate active work."
+      }
+    },
+    "workerHourPlanningThreshold": {
+      "type": "int",
+      "defaultValue": 3500,
+      "minValue": 1,
+      "metadata": {
+        "description": "Planning and alert threshold only, not a commissioning hard stop."
+      }
+    },
+    "reservedLandingWorkerHours": {
+      "type": "int",
+      "defaultValue": 400,
+      "minValue": 400,
+      "maxValue": 400,
+      "metadata": {
+        "description": "Hours inside the aggregate cap reserved for elastic validation and policy review."
+      }
+    },
+    "budgetStartDate": {
+      "type": "string",
+      "metadata": {
+        "description": "First day of the current billing month in UTC."
+      }
+    },
+    "ubuntuImageVersion": {
+      "type": "string",
+      "defaultValue": "24.04.202608070"
+    },
+    "runnerValidationSku": {
+      "type": "string",
+      "defaultValue": "Standard_E8as_v6",
+      "allowedValues": [
+        "Standard_E8as_v6",
+        "Standard_E8s_v6"
+      ],
+      "metadata": {
+        "description": "Reviewed 8-vCPU/32-GiB-or-better one-shot validation seam; this template creates no runner VM."
+      }
+    },
+    "workerHomeBinding": {
+      "type": "string",
+      "defaultValue": "unbound",
+      "maxLength": 64
+    },
+    "workerTaskBinding": {
+      "type": "string",
+      "defaultValue": "unbound",
+      "maxLength": 64
+    },
+    "workerInvocationBinding": {
+      "type": "string",
+      "defaultValue": "unbound",
+      "maxLength": 64
+    },
+    "workerSnapshotDigest": {
+      "type": "string",
+      "defaultValue": "unbound",
+      "maxLength": 71
+    },
+    "workerCostAttribution": {
+      "type": "string",
+      "defaultValue": "author",
+      "maxLength": 64
+    },
+    "protectDurableState": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable only after acceptance to add CanNotDelete locks to storage and Key Vault."
+      }
+    },
+    "herdrRelease": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Reserved pin seam. Leave empty until the Linux artifact contract is independently verified."
+      }
+    },
+    "herdrArtifactUri": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Reserved private artifact seam. No installer consumes it in this revision."
+      }
+    },
+    "herdrArtifactSha256": {
+      "type": "secureString",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Reserved integrity seam. No installer consumes it in this revision."
+      }
+    }
+  },
+  "variables": {
+    "scopeMatches": "[and(equals(parameters('subscriptionId'), subscription().subscriptionId), equals(parameters('tenantId'), tenant().tenantId))]",
+    "capacityMatches": "[and(equals(length(parameters('workerSlots')), length(parameters('workerSkus'))), or(and(equals(parameters('capacityProfile'), 'foundation'), equals(length(parameters('workerSlots')), 0)), and(equals(parameters('capacityProfile'), 'commissioning'), equals(length(parameters('workerSlots')), 2)), and(equals(parameters('capacityProfile'), 'full'), equals(length(parameters('workerSlots')), 16))))]",
+    "safeResourceGroupName": "[if(and(variables('scopeMatches'), variables('capacityMatches')), parameters('resourceGroupName'), 'INVALID/SCOPE-OR-CAPACITY')]",
+    "commonTags": {
+      "workload": "firstmate",
+      "environment": "pilot",
+      "managed-by": "infrastructure-as-code",
+      "region": "eastus",
+      "steady-state-cost-target": "1000-usd-monthly",
+      "commissioning-cost-ceiling": "1500-usd-monthly",
+      "data-classification": "confidential",
+      "activation-policy": "bounded-acceptance-immediate-cutover",
+      "cleanup-owner": "[parameters('ownerTag')]",
+      "deployment-generation": "[parameters('deploymentGeneration')]",
+      "capacity-profile": "[parameters('capacityProfile')]",
+      "author-capacity-mode": "[parameters('authorCapacityMode')]",
+      "regional-vcpu-target": "128",
+      "author-family-vcpu-target": "96",
+      "landing-vcpu-reserve": "62",
+      "aggregate-worker-hour-planning-threshold": "3500",
+      "landing-worker-hour-reserve": "400"
+    },
+    "budgetName": "[format('bud-{0}-monthly', parameters('namingPrefix'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2022-09-01",
+      "name": "[variables('safeResourceGroupName')]",
+      "location": "[parameters('region')]",
+      "tags": "[variables('commonTags')]"
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "firstmate-pilot-resources",
+      "resourceGroup": "[variables('safeResourceGroupName')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/resourceGroups', variables('safeResourceGroupName'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "region": {
+            "value": "[parameters('region')]"
+          },
+          "namingPrefix": {
+            "value": "[parameters('namingPrefix')]"
+          },
+          "storageAccountName": {
+            "value": "[parameters('storageAccountName')]"
+          },
+          "keyVaultName": {
+            "value": "[parameters('keyVaultName')]"
+          },
+          "administratorNotificationEmail": {
+            "value": "[parameters('administratorNotificationEmail')]"
+          },
+          "adminUsername": {
+            "value": "[parameters('adminUsername')]"
+          },
+          "adminSshPublicKey": {
+            "value": "[parameters('adminSshPublicKey')]"
+          },
+          "deploymentGeneration": {
+            "value": "[parameters('deploymentGeneration')]"
+          },
+          "capacityProfile": {
+            "value": "[parameters('capacityProfile')]"
+          },
+          "authorCapacityMode": {
+            "value": "[parameters('authorCapacityMode')]"
+          },
+          "vmFamily": {
+            "value": "[parameters('vmFamily')]"
+          },
+          "workerSlots": {
+            "value": "[parameters('workerSlots')]"
+          },
+          "workerSkus": {
+            "value": "[parameters('workerSkus')]"
+          },
+          "workerHourPlanningThreshold": {
+            "value": "[parameters('workerHourPlanningThreshold')]"
+          },
+          "reservedLandingVcpus": {
+            "value": "[parameters('reservedLandingVcpus')]"
+          },
+          "reservedLandingWorkerHours": {
+            "value": "[parameters('reservedLandingWorkerHours')]"
+          },
+          "ubuntuImageVersion": {
+            "value": "[parameters('ubuntuImageVersion')]"
+          },
+          "workerHomeBinding": {
+            "value": "[parameters('workerHomeBinding')]"
+          },
+          "workerTaskBinding": {
+            "value": "[parameters('workerTaskBinding')]"
+          },
+          "workerInvocationBinding": {
+            "value": "[parameters('workerInvocationBinding')]"
+          },
+          "workerSnapshotDigest": {
+            "value": "[parameters('workerSnapshotDigest')]"
+          },
+          "workerCostAttribution": {
+            "value": "[parameters('workerCostAttribution')]"
+          },
+          "protectDurableState": {
+            "value": "[parameters('protectDurableState')]"
+          },
+          "commonTags": {
+            "value": "[variables('commonTags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "region": {
+              "type": "string"
+            },
+            "namingPrefix": {
+              "type": "string"
+            },
+            "storageAccountName": {
+              "type": "string"
+            },
+            "keyVaultName": {
+              "type": "string"
+            },
+            "administratorNotificationEmail": {
+              "type": "secureString"
+            },
+            "adminUsername": {
+              "type": "secureString"
+            },
+            "adminSshPublicKey": {
+              "type": "secureString"
+            },
+            "deploymentGeneration": {
+              "type": "string"
+            },
+            "capacityProfile": {
+              "type": "string"
+            },
+            "authorCapacityMode": {
+              "type": "string"
+            },
+            "vmFamily": {
+              "type": "string"
+            },
+            "workerSlots": {
+              "type": "array"
+            },
+            "workerSkus": {
+              "type": "array"
+            },
+            "workerHourPlanningThreshold": {
+              "type": "int"
+            },
+            "reservedLandingVcpus": {
+              "type": "int"
+            },
+            "reservedLandingWorkerHours": {
+              "type": "int"
+            },
+            "ubuntuImageVersion": {
+              "type": "string"
+            },
+            "workerHomeBinding": {
+              "type": "string"
+            },
+            "workerTaskBinding": {
+              "type": "string"
+            },
+            "workerInvocationBinding": {
+              "type": "string"
+            },
+            "workerSnapshotDigest": {
+              "type": "string"
+            },
+            "workerCostAttribution": {
+              "type": "string"
+            },
+            "protectDurableState": {
+              "type": "bool"
+            },
+            "commonTags": {
+              "type": "object"
+            }
+          },
+          "variables": {
+            "supervisorVmName": "[format('vm-{0}-sup-01', parameters('namingPrefix'))]",
+            "supervisorIdentityName": "[format('id-{0}-sup-01', parameters('namingPrefix'))]",
+            "supervisorNicName": "[format('nic-{0}-sup-01', parameters('namingPrefix'))]",
+            "supervisorAccountDiskName": "[format('disk-{0}-sup-01-account', parameters('namingPrefix'))]",
+            "supervisorTaskDiskName": "[format('disk-{0}-sup-01-task', parameters('namingPrefix'))]",
+            "supervisorVmSize": "[if(equals(parameters('vmFamily'), 'Dasv5'), 'Standard_D2as_v5', 'Standard_D2as_v6')]",
+            "vnetName": "[format('vnet-{0}-eus', parameters('namingPrefix'))]",
+            "supervisorNsgName": "[format('nsg-{0}-supervisor', parameters('namingPrefix'))]",
+            "workerNsgName": "[format('nsg-{0}-workers', parameters('namingPrefix'))]",
+            "elasticNsgName": "[format('nsg-{0}-elastic-isolated', parameters('namingPrefix'))]",
+            "validationIdentityName": "[format('id-{0}-validation', parameters('namingPrefix'))]",
+            "reviewIdentityName": "[format('id-{0}-policy-review', parameters('namingPrefix'))]",
+            "browserIdentityName": "[format('id-{0}-crosscheck-tools', parameters('namingPrefix'))]",
+            "validationShardIdentityName": "[format('id-{0}-validation-shards', parameters('namingPrefix'))]",
+            "verifierIdentityName": "[format('id-{0}-networkless-verifier', parameters('namingPrefix'))]",
+            "natName": "[format('nat-{0}-eus', parameters('namingPrefix'))]",
+            "natPublicIpName": "[format('pip-{0}-nat-eus', parameters('namingPrefix'))]",
+            "workspaceName": "[format('log-{0}-eus', parameters('namingPrefix'))]",
+            "actionGroupName": "[format('ag-{0}-ops', parameters('namingPrefix'))]",
+            "dcrName": "[format('dcr-{0}-linux', parameters('namingPrefix'))]",
+            "blobPrivateEndpointName": "[format('pe-{0}-blob', parameters('namingPrefix'))]",
+            "vaultPrivateEndpointName": "[format('pe-{0}-vault', parameters('namingPrefix'))]",
+            "blobPrivateDnsZone": "privatelink.blob.core.windows.net",
+            "vaultPrivateDnsZone": "privatelink.vaultcore.azure.net",
+            "blobDataContributorRoleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+            "workerCount": "[length(parameters('workerSlots'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('workspaceName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "retentionInDays": 30,
+                "workspaceCapping": {
+                  "dailyQuotaGb": 0.25
+                },
+                "publicNetworkAccessForIngestion": "Enabled",
+                "publicNetworkAccessForQuery": "Enabled"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/actionGroups",
+              "apiVersion": "2023-01-01",
+              "name": "[variables('actionGroupName')]",
+              "location": "global",
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "enabled": true,
+                "groupShortName": "fmops",
+                "emailReceivers": [
+                  {
+                    "name": "administrator",
+                    "emailAddress": "[parameters('administratorNotificationEmail')]",
+                    "useCommonAlertSchema": true
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('supervisorNsgName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "deny-public-inbound",
+                    "properties": {
+                      "priority": 100,
+                      "access": "Deny",
+                      "direction": "Inbound",
+                      "protocol": "*",
+                      "sourcePortRange": "*",
+                      "destinationPortRange": "*",
+                      "sourceAddressPrefix": "Internet",
+                      "destinationAddressPrefix": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('workerNsgName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "deny-public-inbound",
+                    "properties": {
+                      "priority": 100,
+                      "access": "Deny",
+                      "direction": "Inbound",
+                      "protocol": "*",
+                      "sourcePortRange": "*",
+                      "destinationPortRange": "*",
+                      "sourceAddressPrefix": "Internet",
+                      "destinationAddressPrefix": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('elasticNsgName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('capacity-class', 'validation-review-browser-scale-to-zero'))]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "deny-public-inbound",
+                    "properties": {
+                      "priority": 100,
+                      "access": "Deny",
+                      "direction": "Inbound",
+                      "protocol": "*",
+                      "sourcePortRange": "*",
+                      "destinationPortRange": "*",
+                      "sourceAddressPrefix": "Internet",
+                      "destinationAddressPrefix": "*"
+                    }
+                  },
+                  {
+                    "name": "deny-vnet-cross-compartment-inbound",
+                    "properties": {
+                      "priority": 110,
+                      "access": "Deny",
+                      "direction": "Inbound",
+                      "protocol": "*",
+                      "sourcePortRange": "*",
+                      "destinationPortRange": "*",
+                      "sourceAddressPrefix": "VirtualNetwork",
+                      "destinationAddressPrefix": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('natPublicIpName')]",
+              "location": "[parameters('region')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "publicIPAllocationMethod": "Static",
+                "publicIPAddressVersion": "IPv4",
+                "idleTimeoutInMinutes": 4
+              }
+            },
+            {
+              "type": "Microsoft.Network/natGateways",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('natName')]",
+              "location": "[parameters('region')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', variables('natPublicIpName'))]"
+              ],
+              "properties": {
+                "idleTimeoutInMinutes": 10,
+                "publicIpAddresses": [
+                  {
+                    "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('natPublicIpName'))]"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/virtualNetworks",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('vnetName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/natGateways', variables('natName'))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', variables('supervisorNsgName'))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', variables('workerNsgName'))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', variables('elasticNsgName'))]"
+              ],
+              "properties": {
+                "addressSpace": {
+                  "addressPrefixes": [
+                    "10.42.0.0/16"
+                  ]
+                },
+                "subnets": [
+                  {
+                    "name": "snet-supervisor",
+                    "properties": {
+                      "addressPrefix": "10.42.1.0/27",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('supervisorNsgName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled"
+                    }
+                  },
+                  {
+                    "name": "snet-workers",
+                    "properties": {
+                      "addressPrefix": "10.42.2.0/24",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('workerNsgName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled"
+                    }
+                  },
+                  {
+                    "name": "snet-private-endpoints",
+                    "properties": {
+                      "addressPrefix": "10.42.3.0/27",
+                      "privateEndpointNetworkPolicies": "Disabled"
+                    }
+                  },
+                  {
+                    "name": "snet-validation",
+                    "properties": {
+                      "addressPrefix": "10.42.4.0/24",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('elasticNsgName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled"
+                    }
+                  },
+                  {
+                    "name": "snet-policy-review",
+                    "properties": {
+                      "addressPrefix": "10.42.5.0/24",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('elasticNsgName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled"
+                    }
+                  },
+                  {
+                    "name": "snet-crosscheck-tools",
+                    "properties": {
+                      "addressPrefix": "10.42.6.0/24",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('elasticNsgName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled"
+                    }
+                  },
+                  {
+                    "name": "snet-validation-shards",
+                    "properties": {
+                      "addressPrefix": "10.42.7.0/24",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('elasticNsgName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled"
+                    }
+                  },
+                  {
+                    "name": "snet-networkless-verifier",
+                    "properties": {
+                      "addressPrefix": "10.42.8.0/24",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('elasticNsgName'))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Enabled",
+                      "defaultOutboundAccess": false
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2020-06-01",
+              "name": "[variables('blobPrivateDnsZone')]",
+              "location": "global",
+              "tags": "[parameters('commonTags')]"
+            },
+            {
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2020-06-01",
+              "name": "[variables('vaultPrivateDnsZone')]",
+              "location": "global",
+              "tags": "[parameters('commonTags')]"
+            },
+            {
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2020-06-01",
+              "name": "[format('{0}/{1}', variables('blobPrivateDnsZone'), 'firstmate-vnet')]",
+              "location": "global",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('blobPrivateDnsZone'))]",
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+              ],
+              "properties": {
+                "registrationEnabled": false,
+                "virtualNetwork": {
+                  "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2020-06-01",
+              "name": "[format('{0}/{1}', variables('vaultPrivateDnsZone'), 'firstmate-vnet')]",
+              "location": "global",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('vaultPrivateDnsZone'))]",
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+              ],
+              "properties": {
+                "registrationEnabled": false,
+                "virtualNetwork": {
+                  "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2023-07-01",
+              "name": "[parameters('keyVaultName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "tenantId": "[subscription().tenantId]",
+                "sku": {
+                  "family": "A",
+                  "name": "standard"
+                },
+                "enableRbacAuthorization": true,
+                "enablePurgeProtection": true,
+                "enableSoftDelete": true,
+                "softDeleteRetentionInDays": 90,
+                "publicNetworkAccess": "Disabled",
+                "networkAcls": {
+                  "bypass": "None",
+                  "defaultAction": "Deny"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-05-01",
+              "name": "[parameters('storageAccountName')]",
+              "location": "[parameters('region')]",
+              "kind": "StorageV2",
+              "sku": {
+                "name": "Standard_ZRS"
+              },
+              "tags": "[parameters('commonTags')]",
+              "properties": {
+                "accessTier": "Hot",
+                "allowBlobPublicAccess": false,
+                "allowSharedKeyAccess": false,
+                "defaultToOAuthAuthentication": true,
+                "supportsHttpsTrafficOnly": true,
+                "minimumTlsVersion": "TLS1_2",
+                "publicNetworkAccess": "Disabled",
+                "networkAcls": {
+                  "bypass": "None",
+                  "defaultAction": "Deny"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ],
+              "properties": {
+                "isVersioningEnabled": true,
+                "changeFeed": {
+                  "enabled": true,
+                  "retentionInDays": 35
+                },
+                "deleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 35,
+                  "allowPermanentDelete": false
+                },
+                "containerDeleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 35
+                },
+                "restorePolicy": {
+                  "enabled": true,
+                  "days": 30
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/supervisor-state', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/artifacts', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/worker-state-{1}', parameters('storageAccountName'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "copy": {
+                "name": "workerStateContainers",
+                "count": "[variables('workerCount')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/validation-evidence', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/crosscheck-evidence', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/validation-shards', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/networkless-verifier', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/browser-artifacts', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ],
+              "properties": {
+                "publicAccess": "None"
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('blobPrivateEndpointName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ],
+              "properties": {
+                "subnet": {
+                  "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'snet-private-endpoints')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "blob",
+                    "properties": {
+                      "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                      "groupIds": [
+                        "blob"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2023-09-01",
+              "name": "[format('{0}/default', variables('blobPrivateEndpointName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', variables('blobPrivateEndpointName'))]",
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('blobPrivateDnsZone'))]"
+              ],
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "blob",
+                    "properties": {
+                      "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('blobPrivateDnsZone'))]"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('vaultPrivateEndpointName')]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+              ],
+              "properties": {
+                "subnet": {
+                  "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'snet-private-endpoints')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "vault",
+                    "properties": {
+                      "privateLinkServiceId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+                      "groupIds": [
+                        "vault"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2023-09-01",
+              "name": "[format('{0}/default', variables('vaultPrivateEndpointName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', variables('vaultPrivateEndpointName'))]",
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('vaultPrivateDnsZone'))]"
+              ],
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "vault",
+                    "properties": {
+                      "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('vaultPrivateDnsZone'))]"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('supervisorIdentityName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'supervisor', 'control-plane', 'trusted'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('validationIdentityName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'validation-cell', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('reviewIdentityName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'policy-review', 'lifecycle', 'elastic-scale-to-zero', 'credential-boundary', 'separate'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('browserIdentityName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'browser-tool', 'lifecycle', 'elastic-scale-to-zero', 'credential-boundary', 'uncredentialed-tool'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('validationShardIdentityName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'validation-shard', 'credential-boundary', 'uncredentialed-command', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden', 'cost-attribution', 'validation-shards'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('verifierIdentityName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'networkless-verifier', 'credential-boundary', 'fresh-uncredentialed', 'lifecycle', 'elastic-scale-to-zero', 'control-home-mount', 'forbidden', 'cost-attribution', 'verification'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('id-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+
+              "copy": {
+                "name": "workerIdentities",
+                "count": "[variables('workerCount')]"
+              },
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'worker', 'selected-sku', parameters('workerSkus')[copyIndex()], 'resource-class', 'author-4vcpu-16gib-trustedlaunch', 'agent-capacity', 'one-task-scoped-crewmate', 'nested-team', 'forbidden'))]"
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Compute/disks",
+              "apiVersion": "2023-10-02",
+              "name": "[variables('supervisorAccountDiskName')]",
+              "location": "[parameters('region')]",
+              "zones": [
+                "1"
+              ],
+              "sku": {
+                "name": "PremiumV2_LRS"
+              },
+              "tags": "[union(parameters('commonTags'), createObject('disk-purpose', 'provider-account', 'backup-policy', 'no-snapshots', 'retention', 'detach-on-vm-delete', 'guest-encryption', 'luks2-required'))]",
+              "properties": {
+                "creationData": {
+                  "createOption": "Empty"
+                },
+                "diskSizeGB": 8,
+                "diskIOPSReadWrite": 3000,
+                "diskMBpsReadWrite": 125,
+                "networkAccessPolicy": "DenyAll",
+                "publicNetworkAccess": "Disabled"
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Compute/disks",
+              "apiVersion": "2023-10-02",
+              "name": "[variables('supervisorTaskDiskName')]",
+              "location": "[parameters('region')]",
+              "zones": [
+                "1"
+              ],
+              "sku": {
+                "name": "StandardSSD_LRS"
+              },
+              "tags": "[union(parameters('commonTags'), createObject('disk-purpose', 'task-state', 'backup-policy', 'no-routine-snapshots', 'retention', 'detach-on-vm-delete', 'guest-encryption', 'luks2-required'))]",
+              "properties": {
+                "creationData": {
+                  "createOption": "Empty"
+                },
+                "diskSizeGB": 64,
+                "networkAccessPolicy": "DenyAll",
+                "publicNetworkAccess": "Disabled"
+              }
+            },
+            {
+              "type": "Microsoft.Compute/disks",
+              "apiVersion": "2023-10-02",
+              "name": "[format('disk-{0}-wkr-{1}-account', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "copy": {
+                "name": "workerAccountDisks",
+                "count": "[variables('workerCount')]"
+              },
+              "location": "[parameters('region')]",
+              "zones": [
+                "[string(add(mod(parameters('workerSlots')[copyIndex()], 3), 1))]"
+              ],
+              "sku": {
+                "name": "PremiumV2_LRS"
+              },
+              "tags": "[union(parameters('commonTags'), createObject('disk-purpose', 'provider-account', 'worker-slot', string(parameters('workerSlots')[copyIndex()]), 'backup-policy', 'no-snapshots', 'retention', 'detach-on-vm-delete', 'guest-encryption', 'luks2-required'))]",
+              "properties": {
+                "creationData": {
+                  "createOption": "Empty"
+                },
+                "diskSizeGB": 8,
+                "diskIOPSReadWrite": 3000,
+                "diskMBpsReadWrite": 125,
+                "networkAccessPolicy": "DenyAll",
+                "publicNetworkAccess": "Disabled"
+              }
+            },
+            {
+              "type": "Microsoft.Compute/disks",
+              "apiVersion": "2023-10-02",
+              "name": "[format('disk-{0}-wkr-{1}-task', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "copy": {
+                "name": "workerTaskDisks",
+                "count": "[variables('workerCount')]"
+              },
+              "location": "[parameters('region')]",
+              "zones": [
+                "[string(add(mod(parameters('workerSlots')[copyIndex()], 3), 1))]"
+              ],
+              "sku": {
+                "name": "StandardSSD_LRS"
+              },
+              "tags": "[union(parameters('commonTags'), createObject('disk-purpose', 'task-state', 'worker-slot', string(parameters('workerSlots')[copyIndex()]), 'backup-policy', 'no-routine-snapshots', 'retention', 'detach-on-vm-delete', 'guest-encryption', 'luks2-required'))]",
+              "properties": {
+                "creationData": {
+                  "createOption": "Empty"
+                },
+                "diskSizeGB": 64,
+                "networkAccessPolicy": "DenyAll",
+                "publicNetworkAccess": "Disabled"
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2023-09-01",
+              "name": "[variables('supervisorNicName')]",
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'supervisor'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+              ],
+              "properties": {
+                "enableAcceleratedNetworking": true,
+                "ipConfigurations": [
+                  {
+                    "name": "primary",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "subnet": {
+                        "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'snet-supervisor')]"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2023-09-01",
+              "name": "[format('nic-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "copy": {
+                "name": "workerNics",
+                "count": "[variables('workerCount')]"
+              },
+              "location": "[parameters('region')]",
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'worker', 'worker-slot', string(parameters('workerSlots')[copyIndex()])))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+              ],
+              "properties": {
+                "enableAcceleratedNetworking": true,
+                "ipConfigurations": [
+                  {
+                    "name": "primary",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "subnet": {
+                        "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'snet-workers')]"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2024-03-01",
+              "name": "[variables('supervisorVmName')]",
+              "location": "[parameters('region')]",
+              "zones": [
+                "1"
+              ],
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": "[createObject(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('supervisorIdentityName')), createObject())]"
+              },
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'supervisor', 'control-plane', 'trusted', 'session-interface', 'herdr-primary', 'recovery-interface', 'tmux-only'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('supervisorIdentityName'))]",
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('supervisorNicName'))]",
+                "[resourceId('Microsoft.Compute/disks', variables('supervisorAccountDiskName'))]",
+                "[resourceId('Microsoft.Compute/disks', variables('supervisorTaskDiskName'))]"
+              ],
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[variables('supervisorVmSize')]"
+                },
+                "securityProfile": {
+                  "securityType": "TrustedLaunch",
+                  "uefiSettings": {
+                    "secureBootEnabled": true,
+                    "vTpmEnabled": true
+                  },
+                  "encryptionAtHost": true
+                },
+                "osProfile": {
+                  "computerName": "[variables('supervisorVmName')]",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "linuxConfiguration": {
+                    "disablePasswordAuthentication": true,
+                    "provisionVMAgent": true,
+                    "ssh": {
+                      "publicKeys": [
+                        {
+                          "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                          "keyData": "[parameters('adminSshPublicKey')]"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "Canonical",
+                    "offer": "ubuntu-24_04-lts",
+                    "sku": "server",
+                    "version": "[parameters('ubuntuImageVersion')]"
+                  },
+                  "osDisk": {
+                    "name": "[format('disk-{0}-sup-01-os', parameters('namingPrefix'))]",
+                    "createOption": "FromImage",
+                    "deleteOption": "Delete",
+                    "diskSizeGB": 64,
+                    "managedDisk": {
+                      "storageAccountType": "StandardSSD_LRS"
+                    }
+                  },
+                  "dataDisks": [
+                    {
+                      "lun": 0,
+                      "name": "[variables('supervisorAccountDiskName')]",
+                      "createOption": "Attach",
+                      "deleteOption": "Detach",
+                      "caching": "None",
+                      "managedDisk": {
+                        "id": "[resourceId('Microsoft.Compute/disks', variables('supervisorAccountDiskName'))]"
+                      }
+                    },
+                    {
+                      "lun": 1,
+                      "name": "[variables('supervisorTaskDiskName')]",
+                      "createOption": "Attach",
+                      "deleteOption": "Detach",
+                      "caching": "None",
+                      "managedDisk": {
+                        "id": "[resourceId('Microsoft.Compute/disks', variables('supervisorTaskDiskName'))]"
+                      }
+                    }
+                  ]
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('supervisorNicName'))]",
+                      "properties": {
+                        "deleteOption": "Delete",
+                        "primary": true
+                      }
+                    }
+                  ]
+                },
+                "diagnosticsProfile": {
+                  "bootDiagnostics": {
+                    "enabled": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2024-03-01",
+              "name": "[format('vm-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "copy": {
+                "name": "workerVms",
+                "count": "[variables('workerCount')]"
+              },
+              "location": "[parameters('region')]",
+              "zones": [
+                "[string(add(mod(parameters('workerSlots')[copyIndex()], 3), 1))]"
+              ],
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": "[createObject(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))), createObject())]"
+              },
+              "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'worker', 'worker-slot', string(parameters('workerSlots')[copyIndex()]), 'selected-sku', parameters('workerSkus')[copyIndex()], 'resource-class', 'author-4vcpu-16gib-trustedlaunch', 'home-binding', parameters('workerHomeBinding'), 'task-binding', parameters('workerTaskBinding'), 'invocation-binding', parameters('workerInvocationBinding'), 'snapshot-digest', parameters('workerSnapshotDigest'), 'cost-attribution', parameters('workerCostAttribution'), 'agent-capacity', 'one-task-scoped-crewmate', 'secondmate-placement', 'forbidden', 'nested-team', 'forbidden', 'lifecycle', 'disposable-compute-retained-data'))]",
+              "dependsOn": [
+                "workerIdentities",
+                "workerNics",
+                "workerAccountDisks",
+                "workerTaskDisks"
+              ],
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[parameters('workerSkus')[copyIndex()]]"
+                },
+                "securityProfile": {
+                  "securityType": "TrustedLaunch",
+                  "uefiSettings": {
+                    "secureBootEnabled": true,
+                    "vTpmEnabled": true
+                  },
+                  "encryptionAtHost": true
+                },
+                "osProfile": {
+                  "computerName": "[format('wkr-{0}-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "linuxConfiguration": {
+                    "disablePasswordAuthentication": true,
+                    "provisionVMAgent": true,
+                    "ssh": {
+                      "publicKeys": [
+                        {
+                          "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                          "keyData": "[parameters('adminSshPublicKey')]"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "Canonical",
+                    "offer": "ubuntu-24_04-lts",
+                    "sku": "server",
+                    "version": "[parameters('ubuntuImageVersion')]"
+                  },
+                  "osDisk": {
+                    "name": "[format('disk-{0}-wkr-{1}-os', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+                    "createOption": "FromImage",
+                    "deleteOption": "Delete",
+                    "diskSizeGB": 64,
+                    "managedDisk": {
+                      "storageAccountType": "StandardSSD_LRS"
+                    }
+                  },
+                  "dataDisks": [
+                    {
+                      "lun": 0,
+                      "name": "[format('disk-{0}-wkr-{1}-account', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+                      "createOption": "Attach",
+                      "deleteOption": "Detach",
+                      "caching": "None",
+                      "managedDisk": {
+                        "id": "[resourceId('Microsoft.Compute/disks', format('disk-{0}-wkr-{1}-account', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0')))]"
+                      }
+                    },
+                    {
+                      "lun": 1,
+                      "name": "[format('disk-{0}-wkr-{1}-task', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+                      "createOption": "Attach",
+                      "deleteOption": "Detach",
+                      "caching": "None",
+                      "managedDisk": {
+                        "id": "[resourceId('Microsoft.Compute/disks', format('disk-{0}-wkr-{1}-task', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0')))]"
+                      }
+                    }
+                  ]
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', format('nic-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0')))]",
+                      "properties": {
+                        "deleteOption": "Delete",
+                        "primary": true
+                      }
+                    }
+                  ]
+                },
+                "diagnosticsProfile": {
+                  "bootDiagnostics": {
+                    "enabled": true
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/dataCollectionRules",
+              "apiVersion": "2023-03-11",
+              "name": "[variables('dcrName')]",
+              "location": "[parameters('region')]",
+              "kind": "Linux",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]"
+              ],
+              "properties": {
+                "dataSources": {
+                  "performanceCounters": [
+                    {
+                      "name": "safe-performance",
+                      "streams": [
+                        "Microsoft-Perf"
+                      ],
+                      "samplingFrequencyInSeconds": 60,
+                      "counterSpecifiers": [
+                        "\\Processor(_Total)\\% Processor Time",
+                        "\\Memory\\Available MBytes",
+                        "\\Logical Disk(*)\\% Free Space"
+                      ]
+                    }
+                  ],
+                  "syslog": [
+                    {
+                      "name": "warning-and-higher",
+                      "streams": [
+                        "Microsoft-Syslog"
+                      ],
+                      "facilityNames": [
+                        "auth",
+                        "authpriv",
+                        "daemon",
+                        "syslog",
+                        "user"
+                      ],
+                      "logLevels": [
+                        "Warning",
+                        "Error",
+                        "Critical",
+                        "Alert",
+                        "Emergency"
+                      ]
+                    }
+                  ]
+                },
+                "destinations": {
+                  "logAnalytics": [
+                    {
+                      "name": "workspace",
+                      "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]"
+                    }
+                  ]
+                },
+                "dataFlows": [
+                  {
+                    "streams": [
+                      "Microsoft-Perf",
+                      "Microsoft-Syslog"
+                    ],
+                    "destinations": [
+                      "workspace"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Compute/virtualMachines/extensions",
+              "apiVersion": "2024-03-01",
+              "name": "[format('{0}/AzureMonitorLinuxAgent', variables('supervisorVmName'))]",
+              "location": "[parameters('region')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('supervisorVmName'))]"
+              ],
+              "properties": {
+                "publisher": "Microsoft.Azure.Monitor",
+                "type": "AzureMonitorLinuxAgent",
+                "typeHandlerVersion": "1.0",
+                "autoUpgradeMinorVersion": true,
+                "enableAutomaticUpgrade": true
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines/extensions",
+              "apiVersion": "2024-03-01",
+              "name": "[format('vm-{0}-wkr-{1}/AzureMonitorLinuxAgent', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "copy": {
+                "name": "workerMonitorAgents",
+                "count": "[variables('workerCount')]"
+              },
+              "location": "[parameters('region')]",
+              "dependsOn": [
+                "workerVms"
+              ],
+              "properties": {
+                "publisher": "Microsoft.Azure.Monitor",
+                "type": "AzureMonitorLinuxAgent",
+                "typeHandlerVersion": "1.0",
+                "autoUpgradeMinorVersion": true,
+                "enableAutomaticUpgrade": true
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Insights/dataCollectionRuleAssociations",
+              "apiVersion": "2023-03-11",
+              "scope": "[format('Microsoft.Compute/virtualMachines/{0}', variables('supervisorVmName'))]",
+              "name": "firstmate-linux",
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', variables('dcrName'))]",
+                "[resourceId('Microsoft.Compute/virtualMachines/extensions', variables('supervisorVmName'), 'AzureMonitorLinuxAgent')]"
+              ],
+              "properties": {
+                "dataCollectionRuleId": "[resourceId('Microsoft.Insights/dataCollectionRules', variables('dcrName'))]"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/dataCollectionRuleAssociations",
+              "apiVersion": "2023-03-11",
+              "scope": "[format('Microsoft.Compute/virtualMachines/vm-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
+              "name": "firstmate-linux",
+              "copy": {
+                "name": "workerDcrAssociations",
+                "count": "[variables('workerCount')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', variables('dcrName'))]",
+                "workerMonitorAgents"
+              ],
+              "properties": {
+                "dataCollectionRuleId": "[resourceId('Microsoft.Insights/dataCollectionRules', variables('dcrName'))]"
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[format('alert-{0}-supervisor-heartbeat', parameters('namingPrefix'))]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]",
+                "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+              ],
+              "properties": {
+                "displayName": "Firstmate supervisor heartbeat missing",
+                "enabled": true,
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT5M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[format('Heartbeat | where Computer == ''{0}''', variables('supervisorVmName'))]",
+                      "timeAggregation": "Count",
+                      "operator": "LessThan",
+                      "threshold": 1,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[format('alert-{0}-worker-heartbeat', parameters('namingPrefix'))]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]",
+                "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+              ],
+              "properties": {
+                "displayName": "Firstmate active worker heartbeat missing",
+                "enabled": true,
+                "severity": 2,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT10M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[format('Heartbeat | where Computer startswith ''wkr-{0}-'' | summarize LastHeartbeat=max(TimeGenerated) by Computer | where LastHeartbeat < ago(10m)', parameters('namingPrefix'))]",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[format('alert-{0}-sync-age', parameters('namingPrefix'))]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]",
+                "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+              ],
+              "properties": {
+                "displayName": "Firstmate durable state sync exceeds 15 minutes",
+                "enabled": true,
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "skipQueryValidation": true,
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "FMStateSync_CL | summarize Latest=max(TimeGenerated) by Node_s | where Latest < ago(15m)",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[format('alert-{0}-disk-usage', parameters('namingPrefix'))]",
+              "location": "[parameters('region')]",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]",
+                "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+              ],
+              "properties": {
+                "displayName": "Firstmate filesystem usage at or above 80 percent",
+                "enabled": true,
+                "severity": 2,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "Perf | where ObjectName == 'Logical Disk' and CounterName == '% Free Space' | summarize Free=min(CounterValue) by Computer, InstanceName | where Free <= 20",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "[format('alert-{0}-storage-availability', parameters('namingPrefix'))]",
+              "location": "global",
+              "tags": "[parameters('commonTags')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+              ],
+              "properties": {
+                "description": "Storage or private-endpoint availability fell below 100 percent.",
+                "severity": 1,
+                "enabled": true,
+                "scopes": [
+                  "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+                ],
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT5M",
+                "criteria": {
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                  "allOf": [
+                    {
+                      "name": "availability",
+                      "metricNamespace": "Microsoft.Storage/storageAccounts",
+                      "metricName": "Availability",
+                      "operator": "LessThan",
+                      "threshold": 100,
+                      "timeAggregation": "Average",
+                      "criterionType": "StaticThresholdCriterion"
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', variables('actionGroupName'))]"
+                  }
+                ]
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers/providers/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[format('{0}/default/supervisor-state/Microsoft.Authorization/{1}', parameters('storageAccountName'), guid(resourceGroup().id, 'supervisor-state-writer'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('supervisorIdentityName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', 'supervisor-state')]"
+              ],
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobDataContributorRoleId'))]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('supervisorIdentityName')), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "condition": "[not(equals(parameters('capacityProfile'), 'foundation'))]",
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers/providers/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[format('{0}/default/artifacts/Microsoft.Authorization/{1}', parameters('storageAccountName'), guid(resourceGroup().id, 'artifact-writer'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('supervisorIdentityName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', 'artifacts')]"
+              ],
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobDataContributorRoleId'))]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('supervisorIdentityName')), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers/providers/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[format('{0}/default/worker-state-{1}/Microsoft.Authorization/{2}', parameters('storageAccountName'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'), guid(resourceGroup().id, format('worker-{0}-state-writer', parameters('workerSlots')[copyIndex()]))) ]",
+              "copy": {
+                "name": "workerStateRoleAssignments",
+                "count": "[variables('workerCount')]"
+              },
+              "dependsOn": [
+                "workerIdentities",
+                "workerStateContainers"
+              ],
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobDataContributorRoleId'))]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "condition": "[parameters('protectDurableState')]",
+              "type": "Microsoft.Storage/storageAccounts/providers/locks",
+              "apiVersion": "2016-09-01",
+              "name": "[format('{0}/Microsoft.Authorization/state-storage-lock', parameters('storageAccountName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ],
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Accepted durable state. Explicit safe cleanup is required."
+              }
+            },
+            {
+              "condition": "[parameters('protectDurableState')]",
+              "type": "Microsoft.KeyVault/vaults/providers/locks",
+              "apiVersion": "2016-09-01",
+              "name": "[format('{0}/Microsoft.Authorization/key-vault-lock', parameters('keyVaultName'))]",
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+              ],
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Accepted LUKS unlock store. Explicit safe cleanup is required."
+              }
+            }
+          ],
+          "outputs": {
+            "capacityProfile": {
+              "type": "string",
+              "value": "[parameters('capacityProfile')]"
+            },
+            "authorCapacityMode": {
+              "type": "string",
+              "value": "[parameters('authorCapacityMode')]"
+            },
+            "selectedVmFamily": {
+              "type": "string",
+              "value": "[parameters('vmFamily')]"
+            },
+            "createdWorkerCount": {
+              "type": "int",
+              "value": "[variables('workerCount')]"
+            },
+            "workerHourPlanningThreshold": {
+              "type": "int",
+              "value": "[parameters('workerHourPlanningThreshold')]"
+            },
+            "reservedLandingVcpus": {
+              "type": "int",
+              "value": "[parameters('reservedLandingVcpus')]"
+            },
+            "reservedLandingWorkerHours": {
+              "type": "int",
+              "value": "[parameters('reservedLandingWorkerHours')]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Consumption/budgets",
+      "apiVersion": "2023-11-01",
+      "name": "[variables('budgetName')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/resourceGroups', variables('safeResourceGroupName'))]"
+      ],
+      "properties": {
+        "category": "Cost",
+        "amount": "[parameters('commissioningBudgetCeilingUsd')]",
+        "timeGrain": "Monthly",
+        "timePeriod": {
+          "startDate": "[parameters('budgetStartDate')]",
+          "endDate": "[dateTimeAdd(parameters('budgetStartDate'), 'P10Y')]"
+        },
+        "filter": {
+          "dimensions": {
+            "name": "ResourceGroupName",
+            "operator": "In",
+            "values": [
+              "[variables('safeResourceGroupName')]"
+            ]
+          }
+        },
+        "notifications": {
+          "Actual750": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 50,
+            "thresholdType": "Actual",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Actual1000": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 66.67,
+            "thresholdType": "Actual",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Actual1250": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 83.33,
+            "thresholdType": "Actual",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Actual1500": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 100,
+            "thresholdType": "Actual",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Forecast750": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 50,
+            "thresholdType": "Forecasted",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Forecast1000": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 66.67,
+            "thresholdType": "Forecasted",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Forecast1250": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 83.33,
+            "thresholdType": "Forecasted",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          },
+          "Forecast1500": {
+            "enabled": true,
+            "operator": "GreaterThanOrEqualTo",
+            "threshold": 100,
+            "thresholdType": "Forecasted",
+            "contactEmails": [
+              "[parameters('administratorNotificationEmail')]"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "scopeBindingVerified": {
+      "type": "bool",
+      "value": "[variables('scopeMatches')]"
+    },
+    "region": {
+      "type": "string",
+      "value": "[parameters('region')]"
+    },
+    "capacityProfile": {
+      "type": "string",
+      "value": "[parameters('capacityProfile')]"
+    },
+    "authorCapacityMode": {
+      "type": "string",
+      "value": "[parameters('authorCapacityMode')]"
+    },
+    "runnerValidationSku": {
+      "type": "string",
+      "value": "[parameters('runnerValidationSku')]"
+    },
+    "requiredRegionalFreeVcpus": {
+      "type": "int",
+      "value": "[parameters('requiredRegionalFreeVcpus')]"
+    },
+    "requiredAuthorFamilyFreeVcpus": {
+      "type": "int",
+      "value": "[parameters('requiredAuthorFamilyFreeVcpus')]"
+    },
+    "reservedLandingVcpus": {
+      "type": "int",
+      "value": "[parameters('reservedLandingVcpus')]"
+    },
+    "steadyStateBudgetTargetUsd": {
+      "type": "int",
+      "value": "[parameters('steadyStateBudgetTargetUsd')]"
+    },
+    "workerHourPlanningThreshold": {
+      "type": "int",
+      "value": "[parameters('workerHourPlanningThreshold')]"
+    }
+  }
+}

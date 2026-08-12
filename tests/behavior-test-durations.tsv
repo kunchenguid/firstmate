@@ -19,6 +19,7 @@
 180	tests/fm-auto-reap-herdr-e2e.test.sh
 22300	tests/fm-auto-reap.test.sh
 5950	tests/fm-autocompact.test.sh
+1000	tests/fm-azure-pilot.test.sh
 20	tests/fm-backend-autodetect-smoke.test.sh
 20	tests/fm-backend-cmux-smoke.test.sh
 3400	tests/fm-backend-cmux.test.sh
