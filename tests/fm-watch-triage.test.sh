@@ -997,9 +997,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
+# A still-live agent under a captain-held transfer is the disconfirming case: the
+# crew never declared that wait itself, so an unconfirmable crew whose agent is
+# still live must surface once, while the unchanged hash must not append the same
+# wake on every watcher re-arm.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1071,17 +1072,17 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   window="test:fm-gate"
   printf 'idle external-decision gate\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
-  printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
+  printf 'captain-held [key=gate]: waiting at an active external-decision gate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle external-decision gate")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # First sight must surface promptly so a live external-decision gate under a
+  # hold the crew never declared is not hidden behind the pause cadence.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · captain hold, state unconfirmable' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -1094,7 +1095,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # a second possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · captain hold, state unconfirmable' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -1109,7 +1110,142 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
   [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live captain-held gate still surfaces once"
+}
+
+# --- a LIVE crew's own declared pause is authoritative ----------------------
+# The live 2026-08-12 case: two crews held a running dev server and declared
+# `paused:` while waiting on the captain. A running dev server repaints, so each
+# poll settles on a NEW stale hash, and every new hash was a first sighting that
+# re-read agent liveness and surfaced a contentless `stale: <window>` wake -
+# roughly a dozen supervision turns during one quiescent captain review, while
+# state/.watch-triage.log simultaneously logged the pane as absorbed. A crew that
+# declared its own external wait is normally still alive, so agent liveness must
+# not override the authoritative paused verdict; only the pause cadence may
+# re-surface it.
+test_live_declared_pause_absorbs_churny_stale_hashes() {
+  local dir state fakebin out capture_file statusf window key text pane_hash sig pid round wakes i
+  dir=$(make_case live-paused-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'dev server listening, request log line 0' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding the dev server while the captain reviews\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # One long-lived watcher, exactly as production runs it: the churn comes from
+  # the held dev server repainting the pane, not from re-arming the watcher.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding the dev server' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+
+  round=1
+  while [ "$round" -le 4 ]; do
+    # Each repaint settles on a stale hash the watcher has never triaged before,
+    # so every round is a fresh first sighting - the shape that used to re-read
+    # agent liveness and queue another contentless wake.
+    text="dev server listening, request log line $round"
+    printf '%s' "$text" > "$capture_file"
+    pane_hash=$(hash_text "$text")
+    i=0
+    while [ "$i" -lt 100 ]; do
+      [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    kill -0 "$pid" 2>/dev/null \
+      || { wait "$pid" 2>/dev/null || true; fail "a live declared pause woke firstmate on churny stale hash $round: $(cat "$out")"; }
+    [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+      || { reap "$pid"; fail "churny paused hash $round was never absorbed (stale suppressor not advanced)"; }
+    [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "churny paused absorb $round lost the pause cadence marker"; }
+    [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "churny paused absorb $round started the wedge timer"; }
+    round=$((round + 1))
+  done
+  reap "$pid"
+
+  [ ! -s "$out" ] || fail "a live declared pause printed a wake reason across churny hashes: $(cat "$out")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a live declared pause queued $wakes stale wakes across four churny hashes"
+  pass "a live crew's declared pause absorbs every churny stale hash instead of queueing bare stale wakes"
+}
+
+# The disconfirming case for the absorb above: the same live, idle, churny pane
+# WITHOUT a declared pause must still surface immediately, on the unchanged
+# schedule, so the fix cannot silence a genuinely quiet crew.
+test_live_idle_crew_without_declared_pause_still_surfaces() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case live-idle-no-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  statusf="$state/quiet.status"; window="test:fm-quiet"
+  printf 'dev server listening, request log line 1' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/quiet.meta"
+  printf 'working: wiring the dev server\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "dev server listening, request log line 1")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no run, idle pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an idle crew without a declared pause did not surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "idle non-paused crew did not surface its stale wake"
+  [ ! -e "$state/.paused-$key" ] || fail "an idle crew without a declared pause was given the pause cadence"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the non-paused stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "idle non-paused crew's stale wake was not queued"
+  pass "a live idle crew that declared no pause still surfaces its stale wake on the unchanged schedule"
+}
+
+# A declared pause is absorbed, never suppressed forever: once the pause itself
+# is older than the bounded window, the same live crew re-surfaces once as a
+# labeled recheck so a wait that quietly stopped being true cannot rot invisibly.
+test_live_declared_pause_resurfaces_on_long_cadence() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case live-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  statusf="$state/held.status"; window="test:fm-held"
+  printf 'dev server listening, idle' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding the dev server while the captain reviews\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "dev server listening, idle")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding the dev server' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a live declared pause past the bounded window never re-surfaced"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the long-cadence recheck printed no stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the long-cadence recheck was not labeled an external-wait recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a live declared pause was mislabeled a possible wedge"
+  grep -Fx "stale: $window" "$out" >/dev/null && fail "the long-cadence recheck degraded to a bare stale wake"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the long-cadence recheck left no throttle marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a live declared pause recheck used the wedge timer"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "awaiting external" >/dev/null \
+    || fail "the paused recheck was not queued as an external-wait recheck"
+  pass "a live declared pause whose wait has gone stale still re-surfaces once on the long cadence"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -2641,6 +2777,9 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_declared_pause_absorbs_churny_stale_hashes
+test_live_idle_crew_without_declared_pause_still_surfaces
+test_live_declared_pause_resurfaces_on_long_cadence
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
