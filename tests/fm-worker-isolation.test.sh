@@ -433,6 +433,41 @@ test_primary_initialization_requires_explicit_bootstrap() {
   pass "primary initialization requires an explicit bootstrap path"
 }
 
+test_primary_bootstrap_rejects_invalid_attestation_before_lock() {
+  local primary_home fakebin attestation foreign out status mode
+  primary_home=$(make_primary_home "$TMP_ROOT/invalid-bootstrap-attestation")
+  fakebin=$(fm_fakebin "$TMP_ROOT/invalid-bootstrap-attestation")
+  attestation="$primary_home/state/.primary-attestation"
+  foreign="$TMP_ROOT/foreign-primary-attestation"
+  printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *comm=*|*args=*) printf claude ;; *) exit 1 ;; esac' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+  for mode in malformed foreign symlink; do
+    rm -f "$primary_home/state/.lock" "$attestation" "$foreign"
+    case "$mode" in
+      malformed)
+        printf '%s\n' malformed > "$attestation"
+        ;;
+      foreign)
+        printf 'root=%s\ntoken=foreign\n' "$TMP_ROOT/other-primary" > "$attestation"
+        ;;
+      symlink)
+        printf 'root=%s\ntoken=symlink\n' "$primary_home" > "$foreign"
+        ln -s "$foreign" "$attestation"
+        ;;
+    esac
+    if out=$(cd "$primary_home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      CODEX_THREAD_ID="invalid-$mode" FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+      FM_STATE_OVERRIDE="$primary_home/state" PATH="$fakebin:$PATH" "$LOCK" bootstrap 2>&1); then
+      status=0
+    else
+      status=$?
+    fi
+    expect_code 1 "$status" "$mode primary attestation must refuse bootstrap"
+    [ ! -e "$primary_home/state/.lock" ] || fail "$mode attestation was accepted before lock publication"
+  done
+  pass "invalid primary attestations are rejected before lock publication"
+}
+
 test_process_environment_requires_linux_procfs() {
   local status
   if bash -c '
@@ -1726,6 +1761,7 @@ test_primary_ancestry_refuses_any_inherited_worker_marker
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
 test_primary_initialization_requires_explicit_bootstrap
+test_primary_bootstrap_rejects_invalid_attestation_before_lock
 test_process_environment_requires_linux_procfs
 test_process_environment_newline_is_not_a_marker
 test_unreadable_task_start_proof_remains_contested

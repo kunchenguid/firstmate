@@ -29,6 +29,12 @@ LOCK="$STATE/.lock"
 
 if [ "${1:-}" = bootstrap ]; then
   fm_worker_refuse_primary_initialization "session lock initialization" || exit 1
+  if [ -e "$STATE/.primary-attestation" ] || [ -L "$STATE/.primary-attestation" ]; then
+    fm_worker_primary_attestation_load || {
+      echo "error: existing primary attestation is invalid; refusing session lock initialization" >&2
+      exit 1
+    }
+  fi
 elif [ "${1:-}" != status ]; then
   fm_worker_refuse_unproven_session_entry "session lock acquisition" || exit 1
 fi
