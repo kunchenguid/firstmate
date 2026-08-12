@@ -275,26 +275,30 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
   [ split("\n")[] | select(length > 0) | split("\t")
     | {task:.[0], key:.[1], verb:.[2], disposition:.[3],
        detail:(.[4] // ""), summary:((.[5] // "") | trunc(160)),
-       hold_id:(.[0] + "-decision-" + .[1]), origins:["folded-status-key"]} ] as $status_rows
+       hold_id:(.[0] + "-decision-" + .[1]), origins:["folded-status-key"],
+       current_sources:["folded-status-key"]} ] as $status_rows
   | ($holds | map(. as $hold |
       if (.task | type) == "string" and (.task | length) > 0
          and (.key | type) == "string" and (.key | length) > 0 then
         {task, key, verb:"captain-hold", disposition:"captain-hold-active", detail:"",
-         summary:(.summary | trunc(160)), hold_id,
+         summary:(.summary | trunc(160)), hold_id, current_sources:["captain-hold"],
          origins:((if any($opened[]; .task == $hold.task and .key == $hold.key)
                    then ["folded-status-key"] else [] end) + ["captain-hold"])}
       else
         {task:null, key:.hold_id, verb:"captain-hold", disposition:"undetermined",
          detail:"active captain hold has no readable Origin and Decision key record",
-         summary:(.summary | trunc(160)), hold_id:.hold_id, origins:["captain-hold"]}
+         summary:(.summary | trunc(160)), hold_id:.hold_id, origins:["captain-hold"],
+         current_sources:["captain-hold"]}
       end
     )) as $hold_rows
   | ($status_rows + $hold_rows
      | group_by(.hold_id)
      | map(reduce .[] as $row ({};
-         . * $row
-         | .origins = ((.origins // []) + ($row.origins // []) | unique)
-         | .detail = ([.detail, $row.detail] | map(select(. != "")) | unique | join("; "))
+         . as $existing
+         | ($existing * $row)
+         | .origins = (($existing.origins // []) + ($row.origins // []) | unique)
+         | .current_sources = (($existing.current_sources // []) + ($row.current_sources // []) | unique)
+         | .detail = ($row.detail // "")
        ))) as $rows
   | {
       schema: "fm-decision-ledger.v1",
@@ -323,8 +327,8 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
         keys_stale: "open keys whose owning lane already finished; they are still counted open and still carry a disposition.",
         status_open_decision_keys: "distinct still-open keys from fm-classify-lib.sh status_open_decisions. This is a folded status-key figure, not a raw event count.",
         captain_holds_active: "actionable captain backlog rows with -decision- hold identities. This is a held-backlog-row figure, not a status-key or raw-event count.",
-        open_decision_keys: "the deduplicated union of folded status keys and actionable captain holds. Always equal to the length of open_decisions; its origin-labelled rows keep the source figures readable.",
-        open_decisions: "one row per distinct live decision identity, each with a disposition and origins. No key or captain hold is omitted, capped, or left blank.",
+        open_decision_keys: "the deduplicated union of folded status keys and actionable captain holds. Always equal to the length of open_decisions; current_sources keeps the source figures derivable while origins preserves historical lineage.",
+        open_decisions: "one row per distinct live decision identity, each with a disposition, current_sources, and origins. No key or captain hold is omitted, capped, or left blank.",
         complete: "false when any row is undetermined, so a partially classified ledger can never read as a fully accounted one."
       }
     }') || { echo "fm-decision-ledger: ledger assembly failed" >&2; exit 1; }
@@ -345,6 +349,14 @@ printf '%s' "$LEDGER" | jq -e '
     error("an undetermined disposition carries no reason")
   elif (.open_decisions | any((.origins | type) != "array" or (.origins | length) == 0)) then
     error("a live decision identity carries no origin")
+  elif (.open_decisions | any((.current_sources | type) != "array" or (.current_sources | length) == 0)) then
+    error("a live decision identity carries no current source")
+  elif .status_open_decision_keys != ([.open_decisions[] | select(.current_sources | index("folded-status-key"))] | length) then
+    error("status_open_decision_keys does not equal its enumerated current-source rows")
+  elif .captain_holds_active != ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length) then
+    error("captain_holds_active does not equal its enumerated current-source rows")
+  elif .keys_stale != ([.open_decisions[] | select((.current_sources | index("folded-status-key")) and .disposition == "orphaned-terminal-lane")] | length) then
+    error("keys_stale does not equal its enumerated current-source rows")
   elif (.complete == true and (.open_decisions | any(.disposition == "undetermined"))) then
     error("a ledger with undetermined rows claims completeness")
   elif .keys_opened_distinct < .status_open_decision_keys then

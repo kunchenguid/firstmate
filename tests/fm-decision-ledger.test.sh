@@ -206,6 +206,13 @@ test_every_live_key_carries_a_disposition() {
     and (.open_decisions | all(.task != "" and .key != ""))
     and (.complete == true)
     and (.keys_stale == 1)
+    and (.status_open_decision_keys ==
+         ([.open_decisions[] | select(.current_sources | index("folded-status-key"))] | length))
+    and (.captain_holds_active ==
+         ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length))
+    and (.keys_stale ==
+         ([.open_decisions[] | select((.current_sources | index("folded-status-key"))
+           and .disposition == "orphaned-terminal-lane")] | length))
   ' >/dev/null || fail "live keys were not fully accounted for: $json"
 
   expected='["awaiting-answer","captain-hold-active","captain-hold-archived","orphaned-terminal-lane"]'
@@ -246,6 +253,7 @@ test_active_hold_transferred_out_of_status_fold_stays_enumerated() {
       .task == "lane-held" and .key == "route"
       and .disposition == "captain-hold-active"
       and (.origins | sort) == ["captain-hold", "folded-status-key"]
+      and .current_sources == ["captain-hold"]
     ))
   ' >/dev/null || fail "a transferred active captain hold was omitted or lost its status-key lineage: $json"
   pass "an active captain hold remains an origin-labelled ledger row after status closure"
@@ -269,7 +277,8 @@ test_active_hold_without_status_key_stays_enumerated() {
     and .open_decision_keys == 1
     and (.open_decisions | length) == 1
     and (.open_decisions[0] | .task == "backlog-only" and .key == "route"
-      and .disposition == "captain-hold-active" and .origins == ["captain-hold"])
+      and .disposition == "captain-hold-active" and .origins == ["captain-hold"]
+      and .current_sources == ["captain-hold"])
   ' >/dev/null || fail "a backlog-only active captain hold was not separately enumerated: $json"
   pass "an active captain hold without a status key remains an origin-labelled ledger row"
 }
