@@ -179,6 +179,29 @@ SH
     || fail "the missing registry did not surface as an actionable check wake"
   pass "watcher surfaces a missing routine registry as a check wake"
 }
+test_watcher_surfaces_missing_registry_with_empty_pending_state() {
+  local home fakebin rc
+  home=$(make_home missing-registry-empty-pending)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = list-windows ] && exit 0
+exit 1
+SH
+  chmod 0755 "$fakebin/tmux"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the empty-pending fixture"
+  rm -f -- "$home/data/routines.md"
+  : > "$home/state/.routine-pending"
+
+  run_bounded_watcher "$home" "$home/watch.out" "$fakebin"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the watcher accepted empty pending state as a routine scan"
+  grep -q 'routine-check-error: scanner exited 1' "$home/watch.out" \
+    || fail "empty pending state did not surface a missing-registry check wake"
+  pass "watcher surfaces a missing registry with empty pending state"
+}
 test_daily_fires_once_per_local_day() {
   local home out
   home=$(make_home daily)
@@ -773,6 +796,7 @@ test_bootstrap_seeds_and_arms_private_routine
 test_setup_persists_canonical_path_overrides
 test_routine_check_enforces_timeout
 test_watcher_surfaces_missing_registry_as_a_check_wake
+test_watcher_surfaces_missing_registry_with_empty_pending_state
 test_daily_fires_once_per_local_day
 test_weekly_fires_only_on_matching_weekday
 test_weekday_is_derived_from_captured_local_date
