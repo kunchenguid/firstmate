@@ -753,24 +753,81 @@ set_remote_profile() {
   ' "$source" > "$remote_route_meta"
 }
 
-set_remote_profile grok grok-4 max "$TMP_ROOT/remote-ios-default-profile.meta"
+set_remote_profile grok grok-4 high "$TMP_ROOT/remote-ios-default-profile.meta"
 out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
 assert_contains "$out" 'harness=grok' "remote route did not expose the live Grok harness"
-assert_contains "$out" 'effective_effort=high' "remote route published Grok's requested max as effective max"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios grok grok-4 max herdr)
-assert_contains "$out" 'effective_effort=high' "Grok exact reuse did not compare or report its applied high effort"
+assert_contains "$out" 'effective_effort=high' "remote route did not expose Grok's authoritative effort"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios grok grok-4 high herdr)
+assert_contains "$out" 'effective_effort=high' "Grok exact reuse did not compare or report its authoritative effort"
+
+set_remote_profile opencode opencode-model - "$TMP_ROOT/remote-ios-default-profile.meta"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$out" 'effective_effort=default' "remote route did not preserve OpenCode's unselected effort axis"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model - herdr)
+assert_contains "$out" 'effective_effort=default' "OpenCode exact reuse did not preserve its unselected effort axis"
+
+set_remote_profile kimi kimi-model - "$TMP_ROOT/remote-ios-default-profile.meta"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$out" 'effective_effort=default' "remote route did not preserve Kimi's unselected effort axis"
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model - herdr)
+assert_contains "$out" 'effective_effort=default' "Kimi exact reuse did not preserve its unselected effort axis"
+
+set_remote_profile grok grok-4 max "$TMP_ROOT/remote-ios-default-profile.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-unverifiable-grok.meta"
+herdr_launches_before_unverifiable_grok=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
+herdr_closes_before_unverifiable_grok=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+unverifiable_grok_route_rc=$?
+set -e
+[ "$unverifiable_grok_route_rc" -ne 0 ] || fail "remote route published Grok max without authoritative effort"
+assert_contains "$out" 'unverifiable' "Grok max route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios grok grok-4 max herdr \
+  > "$TMP_ROOT/remote-unverifiable-grok.out" 2>&1
+unverifiable_grok_launch_rc=$?
+set -e
+[ "$unverifiable_grok_launch_rc" -ne 0 ] || fail "remote reuse accepted Grok max without authoritative effort"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-unverifiable-grok.out" \
+  "Grok max reuse did not refuse unverifiable effort"
+[ "$herdr_launches_before_unverifiable_grok" -eq "$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)" ] \
+  || fail "Grok max refusal created a new Herdr endpoint"
+[ "$herdr_closes_before_unverifiable_grok" -eq "$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)" ] \
+  || fail "Grok max refusal stopped the live Herdr endpoint"
+cmp -s "$TMP_ROOT/remote-ios-before-unverifiable-grok.meta" "$remote_route_meta" \
+  || fail "Grok max refusal changed the live remote metadata"
 
 set_remote_profile opencode opencode-model high "$TMP_ROOT/remote-ios-default-profile.meta"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
-assert_contains "$out" 'effective_effort=default' "remote route published OpenCode's unapplied effort as effective high"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model high herdr)
-assert_contains "$out" 'effective_effort=default' "OpenCode exact reuse did not preserve its unapplied effort truth"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+unverifiable_opencode_route_rc=$?
+set -e
+[ "$unverifiable_opencode_route_rc" -ne 0 ] || fail "remote route published OpenCode effort without authoritative truth"
+assert_contains "$out" 'unverifiable' "OpenCode route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios opencode opencode-model high herdr \
+  > "$TMP_ROOT/remote-unverifiable-opencode.out" 2>&1
+unverifiable_opencode_launch_rc=$?
+set -e
+[ "$unverifiable_opencode_launch_rc" -ne 0 ] || fail "remote reuse accepted OpenCode effort without authoritative truth"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-unverifiable-opencode.out" \
+  "OpenCode reuse did not refuse unverifiable effort"
 
 set_remote_profile kimi kimi-model max "$TMP_ROOT/remote-ios-default-profile.meta"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
-assert_contains "$out" 'effective_effort=default' "remote route published Kimi's unapplied effort as effective max"
-out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model max herdr)
-assert_contains "$out" 'effective_effort=default' "Kimi exact reuse did not preserve its unapplied effort truth"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+unverifiable_kimi_route_rc=$?
+set -e
+[ "$unverifiable_kimi_route_rc" -ne 0 ] || fail "remote route published Kimi effort without authoritative truth"
+assert_contains "$out" 'unverifiable' "Kimi route did not refuse unverifiable effort"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios kimi kimi-model max herdr \
+  > "$TMP_ROOT/remote-unverifiable-kimi.out" 2>&1
+unverifiable_kimi_launch_rc=$?
+set -e
+[ "$unverifiable_kimi_launch_rc" -ne 0 ] || fail "remote reuse accepted Kimi effort without authoritative truth"
+assert_grep 'unverifiable' "$TMP_ROOT/remote-unverifiable-kimi.out" \
+  "Kimi reuse did not refuse unverifiable effort"
 
 set_remote_profile codex future-codex-model max "$TMP_ROOT/remote-ios-default-profile.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-stale-codex.meta"
@@ -784,6 +841,13 @@ set -e
 [ "$stale_codex_rc" -ne 0 ] || fail "an alive remote Codex endpoint bypassed capability validation"
 assert_grep 'unknown max reasoning capability' "$TMP_ROOT/remote-stale-codex.out" \
   "stale remote Codex reuse did not report its unverifiable max capability"
+set +e
+out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1)
+stale_codex_route_rc=$?
+set -e
+[ "$stale_codex_route_rc" -ne 0 ] || fail "remote route published unsupported Codex max capability"
+assert_contains "$out" 'unknown max reasoning capability' \
+  "remote route did not validate the stale Codex max capability"
 herdr_launches_after_stale_codex=$(grep -c '^tab create' "$HERDR_LOG" 2>/dev/null || true)
 herdr_closes_after_stale_codex=$(grep -c '^tab close' "$HERDR_LOG" 2>/dev/null || true)
 [ "$herdr_launches_before_stale_codex" -eq "$herdr_launches_after_stale_codex" ] \

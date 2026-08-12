@@ -42,10 +42,10 @@ fm_profile_effective_effort() {
         grok)
           case "$effort" in
             low|medium|high) printf '%s\n' "$effort" ;;
-            xhigh|max) printf 'high\n' ;;
+            xhigh|max) printf 'unverifiable\n'; return 1 ;;
           esac
           ;;
-        opencode|kimi) printf 'default\n' ;;
+        opencode|kimi) printf 'unverifiable\n'; return 1 ;;
         muse)
           case "$effort" in
             max) printf 'ultra\n' ;;
