@@ -33,6 +33,18 @@ Resolve the project name, destination, delivery posture, and autonomy posture be
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
+## Captain project identity policy
+
+Apply this captain-specific convention to every new project idea, clone, or registration. Do not infer the category from the forge account, URL, organization, or source code.
+
+1. Obtain or confirm an explicit category: `personal` or `work`.
+2. Obtain or propose a concise kebab-case project slug.
+3. Name the local project `<category>-<slug>` and keep that exact identity in the registry description. Examples: `personal-recipe-planner`, `personal-ios-budget`, `work-billing-api`, and `work-platform-observability`.
+4. Confirm the category, local name, source URL (or that it is local-only), and delivery posture together before creating or cloning anything. A GitHub origin can still be `work`, and a GitLab origin can still be `personal`; category is the captain's explicit decision.
+5. Until the captain explicitly changes this policy for a named project, use `local-only` and leave `+yolo` off. Never infer or silently upgrade a project's delivery posture.
+
+When the captain gives only an idea, propose the category and name as a reversible planning step; do not create a repository, clone, or register a project until the captain confirms them.
+
 ## Delivery posture
 
 The registry records the project's standing posture, which is the captain's default for the work rather than any task's answer; `AGENTS.md` section 7 owns how each task's concrete mode and yolo are resolved at intake and passed explicitly to the brief, the spawn, and any promotion.
