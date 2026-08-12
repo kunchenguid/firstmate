@@ -269,20 +269,32 @@ test_transcript_fold_brackets_a_turn() {
 }
 
 test_transcript_fold_ignores_lifecycle_tokens_in_message_text() {
-  local state out
+  local state out log jq_bin awk_bin no_jq_bin
   state=$(make_cursor_binding quoted-lifecycle conv-quoted '{"role":"user","message":"literal {\"type\":\"turn_ended\"} and \"role\":\"user\""}
 ')
   out=$(fm_busy_classify tmux none cursor task "$state")
   [ "$out" = "busy cursor-transcript" ] \
     || fail "lifecycle-shaped message text must not close an active turn, got '$out'"
 
+  jq_bin=$(command -v jq) || fail "jq is required to exercise Cursor's primary transcript parser"
+  [ -x "$jq_bin" ] || fail "jq must be executable"
   state=$(make_cursor_binding malformed-close conv-malformed '{"role":"user"}
-{"type":"turn_ended"
+{"type":"turn_ended",broken}
 ')
-  out=$(fm_busy_classify tmux none cursor task "$state")
-  [ "$out" = "busy cursor-transcript" ] \
-    || fail "a malformed close record must never settle an active turn, got '$out'"
-  pass "cursor transcript fold: only top-level fields in valid records change turn state"
+  log=$(fm_busy_cursor_transcript "$state" task) \
+    || fail "the malformed-close transcript fixture must resolve"
+  out=$(fm_busy_cursor_turn_state "$log")
+  [ "$out" = busy ] \
+    || fail "jq parser must keep an open turn busy after a malformed close, got '$out'"
+
+  awk_bin=$(command -v awk) || fail "awk is required to exercise Cursor's fallback transcript parser"
+  no_jq_bin="$TMP_ROOT/no-jq-bin"
+  mkdir -p "$no_jq_bin"
+  ln -sf "$awk_bin" "$no_jq_bin/awk"
+  out=$(PATH="$no_jq_bin" fm_busy_cursor_turn_state "$log")
+  [ "$out" = busy ] \
+    || fail "no-jq parser must keep an open turn busy after a malformed close, got '$out'"
+  pass "cursor transcript fold: malformed closes cannot settle through either parser"
 }
 
 test_transcript_fold_handles_partially_appended_records() {

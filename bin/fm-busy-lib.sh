@@ -684,9 +684,8 @@ fm_busy_cursor_transcript() {  # <state-dir> <id>
 }
 
 # fm_busy_cursor_turn_state: fold the transcript into busy | settled | none.
-# The close record is matched on its structural `type` field rather than a
-# search for the token anywhere in the line, so a turn whose own text mentions
-# turn_ended cannot close it.
+# Lifecycle records are matched on top-level fields of structurally valid JSON,
+# so a turn whose own text mentions turn_ended cannot close it.
 fm_busy_cursor_turn_state() {  # <transcript>
   [ -f "$1" ] || return 1
   if command -v jq >/dev/null 2>&1; then
@@ -701,10 +700,116 @@ fm_busy_cursor_turn_state() {  # <transcript>
     ' "$1"
   else
     LC_ALL=C awk '
-      /^[[:space:]]*\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"turn_ended"([[:space:]]*[,}])/ { print "close"; next }
-      /^[[:space:]]*\{[[:space:]]*"role"[[:space:]]*:[[:space:]]*"user"([[:space:]]*[,}])/ { print "open"; next }
-      /^[[:space:]]*\{.*\}[[:space:]]*$/ { print "other"; next }
-      { print "malformed" }
+      function ws(    c) {
+        while (p <= n) {
+          c = substr(line, p, 1)
+          if (c != " " && c != "\t" && c != "\r") break
+          p++
+        }
+      }
+      function hex(c) {
+        if (c >= "0" && c <= "9") return c + 0
+        c = tolower(c)
+        return index("abcdef", c) + 9
+      }
+      function string(    c, e, h, i, code, out) {
+        if (substr(line, p, 1) != "\"") return 0
+        p++; out = ""
+        while (p <= n) {
+          c = substr(line, p++, 1)
+          if (c == "\"") { value = out; kind = "string"; return 1 }
+          if (c ~ /[[:cntrl:]]/) return 0
+          if (c != "\\") { out = out c; continue }
+          if (p > n) return 0
+          e = substr(line, p++, 1)
+          if (e == "\"" || e == "\\" || e == "/") out = out e
+          else if (e ~ /^[bfnrt]$/) out = out "?"
+          else if (e == "u") {
+            h = substr(line, p, 4)
+            if (length(h) != 4 || h !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return 0
+            code = 0
+            for (i = 1; i <= 4; i++) code = code * 16 + hex(substr(h, i, 1))
+            out = out (code < 128 ? sprintf("%c", code) : "?")
+            p += 4
+          } else return 0
+        }
+        return 0
+      }
+      function number(    c) {
+        if (substr(line, p, 1) == "-") p++
+        c = substr(line, p, 1)
+        if (c == "0") {
+          p++
+          if (substr(line, p, 1) ~ /^[0-9]$/) return 0
+        } else if (c ~ /^[1-9]$/) {
+          do { p++; c = substr(line, p, 1) } while (c ~ /^[0-9]$/)
+        } else return 0
+        if (substr(line, p, 1) == ".") {
+          p++
+          if (substr(line, p, 1) !~ /^[0-9]$/) return 0
+          while (substr(line, p, 1) ~ /^[0-9]$/) p++
+        }
+        c = substr(line, p, 1)
+        if (c == "e" || c == "E") {
+          p++; c = substr(line, p, 1)
+          if (c == "+" || c == "-") p++
+          if (substr(line, p, 1) !~ /^[0-9]$/) return 0
+          while (substr(line, p, 1) ~ /^[0-9]$/) p++
+        }
+        kind = "number"; value = ""
+        return 1
+      }
+      function array(depth,    c) {
+        p++; ws()
+        if (substr(line, p, 1) == "]") { p++; return 1 }
+        while (p <= n) {
+          if (!json(depth + 1)) return 0
+          ws(); c = substr(line, p, 1)
+          if (c == "]") { p++; return 1 }
+          if (c != ",") return 0
+          p++; ws()
+        }
+        return 0
+      }
+      function object(depth,    c, key, vkind, vvalue, is_close, is_open) {
+        p++; ws()
+        if (substr(line, p, 1) == "}") { p++; kind = "object"; return 1 }
+        while (p <= n) {
+          if (!string()) return 0
+          key = value; ws()
+          if (substr(line, p, 1) != ":") return 0
+          p++; ws()
+          if (!json(depth + 1)) return 0
+          vkind = kind; vvalue = value
+          if (depth == 0 && key == "type") is_close = (vkind == "string" && vvalue == "turn_ended")
+          if (depth == 0 && key == "role") is_open = (vkind == "string" && vvalue == "user")
+          ws(); c = substr(line, p, 1)
+          if (c == "}") {
+            p++; kind = "object"; value = ""
+            if (depth == 0) event = (is_close ? "close" : (is_open ? "open" : "other"))
+            return 1
+          }
+          if (c != ",") return 0
+          p++; ws()
+        }
+        return 0
+      }
+      function json(depth,    c, word) {
+        ws(); c = substr(line, p, 1)
+        if (c == "\"") return string()
+        if (c == "{") return object(depth)
+        if (c == "[") { kind = "array"; value = ""; return array(depth) }
+        if (c == "-" || c ~ /^[0-9]$/) return number()
+        word = substr(line, p)
+        if (substr(word, 1, 4) == "true" || substr(word, 1, 4) == "null") { p += 4; kind = "literal"; value = ""; return 1 }
+        if (substr(word, 1, 5) == "false") { p += 5; kind = "literal"; value = ""; return 1 }
+        return 0
+      }
+      {
+        line = $0; p = 1; n = length(line); event = "other"; kind = ""; value = ""
+        valid = json(0); ws()
+        print (valid && p > n ? event : "malformed")
+      }
     ' "$1"
   fi | LC_ALL=C awk '
     $0 == "close" { open = 0; seen = 1; malformed = 0; next }
