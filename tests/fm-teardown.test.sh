@@ -839,6 +839,11 @@ SH
 test_teardown_failed_return_stays_retryable_for_a_ship_task() {
   local case_dir rc wt_head gate branch
   case_dir=$(make_case failed-return-retry)
+  # This regression isolates the durable treehouse-return retry. Make the
+  # process-census answer explicit so a busy CI runner cannot turn a failed
+  # return into a successful retain-only teardown.
+  printf '%s\n' 'fm_slot_process_occupant_tasks() { return 1; }' \
+    >> "$case_dir/project/bin/fm-slot-owner-lib.sh"
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "landed work before the failed return"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
