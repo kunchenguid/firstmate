@@ -210,18 +210,37 @@ routine_ack_seen() {
 
 routine_ack_publication_exists() {
   local wake_key=$STATE/routine-scan.check.sh:routine-generation:$ROUTINE_ACK_GENERATION
-  local found=1 queue_lock_held=0
+  local found=1 queue_lock_held=0 ownerdir ownerpid parentpid current owner_ancestor=0
   [ ! -L "$FM_WAKE_QUEUE" ] \
     || { routine_error "wake queue is unavailable: $FM_WAKE_QUEUE"; return 1; }
   if [ -e "$FM_WAKE_QUEUE" ]; then
     [ -f "$FM_WAKE_QUEUE" ] \
       || { routine_error "wake queue is unavailable: $FM_WAKE_QUEUE"; return 1; }
   fi
-  [ "${FM_ROUTINE_WAKE_QUEUE_LOCK_HELD:-0}" = 1 ] || {
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" \
-      || { routine_error 'could not acquire wake queue lock for acknowledgement'; return 1; }
-    queue_lock_held=1
-  }
+  case "${FM_ROUTINE_WAKE_QUEUE_LOCK_HELD:-0}" in
+    0) 
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" \
+        || { routine_error 'could not acquire wake queue lock for acknowledgement'; return 1; }
+      queue_lock_held=1
+      ;;
+    1)
+      ownerdir=$(fm_lock_link_owner "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true)
+      ownerpid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+      current=${BASHPID:-$$}
+      while case "$current" in ''|*[!0-9]*) false ;; *) true ;; esac; do
+        [ "$current" = "$ownerpid" ] && { owner_ancestor=1; break; }
+        parentpid=$(awk '/^PPid:[[:space:]]*[0-9]+$/ { print $2; exit }' "/proc/$current/status" 2>/dev/null || true)
+        [ -n "$parentpid" ] || parentpid=$(ps -o ppid= -p "$current" 2>/dev/null | tr -d '[:space:]')
+        [ -n "$parentpid" ] && [ "$parentpid" != "$current" ] || break
+        current=$parentpid
+      done
+      [ -n "$ownerdir" ] && [ "$owner_ancestor" -eq 1 ] \
+        && fm_lock_points_to_owner "$FM_WAKE_QUEUE_LOCK" "$ownerdir" \
+        && fm_pid_alive "$ownerpid" \
+        || { routine_error 'routine acknowledgement lacks verified wake queue lock ownership'; return 1; }
+      ;;
+    *) routine_error 'invalid wake queue lock ownership'; return 1 ;;
+  esac
   if [ -f "$FM_WAKE_QUEUE" ] && awk -F '\t' -v key="$wake_key" \
     '$3 == "check" && $4 == key && index($5, "routine-due: ") > 0 { found = 0; exit } END { exit found }' \
     "$FM_WAKE_QUEUE"; then
@@ -348,6 +367,7 @@ DUE_IDS=()
 DUE_RECORDS=()
 DUE_LINES=()
 DUE_PENDING_LINES=()
+PENDING_FIRED_CLEANUP=0
 if [ "$ROUTINE_DEFER_FIRE" -eq 1 ] && [ -e "$PENDING" ]; then
   [ -f "$PENDING" ] && [ ! -L "$PENDING" ] \
     || { routine_error "pending routine state is unavailable: $PENDING"; exit 1; }
@@ -361,6 +381,10 @@ if [ "$ROUTINE_DEFER_FIRE" -eq 1 ] && [ -e "$PENDING" ]; then
     case "$pending_generation" in
       ''|*[!0-9]*) routine_error 'pending routine state has an invalid generation'; exit 1 ;;
     esac
+    routine_fired "$pending_id|$pending_cadence|$pending_date" && {
+      PENDING_FIRED_CLEANUP=1
+      continue
+    }
     DUE_IDS+=("$pending_id")
     DUE_RECORDS+=("$pending_id|$pending_cadence|$pending_date")
     DUE_LINES+=("routine-due: $pending_id | $pending_owner | $pending_action")
@@ -430,7 +454,11 @@ done <&8
 [ ! -L "$REGISTRY" ] \
   || { routine_error "registry became a symlink: $REGISTRY"; exit 1; }
 
-[ "${#DUE_LINES[@]}" -gt 0 ] || exit 0
+if [ "${#DUE_LINES[@]}" -eq 0 ]; then
+  [ "$PENDING_FIRED_CLEANUP" -eq 0 ] || rm -f -- "$PENDING" \
+    || { routine_error 'could not clear replayed pending routine state'; exit 1; }
+  exit 0
+fi
 
 if [ "$ROUTINE_DEFER_FIRE" -eq 1 ]; then
   umask 077

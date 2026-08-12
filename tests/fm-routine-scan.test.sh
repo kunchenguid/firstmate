@@ -315,6 +315,17 @@ test_ack_requires_durable_generation_wake() {
     *) fail "unpublished acknowledgement lacked an actionable diagnostic: $out" ;;
   esac
   [ ! -e "$home/state/.routine-fired" ] || fail "unpublished acknowledgement committed fire state"
+  if out=$(FM_ROUTINE_WAKE_QUEUE_LOCK_HELD=1 FM_ROUTINE_DATE=2026-08-10 \
+    "$check" --ack --generation "$generation" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "caller-controlled queue lock flag bypassed publication proof"
+  case "$out" in
+    *'lacks verified wake queue lock ownership'*) ;;
+    *) fail "unverified queue lock ownership lacked an actionable diagnostic: $out" ;;
+  esac
   FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
     || fail "the publication fixture could not append its durable wake"
@@ -323,6 +334,25 @@ test_ack_requires_durable_generation_wake() {
   [ "$(cat "$home/state/.routine-fired")" = 'publication-bound-item|daily|2026-08-10' ] \
     || fail "the published generation did not commit fire state"
   pass "routine acknowledgement requires durable wake publication"
+}
+test_fired_pending_replay_is_suppressed() {
+  local home check first generation second
+  home=$(make_home fired-pending-replay)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the replay fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- replayed-item | daily | captain | do not replay'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
+    || fail "the replay fixture could not publish its wake"
+  printf '%s\n' 'replayed-item|daily|2026-08-10' > "$home/state/.routine-fired"
+  second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ -z "$second" ] || fail "a fired pending routine replayed after acknowledgement publication"
+  [ ! -e "$home/state/.routine-pending" ] || fail "replayed pending state was not cleared"
+  pass "fired pending routines are suppressed after a crash"
 }
 test_pending_generation_stays_bound_after_rescan() {
   local home check first second third generation
@@ -624,6 +654,7 @@ test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
 test_ack_requires_durable_generation_wake
+test_fired_pending_replay_is_suppressed
 test_pending_generation_stays_bound_after_rescan
 test_deferred_publication_does_not_refire_after_restart
 test_ack_fails_when_routine_state_lock_is_held
