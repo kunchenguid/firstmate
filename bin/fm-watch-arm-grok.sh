@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Grok-owned persistent watcher arm.
+#
+# Grok bills a model turn whenever one tracked background command completes.
+# Run this script, rather than fm-watch-arm.sh directly, as Grok's tracked
+# background command. It keeps that one command alive across an arm close that
+# has no durable wake row, no open decision, no pending recovery episode, and
+# no failure. A close with any of those actionable facts returns immediately so
+# Grok's native task-completed notification still wakes the model.
+#
+# This owner never drains or acknowledges work. Queue rows, decision records,
+# and recovery episodes retain their existing owners. It only performs bounded
+# read-side classification after the child arm has already closed. If that
+# classification cannot be completed safely, it fails loudly instead of hiding
+# a possible wake. Before every child arm it also requires the same live harness
+# pid to own the session lock, normal supervision need, and no away-mode flag.
+# Losing any of those conditions leaves this tracked task dormant instead of
+# mutating fleet state or completing an empty task.
+#
+# FM_GROK_WATCH_ARM_SCRIPT and FM_GROK_WATCH_IDLE_POLL are deterministic test
+# seams. Production uses the sibling fm-watch-arm.sh and a one-second idle poll.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+ARM="${FM_GROK_WATCH_ARM_SCRIPT:-$SCRIPT_DIR/fm-watch-arm.sh}"
+IDLE_POLL=${FM_GROK_WATCH_IDLE_POLL:-1}
+RECOVERY_MARKER="$STATE/.watcher-down"
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+case "${1:-}" in
+  '') ;;
+  -h|--help)
+    printf 'Usage: %s\n' "$(basename "$0")"
+    printf 'Run one persistent Grok tracked background watcher task.\n'
+    exit 0
+    ;;
+  *)
+    printf 'usage: %s\n' "$(basename "$0")" >&2
+    exit 2
+    ;;
+esac
+
+mkdir -p "$STATE"
+SESSION_OWNER=$(cat "$STATE/.lock" 2>/dev/null || true)
+
+child=
+reader=
+stream_dir=
+
+cleanup_cycle() {
+  if [ -n "$child" ] && fm_pid_alive "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
+  if [ -n "$reader" ] && fm_pid_alive "$reader"; then
+    kill -TERM "$reader" 2>/dev/null || true
+    wait "$reader" 2>/dev/null || true
+  fi
+  if [ -n "$stream_dir" ]; then
+    rm -rf "$stream_dir" 2>/dev/null || true
+  fi
+  child=
+  reader=
+  stream_dir=
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+handle_signal() {
+  local rc=$1
+  trap - HUP TERM INT
+  cleanup_cycle
+  exit "$rc"
+}
+
+trap 'handle_signal 129' HUP
+trap 'handle_signal 143' TERM
+trap 'handle_signal 130' INT
+trap cleanup_cycle EXIT
+
+CLASSIFY_FAILURE=
+
+# Exit 0 when durable state requires a Grok model wake, 1 when the close is
+# genuinely empty, and 2 when the read-side verdict cannot be established.
+durable_action_pending() {
+  local i open token
+  CLASSIFY_FAILURE=
+
+  i=0
+  while ! fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK"; do
+    if [ "$i" -ge 20 ]; then
+      CLASSIFY_FAILURE='wake queue lock remained unavailable'
+      return 2
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ -s "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+
+  open=$(scan_open_decisions "$STATE") || {
+    CLASSIFY_FAILURE='open-decision scan failed'
+    return 2
+  }
+  [ -z "$open" ] || return 0
+
+  if ! fm_recovery_marker_snapshot "$RECOVERY_MARKER"; then
+    CLASSIFY_FAILURE='recovery marker snapshot failed'
+    return 2
+  fi
+  token=$FM_RECOVERY_MARKER_TOKEN
+  if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then
+    case "$token" in
+      acked:*) ;;
+      pending:*) return 0 ;;
+      *)
+        CLASSIFY_FAILURE='recovery marker is unreadable or malformed'
+        return 2
+        ;;
+    esac
+  fi
+
+  return 1
+}
+
+wait_until_needed() {
+  while [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; do
+    sleep "$IDLE_POLL"
+  done
+}
+
+session_owner_is_still_valid() {
+  local current
+  case "$SESSION_OWNER" in ''|*[!0-9]*) return 1 ;; esac
+  current=$(cat "$STATE/.lock" 2>/dev/null || true)
+  [ "$current" = "$SESSION_OWNER" ] || return 1
+  fm_harness_pid_alive "$SESSION_OWNER"
+}
+
+while :; do
+  wait_until_needed
+
+  stream_dir=$(mktemp -d "$STATE/.grok-watch-arm.XXXXXX") || {
+    echo 'watcher: FAILED - Grok continuity could not allocate its arm output stream'
+    exit 1
+  }
+  mkfifo "$stream_dir/stream" || {
+    echo 'watcher: FAILED - Grok continuity could not create its arm output stream'
+    exit 1
+  }
+  : > "$stream_dir/output"
+
+  tee "$stream_dir/output" < "$stream_dir/stream" &
+  reader=$!
+  "$ARM" > "$stream_dir/stream" 2>&1 &
+  child=$!
+  wait "$child"
+  rc=$?
+  child=
+  wait "$reader" 2>/dev/null || true
+  reader=
+
+  if [ "$rc" -ne 0 ] || grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
+    if [ "$rc" -eq 0 ]; then rc=1; fi
+    if ! grep -q '^watcher: FAILED' "$stream_dir/output" 2>/dev/null; then
+      printf 'watcher: FAILED - Grok continuity arm exited %s\n' "$rc"
+    fi
+    rm -rf "$stream_dir"
+    stream_dir=
+    exit "$rc"
+  fi
+
+  durable_action_pending
+  verdict=$?
+  case "$verdict" in
+    0)
+      rm -rf "$stream_dir"
+      stream_dir=
+      exit 0
+      ;;
+    1)
+      rm -rf "$stream_dir"
+      stream_dir=
+      ;;
+    *)
+      printf 'watcher: FAILED - Grok continuity could not classify a completed arm: %s\n' "$CLASSIFY_FAILURE"
+      rm -rf "$stream_dir"
+      stream_dir=
+      exit 1
+      ;;
+  esac
+done

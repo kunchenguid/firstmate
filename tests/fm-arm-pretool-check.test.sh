@@ -27,6 +27,7 @@ matrix_case() {
 }
 
 matrix_case A01 allow 'bin/fm-watch-arm.sh'
+matrix_case A01G allow 'bin/fm-watch-arm-grok.sh'
 matrix_case A02 allow './bin/fm-watch-arm.sh --restart'
 matrix_case A03 allow 'exec bin/fm-watch-arm.sh'
 matrix_case A04 allow 'bin/fm-watch-checkpoint.sh --seconds 180'
@@ -65,6 +66,7 @@ matrix_case R18 allow "sh -c 'tmux send-keys -t lab \"bin/fm-watch-arm.sh &\" En
 matrix_case R19 allow "eval 'printf \"%s\\n\" \"bin/fm-watch-arm.sh &\"'"
 
 matrix_case D01 deny 'bin/fm-watch-arm.sh &'
+matrix_case D01G deny 'bin/fm-watch-arm-grok.sh &'
 matrix_case D02 deny 'nohup bin/fm-watch-arm.sh'
 matrix_case D03 deny 'bin/fm-watch-arm.sh & disown'
 matrix_case D04 deny '(bin/fm-watch-arm.sh) &'

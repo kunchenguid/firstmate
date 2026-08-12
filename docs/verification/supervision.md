@@ -345,6 +345,25 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
+Grok's persistent empty-close owner was verified deterministically on 2026-08-12 without starting a live harness or spending a model turn.
+The focused suite proved that an empty child close stays inside one tracked task, while a durable queue row, open decision, pending recovery episode, malformed recovery state, arm failure, or owner termination preserves its actionable or cleanup behavior.
+It also proved that away-mode transfer, ended supervision need, and a changed session-lock owner remain dormant without launching another child or completing an empty Grok task.
+The same pass covered the five-harness PreToolUse matrix, rendered Grok protocol, empty-queue OPEN DECISIONS path, and Grok turn-end guard.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-grok-watch-arm.test.sh tests/fm-arm-pretool-check.test.sh tests/fm-supervision-instructions.test.sh tests/fm-wake-drain-open-decisions.test.sh tests/fm-turnend-guard.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=67 local_links=240
+FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=160496
+```
+
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
 Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):

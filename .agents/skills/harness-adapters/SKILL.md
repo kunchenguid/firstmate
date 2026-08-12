@@ -96,7 +96,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
-Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
+Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses one tracked `bin/fm-watch-arm-grok.sh` background owner that keeps empty child closes inside the same task.
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
@@ -356,7 +356,7 @@ Grok 0.2.112 exposes native same-process Stop continuation in its running payloa
 The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.md`.
 The tracked Claude hook entries whose event Grok already covers through its own `.grok/hooks/` registration skip themselves under `GROK_AGENT` or `GROK_HOOK_EVENT`, because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path; the exact marker set and why `GROK_SESSION_ID` is excluded are owned by `docs/turnend-guard.md` "Harness integrations".
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
-Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
+Grok's primary watcher protocol remains background-notify through `bin/fm-watch-arm-grok.sh`; its persistent tracked owner absorbs empty child closes before Grok can notify the model, while native Stop continuation still does not provide Pi-like extension ownership.
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 
