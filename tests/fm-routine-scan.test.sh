@@ -115,6 +115,9 @@ test_setup_persists_canonical_path_overrides() {
   [ "$out" = "$expected" ] || fail "routine check did not retain its provisioned registry path"
   [ -f "$state/.routine-pending" ] || fail "routine check did not retain its provisioned pending state path"
   generation=$(cat "$state/.routine-generation")
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state/routine-scan.check.sh:routine-generation:$generation" "$out" \
+    || fail "routine check could not publish its pending wake"
   "$check" --ack --generation "$generation" >/dev/null \
     || fail "routine check could not acknowledge its pending state"
   [ -f "$state/.routine-fired" ] || fail "routine check did not retain its provisioned fire state path"
@@ -266,8 +269,9 @@ test_deferred_check_acknowledges_after_wake() {
   second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   [ "$second" = "$first" ] \
     || fail "pending due output was not repeatable before acknowledgement"
-  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check routine-scan "$2"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$first" \
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
     || fail "the routine due wake could not enter the existing wake rail"
   [ -s "$home/state/.wake-queue" ] || fail "the routine due wake was not durable"
   if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack 2>&1); then
@@ -280,7 +284,6 @@ test_deferred_check_acknowledges_after_wake() {
     *'routine acknowledgement requires a generation'*) ;;
     *) fail "bare routine acknowledgement lacked an actionable diagnostic: $out" ;
   esac
-  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
   ack=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation")
   [ -z "$ack" ] || fail "routine acknowledgement produced check output"
   [ "$(cat "$home/state/.routine-fired")" = 'deferred-item|daily|2026-08-10' ] \
@@ -290,6 +293,36 @@ test_deferred_check_acknowledges_after_wake() {
   third=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   [ -z "$third" ] || fail "acknowledged routine fired again"
   pass "routine fire state commits after wake acknowledgement"
+}
+test_ack_requires_durable_generation_wake() {
+  local home check first generation out rc
+  home=$(make_home ack-publication)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the acknowledgement fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- publication-bound-item | daily | captain | require a published wake'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  generation=$(awk -F '|' 'NR == 1 { print $6 }' "$home/state/.routine-pending")
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "acknowledgement bypassed durable wake publication"
+  case "$out" in
+    *'routine acknowledgement has no durable wake:'*) ;;
+    *) fail "unpublished acknowledgement lacked an actionable diagnostic: $out" ;;
+  esac
+  [ ! -e "$home/state/.routine-fired" ] || fail "unpublished acknowledgement committed fire state"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
+    || fail "the publication fixture could not append its durable wake"
+  "$check" --ack --generation "$generation" \
+    || fail "acknowledgement rejected its durable generation wake"
+  [ "$(cat "$home/state/.routine-fired")" = 'publication-bound-item|daily|2026-08-10' ] \
+    || fail "the published generation did not commit fire state"
+  pass "routine acknowledgement requires durable wake publication"
 }
 test_pending_generation_stays_bound_after_rescan() {
   local home check first second third generation
@@ -590,6 +623,7 @@ test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
+test_ack_requires_durable_generation_wake
 test_pending_generation_stays_bound_after_rescan
 test_deferred_publication_does_not_refire_after_restart
 test_ack_fails_when_routine_state_lock_is_held

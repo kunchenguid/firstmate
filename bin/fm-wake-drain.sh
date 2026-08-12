@@ -102,6 +102,7 @@ routine_wake_acknowledge_queued() {
       *) continue ;;
     esac
     FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      FM_ROUTINE_WAKE_QUEUE_LOCK_HELD=1 \
       "$SCRIPT_DIR/fm-routine-scan.sh" --ack --generation "$generation" >/dev/null 2>&1 \
       || { echo 'wake drain: routine fire state acknowledgement failed' >&2; return 1; }
   done < "$FM_WAKE_QUEUE"

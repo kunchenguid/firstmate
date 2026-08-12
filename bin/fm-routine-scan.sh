@@ -208,6 +208,30 @@ routine_ack_seen() {
   return 1
 }
 
+routine_ack_publication_exists() {
+  local wake_key=$STATE/routine-scan.check.sh:routine-generation:$ROUTINE_ACK_GENERATION
+  local found=1 queue_lock_held=0
+  [ ! -L "$FM_WAKE_QUEUE" ] \
+    || { routine_error "wake queue is unavailable: $FM_WAKE_QUEUE"; return 1; }
+  if [ -e "$FM_WAKE_QUEUE" ]; then
+    [ -f "$FM_WAKE_QUEUE" ] \
+      || { routine_error "wake queue is unavailable: $FM_WAKE_QUEUE"; return 1; }
+  fi
+  [ "${FM_ROUTINE_WAKE_QUEUE_LOCK_HELD:-0}" = 1 ] || {
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" \
+      || { routine_error 'could not acquire wake queue lock for acknowledgement'; return 1; }
+    queue_lock_held=1
+  }
+  if [ -f "$FM_WAKE_QUEUE" ] && awk -F '\t' -v key="$wake_key" \
+    '$3 == "check" && $4 == key && index($5, "routine-due: ") > 0 { found = 0; exit } END { exit found }' \
+    "$FM_WAKE_QUEUE"; then
+    found=0
+  fi
+  [ "$queue_lock_held" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$found" -eq 0 ] \
+    || { routine_error "routine acknowledgement has no durable wake: $ROUTINE_ACK_GENERATION"; return 1; }
+}
+
 routine_ack_pending() {
   local pending_id pending_cadence pending_date pending_owner pending_action pending_generation pending_extra
   local stored_id stored_cadence stored_date stored_extra fire_record
@@ -311,6 +335,7 @@ routine_id_fired_this_scan() {
 }
 
 if [ "$ROUTINE_ACK" -eq 1 ]; then
+  routine_ack_publication_exists || exit 1
   routine_ack_pending || exit 1
   exit 0
 fi
