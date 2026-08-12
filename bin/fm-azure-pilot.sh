@@ -773,7 +773,6 @@ run_apply() {
     --name "$DEPLOYMENT_NAME" \
     --template-file "$TEMPLATE" \
     --parameters "@$PARAMS_FILE" \
-    --mode Incremental \
     --output none \
     --only-show-errors || refuse "Azure apply timed out or failed; retained operation state requires live reconciliation before retry"
   printf 'apply completed for profile=%s; cloud default remains blocked until every bounded acceptance leg passes\n' "$CAPACITY_PROFILE"
@@ -865,7 +864,6 @@ run_worker_create() {
     --name "$DEPLOYMENT_NAME-worker-$SLOT" \
     --template-file "$TEMPLATE" \
     --parameters "@$PARAMS_FILE" \
-    --mode Incremental \
     --output none \
     --only-show-errors || refuse "worker create timed out or failed; retained operation state requires live reconciliation before retry"
   printf 'worker slot created or reconciled; retained disks require exact task-generation proof before adoption\n'

@@ -570,6 +570,27 @@ PY
   pass "all live gates and validate/preview/apply/worker mutations share bounded Azure CLI ownership and retained state"
 }
 
+run_subscription_deployment_cli_shape_check() {
+  python3 - "$SCRIPT" <<'PY' || fail "subscription deployment create CLI shape is invalid"
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+for function in ("run_apply", "run_worker_create"):
+    body = text.split(function + "() {", 1)[1].split("\n}\n", 1)[0]
+    assert body.count("deployment sub create") == 1, function
+    call = body.split("deployment sub create", 1)[1].split("|| refuse", 1)[0]
+    expected = (
+        "--subscription", "--location", "--name", "--template-file",
+        "--parameters", "--output none", "--only-show-errors",
+    )
+    positions = [call.index(argument) for argument in expected]
+    assert positions == sorted(positions), function
+    assert "--mode" not in call, function
+PY
+  pass "subscription deployment creates use the exact valid Azure CLI shape"
+}
+
 run_capacity_contract_checks() {
   local sourceable output status
   sourceable=$(mktemp)
@@ -685,6 +706,7 @@ run_destroy_inventory_failure_checks
 run_destroy_unknown_disk_check
 run_destroy_deadline_check
 run_bounded_mutation_deadline_checks
+run_subscription_deployment_cli_shape_check
 run_capacity_contract_checks
 run_documentation_contract_checks
 
