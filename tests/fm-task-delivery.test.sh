@@ -285,6 +285,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   printf 'window=fm-promote-web-fenced-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_fenced_meta"
   mkdir -p "$home/data/promote-web-fenced-d2"
   brief="$home/data/promote-web-fenced-d2/brief.md"
+  # shellcheck disable=SC2016 # The fenced markdown is literal test brief text.
   printf '# Task\n```markdown\nSurface contract: web\n```\n\n# Definition of done\nScout work complete.\n' > "$brief"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-fenced-d2 --mode local-only --yolo off --web 2>&1)
   status=$?
