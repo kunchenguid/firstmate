@@ -278,15 +278,18 @@ fm_composer_strip_ghost() {
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
-FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩')
+FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
 # bordered placeholder and opencode's left-bar hint (which continues with a
-# rotating quoted suggestion, hence the unanchored tail). FM_COMPOSER_IDLE_RE
-# overrides for an unverified harness; matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.'
+# rotating quoted suggestion, hence the unanchored tail). cursor-agent renders
+# two, both anchored: `Plan, search, build anything` in a fresh session and
+# `Add a follow-up` once a turn has completed (verified live on cursor-agent
+# 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# matching is case-insensitive.
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -426,6 +429,34 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
+  # Ghost stripping can leave a REMNANT of an idle placeholder rather than
+  # emptying it, because a terminal draws the cell under its cursor in reverse
+  # video (SGR 7) - neither dim/faint nor a dark foreground, so that one
+  # character survives a stripper built for the other two. cursor-agent renders
+  # exactly this shape: a dim `Plan, search, build anything` whose first
+  # character is reverse-video, leaving a lone `P` (verified live on
+  # cursor-agent 2026.08.11-e8db854). Judging that remnant on its own reads
+  # `pending` on a genuinely idle pane.
+  # The plain row is the styling-independent signal, so consult it here. This
+  # stays safe in the false-EMPTY direction because it demands the remnant be a
+  # PROPER, strictly shorter substring of a plain row that matches a full
+  # anchored placeholder: real typed text is uniformly bright, so stripping
+  # leaves it EQUAL to the plain row and it falls through to `pending` below.
+  # Typing a strict substring of a placeholder is equally safe - the plain row
+  # is then that substring, which the anchored placeholder pattern cannot match.
+  if [ "$idle_collision" != 1 ] && [ "$styled" = 1 ] && [ -n "$plain_content" ]; then
+    local plain_body=$plain_content plain_glyph=''
+    if fm_composer_leading_prompt_glyph_var plain_glyph "$plain_body"; then
+      plain_body=${plain_body#*"$plain_glyph"}
+    fi
+    fm_composer_normalize_trim_var plain_body
+    if [ "${#content}" -lt "${#plain_body}" ] \
+       && fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
+      case "$plain_body" in
+        *"$content"*) printf 'empty'; return 0 ;;
+      esac
+    fi
+  fi
   if [ "$idle_collision" = 1 ]; then
     if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ] && [ "$styled" != 1 ]; then
       printf 'empty'; return 0

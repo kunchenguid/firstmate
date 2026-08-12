@@ -9,8 +9,8 @@
 #      (unsafe-for-injection), never `empty`. This is the safety fix.
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
-#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `⟩` (muse) are a genuine empty
-#      agent composer either way, bordered or bare.
+#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), `⟩` (muse), and `→`
+#      (cursor) are a genuine empty agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
@@ -219,6 +219,49 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
   out=$(FM_COMPOSER_GHOST_LUMA_MAX=200 fm_composer_classify_screen "$CAPS_STYLED" "$screen")
   [ "$out" = empty ] || fail "muse must stay empty when the ghost strip eats its glyph (plain-row signal), got '$out'"
   pass "matrix: muse's ⟩ reads empty everywhere and survives losing the styled-glyph signal"
+}
+
+test_matrix_cursor_reverse_video_placeholder_remnant() {
+  # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
+  # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
+  # cell under the terminal cursor is REVERSE VIDEO (SGR 0;7). Reverse video is
+  # neither dim nor a dark foreground, so the ghost stripper keeps that one
+  # character and an idle composer reduces to a lone `P`.
+  local row screen plain out stripped
+  row="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0;7m${ESC}[48;2;21;21;21mP"
+  row="${row}${ESC}[0;2m${ESC}[48;2;21;21;21mlan, search, build anything${ESC}[0m"
+  screen=$'transcript\n\n'"$row"
+  plain=$'transcript\n\n  → Plan, search, build anything'
+
+  # NON-VACUOUSNESS: prove the remnant really survives stripping. If the ghost
+  # stripper ever learned SGR 7, `stripped` would be empty and the verdict below
+  # would come from the empty-content path instead, silently retiring the
+  # plain-row branch this case exists to cover.
+  stripped=$(printf '%s' "$row" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" = P ] \
+    || fail "cursor's reverse-video remnant must survive ghost stripping as 'P', got '$stripped'"
+
+  assert_screen "cursor idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "cursor idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # An UNSTYLED capture carries no ghost-strip proof, so a bare row matching a
+  # placeholder is indistinguishable from typed text and must stay unknown -
+  # the same degradation every other bare-row placeholder already takes.
+  assert_screen "cursor idle on cmux/orca" unknown "$CAPS_PLAIN" "$plain"
+
+  # The dangerous direction: text a user actually TYPED is uniformly bright, so
+  # stripping leaves it EQUAL to the plain row. Even when that text is exactly
+  # the placeholder, it must stay pending - never a false empty.
+  local typed typed_plain
+  typed="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244mAdd a follow-up${ESC}[0m"
+  typed_plain=$'transcript\n\n  → Add a follow-up'
+  assert_screen "cursor typed placeholder text stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n\n'"$typed"
+  # Without styling there is no proof either way, so it must not read empty.
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" "$typed_plain")
+  [ "$out" != empty ] \
+    || fail "an unstyled cursor row matching the placeholder must not read empty, got '$out'"
+  pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
 }
 
 test_matrix_pi_separated_needs_identity() {
@@ -543,6 +586,7 @@ test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
+test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
