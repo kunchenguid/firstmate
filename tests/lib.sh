@@ -170,6 +170,20 @@ SH
   done
 }
 
+# fm_fake_treehouse_get_path <fakebin> writes a Treehouse stub whose get
+# command returns the worktree already exposed by the fixture's fake backend.
+fm_fake_treehouse_get_path() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation
