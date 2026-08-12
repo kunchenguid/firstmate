@@ -187,45 +187,21 @@ function markdownSection(text, names) {
   return value || null;
 }
 
-function stripCredentialSubsection(text) {
-  if (!text) return { text: null, omitted: false };
-  const lines = text.split(/\r?\n/);
-  const kept = [];
-  let credentialLevel = null;
-  let omitted = false;
-  for (const line of lines) {
-    const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
-    if (credentialLevel === null && heading && /credentials?|login/i.test(heading[2])) {
-      credentialLevel = heading[1].length;
-      omitted = true;
-      continue;
-    }
-    if (credentialLevel !== null) {
-      if (!heading || heading[1].length > credentialLevel) continue;
-      credentialLevel = null;
-    }
-    kept.push(line);
-  }
-  return { text: kept.join("\n").trim() || null, omitted };
-}
-
 function reportEvidence(reportPath) {
   if (!reportPath || !existsSync(reportPath)) {
-    return { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false };
+    return { impact: null, manualScript: null, credentialsOmitted: false };
   }
   let text;
   try {
     text = readFileSync(reportPath, "utf8");
   } catch {
-    return { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false };
+    return { impact: null, manualScript: null, credentialsOmitted: false };
   }
   const manualScript = markdownSection(text, ["Manual test script", "Manual validation script"]);
-  const safeScript = stripCredentialSubsection(manualScript);
   return {
     impact: markdownSection(text, ["What this affects", "User impact"]),
     manualScript,
-    htmlManualScript: safeScript.text,
-    credentialsOmitted: safeScript.omitted,
+    credentialsOmitted: manualScript !== null,
   };
 }
 
@@ -356,6 +332,20 @@ function readableRowId(prefix, stableValue, canonical, title, forceDiscriminator
   }
   if (!readable) readable = source.slice(0, available);
   return `${prefix}:${readable}~${discriminator}`;
+}
+
+function compactRowId(prefix, stableValue, canonical) {
+  // Keep the task-derived token inside the fixed 80-column status row; the model-wide guard below refuses a digest collision.
+  const source = String(stableValue ?? "")
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "");
+  const parts = source.split("-").filter(Boolean);
+  const readable = (parts.length > 1 ? parts.map((part) => part[0]).join("") : source)
+    .slice(0, 2)
+    .padEnd(2, "r");
+  const discriminator = createHash("sha256").update(canonical).digest("hex").slice(0, 2);
+  return `${prefix}:${readable}${discriminator}`;
 }
 
 function formatDuration(seconds) {
@@ -1109,7 +1099,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       blocker: relationship.holdReason ?? relationship.status,
       review: relationship.status,
       recommendation,
-      evidence: { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false },
+      evidence: { impact: null, manualScript: null, credentialsOmitted: false },
       why: relationship.linkSource === "verified_project_remote"
         ? "review records grouped by PR; link established from the recorded PR number and verified project GitHub remote"
         : "review records grouped by PR; completed rounds remain until terminal PR evidence exists",
@@ -1123,11 +1113,20 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     const githubResult = github?.results?.get(request.url) ?? null;
     const relationship = relationshipByUrl.get(request.url) ?? null;
     const recordedHeads = relationship?.heads ?? [];
-    const roundLabel = recordedHeads.length === 0 ? "first pass" : `re-review ${recordedHeads.length + 1}`;
-    const pushedSinceReview = recordedHeads.length === 0
-      ? null
-      : githubResult?.headRefOid
+    const viewerReview = reviewRequests?.viewer
+      ? (githubResult?.reviewRecords ?? []).find((review) => review.author === reviewRequests.viewer) ?? null
+      : null;
+    const roundLabel = recordedHeads.length > 0
+      ? `re-review ${recordedHeads.length + 1}`
+      : viewerReview
+        ? "re-review 2+"
+        : "round unknown";
+    const pushedSinceReview = recordedHeads.length > 0
+      ? githubResult?.headRefOid
         ? !recordedHeads.includes(githubResult.headRefOid)
+        : null
+      : viewerReview?.commitOid && githubResult?.headRefOid
+        ? viewerReview.commitOid !== githubResult.headRefOid
         : null;
     const manualEvidence = `${request.title ?? ""} ${relationship?.status ?? ""}`;
     const manualOutstanding = /manual validation[^.\n]*(?:required|outstanding|pending)/i.test(manualEvidence);
@@ -1141,7 +1140,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       waiting.seconds === null ? "waiting time unknown" : `waiting ${formatDuration(waiting.seconds)}`,
       roundLabel,
       pushedSinceReview === true ? "author pushed since review" : pushedSinceReview === false ? "head unchanged since review" : null,
-      recordedHeads.length > 0 && pushedSinceReview === null ? "head change unknown" : null,
+      pushedSinceReview === null ? "head change unknown" : null,
       manualOutstanding ? "manual validation outstanding" : "manual validation unknown",
       unansweredFindings ? "findings recorded as unanswered" : "findings status unknown",
     ].filter(Boolean);
@@ -1168,7 +1167,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       recommendation: manualOutstanding
         ? "Run the recorded manual validation, then submit the requested review."
         : "Review the current head and submit the requested review.",
-      evidence: { impact: null, manualScript: null, htmlManualScript: null, credentialsOmitted: false },
+      evidence: { impact: null, manualScript: null, credentialsOmitted: false },
       why: "GitHub currently reports the authenticated viewer as a requested reviewer",
     });
   }
@@ -1256,6 +1255,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   };
 
   let rowNumber = 0;
+  const rowByIdentity = new Map();
   for (const bucket of model.buckets) {
     for (const item of bucket.items) {
       rowNumber += 1;
@@ -1265,7 +1265,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       const stablePart = bucket.key === "decisions"
         ? decisionUsesKey ? `${item.id}-${item.stableKey}-${item.identityVerb ?? "row"}` : item.id
         : bucket.key === "ours-in-review"
-          ? item.prNumber ?? item.id
+          ? `${item.id}-${item.prNumber ?? "pr-unknown"}`
           : bucket.key === "review-obligations"
             ? item.stableKey
             : String(item.id).replace(/^pr-/, "");
@@ -1277,7 +1277,14 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
             ? "v"
             : "r";
       const canonical = `${bucket.key}/${item.id}/${item.stableKey ?? ""}/${item.identityVerb ?? bucket.key}`;
-      item.identity = readableRowId(prefix, stablePart, canonical, item.name);
+      item.identity = bucket.key === "ours-in-review"
+        ? compactRowId(prefix, stablePart, canonical)
+        : readableRowId(prefix, stablePart, canonical, item.name);
+      const previous = rowByIdentity.get(item.identity);
+      if (previous) {
+        throw new Error(`duplicate cockpit row id ${item.identity}: ${previous.bucketName}/${previous.id} and ${item.bucketName}/${item.id}`);
+      }
+      rowByIdentity.set(item.identity, item);
     }
   }
   model.totalRows = rowNumber;
@@ -1487,15 +1494,14 @@ function renderExpandedItem(item, model, options = {}) {
   lines.push(`verdict: ${recommendation}`);
   lines.push(`why here: ${item.why || "routing reason not recorded"}`);
   lines.push(`what this affects: ${item.evidence?.impact ? cleanProse(item.evidence.impact) : "not recorded in the task report"}`);
-  const manualScript = options.forHtml ? item.evidence?.htmlManualScript : item.evidence?.manualScript;
-  if (manualScript) {
+  const manualScript = item.evidence?.manualScript;
+  if (options.forHtml && item.evidence?.credentialsOmitted) {
+    lines.push(`manual test script: omitted from shareable HTML; use --show ${item.identity} in the interactive terminal detail.`);
+  } else if (manualScript) {
     lines.push("manual test script (task report):");
     for (const line of manualScript.split(/\r?\n/)) lines.push(`  ${line}`);
   } else {
     lines.push("manual test script: no manual test script recorded in the task report");
-  }
-  if (options.forHtml && item.evidence?.credentialsOmitted) {
-    lines.push(`credentials: Credentials are omitted from HTML; use --show ${item.identity} in the interactive terminal detail.`);
   }
   const identity = [item.id ? `task ${item.id}` : null, item.project ? `project ${item.project}` : null]
     .filter(Boolean)

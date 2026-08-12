@@ -74,6 +74,10 @@ SH
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "search" ]; then
+  if [ -f "$FM_HOME/review-history-fixture" ]; then
+    printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-29T00:00:00Z","number":940,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Re-review the address refresh","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/940"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-30T00:00:00Z","number":941,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Review the audit export","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/941"}]'
+    exit 0
+  fi
   printf '[{"author":{"login":"colleague"},"createdAt":"2026-07-20T00:00:00Z","number":930,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Tile cache manual validation required and outstanding","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/930"},{"author":{"login":"colleague-two"},"createdAt":"2026-07-31T00:00:00Z","number":912,"repository":{"name":"artemis","nameWithOwner":"monalee/artemis"},"title":"Payment refactor","updatedAt":"2026-08-02T00:00:00Z","url":"https://github.com/monalee/artemis/pull/912"}]'
   exit 0
 fi
@@ -88,10 +92,19 @@ if [ "${1:-}" = "api" ]; then
     *" repos/monalee/artemis/issues/912/timeline "*)
       printf '[{"event":"review_requested","created_at":"2026-07-31T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
       ;;
+    *" repos/monalee/artemis/issues/940/timeline "*)
+      printf '[{"event":"review_requested","created_at":"2026-07-29T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      ;;
+    *" repos/monalee/artemis/issues/941/timeline "*)
+      printf '[{"event":"review_requested","created_at":"2026-07-30T00:00:00Z","requested_reviewer":{"login":"pedromuller-del"}}]'
+      ;;
     *" repos/monalee/artemis/pulls/930/requested_reviewers "*)
       printf '{"users":[],"teams":[{"name":"webdev","slug":"webdev"}]}'
       ;;
     *" repos/monalee/artemis/pulls/912/requested_reviewers "*)
+      printf '{"users":[{"login":"pedromuller-del"}],"teams":[]}'
+      ;;
+    *" repos/monalee/artemis/pulls/940/requested_reviewers "*|*" repos/monalee/artemis/pulls/941/requested_reviewers "*)
       printf '{"users":[{"login":"pedromuller-del"}],"teams":[]}'
       ;;
     *)
@@ -113,6 +126,12 @@ case "$url" in
     ;;
   *pull/912*|*pull/4188*)
     printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[],"headRefOid":"b2b2b2b"}'
+    ;;
+  *pull/940*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[{"author":{"login":"pedromuller-del"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-28T00:00:00Z","commit":{"oid":"aaa111"}}],"reviewRequests":[{"login":"pedromuller-del"}],"headRefOid":"bbb222"}'
+    ;;
+  *pull/941*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"reviews":[],"reviewRequests":[{"login":"pedromuller-del"}],"headRefOid":"ccc333"}'
     ;;
   *pull/888*|*pull/999*)
     printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[],"reviews":[],"reviewRequests":[]}'
@@ -816,8 +835,9 @@ EOF
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
     "$DASHBOARD" --output "$output" >/dev/null || fail "HTML detail render failed"
   html=$(<"$output")
-  assert_contains "$html" "manual test script" "HTML detail omitted the recorded script"
-  assert_contains "$html" "Credentials are omitted" "HTML does not explain credential omission"
+  assert_contains "$html" "manual test script: omitted from shareable HTML" \
+    "HTML does not explain its fail-safe script omission"
+  assert_not_contains "$html" "Open the API preview" "shareable HTML retained a manual script body"
   assert_not_contains "$html" "secret-test-password" "shareable HTML leaked credentials"
   pass "detail carries sourced impact, manual validation, honest token status, and quota"
 }
@@ -910,6 +930,92 @@ test_registered_pr_number_comes_from_registered_url() {
   pass "registered PR URL outranks a conflicting title number"
 }
 
+test_our_pr_ids_bind_task_and_pr_when_two_tasks_share_one_pr() {
+  local home fakebin updated out first_id second_id first_shown second_shown duplicates
+  home=$(make_home duplicate-our-pr)
+  write_live_fixture "$home"
+  updated="$home/data/backlog.md.updated"
+  awk '/^## Queued$/ { print "- [ ] review-followup - Follow up on the review branch (repo: artemis) (kind: ship) (since 2026-08-02)" } { print }' \
+    "$home/data/backlog.md" > "$updated"
+  mv "$updated" "$home/data/backlog.md"
+  mkdir -p "$home/projects/review-followup"
+  fm_write_meta "$home/state/review-followup.meta" \
+    "window=firstmate:fm-review-followup" "worktree=$home/projects/review-followup" "project=artemis" \
+    "harness=claude" "kind=ship" "mode=ship" "yolo=off" "pr=$OUR_PR"
+  printf 'working: addressing follow-up findings on %s\n' "$OUR_PR" > "$home/state/review-followup.status"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "duplicate-PR render failed"
+  first_id=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | head -1 | awk '{print $2}')
+  second_id=$(printf '%s\n' "$out" | grep -F "PR 4001 |" | tail -1 | awk '{print $2}')
+  [ -n "$first_id" ] && [ -n "$second_id" ] || fail "two tasks on one PR did not both render"
+  [ "$first_id" != "$second_id" ] || fail "two tasks on one PR share quotable id $first_id"
+  duplicates=$(printf '%s\n' "$out" | awk '$2 ~ /^[dorv]:/ { print $2 }' | sort | uniq -d)
+  [ -z "$duplicates" ] || fail "dashboard emitted duplicate row identities: $duplicates"
+  first_shown=$(render_terminal "$home" "$fakebin" --show "$first_id") || fail "first same-PR task id did not resolve"
+  second_shown=$(render_terminal "$home" "$fakebin" --show "$second_id") || fail "second same-PR task id did not resolve"
+  assert_contains "$first_shown$second_shown" "Ship the review branch" "same-PR ids lost the original task"
+  assert_contains "$first_shown$second_shown" "Follow up on the review branch" "same-PR ids lost the follow-up task"
+  pass "our PR ids bind task and PR and every rendered identity is unique"
+}
+
+test_obligation_round_uses_viewer_review_history_or_stays_unknown() {
+  local home fakebin out reviewed_id reviewed_shown unknown_id unknown_shown
+  home=$(make_home obligation-review-history)
+  write_live_fixture "$home"
+  touch "$home/review-history-fixture"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "review-history obligation render failed"
+  reviewed_id=$(printf '%s\n' "$out" | grep -F "PR 940 [artemis]" | awk '{print $2}')
+  reviewed_shown=$(render_terminal "$home" "$fakebin" --show "$reviewed_id") \
+    || fail "viewer-reviewed obligation detail failed"
+  assert_contains "$reviewed_shown" "re-review 2+ · author pushed since review" \
+    "viewer-authored GitHub review did not establish the round floor and head change"
+  unknown_id=$(printf '%s\n' "$out" | grep -F "PR 941 [artemis]" | awk '{print $2}')
+  unknown_shown=$(render_terminal "$home" "$fakebin" --show "$unknown_id") \
+    || fail "unknown-history obligation detail failed"
+  assert_contains "$unknown_shown" "round unknown · head change unknown" \
+    "absent local and GitHub review history became a positive round claim"
+  assert_not_contains "$reviewed_shown$unknown_shown" "first pass" "absent review history still renders as first pass"
+  pass "review obligations derive a round floor from GitHub or render unknown"
+}
+
+test_shareable_html_omits_unstructured_manual_scripts_by_default() {
+  local home fakebin out id shown output html
+  home=$(make_home inline-credentials)
+  write_live_fixture "$home"
+  mkdir -p "$home/data/decision-task"
+  cat > "$home/data/decision-task/report.md" <<'EOF'
+# Decision task report
+
+## Manual test script
+
+1. Open the API preview.
+2. Log in with buyer@example.test / hunter2-inline-password.
+Expected: the documented method succeeds.
+EOF
+  fakebin=$(make_fakebin "$home")
+
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) || fail "inline-credential list render failed"
+  id=$(printf '%s\n' "$out" | grep -F "Decide the public API" | awk '{print $2}')
+  shown=$(render_terminal "$home" "$fakebin" --show "$id") || fail "inline-credential terminal detail failed"
+  assert_contains "$shown" "hunter2-inline-password" "interactive terminal omitted the recorded credential"
+
+  output="$home/cockpit.html"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" --output "$output" >/dev/null || fail "inline-credential HTML render failed"
+  html=$(<"$output")
+  assert_not_contains "$html" "hunter2-inline-password" "shareable HTML leaked an inline credential"
+  assert_not_contains "$html" "Open the API preview" "shareable HTML included an unstructured manual script body"
+  assert_contains "$html" "manual test script: omitted from shareable HTML" \
+    "shareable HTML did not explain the fail-safe script omission"
+  pass "shareable HTML omits unstructured manual scripts while terminal detail retains them"
+}
+
+test_shareable_html_omits_unstructured_manual_scripts_by_default
+test_obligation_round_uses_viewer_review_history_or_stays_unknown
+test_our_pr_ids_bind_task_and_pr_when_two_tasks_share_one_pr
 test_cockpit_shows_action_sections_and_full_inventory
 test_pr_truthfulness_regressions
 test_review_relationships_survive_completed_rounds
