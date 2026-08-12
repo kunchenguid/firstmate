@@ -190,7 +190,15 @@ make_run_primary() {
 run_hook() {  # <root> [args...]
   local root=$1
   shift
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+run_hook_pi() {  # <root> [args...]
+  local root=$1
+  shift
+  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh
@@ -232,6 +240,53 @@ test_run_clear_and_compact_reemit() {
   pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
 }
 
+test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
+  local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
+  make_run_primary "$root"
+  printf '%s\n' 'RUN_TIER_AGENTS=original' > "$root/AGENTS.md"
+  run_hook_pi "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-agents-baseline" \
+    "run-tier startup did not record an instruction baseline"
+  baseline=$(cat "$root/state/.session-start-agents-baseline")
+
+  printf '%s\n' 'RUN_TIER_AGENTS=updated' > "$root/AGENTS.md"
+  compact_out=$(run_hook_pi "$root" --source compact </dev/null)
+  clear_out=$(run_hook_pi "$root" --source clear </dev/null)
+  resume_out=$(run_hook_pi "$root" --source resume </dev/null)
+
+  assert_contains "$compact_out" "RUN_TIER_AGENTS=updated" \
+    "the compact run wrapper did not forward its source to instruction refresh"
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "the clear run wrapper emitted a replacement contract despite Pi's fresh runtime"
+  [ "$baseline" = "$(cat "$root/state/.session-start-agents-baseline")" ] \
+    || fail "a run-tier rebuild rewrote the true-start instruction baseline"
+  [ -z "$resume_out" ] \
+    || fail "an already-owned resume should preserve context without re-running the digest"
+
+  pass "run wrapper forwards only stale-cache rebuild sources to immutable-baseline instruction refresh"
+}
+
+test_run_compact_without_completion_refreshes_before_finishing_startup() {
+  local root="$TMP_ROOT/run-compact-incomplete" out status=0 refresh_line bootstrap_line
+  make_run_primary "$root"
+  printf '%s\n' 'INCOMPLETE_START_AGENTS=current' > "$root/AGENTS.md"
+
+  out=$(run_hook_pi "$root" --source compact </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper compact without completion proof"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "compact skipped full startup when no completed startup could be proven"
+  assert_contains "$out" "INCOMPLETE_START_AGENTS=current" \
+    "compact after an incomplete startup did not conservatively inject current instructions"
+  refresh_line=$(printf '%s\n' "$out" | grep -n '^CURRENT AGENTS.md - INSTRUCTION REFRESH$' | head -1 | cut -d: -f1)
+  bootstrap_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
+  [ -n "$refresh_line" ] && [ -n "$bootstrap_line" ] && [ "$refresh_line" -lt "$bootstrap_line" ] \
+    || fail "compact recovery did not emit current instructions before the bulky digest"
+  assert_absent "$root/state/.session-start-agents-baseline" \
+    "compact recovery fabricated a true-start instruction baseline"
+
+  pass "run wrapper refreshes a compact even when startup completion is unproven"
+}
+
 test_run_clear_without_completion_finishes_startup() {
   local root="$TMP_ROOT/run-clear-incomplete" out status=0
   make_run_primary "$root"
@@ -264,6 +319,89 @@ test_run_clear_rejects_previous_owner_completion() {
   [ "$(cat "$root/state/.lock")" != "$previous_pid" ] \
     || fail "the recovery startup did not replace the previous session's stale lock"
   pass "run wrapper: clear accepts completion only from the current harness"
+}
+
+test_pi_startup_classifies_cli_continuations() {
+  local fixture out expected actual status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi continuation classification test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-continuation-source"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_HOME:?}/state/sources"
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?continuation=${Date.now()}`);
+extension.default(pi);
+const fire = async (args, entries = [], timestamp = new Date().toISOString()) => {
+  process.argv.splice(1, process.argv.length, "pi", ...args);
+  await handlers.get("session_start")(
+    { reason: "startup" },
+    { sessionManager: { getEntries: () => entries, getHeader: () => ({ timestamp }) } },
+  );
+};
+const oldTimestamp = "2000-01-01T00:00:00.000Z";
+const nameEntry = [{ type: "session_info", name: "named" }];
+await fire([]);
+await fire(["-c"]);
+await fire(["--continue"], [{ type: "message" }], oldTimestamp);
+await fire(["--resume"]);
+await fire(["-r"], [{ type: "message" }], oldTimestamp);
+await fire(["--session", "new-session"]);
+await fire(["--session=existing-session"], [{ type: "message" }], oldTimestamp);
+await fire(["--session-id", "new-id"]);
+await fire(["--session-id=existing-id"], [{ type: "message" }], oldTimestamp);
+await fire(["--session-id", "empty-existing-id"], [], oldTimestamp);
+await fire(["-c", "--name", "new-named"], nameEntry);
+await fire(["-c", "--name", "restored-named"], nameEntry, oldTimestamp);
+await fire(["--session-id", "new-named-id", "--name", "new-named"], nameEntry);
+await fire(["--session", "existing-named", "--name", "restored-named"], nameEntry, oldTimestamp);
+await fire(["--fork=session-id"]);
+await fire([], [{ type: "message" }], oldTimestamp);
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi continuation classification"
+  [ -z "$out" ] || fail "Pi continuation classification printed output: $out"
+  expected=$(printf '%s\n' \
+    '--source startup' \
+    '--source startup' \
+    '--source resume' \
+    '--source startup' \
+    '--source resume' \
+    '--source startup' \
+    '--source resume' \
+    '--source startup' \
+    '--source resume' \
+    '--source resume' \
+    '--source startup' \
+    '--source resume' \
+    '--source startup' \
+    '--source resume' \
+    '--source fork' \
+    '--source startup')
+  actual=$(cat "$fixture/state/sources")
+  [ "$actual" = "$expected" ] \
+    || fail "Pi continuation classification produced unexpected sources: $actual"
+  pass "Pi distinguishes header-proven restored CLI sessions from named create-if-missing startups"
 }
 
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
@@ -306,7 +444,10 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);
 extension.default(pi);
-await handlers.get("session_start")({ reason: "startup" });
+await handlers.get("session_start")(
+  { reason: "startup" },
+  { sessionManager: { getEntries: () => [] } },
+);
 if (messages.length !== 1) throw new Error(`expected one message, got ${messages.length}`);
 const content = messages[0].content;
 if (!content.includes("PI_LARGE_DIGEST_PREFIX")) throw new Error("digest prefix was lost");
@@ -401,6 +542,8 @@ test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
+test_run_rebuild_forwards_source_to_drifted_instruction_refresh
+test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
@@ -408,4 +551,5 @@ test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
+test_pi_startup_classifies_cli_continuations
 test_pi_large_sessionstart_digest_is_delivered_loudly
