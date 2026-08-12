@@ -213,6 +213,7 @@ A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard 
 That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
 An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
 This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
+Firstmate's project-local skills resolve for codex directly from `.agents/skills/`, with no `.codex/skills` copy, and claude reaches that same source through the `.claude/skills` symlink ([`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md) owns the dated probe).
 
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter.
