@@ -270,6 +270,14 @@ routine_ack_publication_exists() {
     || { routine_error "routine acknowledgement has no durable wake: $ROUTINE_ACK_GENERATION"; return 1; }
 }
 
+routine_ack_generation_published() {
+  local wake_key=$STATE/routine-scan.check.sh:routine-generation:$1
+  [ -f "$FM_WAKE_QUEUE" ] \
+    && awk -F '\t' -v key="$wake_key" \
+      '$3 == "check" && $4 == key && index($5, "routine-due: ") > 0 { found = 1; exit } END { exit(found ? 0 : 1) }' \
+      "$FM_WAKE_QUEUE"
+}
+
 routine_ack_pending() {
   local pending_id pending_cadence pending_date pending_owner pending_action pending_generation pending_extra
   local stored_id stored_cadence stored_date stored_extra fire_record
@@ -321,7 +329,9 @@ routine_ack_pending() {
     case "$pending_generation" in
       ''|*[!0-9]*) routine_error 'pending routine state has an invalid generation'; return 1 ;;
     esac
-    if [ -n "$ROUTINE_ACK_GENERATION" ] && [ "$pending_generation" != "$ROUTINE_ACK_GENERATION" ]; then
+    if [ -n "$ROUTINE_ACK_GENERATION" ] && [ "$pending_generation" != "$ROUTINE_ACK_GENERATION" ] \
+      && { [ "$pending_generation" -gt "$ROUTINE_ACK_GENERATION" ] \
+        || routine_ack_generation_published "$pending_generation"; }; then
       printf '%s|%s|%s|%s|%s|%s\n' \
         "$pending_id" "$pending_cadence" "$pending_date" "$pending_owner" \
         "$pending_action" "$pending_generation" >> "$PENDING_ACK_TMP" \

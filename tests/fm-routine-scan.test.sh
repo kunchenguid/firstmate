@@ -335,6 +335,33 @@ test_ack_requires_durable_generation_wake() {
     || fail "the published generation did not commit fire state"
   pass "routine acknowledgement requires durable wake publication"
 }
+test_unpublished_pending_binds_to_first_successful_wake() {
+  local home check first second generation retry
+  home=$(make_home unpublished-pending)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the unpublished-pending fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- retry-item | daily | captain | retry publication'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ -f "$home/state/.routine-pending" ] || fail "the first scan did not retain pending state"
+  second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ "$second" = "$first" ] || fail "the pending item did not retry before publication"
+  generation=$(cat "$home/state/.routine-generation")
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$second" \
+    || fail "the first successful retry wake could not be published"
+  "$check" --ack --generation "$generation" \
+    || fail "the unpublished pending item did not bind to the successful wake"
+  [ ! -e "$home/state/.routine-pending" ] || fail "the published retry left pending state"
+  [ "$(cat "$home/state/.routine-fired")" = 'retry-item|daily|2026-08-10' ] \
+    || fail "the published retry did not commit fire state"
+  retry=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack --generation "$generation")
+  [ -z "$retry" ] || fail "retry acknowledgement produced output"
+  [ "$(cat "$home/state/.routine-fired")" = 'retry-item|daily|2026-08-10' ] \
+    || fail "retry acknowledgement changed fire state"
+  pass "unpublished pending routines bind on first successful wake"
+}
 test_fired_pending_replay_is_suppressed() {
   local home check first generation second
   home=$(make_home fired-pending-replay)
@@ -694,6 +721,7 @@ test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
 test_ack_requires_durable_generation_wake
+test_unpublished_pending_binds_to_first_successful_wake
 test_fired_pending_replay_is_suppressed
 test_pending_generation_stays_bound_after_rescan
 test_deferred_publication_does_not_refire_after_restart
