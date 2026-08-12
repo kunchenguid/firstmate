@@ -123,9 +123,13 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 # The main retains a terminal presentation receipt until the corresponding wake
 # is handled and acknowledged.
 test_main_direct_terminal_presentation_receipt() {
-  local err seq generation
+  local err seq generation scan_out
   make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
-  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  scan_out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  case "$scan_out" in
+    'actionable: inactive terminal outcome awaiting captain presentation:'*) ;;
+    *) fail "public scan output changed shape: $scan_out" ;;
+  esac
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "main did not retain presentation receipt"
 

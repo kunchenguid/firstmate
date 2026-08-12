@@ -193,6 +193,14 @@ queue_key_exists() { # <key>
   printf '%s\n' "$queued" | grep -Fx -- "$key" >/dev/null 2>&1
 }
 
+emit_actionable() { # <payload>
+  if [ "${FM_INACTIVE_EPOCH_TRANSPORT:-0}" = 1 ]; then
+    printf '%s\tactionable: %s\n' "$FM_WAKE_APPENDED_EPOCH" "$1"
+  else
+    printf 'actionable: %s\n' "$1"
+  fi
+}
+
 queue_notice_once() { # <record> <key> <payload>
   local record=$1 key=$2 payload=$3 notified
   notified=$(record_value "$record" notice_emitted)
@@ -203,7 +211,7 @@ queue_notice_once() { # <record> <key> <payload>
   fi
   fm_wake_append check "$key" "$payload" || return 2
   record_field_set "$record" notice_emitted 1 || return 2
-  printf '%s\tactionable: %s\n' "$FM_WAKE_APPENDED_EPOCH" "$payload"
+  emit_actionable "$payload"
   return 0
 }
 
@@ -214,7 +222,7 @@ queue_presentation() { # <record> <fingerprint> <payload>
     return 1
   fi
   fm_wake_append check "$key" "$payload" || return 2
-  printf '%s\tactionable: %s\n' "$FM_WAKE_APPENDED_EPOCH" "$payload"
+  emit_actionable "$payload"
   return 0
 }
 
