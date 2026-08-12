@@ -75,9 +75,14 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
 if [ "${1:-}" = list-windows ]; then
+  if [ "${FM_FAKE_TMUX_QUERY_ERROR:-0}" = 1 ]; then
+    printf '%s\n' 'tmux query failed' >&2
+    exit 1
+  fi
   case " $* " in
     *"#{window_id}|#{session_name}:#{window_name}"*) printf '%s\n' '@1|firstmate:fm-task-x1' ;;
     *"#{window_id} #{window_name}"*) printf '%s\n' '@1 fm-task-x1' ;;
+    *"#{window_id}"*) printf '%s\n' '@1' ;;
     *"#{window_name}"*) printf '%s\n' 'fm-task-x1' ;;
   esac
   exit 0
@@ -1546,7 +1551,10 @@ case "$cmd $sub" in
     mv "$tmp" "$state"
     ;;
   "agent get")
-    if [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ]; then
+    if [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] \
+      && { [ -z "${FM_FAKE_HERDR_WORKER_PID:-}" ] \
+        || { kill -0 "$FM_FAKE_HERDR_WORKER_PID" 2>/dev/null \
+          && [ "$(ps -o stat= -p "$FM_FAKE_HERDR_WORKER_PID" 2>/dev/null | tr -d '[:space:]')" != Z ]; }; }; then
       jq -n --arg status "$FM_FAKE_HERDR_AGENT_STATUS" \
         '{result:{agent:{agent:"grok",agent_status:$status}}}'
     else
@@ -1667,6 +1675,7 @@ test_projection_teardown_closes_owned_live_pane() {
     'herdr_workspace_id=w9' \
     'herdr_tab_id=w9:t2' \
     'display_label=fm-task-x1' \
+    'harness=grok' \
     'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
   make_herdr_teardown_fake "$case_dir"
   : > "$case_dir/herdr.log"
@@ -1680,6 +1689,7 @@ test_projection_teardown_closes_owned_live_pane() {
     export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
     export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
     export FM_FAKE_HERDR_AGENT_STATUS=working
+    export FM_FAKE_HERDR_WORKER_PID=$worker_pid
     run_teardown "$case_dir" --force
   ) > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -1724,6 +1734,36 @@ test_endpoint_recovery_uses_stable_window_id() {
   pass "endpoint recovery consumes the immutable tmux window id"
 }
 
+test_endpoint_recovery_retains_on_tmux_query_error() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-recovery-query-error)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=firstmate:stale-name' \
+    'window_id=@1' \
+    "project=$case_dir/project" \
+    'backend=tmux' \
+    'endpoint_recovery=1' \
+    'spawn_state=aborted' \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$case_dir/tmux.log"
+  set +e
+  (
+    export FM_FAKE_TMUX_LOG="$case_dir/tmux.log"
+    export FM_FAKE_TMUX_PATH="$case_dir/project"
+    export FM_FAKE_TMUX_QUERY_ERROR=1
+    run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "endpoint-recovery-query-error: teardown must retain uncertain recovery state"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "endpoint-recovery-query-error: uncertain recovery metadata was removed"
+  assert_not_contains "$(cat "$case_dir/tmux.log")" 'kill-window' \
+    "endpoint-recovery-query-error: teardown killed an endpoint after an uncertain query"
+  pass "endpoint recovery retains metadata when tmux presence is unreadable"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_reconciles_consumed_presentation_receipt
@@ -1766,3 +1806,4 @@ test_projection_journal_retires_before_worktree_return
 test_projection_teardown_refuses_missing_identity
 test_projection_teardown_closes_owned_live_pane
 test_endpoint_recovery_uses_stable_window_id
+test_endpoint_recovery_retains_on_tmux_query_error

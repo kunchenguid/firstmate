@@ -59,6 +59,20 @@ fm_backend_tmux_list_task_ids() {  # <session>
   tmux list-windows -t "$1" -F '#{window_id}'
 }
 
+fm_backend_tmux_window_presence() {  # <session> <window-id>
+  local session=$1 window_id=$2 windows
+  if windows=$(tmux list-windows -t "$session" -F '#{window_id}' 2>&1); then
+    printf '%s\n' "$windows" | grep -Fqx -- "$window_id"
+    return $?
+  fi
+  case "$windows" in
+    *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 fm_backend_tmux_set_task_option() {  # <target> <option> <value>
   tmux set-window-option -t "$1" "$2" "$3"
 }

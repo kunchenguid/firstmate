@@ -143,6 +143,7 @@ BACKEND=$(fm_backend_of_meta "$META")
 fm_backend_validate "$BACKEND" || exit 1
 ENDPOINT_RECOVERY=$(grep '^endpoint_recovery=' "$META" | tail -1 | cut -d= -f2- || true)
 ENDPOINT_RECOVERY_WINDOW_ID=$(grep '^window_id=' "$META" | tail -1 | cut -d= -f2- || true)
+ENDPOINT_RECOVERY_WINDOW_TARGET=$T
 if [ "$ENDPOINT_RECOVERY" = 1 ]; then
   [ "$BACKEND" = tmux ] || { echo "REFUSED: unsupported endpoint recovery backend for $ID" >&2; exit 1; }
   if [[ "$ENDPOINT_RECOVERY_WINDOW_ID" =~ ^@[0-9]+$ ]]; then
@@ -2528,7 +2529,16 @@ teardown_release_top_slot_lock() {
 }
 trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true; secondmate_registry_transaction_restore || true' EXIT
 if [ "$ENDPOINT_RECOVERY" = 1 ]; then
-  if fm_backend_task_name tmux "$T" >/dev/null 2>&1; then
+  endpoint_recovery_presence=
+  case "$ENDPOINT_RECOVERY_WINDOW_TARGET" in
+    *:*) endpoint_recovery_session=${ENDPOINT_RECOVERY_WINDOW_TARGET%%:*} ;;
+    *)
+      echo "REFUSED: endpoint recovery for $ID has an invalid tmux target; preserving its recovery record" >&2
+      exit 1
+      ;;
+  esac
+  fm_backend_source tmux || exit 1
+  if fm_backend_tmux_window_presence "$endpoint_recovery_session" "$T"; then
     teardown_endpoint_recovery_identity_proven "$ID" "$T" || {
       echo "REFUSED: could not prove the endpoint recovery window for $ID; preserving its recovery record" >&2
       exit 1
@@ -2537,7 +2547,20 @@ if [ "$ENDPOINT_RECOVERY" = 1 ]; then
       echo "REFUSED: could not close the endpoint recovery window for $ID; preserving its recovery record" >&2
       exit 1
     }
+  else
+    endpoint_recovery_presence=$?
   fi
+  case "$endpoint_recovery_presence" in
+    1) ;;
+    2)
+      echo "REFUSED: could not establish whether the endpoint recovery window for $ID still exists; preserving its recovery record" >&2
+      exit 1
+      ;;
+    *)
+      echo "REFUSED: endpoint recovery presence was ambiguous for $ID; preserving its recovery record" >&2
+      exit 1
+      ;;
+  esac
   teardown_meta_identity_matches || {
     echo "error: endpoint recovery metadata changed before retirement for $ID" >&2
     exit 1
