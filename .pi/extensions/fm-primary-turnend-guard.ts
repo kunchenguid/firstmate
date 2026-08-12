@@ -7,6 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
+  FIRSTMATE_SESSION_START_SETTLED_EVENT,
 } from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
@@ -172,8 +173,8 @@ export default function (pi: ExtensionAPI) {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = { startup: "startup", new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
-    if (!source) return;
-    await injectSessionstart(pi, source);
+    if (source) await injectSessionstart(pi, source);
+    pi.events.emit(FIRSTMATE_SESSION_START_SETTLED_EVENT, { reason });
   });
 
   // Pi's compaction equivalent. The digest is what a compacted session has just

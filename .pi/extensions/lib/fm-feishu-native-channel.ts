@@ -35,6 +35,7 @@ import {
   type BindingRecord,
   type InboundEvent,
 } from "../../../bin/fm-feishu-state.mjs";
+import { FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./fm-operational-input.ts";
 
 export interface FeishuMarker {
   deliveryRef: string;
@@ -452,24 +453,61 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): void {
   registeredApis.add(pi as object);
   const token = `registration_${randomBytes(10).toString("hex")}`;
   let lifecycleEpoch = 0;
-  pi.on("session_start", async (_event, ctx) => {
-    const epoch = ++lifecycleEpoch;
+  let runningEpoch = -1;
+  let convergedEpoch = -1;
+  let currentContext: ExtensionContext | undefined;
+  let stopListeningForSessionStart: (() => void) | undefined;
+  const converge = async (ctx: ExtensionContext, epoch: number) => {
+    if (epoch !== lifecycleEpoch || runningEpoch === epoch || convergedEpoch === epoch) return;
     try {
-      if (configPathPresent() && ctx.mode === "tui" && ctx.isProjectTrusted() && firstmateSessionLockOwnership() === "owned") {
-        const identity = currentFirstmateSessionIdentity(ctx);
-        if (identity) await reconcileConfiguredLifecycle(identity);
+      if (!configPathPresent()) {
+        activate(pi, ctx, token);
+        convergedEpoch = epoch;
+        return;
       }
+      if (ctx.mode !== "tui" || !ctx.isProjectTrusted() || firstmateSessionLockOwnership() !== "owned") {
+        activate(pi, ctx, token);
+        return;
+      }
+      const identity = currentFirstmateSessionIdentity(ctx);
+      if (!identity) {
+        activate(pi, ctx, token);
+        return;
+      }
+      runningEpoch = epoch;
+      await reconcileConfiguredLifecycle(identity);
       if (epoch !== lifecycleEpoch) return;
       activate(pi, ctx, token);
+      convergedEpoch = epoch;
     }
     catch (error) {
       if (epoch !== lifecycleEpoch) return;
       ctx.ui.setStatus("fm-feishu", undefined);
       ctx.ui.notify("Feishu activation stopped safely. Run bin/fm-feishu-transport.sh config-check and inspect docs/feishu-channel.md.", "error");
     }
+    finally {
+      if (runningEpoch === epoch) runningEpoch = -1;
+    }
+  };
+  const listenForSessionStart = () => {
+    if (stopListeningForSessionStart) return;
+    stopListeningForSessionStart = pi.events.on(FIRSTMATE_SESSION_START_SETTLED_EVENT, () => {
+      if (currentContext) void converge(currentContext, lifecycleEpoch);
+    });
+  };
+  listenForSessionStart();
+  pi.on("session_start", async (_event, ctx) => {
+    const epoch = ++lifecycleEpoch;
+    currentContext = ctx;
+    listenForSessionStart();
+    await converge(ctx, epoch);
   });
+  pi.on("agent_start", async (_event, ctx) => converge(ctx, lifecycleEpoch));
   pi.on("session_shutdown", () => {
     lifecycleEpoch += 1;
+    currentContext = undefined;
+    stopListeningForSessionStart?.();
+    stopListeningForSessionStart = undefined;
     const runtime = activeRuntime;
     if (runtime?.token === token) stopRuntime(runtime);
   });

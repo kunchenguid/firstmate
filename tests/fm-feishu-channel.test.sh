@@ -143,11 +143,23 @@ function fakePi() {
   const sends = [];
   const customEntries = [];
   const commands = new Map();
+  const eventChannels = new Map();
   return {
     handlers,
     sends,
     customEntries,
     commands,
+    events: {
+      emit(channel, data) {
+        for (const handler of eventChannels.get(channel) ?? []) handler(data);
+      },
+      on(channel, handler) {
+        const listeners = eventChannels.get(channel) ?? new Set();
+        listeners.add(handler);
+        eventChannels.set(channel, listeners);
+        return () => listeners.delete(handler);
+      },
+    },
     on(event, handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -347,9 +359,11 @@ BRIDGE_FIXTURE="$TMP_ROOT/bridge-fixture"
 mkdir -p "$BRIDGE_FIXTURE/.pi/extensions/lib" "$BRIDGE_FIXTURE/bin" "$BRIDGE_FIXTURE/node_modules/@earendil-works" "$BRIDGE_FIXTURE/home/config" "$BRIDGE_FIXTURE/home/state"
 printf 'FM_FEISHU_ENABLED=true\n' > "$BRIDGE_FIXTURE/home/config/feishu.env"
 chmod 600 "$BRIDGE_FIXTURE/home/config/feishu.env"
-printf 'owned\n' > "$BRIDGE_FIXTURE/home/lock-mode"
+printf 'other\n' > "$BRIDGE_FIXTURE/home/lock-mode"
 cp "$ROOT/.pi/extensions/fm-primary-feishu-bridge.ts" "$BRIDGE_FIXTURE/.pi/extensions/"
+cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$BRIDGE_FIXTURE/.pi/extensions/"
 cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$BRIDGE_FIXTURE/.pi/extensions/lib/"
+cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$BRIDGE_FIXTURE/.pi/extensions/lib/"
 cp "$ROOT/bin/fm-feishu-state.d.mts" "$ROOT/bin/fm-feishu-state.mjs" "$BRIDGE_FIXTURE/bin/"
 mkdir -p "$BRIDGE_FIXTURE/node_modules/@earendil-works/pi-tui"
 printf '%s\n' '{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}' > "$BRIDGE_FIXTURE/node_modules/@earendil-works/pi-tui/package.json"
@@ -361,43 +375,111 @@ printf '%s\n' '{"type":"module"}' > "$BRIDGE_FIXTURE/package.json"
 BRIDGE_SESSION="$BRIDGE_FIXTURE/session"
 BRIDGE_SESSION_FILE="$BRIDGE_SESSION/current.jsonl"
 BRIDGE_TRANSPORT_LOG="$BRIDGE_FIXTURE/transport.log"
+BRIDGE_LIFECYCLE_LOG="$BRIDGE_FIXTURE/lifecycle.log"
 mkdir -p "$BRIDGE_SESSION"
 printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$BRIDGE_SESSION" > "$BRIDGE_SESSION_FILE"
+cat > "$BRIDGE_FIXTURE/bin/fm-feishu-lifecycle.mjs" <<'JS'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { convergeConfiguredSession } from "./fm-feishu-state.mjs";
+let body = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { body += chunk; });
+process.stdin.on("end", () => {
+  if (readFileSync(`${process.env.FM_HOME}/config/feishu.env`, "utf8").includes("FM_FEISHU_ENABLED=false")) return;
+  const identity = JSON.parse(body);
+  const { binding } = convergeConfiguredSession(process.env.FM_HOME, {
+    appIdFingerprint: process.env.APP_FINGERPRINT,
+    allowedUser: "ou_captain1234",
+    allowedChat: "oc_chat1234",
+  }, identity);
+  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${identity.sessionId}\n`);
+  const transportDir = `${process.env.FM_HOME}/state/feishu/transport`;
+  const owner = `${transportDir}/fixture-owner`;
+  if (!existsSync(owner)) {
+    mkdirSync(transportDir, { recursive: true });
+    writeFileSync(owner, `${binding.binding_id}\n`);
+    appendFileSync(process.env.BRIDGE_TRANSPORT_LOG, `start generation=${binding.generation}\n`);
+  } else if (readFileSync(owner, "utf8").trim() !== binding.binding_id) {
+    throw new Error("fixture transport owner did not follow the exact binding");
+  }
+});
+JS
 cat > "$BRIDGE_FIXTURE/bin/fm-feishu-transport.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
 node -e 'const fs=require("fs");const p=process.env.FM_HOME+"/data/feishu/bindings/active.json";const g=fs.existsSync(p)?JSON.parse(fs.readFileSync(p)).generation:"none";fs.appendFileSync(process.env.BRIDGE_TRANSPORT_LOG,process.argv[1]+" generation="+g+"\n")' "$1"
 SH
 chmod +x "$BRIDGE_FIXTURE/bin/fm-feishu-transport.sh"
+cat > "$BRIDGE_FIXTURE/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'owned\n' > "${FM_HOME:?}/lock-mode"
+SH
+chmod +x "$BRIDGE_FIXTURE/bin/fm-sessionstart-run.sh"
 FM_HOME="$BRIDGE_FIXTURE/home" \
 FM_ROOT_OVERRIDE="$BRIDGE_FIXTURE" \
 FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
+FM_FEISHU_LIFECYCLE_SCRIPT="$BRIDGE_FIXTURE/bin/fm-feishu-lifecycle.mjs" \
 FM_FEISHU_DISABLE_AUTOSTART=1 \
 BRIDGE="$BRIDGE_FIXTURE/.pi/extensions/fm-primary-feishu-bridge.ts" \
+TURNEND="$BRIDGE_FIXTURE/.pi/extensions/fm-primary-turnend-guard.ts" \
 BRIDGE_SESSION="$BRIDGE_SESSION" \
 BRIDGE_SESSION_FILE="$BRIDGE_SESSION_FILE" \
+BRIDGE_LIFECYCLE_LOG="$BRIDGE_LIFECYCLE_LOG" \
 BRIDGE_TRANSPORT_LOG="$BRIDGE_TRANSPORT_LOG" \
 SID="$SID" \
 APP_FINGERPRINT="$APP_FINGERPRINT" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-const commands = new Map();
-const handlers = new Map();
-const pi = {
-  on(name, handler) { handlers.set(name, handler); },
-  registerMarkdownTransformer() {},
-  registerEntryRenderer() {},
-  registerCommand(name, options) { commands.set(name, options); },
-};
+function fakeEventBus() {
+  const channels = new Map();
+  return {
+    emit(channel, data) {
+      for (const handler of channels.get(channel) ?? []) handler(data);
+    },
+    on(channel, handler) {
+      const handlers = channels.get(channel) ?? new Set();
+      handlers.add(handler);
+      channels.set(channel, handlers);
+      return () => handlers.delete(handler);
+    },
+  };
+}
+const events = fakeEventBus();
+function fakePi() {
+  const commands = new Map();
+  const handlers = new Map();
+  return {
+    commands,
+    handlers,
+    events,
+    on(name, handler) {
+      const list = handlers.get(name) ?? [];
+      list.push(handler);
+      handlers.set(name, list);
+    },
+    registerMarkdownTransformer() {},
+    registerEntryRenderer() {},
+    registerCommand(name, options) { commands.set(name, options); },
+    appendEntry() {},
+    sendUserMessage() {},
+    sendMessage() {},
+  };
+}
+async function emit(pi, name, event, ctx) {
+  for (const handler of pi.handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
+}
 const bridge = await import(pathToFileURL(process.env.BRIDGE).href);
+const turnend = await import(pathToFileURL(process.env.TURNEND).href);
+let pi = fakePi();
 bridge.default(pi);
-assert.deepEqual([...commands.keys()].sort(), [
+assert.deepEqual([...pi.commands.keys()].sort(), [
   "fm-feishu-disable",
   "fm-feishu-status",
 ]);
-assert(!handlers.has("input") && !handlers.has("tool_call") && !handlers.has("turn_start"));
+assert(!pi.handlers.has("input") && !pi.handlers.has("tool_call") && !pi.handlers.has("turn_start"));
+turnend.default(pi);
 const notices = [];
 const ctx = {
   mode: "tui",
@@ -413,11 +495,56 @@ const ctx = {
   ui: { notify(message) { notices.push(String(message)); }, setStatus() {} },
   async reload() {},
 };
-await commands.get("fm-feishu-disable").handler("", ctx);
+await emit(pi, "session_start", { reason: "startup" }, ctx);
+for (let attempt = 0; attempt < 100 && !existsSync(process.env.BRIDGE_LIFECYCLE_LOG); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID]);
+assert(existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "post-session-start ownership signal did not publish the loaded marker");
+const binding = JSON.parse(readFileSync(`${process.env.FM_HOME}/data/feishu/bindings/active.json`, "utf8"));
+assert.equal(binding.session_id, process.env.SID);
+assert.equal(binding.session_file_realpath, process.env.BRIDGE_SESSION_FILE);
+assert.equal(binding.session_cwd_realpath, process.env.BRIDGE_SESSION);
+events.emit("firstmate:session-start-settled", { reason: "startup" });
+await emit(pi, "agent_start", {}, ctx);
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID], "repeated settled or agent_start boundary duplicated configured lifecycle reconciliation");
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1"], "repeated settled or agent_start boundary duplicated transport startup");
+
+writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
+await emit(pi, "session_shutdown", { reason: "reload" }, ctx);
+rmSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`);
+pi = fakePi();
+bridge.default(pi);
+turnend.default(pi);
+await emit(pi, "session_start", { reason: "reload" }, ctx);
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID], "reload bypassed the missing lock owner");
+assert(!existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "unowned reload published the loaded marker");
+await emit(pi, "agent_start", {}, ctx);
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID], "post-reload wrong-owner agent_start activated the channel");
+writeFileSync(`${process.env.FM_HOME}/lock-mode`, "owned\n");
+await emit(pi, "agent_start", {}, ctx);
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID, process.env.SID], "first owned turn after reload did not converge the configured channel");
+assert(existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "first owned turn after reload did not publish the loaded marker");
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1"], "reload recovery duplicated transport startup");
+
+await pi.commands.get("fm-feishu-disable").handler("", ctx);
 assert(existsSync(process.env.BRIDGE_TRANSPORT_LOG), notices.join("\n"));
-assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["disable-config generation=none"]);
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1", "disable-config generation=1"]);
 assert(notices.every((message) => !message.includes("refused")), notices.join("\n"));
-console.log("ok - local Pi bridge keeps only status and durable disable controls");
+
+rmSync(`${process.env.FM_HOME}/data/feishu`, { recursive: true });
+rmSync(`${process.env.FM_HOME}/state/feishu`, { recursive: true });
+rmSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`);
+writeFileSync(`${process.env.FM_HOME}/config/feishu.env`, "FM_FEISHU_ENABLED=false\n", { mode: 0o600 });
+pi = fakePi();
+bridge.default(pi);
+turnend.default(pi);
+await emit(pi, "session_start", { reason: "reload" }, ctx);
+await emit(pi, "agent_start", {}, ctx);
+assert(!existsSync(`${process.env.FM_HOME}/data/feishu`) && !existsSync(`${process.env.FM_HOME}/state/feishu`), "disabled public lifecycle created Feishu state");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID, process.env.SID], "disabled public lifecycle reconciled a pairing");
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1", "disable-config generation=1"], "disabled public lifecycle started a transport");
+console.log("ok - local Pi bridge converges after delayed ownership and keeps only status and durable disable controls");
 JS
 
 # The transport test replaces the official SDK boundary with one local module.

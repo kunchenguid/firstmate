@@ -15,6 +15,15 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "launch-brief",
 ] as const;
 
+// Process-local signal that the operational session-start hook has settled —
+// the earliest boundary where the Firstmate lock may have just become valid.
+// Pi's initial session_start callback can run before the lock-acquiring digest
+// returns, so ownership-gated extensions (the Feishu bridge) re-check ownership
+// here and converge idempotently, with agent_start only as a later fallback.
+// Reload re-emits session_start but deliberately skips the ownership-acquiring
+// digest, so this event firing on reload cannot manufacture ownership.
+export const FIRSTMATE_SESSION_START_SETTLED_EVENT = "firstmate:session-start-settled";
+
 export type FirstmateCurrentOperationalKind =
   (typeof FIRSTMATE_CURRENT_OPERATIONAL_KINDS)[number];
 

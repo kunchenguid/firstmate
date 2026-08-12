@@ -63,12 +63,16 @@ An invalid file returns one actionable error that contains no configured value.
 Normal startup of a trusted local persisted Pi session validates the file, derives the App ID fingerprint, authenticates through the official SDK, verifies the configured chat is P2P, stores the exact pairing, binds the exact current session, and starts or recovers one transport.
 No `/fm-feishu-pair`, `/fm-feishu-bind`, `/fm-feishu-rebind`, credential export, or manual transport start is required.
 Healthy startup is silent and idempotent.
+Pi's initial `session_start` callback can run before the operational session-start turn has acquired the Firstmate lock.
+After that turn settles, the tracked Pi extensions retry activation for the same session through their process-local lifecycle boundary, so normal startup needs neither a second Pi process nor `/reload`.
 The binding records the complete session UUID, exact session file, session cwd, persisted header identity, canonical Firstmate home, generation, and the last persisted session entry at first bind or replacement as the outbound history boundary.
 Pre-binding Assistant history is never backfilled.
 An ephemeral `--no-session` session cannot bind.
 The bridge activates only in trusted TUI mode while the current process owns the Firstmate session lock and every stored identity matches.
 
-Starting, resuming, forking, reloading, or replacing the eligible persisted Pi session converges the binding to that exact current session.
+Starting, resuming, forking, or replacing the eligible persisted Pi session converges the binding to that exact current session.
+`/reload` reconstructs the extensions but deliberately does not rerun the ownership-acquiring operational session-start digest.
+It therefore converges only when this Pi already owns the lock; reload while ownership is missing or belongs to another session remains safely inert, and a later owned agent start retries without duplicating the transport.
 Replacement validates credentials and P2P identity first, then waits for the verified prior transport to stop, rejects any event already submitted to the prior Pi native queue, increments the binding generation, and starts one new transport.
 The prior transport is fully stopped before binding publication, so an old-generation send cannot race the replacement.
 Pending events retarget only when none already belongs to the prior Pi native queue.
