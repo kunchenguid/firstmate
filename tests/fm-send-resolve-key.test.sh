@@ -132,6 +132,42 @@ test_answer_send_closes_open_decision() {
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
 }
 
+# The answerer's close is this home's own bookkeeping: it must not re-wake the
+# session that wrote it, while any other writer's later line on the same task
+# still must. Both directions are read through the production seen-signature
+# gate the watcher's signal scan consumes (bin/fm-wake-lib.sh).
+test_answer_close_is_self_announced() {
+  local dir fb log home rc
+  dir="$TMP_ROOT/self-announced"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home self-announced)
+  fm_write_meta "$home/state/t9.meta" "window=sess:fm-t9" "kind=ship"
+  printf 'needs-decision [key=port-choice]: 8080 or 9090\n' > "$home/state/t9.status"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    sig=$(fm_wake_signal_sig "$3") || exit 1
+    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t9.status" \
+    || fail "could not prime the announced baseline"
+
+  run_send "$fb" "$home" "$log" t9 --resolve-key port-choice "use 9090"; rc=$?
+  expect_code 0 "$rc" "the answer send should succeed"
+  grep -F 'resolved [key=port-choice]: answered: use 9090' "$home/state/t9.status" >/dev/null \
+    || fail "the closing resolved line is missing"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t9.status" \
+    || fail "the answerer's own close was left to re-wake this same home"
+
+  printf 'done: worker finished after the answer\n' >> "$home/state/t9.status"
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t9.status"; then
+    fail "a later worker line after the self-announced close was swallowed"
+  fi
+  pass "fm-send --resolve-key: the close never re-wakes its own home, later lines still do"
+}
+
 # The reported failure behind issue #2109: a worker that put the colon first
 # (needs-decision: [key=X] ...) had its key silently folded to "default", so
 # the answer's --resolve-key X refused with "no open decision or blocker with
@@ -461,6 +497,7 @@ test_flag_misuse_refuses() {
 }
 
 test_answer_send_closes_open_decision
+test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
