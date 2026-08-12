@@ -29,11 +29,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ARM="${FM_GROK_WATCH_ARM_SCRIPT:-$SCRIPT_DIR/fm-watch-arm.sh}"
 IDLE_POLL=${FM_GROK_WATCH_IDLE_POLL:-1}
 OUTPUT_MAX_BYTES=${FM_GROK_WATCH_OUTPUT_MAX_BYTES:-65536}
+CHILD_TERM_GRACE=${FM_GROK_WATCH_CHILD_TERM_GRACE:-1}
 RECOVERY_MARKER="$STATE/.watcher-down"
 
 case "$OUTPUT_MAX_BYTES" in
   ''|*[!0-9]*|0)
     echo 'watcher: FAILED - Grok continuity output cap must be a positive integer'
+    exit 1
+    ;;
+esac
+case "$CHILD_TERM_GRACE" in
+  ''|*[!0-9.]*|.*|*.*.*)
+    echo 'watcher: FAILED - Grok continuity child TERM grace must be a positive number'
     exit 1
     ;;
 esac
@@ -67,10 +74,50 @@ child=
 reader=
 stream_dir=
 
+child_tree_pids() {
+  local root=$1 frontier=$1 next pid ppid
+  printf '%s\n' "$root"
+  while [ -n "$frontier" ]; do
+    next=
+    while read -r pid ppid; do
+      case " $frontier " in
+        *" $ppid "*)
+          printf '%s\n' "$pid"
+          next="$next $pid"
+          ;;
+      esac
+    done <<EOF
+$(ps -eo pid=,ppid= 2>/dev/null)
+EOF
+    frontier=${next# }
+  done
+}
+
+retire_child_tree() {
+  local root=$1 seed=${2:-} signal pid i=0 pids pgid
+  pgid=$(ps -o pgid= -p "$root" 2>/dev/null | tr -d '[:space:]' || true)
+  pids=$(printf '%s\n' "$(cat "$seed" 2>/dev/null || true)" "$(child_tree_pids "$root")" | awk 'NF && !seen[$0]++')
+  for signal in TERM KILL; do
+    if [ "$pgid" = "$root" ]; then
+      kill -"$signal" -- "-$pgid" 2>/dev/null || true
+    fi
+    printf '%s\n' "$pids" | awk 'NF' | sort -rn | while read -r pid; do
+      kill -"$signal" "$pid" 2>/dev/null || true
+    done
+    if [ "$signal" = TERM ]; then
+      while fm_pid_alive "$root" && [ "$i" -lt 20 ]; do
+        sleep "$(awk -v grace="$CHILD_TERM_GRACE" 'BEGIN { print grace / 20 }')"
+        i=$((i + 1))
+      done
+      pids=$(printf '%s\n' "$pids" "$(child_tree_pids "$root")" | awk 'NF && !seen[$0]++')
+    fi
+  done
+  wait "$root" 2>/dev/null || true
+}
+
 cleanup_cycle() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
-    wait "$child" 2>/dev/null || true
+    retire_child_tree "$child"
   fi
   if [ -n "$reader" ] && fm_pid_alive "$reader"; then
     kill -TERM "$reader" 2>/dev/null || true
@@ -175,8 +222,10 @@ while :; do
   : > "$stream_dir/capture"
   : > "$stream_dir/overflow"
 
+  set -m
   "$ARM" > "$stream_dir/stream" 2>&1 &
   child=$!
+  set +m
   (
     captured=0
     emitted=0
@@ -188,8 +237,8 @@ while :; do
       remaining=$((OUTPUT_MAX_BYTES - captured))
       if [ "$bytes" -gt "$remaining" ]; then
         head -c "$remaining" "$stream_dir/chunk" >> "$stream_dir/capture"
+        child_tree_pids "$child" > "$stream_dir/overflow-pids"
         printf 'watcher: FAILED - Grok continuity arm output exceeded %s bytes\n' "$OUTPUT_MAX_BYTES" > "$stream_dir/overflow"
-        kill -TERM "$child" 2>/dev/null || true
         break
       fi
       captured=$((captured + bytes))
@@ -203,6 +252,12 @@ while :; do
     done < "$stream_dir/stream"
   ) &
   reader=$!
+  while fm_pid_alive "$child" && [ ! -s "$stream_dir/overflow" ]; do
+    sleep 0.02
+  done
+  if [ -s "$stream_dir/overflow" ]; then
+    retire_child_tree "$child" "$stream_dir/overflow-pids"
+  fi
   wait "$child"
   rc=$?
   child=

@@ -193,6 +193,37 @@ SH
   pass "no-newline output is bounded and retires the child"
 }
 
+test_term_resistant_overflow_is_forced_bounded() {
+  local home arm out status child descendant failure started elapsed
+  home=$(make_home term-resistant-overflow)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+(trap '' TERM; while :; do sleep 1; done) &
+printf '%s\n' "$!" > "$FM_HOME/state/overflow-descendant-pid"
+printf '%s\n' "$$" > "$FM_HOME/state/overflow-child-pid"
+while :; do printf '0123456789abcdef0123456789abcdef'; done
+SH
+  chmod +x "$arm"
+
+  started=$(date +%s)
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_OUTPUT_MAX_BYTES=128 FM_GROK_WATCH_CHILD_TERM_GRACE=0.2 "$OWNER" > "$out" 2>&1
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 1 "$status" "TERM-resistant overflow must fail the Grok tracked task"
+  [ "$elapsed" -le 5 ] || fail "TERM-resistant overflow retirement exceeded its bound"
+  child=$(cat "$home/state/overflow-child-pid")
+  descendant=$(cat "$home/state/overflow-descendant-pid")
+  kill -0 "$child" 2>/dev/null && fail "TERM-resistant overflow left the exact child alive"
+  descendant_state=$(ps -o stat= -p "$descendant" 2>/dev/null | tr -d ' ' || true)
+  case "$descendant_state" in ''|Z*) ;; *) fail "TERM-resistant overflow left its descendant alive ($descendant_state)" ;; esac
+  failure='watcher: FAILED - Grok continuity arm output exceeded 128 bytes'
+  [ "$(grep -cF "$failure" "$out")" -eq 1 ] || fail "TERM-resistant overflow failure was not emitted exactly once"
+  pass "TERM-resistant overflow forcibly retires its exact process tree"
+}
+
 test_transferred_no_newline_overflow_queues_once() {
   local home arm out pid child failure size
   home=$(make_home transferred-no-newline-overflow)
@@ -692,6 +723,7 @@ test_failure_completes_loudly
 test_output_overflow_retires_child_and_fails_once
 test_transferred_output_overflow_queues_once
 test_no_newline_output_overflow_is_bounded
+test_term_resistant_overflow_is_forced_bounded
 test_transferred_no_newline_overflow_queues_once
 test_open_decision_completes_without_queue_row
 test_pending_recovery_completes_without_queue_row
