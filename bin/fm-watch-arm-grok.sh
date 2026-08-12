@@ -192,14 +192,14 @@ while :; do
 
   durable_action_pending
   verdict=$?
+  if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; then
+    rm -rf "$stream_dir"
+    stream_dir=
+    wait_until_needed
+    continue
+  fi
   case "$verdict" in
     0)
-      if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE" || ! session_owner_is_still_valid; then
-        rm -rf "$stream_dir"
-        stream_dir=
-        wait_until_needed
-        continue
-      fi
       rm -rf "$stream_dir"
       stream_dir=
       exit 0

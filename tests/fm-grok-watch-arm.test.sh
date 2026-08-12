@@ -396,6 +396,61 @@ SH
   pass "session transfer during actionable classification keeps the old owner dormant"
 }
 
+test_away_transfer_during_failed_classification_stays_dormant() {
+  local home arm out pid
+  home=$(make_home failed-classification-away-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_HOME/state/arm-closed"
+printf 'signal: classification will fail\n'
+SH
+  chmod +x "$arm"
+  hold_wake_queue_lock "$home"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/arm-closed" || fail "failed-classification away arm did not close"
+  : > "$home/state/.afk"
+  sleep 1.2
+  kill -0 "$pid" 2>/dev/null || fail "classification failure completed after away mode took supervision"
+  : > "$home/state/release-classification"
+  wait "$CLASSIFICATION_LOCK_PID" || fail "wake queue lock holder failed"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  assert_not_contains "$(cat "$out")" "watcher: FAILED - Grok continuity could not classify" "old owner surfaced classification failure after away transfer"
+  pass "away transfer during failed classification keeps the old owner dormant"
+}
+
+test_session_transfer_during_failed_classification_stays_dormant() {
+  local home arm out pid replacement
+  home=$(make_home failed-classification-session-transfer)
+  arm="$home/fake-arm.sh"
+  out="$home/owner.out"
+  replacement=$$
+  cat > "$arm" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_HOME/state/arm-closed"
+printf 'signal: classification will fail\n'
+SH
+  chmod +x "$arm"
+  hold_wake_queue_lock "$home"
+
+  FM_HOME="$home" FM_GROK_WATCH_ARM_SCRIPT="$arm" FM_GROK_WATCH_IDLE_POLL=0.05 "$OWNER" > "$out" 2>&1 &
+  pid=$!
+  wait_for_file "$home/state/arm-closed" || fail "failed-classification session arm did not close"
+  printf '%s\n' "$replacement" > "$home/state/.lock"
+  sleep 1.2
+  kill -0 "$pid" 2>/dev/null || fail "classification failure completed after session ownership transferred"
+  : > "$home/state/release-classification"
+  wait "$CLASSIFICATION_LOCK_PID" || fail "wake queue lock holder failed"
+  kill -TERM "$pid"
+  wait "$pid" 2>/dev/null || true
+  assert_not_contains "$(cat "$out")" "watcher: FAILED - Grok continuity could not classify" "old owner surfaced classification failure after session transfer"
+  pass "session transfer during failed classification keeps the old owner dormant"
+}
+
 test_owner_signal_retires_arm_child() {
   local home arm out pid child status
   home=$(make_home signal-cleanup)
@@ -433,4 +488,6 @@ test_actionable_close_after_away_transfer_stays_dormant
 test_actionable_close_after_session_transfer_stays_dormant
 test_away_transfer_during_actionable_classification_stays_dormant
 test_session_transfer_during_actionable_classification_stays_dormant
+test_away_transfer_during_failed_classification_stays_dormant
+test_session_transfer_during_failed_classification_stays_dormant
 test_owner_signal_retires_arm_child
