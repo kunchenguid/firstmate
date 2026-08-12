@@ -410,7 +410,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-After deliverable acceptance, firstmate may request one run of the project's full local checks on the final branch before the configured merge authority decides.
+After the captain accepts the deliverable, firstmate will instruct one full local check run (the project's full test suite and lint, or its documented equivalent) on the final branch, and that run succeeding is required before the merge decision.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;

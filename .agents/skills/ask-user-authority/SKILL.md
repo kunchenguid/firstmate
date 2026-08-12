@@ -48,7 +48,7 @@ Use it only when ALL FOUR of these hold - this is the exact test, not a paraphra
 If classification is uncertain on any of the four, it is not this authority: use the normal escalation path.
 This authority does not relax step 5's expansion boundary or step 8's destructive/irreversible/security-sensitive boundary; a finding that trips either of those escalates regardless.
 
-Never silent: in the same turn, record every autonomous decision on the captain dashboard - the finding, why it qualified against all four conditions, and the authorized remedy - and mirror the callout in chat.
+Never silent: in the same turn, record every autonomous decision on the captain dashboard - the finding, why it qualified against all four conditions, and the authorized remedy - and mirror the callout in chat when the captain is present.
 An autonomous Fix under this authority with no visible callout is a process failure even if the Fix itself was correct.
 
 ## Captain-facing escalation

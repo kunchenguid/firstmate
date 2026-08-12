@@ -312,8 +312,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
-  assert_grep "After deliverable acceptance, firstmate may request one run of the project's full local checks on the final branch before the configured merge authority decides." "$brief" \
-    "local-only brief must provide its post-acceptance full-check handoff"
+  assert_grep "After the captain accepts the deliverable, firstmate will instruct one full local check run (the project's full test suite and lint, or its documented equivalent) on the final branch, and that run succeeding is required before the merge decision." "$brief" \
+    "local-only brief must require its post-acceptance full-check handoff"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \

@@ -34,8 +34,10 @@ The goal is captain judgment without captain supervision: firstmate owns routing
    Coordinate each feedback round, rerun targeted validation, and refresh the package. Continue until the captain explicitly accepts the deliverable.
 6. **Reach ship readiness by selected mode.** Normally after deliverable acceptance, complete the selected delivery path's full readiness stage.
    For `no-mistakes`, run the complete pipeline: review, tests, documentation, lint, push, PR, and CI.
-   For `direct-PR`, push the branch, open the PR, and reach CI green; the deliverable gate normally runs at review readiness before push, but risk may require opening the PR early just as it may require validating early.
-   For `local-only`, run the project's full local checks once on the final branch - the full test suite and lint, or the project's documented equivalent - and treat those checks being green as ship readiness before the existing guarded local merge under the configured merge authority.
+   For `direct-PR`, the worker pushes the branch, opens the PR, and reports `done: PR <url>`; that signal reports the PR opened rather than claiming ship readiness, and the deliverable gate normally runs at review readiness before push, though risk may require opening the PR early just as it may require validating early.
+   Direct-PR ship readiness is CI green as observed through firstmate's existing PR monitoring after the worker opens the PR, and merge authority proceeds only on green work under the unchanged never-merge-red rule.
+   For `local-only`, after the captain accepts the deliverable, firstmate instructs one full local check run on the final branch - the full test suite and lint, or the project's documented equivalent.
+   That run succeeding is required before the merge decision, and those checks being green are ship readiness before the existing guarded local merge under the configured merge authority.
    Fix findings autonomously when they remain within accepted intent and existing authority (`ask-user-authority`).
    If a fix materially changes the accepted experience, behavior, or architecture, refresh the evidence and reopen the deliverable gate (step 5) before continuing.
 7. **Ship.** Once the deliverable is accepted and the selected mode's ship-readiness stage is green, proceed under the existing merge authority (AGENTS.md section 7's selected delivery path and approval authority; this workflow never invents a second one).
@@ -80,7 +82,7 @@ The captain-gated delivery workflow applies to every ship; this section only acc
 A simple ship is small, localized, behavior-preserving work that completes an accepted parity, fill, or alignment remedy family.
 If classification is uncertain, use the normal authority and validation path - ordinary ships remain non-yolo, and this is the only autonomous exception.
 
-**Autonomous parity fixes** - load `ask-user-authority` before deciding any ask-user finding; it owns the exact four-condition test and the mandatory dashboard-plus-chat callout for exercising this authority.
+**Autonomous parity fixes** - load `ask-user-authority` before deciding any ask-user finding; it owns the exact four-condition test and the mandatory dashboard callout for exercising this authority, mirrored in chat when the captain is present.
 This workflow is what makes that authority standing rather than a per-project opt-in.
 
 **Light-touch fix verification** - for each simple-ship review round:
