@@ -538,6 +538,8 @@ FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
 FM_CHECK_RC=
+ROUTINE_SCAN_RECEIPT=
+FM_ROUTINE_GENERATION_RECEIPT=
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
@@ -601,27 +603,44 @@ run_check_capture() {
 }
 
 routine_check_ack() {
-  local id=$1 output=$2 check_rc=$3
+  local id=$1 output=$2 check_rc=$3 generation=$4
   [ "$id" = routine-scan ] || return 0
   [ "$check_rc" -eq 0 ] || return 0
   case "$output" in
     *'routine-due: '*) ;;
     *) return 0 ;;
   esac
+  [ -n "$generation" ] || return 1
   FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-routine-scan.sh" --ack >/dev/null 2>&1 \
+    "$SCRIPT_DIR/fm-routine-scan.sh" --ack --generation "$generation" >/dev/null 2>&1 \
     || { echo 'watcher: routine fire state acknowledgement failed' >&2; return 1; }
 }
 
-routine_scan_generation() {
+routine_scan_receipt_prepare() {
+  ROUTINE_SCAN_RECEIPT=$(mktemp "$STATE/.routine-generation-receipt.XXXXXX") || return 1
+  rm -f -- "$ROUTINE_SCAN_RECEIPT" || return 1
+  FM_ROUTINE_GENERATION_RECEIPT=$ROUTINE_SCAN_RECEIPT
+  export FM_ROUTINE_GENERATION_RECEIPT
+}
+
+routine_scan_receipt_read() {
   local generation
-  [ -f "$STATE/.routine-generation" ] && [ ! -L "$STATE/.routine-generation" ] \
+  [ -n "$ROUTINE_SCAN_RECEIPT" ] \
+    && [ -f "$ROUTINE_SCAN_RECEIPT" ] \
+    && [ ! -L "$ROUTINE_SCAN_RECEIPT" ] \
     || return 1
-  generation=$(cat "$STATE/.routine-generation") || return 1
+  generation=$(cat "$ROUTINE_SCAN_RECEIPT") || return 1
   case "$generation" in
     ''|*[!0-9]*) return 1 ;;
   esac
   printf '%s' "$generation"
+}
+
+routine_scan_receipt_cleanup() {
+  [ -z "$ROUTINE_SCAN_RECEIPT" ] || rm -f -- "$ROUTINE_SCAN_RECEIPT" || true
+  ROUTINE_SCAN_RECEIPT=
+  FM_ROUTINE_GENERATION_RECEIPT=
+  export FM_ROUTINE_GENERATION_RECEIPT
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
@@ -937,6 +956,10 @@ while :; do
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+          if [ "$id" = routine-scan ]; then
+            routine_scan_receipt_prepare \
+              || { echo 'watcher: routine scan generation receipt is unavailable' >&2; exit 1; }
+          fi
           run_check_capture "$custom_snapshot" || exit 1
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
@@ -946,6 +969,14 @@ while :; do
           continue
         fi
       fi
+      routine_generation=
+      if [ "$id" = routine-scan ]; then
+        if [ "$FM_CHECK_RC" -eq 0 ]; then
+          routine_generation=$(routine_scan_receipt_read) \
+            || { routine_scan_receipt_cleanup; echo 'watcher: routine scan generation receipt is unavailable' >&2; exit 1; }
+        fi
+        routine_scan_receipt_cleanup
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         wake_key=$c
@@ -953,13 +984,18 @@ while :; do
           if [ "$FM_CHECK_RC" -ne 0 ]; then
             wake_key="$c:routine-error"
           else
-            routine_generation=$(routine_scan_generation) \
-              || { echo 'watcher: routine scan generation is unavailable' >&2; exit 1; }
             wake_key="$c:routine-generation:$routine_generation"
           fi
         fi
         fm_wake_append check "$wake_key" "$reason" || exit 1
-        routine_check_ack "$id" "$out" "$FM_CHECK_RC" || exit 1
+        if [ "$id" = routine-scan ]; then
+          case "${FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK:-0}" in
+            0) ;;
+            ''|*[!0-9]*) ;;
+            *) sleep "$FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK" ;;
+          esac
+        fi
+        routine_check_ack "$id" "$out" "$FM_CHECK_RC" "$routine_generation" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \

@@ -30,7 +30,9 @@ run_bounded_watcher() {
   local home=$1 out=$2 fakebin=$3
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=1 FM_CHECK_TIMEOUT=1 \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$PATH" "$WATCH" > "$out"
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK="${FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK:-0}" \
+      PATH="$fakebin:$PATH" "$WATCH" > "$out"
 }
 ack_watcher_cycle() {
   local state=$1 err sequence generation
@@ -431,6 +433,47 @@ test_recovery_does_not_acknowledge_stale_routine_generation() {
   esac
   pass "recovery binds routine acknowledgement to its scan generation"
 }
+test_normal_acknowledgement_uses_its_scan_generation() {
+  local home fakebin check later_pid rc
+  home=$(make_home normal-generation-race)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = list-windows ] && exit 0
+exit 1
+SH
+  chmod 0755 "$fakebin/tmux"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the normal-ack race fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- item-a | daily | captain | first routine'
+  (
+    for _ in $(seq 1 300); do
+      [ -s "$home/state/.wake-queue" ] || { sleep 0.01; continue; }
+      write_registry "$home" \
+        '- item-a | daily | captain | first routine' \
+        '- item-b | daily | captain | second routine'
+      FM_ROUTINE_DATE=2026-08-10 "$check" > "$home/later-scan.out" 2>&1
+      exit $?
+    done
+    exit 1
+  ) &
+  later_pid=$!
+  export FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK=1
+  run_bounded_watcher \
+    "$home" "$home/watch.out" "$fakebin"
+  rc=$?
+  unset FM_ROUTINE_WATCH_TEST_DELAY_BEFORE_ACK
+  wait "$later_pid" || fail "the later routine scan did not run during acknowledgement"
+  [ "$rc" -eq 0 ] || fail "the watcher did not complete the normal-ack race fixture"
+  [ ! -s "$home/state/.routine-fired" ] \
+    || fail "normal acknowledgement promoted a later scan generation"
+  grep -q '^item-b|daily|2026-08-10|' "$home/state/.routine-pending" \
+    || fail "normal acknowledgement discarded later pending routine work"
+  pass "normal acknowledgement remains bound to its scan generation"
+}
 test_ack_rejects_dangling_pending_symlink() {
   local home check out rc
   home=$(make_home dangling-pending)
@@ -512,6 +555,7 @@ test_deferred_publication_does_not_refire_after_restart
 test_ack_fails_when_routine_state_lock_is_held
 test_watcher_acknowledges_only_after_complete_scan
 test_recovery_does_not_acknowledge_stale_routine_generation
+test_normal_acknowledgement_uses_its_scan_generation
 test_ack_rejects_dangling_pending_symlink
 test_symlink_registry_is_rejected_at_scan_boundary
 test_check_surfaces_registry_diagnostics

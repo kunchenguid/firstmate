@@ -29,10 +29,12 @@ LOCK="$STATE/.routine-fired.lock"
 ROUTINE_TMP=
 PENDING_TMP=
 GENERATION_TMP=
+GENERATION_RECEIPT_TMP=
 PENDING_ACK_TMP=
 ROUTINE_DEFER_FIRE=${FM_ROUTINE_DEFER_FIRE:-0}
 ROUTINE_ACK=0
 ROUTINE_ACK_GENERATION=
+GENERATION_RECEIPT=${FM_ROUTINE_GENERATION_RECEIPT:-}
 
 routine_error() {
   printf 'routine-scan: %s\n' "$*" >&2
@@ -49,6 +51,7 @@ routine_cleanup() {
   [ -z "$ROUTINE_TMP" ] || rm -f -- "$ROUTINE_TMP"
   [ -z "$PENDING_TMP" ] || rm -f -- "$PENDING_TMP"
   [ -z "$GENERATION_TMP" ] || rm -f -- "$GENERATION_TMP"
+  [ -z "$GENERATION_RECEIPT_TMP" ] || rm -f -- "$GENERATION_RECEIPT_TMP"
   [ -z "$PENDING_ACK_TMP" ] || rm -f -- "$PENDING_ACK_TMP"
   exec 8<&- 2>/dev/null || true
   fm_lock_release "$LOCK" 2>/dev/null || true
@@ -172,6 +175,19 @@ routine_begin_generation() {
     || { routine_error 'could not publish routine generation state'; return 1; }
   GENERATION_TMP=
   ROUTINE_GENERATION=$next
+  if [ -n "$GENERATION_RECEIPT" ]; then
+    [ ! -L "$GENERATION_RECEIPT" ] \
+      || { routine_error "routine generation receipt is unavailable: $GENERATION_RECEIPT"; return 1; }
+    GENERATION_RECEIPT_TMP=$(mktemp "${GENERATION_RECEIPT}.XXXXXX") \
+      || { routine_error 'could not create routine generation receipt'; return 1; }
+    printf '%s\n' "$next" > "$GENERATION_RECEIPT_TMP" \
+      || { routine_error 'could not write routine generation receipt'; return 1; }
+    chmod 0600 "$GENERATION_RECEIPT_TMP" \
+      || { routine_error 'could not protect routine generation receipt'; return 1; }
+    mv -f -- "$GENERATION_RECEIPT_TMP" "$GENERATION_RECEIPT" \
+      || { routine_error 'could not publish routine generation receipt'; return 1; }
+    GENERATION_RECEIPT_TMP=
+  fi
 }
 
 routine_fired() {
