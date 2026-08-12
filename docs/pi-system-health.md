@@ -1,6 +1,7 @@
 # Pi system-health indicator
 
 The project-local Pi extension adds a compact system-health status beside Pi's built-in footer information.
+It lives at `.pi/extensions/fm-system-health.ts`, a tracked file Pi auto-discovers once the project is trusted, and it registers no LLM tool and no system-prompt text.
 It uses `ctx.ui.setStatus()` with the unique key `firstmate-system-health`, so Pi's token, context, model, and other extension status displays remain intact.
 
 The status reports `RAM <percent> free` and sampled aggregate `CPU <percent>` utilization.
@@ -13,6 +14,7 @@ On every other platform `os.freemem()` is truthful and is used directly as the f
 The value is available memory, not a macOS memory-pressure classification.
 
 The CPU value is calculated from deltas between `os.cpus()` time snapshots rather than from a load-average label.
+Because a delta needs two snapshots, CPU is unavailable on the first sample of a session and is omitted until the second one, roughly three seconds later.
 Swap is intentionally omitted because this extension does not have a compact, truthful, cross-platform swap source.
 
 Sampling starts at `session_start`, refreshes every three seconds, and is cleared at `session_shutdown`.
@@ -23,10 +25,17 @@ A sample that resolves after a shutdown or reload is discarded rather than resto
 If `vm_stat` is missing, fails, or times out, the memory metric is omitted instead of falling back to a misleading value.
 The extension performs no network access, telemetry persistence, machine-measurement persistence, Herdr configuration, or supervision work.
 
-Use `/system-health` to report the latest values.
-Use `/system-health toggle`, `/system-health on`, or `/system-health off` to control the status display for the current Pi extension lifetime.
+Use `/system-health` or `/system-health show` to report the latest values; any other unrecognized argument reports the supported usage instead of acting.
+The indicator is on by default; `/system-health toggle`, `/system-health on`, and `/system-health off` control the status display for the current Pi extension lifetime and are not persisted.
 Unavailable sources are omitted from both the status and the command report instead of being represented as invented values.
 Semantic `muted`, `warning`, and `error` tones use Pi's active theme palette, which keeps the default Rose Pine Moon presentation calm until a threshold is crossed.
+Each metric is `muted` in its normal band, so an ordinary machine shows no colour emphasis at all:
+
+| Metric | `warning` | `error` |
+|---|---|---|
+| RAM free | below 20% | below 10% |
+| CPU used | 70% and above | 90% and above |
+
 Thresholds are evaluated against the same rounded percentage that is displayed, so two readings shown as the same number always carry the same colour.
 
 Regression entry points:
