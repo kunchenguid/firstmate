@@ -126,7 +126,7 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   out="$dir/drain.out"
   # task6 has a buried, still-open decision but generates NO new queue record
   # this turn; task7 is what actually wakes the drain. The fleet-wide scan
-  # must still catch task6's decision alongside task7's own raw row.
+  # must still catch task6's decision alongside task7's own reason line.
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$state/task6.status"
   printf 'working: continuing\n' >> "$state/task6.status"
   printf 'blocked: waiting on credentials\n' > "$state/task7.status"
@@ -135,7 +135,7 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a mixed fleet"
 
-  grep "$(printf '\tsignal\ttask7.status\t')" "$out" >/dev/null || fail "task7's own raw row is missing"
+  grep -F '— blocked: waiting on credentials' "$out" >/dev/null || fail "task7's own reason line is missing"
   grep -F 'task6' "$out" | grep -F '[key=migration]' >/dev/null \
     || fail "task6's buried decision was not surfaced even though only task7 queued a wake"
   pass "the open-decision section is fleet-wide, not scoped to this drain's own queued records"

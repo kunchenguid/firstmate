@@ -71,12 +71,12 @@ test_routine_then_terminal_after_restart() {
   # A routine status fires a signal; the watcher queues it and exits.
   printf 'working: building\n' > "$status_file"
   run_watcher_once "$state" "$fakebin" "$out" || fail "watcher did not exit for the routine signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not report the routine signal"
+  grep -F "— signal: $status_file" "$out" >/dev/null || fail "watcher did not report the routine signal"
 
   # Drain it and route through the daemon: a routine status self-handles.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
     || fail "drain after routine signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+  grep -F "— signal: $status_file" "$drain_out" >/dev/null \
     || fail "routine signal was not queued"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
   ack_handled_wakes "$state" "$drain_err" || fail "routine wake acknowledgement failed"
@@ -87,7 +87,7 @@ test_routine_then_terminal_after_restart() {
   printf 'done: PR https://example.test/pr/900\n' >> "$status_file"
   : > "$out"
   run_watcher_once "$state" "$fakebin" "$out" || fail "restarted watcher did not exit for the terminal signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "terminal signal written while watcher down was not caught on restart"
+  grep -F "— signal: $status_file" "$out" >/dev/null || fail "terminal signal written while watcher down was not caught on restart"
 
   # Drain and route the terminal: exactly ONE digest is buffered.
   : > "$drain_out"

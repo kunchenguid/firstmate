@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, then assert liveness.
+# Present durable watcher wake reasons with their queued local timestamps,
+# optionally acknowledge handled records, annotate validated signal status keys,
+# then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -255,7 +256,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
-  printf '%s\n' "$RAW_ROWS" || exit "$?"
+  fm_wake_print_reasons "$RAW_ROWS" || exit "$?"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN

@@ -9,6 +9,13 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# shellcheck disable=SC2034 # Consumed by wake() in fm-push-transition-lib.sh.
+FM_WAKE_APPENDED_EPOCH=
+# A reason line can arrive from the current timestamped watcher or from a
+# watcher delivery record written before timestamp prefixes existed.
+FM_WAKE_SHORT_TIMESTAMP_RE='[A-Z][a-z][a-z] ([1-9]|[12][0-9]|3[01]) ([1-9]|1[0-2]):[0-5][0-9][ap]'
+# shellcheck disable=SC2034 # Consumed by watch-arm and Claude auto-arm.
+FM_WAKE_REASON_LINE_RE="^(${FM_WAKE_SHORT_TIMESTAMP_RE} — )?(signal:|stale:|check:|heartbeat($|:))"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -815,6 +822,36 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+# Render one epoch in the captain-facing short local-time shape. LC_ALL fixes
+# the month and meridiem vocabulary while TZ remains ambient local time.
+fm_wake_short_timestamp() {  # <epoch>
+  local epoch=$1 raw month day clock minute_period hour minute meridiem
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$_FM_UNAME" = Darwin ]; then
+    raw=$(LC_ALL=C date -r "$epoch" '+%b %d %I:%M%p') || return 1
+  else
+    raw=$(LC_ALL=C date -d "@$epoch" '+%b %d %I:%M%p') || return 1
+  fi
+  read -r month day clock <<< "$raw"
+  day=${day#0}
+  hour=${clock%%:*}
+  hour=${hour#0}
+  minute_period=${clock#*:}
+  minute=${minute_period%??}
+  case "${minute_period#"$minute"}" in
+    AM) meridiem=a ;;
+    PM) meridiem=p ;;
+    *) return 1 ;;
+  esac
+  printf '%s %s %s:%s%s' "$month" "$day" "$hour" "$minute" "$meridiem"
+}
+
+fm_wake_format_reason() {  # <epoch> <reason>
+  local timestamp
+  timestamp=$(fm_wake_short_timestamp "$1") || return 1
+  printf '%s — %s\n' "$timestamp" "$2"
+}
+
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   local recovery_marker
@@ -826,6 +863,7 @@ fm_wake_append() {
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
   epoch=$(date +%s)
+  FM_WAKE_APPENDED_EPOCH=
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
   status=0
@@ -844,6 +882,8 @@ fm_wake_append() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  # shellcheck disable=SC2034 # Consumed by wake() after this function returns.
+  [ "$status" -ne 0 ] || FM_WAKE_APPENDED_EPOCH=$epoch
   return "$status"
 }
 
@@ -900,6 +940,19 @@ fm_wake_print_deduped() {
       }
     }
   ' "$file"
+}
+
+# Render deduped durable rows as reason lines while keeping the queue's raw
+# five-field schema private and unchanged. The stored epoch is the event time,
+# even when a record waited in the queue before presentation.
+fm_wake_print_reasons() {  # <deduped-raw-rows>
+  local rows=$1 epoch seq kind key payload
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ -n "$epoch" ] || continue
+    fm_wake_format_reason "$epoch" "$payload" || return 1
+  done <<EOF
+$rows
+EOF
 }
 
 # Map one structurally valid signal key to its home-local status filename.

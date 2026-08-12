@@ -36,11 +36,11 @@ test_concurrent_append_and_drain() {
     wait "$pid" || fail "concurrent append/drain subprocess failed"
   done
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
-  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
+  count=$(grep -Ec '^[A-Z][a-z]{2} [1-9][0-9]? ([1-9]|1[0-2]):[0-5][0-9][ap] — signal:' "$out2" || true)
   [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"
-  malformed=$(awk -F '\t' 'NF && NF != 5 { bad++ } END { print bad + 0 }' "$out2")
-  [ "$malformed" -eq 0 ] || fail "drained records had malformed fields"
-  unique=$(awk -F '\t' 'NF == 5 { keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$out2")
+  malformed=$(grep -Evc '^[A-Z][a-z]{2} [1-9][0-9]? ([1-9]|1[0-2]):[0-5][0-9][ap] — signal:' "$out2" || true)
+  [ "$malformed" -eq 0 ] || fail "drained reasons had malformed timestamp prefixes"
+  unique=$(sed -n 's/^[^—]* — signal: .*\/status-\([0-9][0-9]*\)\.status$/\1/p' "$out2" | sort -u | wc -l | tr -d ' ')
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
   [ -s "$state/.wake-queue" ] || fail "concurrent drain consumed records before handling acknowledgement"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain-two.err")
@@ -53,7 +53,7 @@ test_concurrent_append_and_drain() {
 }
 
 test_signal_catchup_without_running_watcher() {
-  local dir state fakebin out drain_out drain_err status_file sequence generation
+  local dir state fakebin out drain_out drain_err status_file sequence generation epoch expected
   dir=$(make_case signal)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -68,9 +68,13 @@ test_signal_catchup_without_running_watcher() {
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
+  epoch=$(awk -F '\t' '$3 == "signal" { print $1; exit }' "$state/.wake-queue")
+  expected=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_format_reason "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$epoch" "signal: $status_file")
+  [ "$(cat "$out")" = "$expected" ] \
+    || fail "watcher did not prefix the byte-exact reason with its durable queue epoch: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
+  grep -F "— signal: $status_file" "$drain_out" >/dev/null || fail "first signal was not presented"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
@@ -80,7 +84,7 @@ test_signal_catchup_without_running_watcher() {
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
+  grep -F "— signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
   pass "signal written while no watcher runs is caught on next run"
 }
 
@@ -108,9 +112,9 @@ test_stale_enqueue_before_suppressor() {
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
+  grep -F "— stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stale wake was not queued"
+  grep -F "— stale: $window" "$drain_out" >/dev/null || fail "stale wake was not presented"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not written"
   pass "stale wake is queued before suppressor state is advanced"
 }
@@ -146,9 +150,9 @@ test_not_working_stale_enqueue_before_suppressor() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  grep -F "— stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
+  grep -F "— stale: $window" "$drain_out" >/dev/null || fail "immediate stale wake was not presented"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"
   unset FM_FAKE_CREW_STATE
   pass "a not-provably-working stale wake is queued before its suppressor is advanced"
@@ -174,9 +178,9 @@ SH
     || fail "could not register queue custom check"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
-  grep -F "check: $check_file: merged: https://example.test/pr/1" "$out" >/dev/null || fail "watcher did not print check wake"
+  grep -F "— check: $check_file: merged: https://example.test/pr/1" "$out" >/dev/null || fail "watcher did not print check wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"
-  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
+  grep -F "— check: $check_file: merged: https://example.test/pr/1" "$drain_out" >/dev/null || fail "check wake was not presented"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
   pass "registered custom check output is queued before cadence suppression"
 }
@@ -196,8 +200,8 @@ test_atomic_double_drain() {
   pid2=$!
   wait "$pid1" || fail "first drain failed"
   wait "$pid2" || fail "second drain failed"
-  count1=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out1")
-  count2=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
+  count1=$(grep -c ' — ' "$out1" || true)
+  count2=$(grep -c ' — ' "$out2" || true)
   [ "$count1" -eq 3 ] && [ "$count2" -eq 3 ] \
     || fail "unacknowledged concurrent drains did not replay all three records"
   cmp -s "$out1" "$out2" || fail "concurrent pre-ack replays were not deterministic"
@@ -208,7 +212,7 @@ test_atomic_double_drain() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
     || fail "concurrent replay acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledgement did not consume replayed records"
-  leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }')
+  leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | grep -c ' — ' || true)
   [ "$leftover" -eq 0 ] || fail "acknowledged records replayed again"
   pass "concurrent drains replay until one post-handling acknowledgement consumes records"
 }
@@ -225,9 +229,28 @@ test_drain_dedupes_obvious_duplicates() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "dedupe drain failed"
   count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 2 ] || fail "expected 2 deduped records, got $count"
-  grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
-  grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
+  grep -E ' — heartbeat$' "$out" >/dev/null || fail "heartbeat was not preserved"
+  grep -F "— signal: $state/task.status $state/task.turn-ended" "$out" >/dev/null || fail "latest signal payload was not preserved"
   pass "drain collapses obvious duplicate heartbeat and signal records"
+}
+
+test_drain_uses_queued_epoch_in_local_time() {
+  local dir state reason utc pacific
+  dir=$(make_case timestamp)
+  state="$dir/state"
+  reason='check: existing reason bytes stay: [a-z] / ? = +'
+  printf '1704141000\t1\tcheck\tcompat\t%s\n' "$reason" > "$state/.wake-queue"
+
+  utc=$(TZ=UTC FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null) \
+    || fail "UTC timestamp drain failed"
+  pacific=$(TZ=America/Los_Angeles FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null) \
+    || fail "Pacific timestamp drain failed"
+
+  [ "$utc" = "Jan 1 8:30p — $reason" ] \
+    || fail "drain did not render the queued epoch in UTC or altered the reason: $utc"
+  [ "$pacific" = "Jan 1 12:30p — $reason" ] \
+    || fail "drain did not render the same queued epoch in local Pacific time: $pacific"
+  pass "drain renders the durable queued epoch in local time and preserves existing reason bytes"
 }
 
 # The drain runs at the top of every wake-handling turn, so it also asserts
@@ -260,7 +283,7 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
 }
 
-test_structural_signal_enrichment_preserves_raw_rows() {
+test_structural_signal_enrichment_preserves_reason_lines() {
   local dir state out expected actual annotation_count outside perl_bin
   dir=$(make_case enrichment)
   state="$dir/state"
@@ -297,13 +320,13 @@ SH
   append_wake "$state" stale test:fm-task "stale: test:fm-task" || fail "stale wake append failed"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "heartbeat wake append failed"
 
-  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ \
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; rows=$(fm_wake_print_deduped "$2"); fm_wake_print_reasons "$rows"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$expected"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
     FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
     || fail "structural enrichment drain failed"
-  awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
-  cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
+  grep -E '^[A-Z][a-z]{2} [1-9][0-9]? ([1-9]|1[0-2]):[0-5][0-9][ap] — (signal:|stale:|check:|heartbeat$)' "$out" > "$actual"
+  cmp -s "$expected" "$actual" || fail "enrichment changed or reordered a rendered reason line"
 
   annotation_count=$(grep -c '^wake annotation:' "$out" || true)
   [ "$annotation_count" -eq 1 ] || fail "expected only the unreadable-race-safe status annotation, got $annotation_count"
@@ -315,7 +338,7 @@ SH
   if grep -F 'must-not-be-read' "$out" >/dev/null; then
     fail "drain trusted a payload path or followed an out-of-state status symlink"
   fi
-  pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
+  pass "structural signal enrichment is separate from timestamped, deduped reason presentation"
 }
 
 test_enrichment_caps_and_status_file_failures() {
@@ -353,8 +376,8 @@ SH
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_PERL_LOG="$fake_perl_log" \
     FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
     || fail "capped enrichment drain failed"
-  raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
-  [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
+  raw_count=$(grep -Ec '^[A-Z][a-z]{2} [1-9][0-9]? ([1-9]|1[0-2]):[0-5][0-9][ap] — signal:' "$out" || true)
+  [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a reason line"
   grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
   grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(global enrichment byte cap\)$' "$out" >/dev/null \
     || fail "global omitted-annotation marker was not emitted"
@@ -395,19 +418,19 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
 
   FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=3 "$DRAIN" > "$out1" &
   pid=$!
-  wait_for_file_text "$out1" "$(printf '\tsignal\tslow.status\t')" \
-    || { kill "$pid" 2>/dev/null || true; fail "slow drain did not commit its raw row"; }
+  wait_for_file_text "$out1" "— signal: slow" \
+    || { kill "$pid" 2>/dev/null || true; fail "slow drain did not present its reason line"; }
   printf 'done: appended while first drain annotates\n' > "$state/next.status"
   append_wake "$state" signal next.status "signal: next" || fail "append blocked or failed during annotation"
   kill -0 "$pid" 2>/dev/null || fail "slow annotation finished before the concurrent append proved lock independence"
   rm -f "$state/slow.status"
   wait "$pid" || fail "deleted status file made the committed drain fail"
-  grep -F "$(printf '\tsignal\tslow.status\t')" "$out1" >/dev/null || fail "deleted status file hid the committed raw row"
+  grep -F "— signal: slow" "$out1" >/dev/null || fail "deleted status file hid the presented reason line"
   if grep -F ': slow.status:' "$out1" >/dev/null; then
     fail "status deleted during annotation still produced an annotation"
   fi
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "follow-up drain after concurrent append failed"
-  grep -F "$(printf '\tsignal\tnext.status\t')" "$out2" >/dev/null || fail "concurrent append was not left for the next drain"
+  grep -F "— signal: next" "$out2" >/dev/null || fail "concurrent append was not left for the next drain"
   pass "slow annotation releases the append lock and a deleted status file fails open"
 }
 
@@ -445,7 +468,7 @@ SH
   out="$dir/drain.out"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "wake retry did not drain"
-  grep -F "signal: recovered retry" "$out" >/dev/null \
+  grep -F "— signal: recovered retry" "$out" >/dev/null \
     || fail "retried wake was not recovered by the durable drain"
   pass "wake append publishes atomic recovery evidence before durable rows"
 }
@@ -459,7 +482,7 @@ test_legacy_generationless_wake_is_adopted() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
     || fail "generation-less legacy wake could not be adopted"
-  grep -F "$row" "$dir/first.out" >/dev/null \
+  grep -F '— check: legacy process-event' "$dir/first.out" >/dev/null \
     || fail "adopted legacy wake was not presented"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/first.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
@@ -527,9 +550,9 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
     || fail "remaining wake could not be re-drained"
   replay_err="$dir/replay.err"
-  grep "$(printf '\tcheck\tsecond\t')" "$dir/replay.out" >/dev/null \
+  grep -F '— check: same episode' "$dir/replay.out" >/dev/null \
     || fail "remaining wake did not re-surface"
-  grep "$(printf '\tcheck\tthird\t')" "$dir/replay.out" >/dev/null \
+  grep -F '— check: same episode again' "$dir/replay.out" >/dev/null \
     || fail "second remaining wake did not re-surface"
   newer_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
   newer_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
@@ -629,7 +652,7 @@ test_interruption_before_and_after_raw_commit() {
   set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
-  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
+  count=$(grep -c ' — signal: task$' "$replay_out" || true)
   [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the durable row"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay.err")
@@ -639,17 +662,17 @@ test_interruption_before_and_after_raw_commit() {
   append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
   FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" &
   pid=$!
-  wait_for_file_text "$after_out" "$(printf '\tsignal\ttask.status\t')" \
-    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
+  wait_for_file_text "$after_out" "— signal: task after commit" \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its reason line"; }
   [ -s "$state/.wake-queue" ] \
-    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its durable row before handling acknowledgement"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
   set +e
   wait "$pid"
   set -e
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" 2> "$dir/after-replay.err" \
     || fail "drain after post-presentation interruption failed"
-  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$empty_out")
+  count=$(grep -c ' — signal: task after commit$' "$empty_out" || true)
   [ "$count" -eq 1 ] || fail "interrupted handling did not replay its durable row exactly once"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/after-replay.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/after-replay.err")
@@ -666,8 +689,9 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_drain_uses_queued_epoch_in_local_time
 test_drain_asserts_watcher_liveness
-test_structural_signal_enrichment_preserves_raw_rows
+test_structural_signal_enrichment_preserves_reason_lines
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_wake_publish_requires_atomic_recovery_evidence

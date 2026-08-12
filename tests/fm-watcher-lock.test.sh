@@ -747,7 +747,7 @@ SH
   grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
-  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
+  grep -F "— check: $check_file: merged: https://example.test/pr/7" "$drain_out" >/dev/null || fail "immediate check wake was not presented"
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 

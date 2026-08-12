@@ -42,7 +42,7 @@ test_signal_passes_through_and_exits_zero() {
   expect_code 0 "$status" "signal checkpoint exit"
   assert_contains "$(cat "$out")" "signal:" "signal wake was not passed through"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" $'\tsignal\tdemo.status\t' "signal wake was not queued durably"
+  assert_contains "$drained" '— signal:' "signal wake was not presented from durable state"
   pass "checkpoint passes through a real watcher wake and leaves the queue for drain"
 }
 

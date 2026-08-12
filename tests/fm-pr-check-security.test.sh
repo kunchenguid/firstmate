@@ -771,7 +771,7 @@ test_static_poll_contract() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
-  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
+  [ "$(grep -c ' — check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
@@ -831,7 +831,7 @@ SH
     set -e
     wait "$direct_pid" || fail "concurrent direct arming failed"
     [ "$rc" -eq 0 ] || fail "concurrent watcher did not complete"
-    grep -q '^check: .*: merged$' "$dir/watch.out" || fail "concurrent watcher never saw complete poll"
+    grep -q ' — check: .*: merged$' "$dir/watch.out" || fail "concurrent watcher never saw complete poll"
     [ ! -s "$dir/watch.err" ] || fail "concurrent watcher observed a partial artifact error"
     if [ -e "$dir/home/state/task-a.check.sh" ]; then
       cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "concurrent publication check bytes changed"
@@ -3045,7 +3045,7 @@ test_retirement_crash_recovery() {
   raw_count=$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue")
   [ "$raw_count" -eq 1 ] || fail "post-queue retry did not publish exactly one new terminal row"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2>/dev/null
-  drain_count=$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$dir/drain.out")
+  drain_count=$(grep -c ' — check: .*task-a.check.sh:' "$dir/drain.out")
   [ "$drain_count" -eq 1 ] || fail "same-key crash retry rows did not deduplicate at drain"
 
   dir=$(make_case retirement-after-receipt)

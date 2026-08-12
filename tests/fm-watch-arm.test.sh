@@ -169,7 +169,7 @@ test_attached_arm_reports_the_delivered_wake() {
   # queue, prints its one reason line to its own stdout, and exits.
   printf 'done: fixture finished\n' > "$state/demo.status"
   wait_for_exit "$SEED_PID" 120
-  grep -q '^signal:' "$out" || fail "seed watcher did not surface the signal wake: $(cat "$out")"
+  grep -q ' — signal:' "$out" || fail "seed watcher did not surface the signal wake: $(cat "$out")"
 
   wait_for_exit "$ARM_PID" 120
   status=$?
@@ -177,7 +177,7 @@ test_attached_arm_reports_the_delivered_wake() {
     || fail "the wake was not durably recorded, so this case proves nothing"
   ! grep -qF 'watcher: FAILED' "$armout" \
     || fail "attached arm reported a delivered wake as a failed cycle: $(cat "$armout")"
-  grep -q '^signal:' "$armout" \
+  grep -q ' — signal:' "$armout" \
     || fail "attached arm did not report the durably recorded wake reason: $(cat "$armout")"
   expect_code 0 "$status" "an attached arm whose cycle delivered a wake must close successfully"
   grep -q 'reason=attached-delivered-wake' "$state/.watch-cycle-exits.log" \
@@ -210,7 +210,7 @@ test_attached_arm_reports_the_delivered_wake_after_drain() {
   status=$?
   ! grep -qF 'watcher: FAILED' "$armout" \
     || fail "attached arm reported an already-handled wake as a failed cycle: $(cat "$armout")"
-  grep -q '^signal:' "$armout" \
+  grep -q ' — signal:' "$armout" \
     || fail "attached arm did not report the delivered reason after the queue drain: $(cat "$armout")"
   expect_code 0 "$status" "an attached arm whose wake was already drained must close successfully"
   pass "watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly"
@@ -287,8 +287,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  sleep 0.25
-  if is_live_non_zombie "$ARM_PID"; then
+  if ! wait_for_exit "$ARM_PID" 80; then
     # End the fixture through an ordinary actionable status transition so this
     # failing pre-fix path leaves no child behind.
     printf 'done: fixture cleanup\n' > "$state/cleanup.status"
@@ -306,9 +305,9 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   # already-open remote decision without relying on another user message.
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drainout" \
     || fail "drain after re-arm recovery failed"
-  grep "$(printf '\tcheck\tremote-reply-ios\t')" "$drainout" >/dev/null \
+  grep -F '— check: process-event result captured: remote-reply-ios:7' "$drainout" >/dev/null \
     || fail "remote-reply wake queued during downtime was not drained"
-  grep "$(printf '\tcheck\tstartup-network\t')" "$drainout" >/dev/null \
+  grep -F '— check: startup-network' "$drainout" >/dev/null \
     || fail "second durable wake queued during downtime was not drained"
   grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' "$drainout" >/dev/null \
     || fail "remote parent-reply decision was not re-folded after watcher re-arm"
@@ -412,7 +411,7 @@ test_delivery_gap_wake_is_recovered_once() {
   is_live_non_zombie "$first_arm" || fail "delivery-gap fixture watcher did not stay live"
   printf 'done: first delivered wake\n' > "$state/first.status"
   wait_for_exit "$first_arm" 120 || fail "first watcher did not deliver its status wake"
-  grep -q '^signal:' "$dir/first-arm.out" \
+  grep -q ' — signal:' "$dir/first-arm.out" \
     || fail "first watcher did not report its delivered wake"
 
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first-drain.out" \
@@ -427,7 +426,7 @@ test_delivery_gap_wake_is_recovered_once() {
 
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/gap-drain.out" \
     || fail "delivery-gap recovery drain failed"
-  grep "$(printf '\tcheck\tstartup-network\t')" "$dir/gap-drain.out" >/dev/null \
+  grep -F '— check: startup-network during handling gap' "$dir/gap-drain.out" >/dev/null \
     || fail "wake queued in the delivery gap was not drained"
   ack_wakes "$state" || fail "delivery-gap handling acknowledgement failed"
 
@@ -492,7 +491,7 @@ test_interrupted_handling_is_redrained_on_rearm() {
     || fail "expected handling successor emitted a recursive recovery wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/interrupted-drain.out" \
     2> "$dir/interrupted-drain.err" || fail "handling drain did not expose the durable wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$dir/interrupted-drain.out" >/dev/null \
+  grep -F '— signal: interrupted' "$dir/interrupted-drain.out" >/dev/null \
     || fail "handling drain did not present the durable wake"
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
     || fail "interrupted handling removed the unacknowledged durable wake"
@@ -511,7 +510,7 @@ test_interrupted_handling_is_redrained_on_rearm() {
     || fail "successor after interruption did not emit durable recovery"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay-drain.out" \
     2> "$dir/replay-drain.err" || fail "successor could not re-drain the interrupted wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$dir/replay-drain.out" >/dev/null \
+  grep -F '— signal: interrupted' "$dir/replay-drain.out" >/dev/null \
     || fail "successor did not re-drain the still-durable wake"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay-drain.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay-drain.err")
@@ -571,7 +570,7 @@ test_recovery_consumption_serializes_queue_publication() {
     || fail "publisher did not durably append its wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
     || fail "publisher recovery drain failed"
-  grep "$(printf '\tcheck\tstartup-network\t')" "$dir/drain.out" >/dev/null \
+  grep -F '— check: startup-network' "$dir/drain.out" >/dev/null \
     || fail "publisher wake was not surfaced and drained"
   ack_wakes "$state" || fail "publisher handling acknowledgement failed"
   pass "watch-arm: publication after recovery handoff is surfaced"
@@ -625,7 +624,7 @@ test_markerless_legacy_queue_is_recovered_on_arm() {
   esac
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
     || fail "adopted legacy queue could not be drained"
-  grep -F "$row" "$dir/drain.out" >/dev/null \
+  grep -F '— check: legacy process-event' "$dir/drain.out" >/dev/null \
     || fail "adopted legacy wake was not presented"
   ack_wakes "$state" || fail "adopted legacy wake could not be acknowledged"
   pass "watch-arm: markerless legacy queues are adopted and recovered"
@@ -649,7 +648,7 @@ test_handling_window_close_keeps_the_acknowledgement_valid() {
     || fail "delivered wake was not durable before handling"
 
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
-    || fail "handling drain did not present the durable wake"
+    || fail "handling drain did not present the durable wake: $(cat "$dir/drain.err")"
   pair=$(drain_ack_pair "$dir/drain.err") \
     || fail "drain did not print a generation-bound acknowledgement command"
   sequence=${pair%%$'\t'*}
@@ -694,7 +693,7 @@ test_handling_window_close_keeps_the_acknowledgement_valid() {
     || fail "the watcher armed after acknowledgement re-announced a retired recovery"
   printf 'blocked: a later wake the live watcher must still surface\n' > "$state/later.status"
   wait_for_exit "$ARM_PID" 120 || fail "the live watcher did not surface a later wake"
-  grep -q '^signal:' "$dir/next-arm.out" \
+  grep -q ' — signal:' "$dir/next-arm.out" \
     || fail "the watcher armed after acknowledgement never reached real supervision work: $(cat "$dir/next-arm.out")"
   pass "watch-arm: a watcher close during handling keeps the printed acknowledgement valid"
 }

@@ -352,12 +352,13 @@ trap 'handle_attached_signal INT 130' INT
 
 watch_output_has_wake() {
   local out=$1
-  grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
+  grep -Eq "$FM_WAKE_REASON_LINE_RE" "$out" 2>/dev/null
 }
 
 watch_output_reason_type() {
   local out=$1 line
-  line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
+  line=$(grep -E "$FM_WAKE_REASON_LINE_RE" "$out" 2>/dev/null | head -1 || true)
+  line=$(printf '%s\n' "$line" | sed -E "s/^${FM_WAKE_SHORT_TIMESTAMP_RE} — //")
   case "$line" in
     signal:*) printf 'actionable-signal' ;;
     stale:*) printf 'actionable-stale' ;;

@@ -86,16 +86,18 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0
+  local output_status=0 epoch displayed_reason
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
-  if echo "$1"; then
+  epoch=${FM_WAKE_APPENDED_EPOCH:-$(date +%s)}
+  displayed_reason=$(fm_wake_format_reason "$epoch" "$1") || displayed_reason=$1
+  if printf '%s\n' "$displayed_reason"; then
     output_status=0
-    watch_delivery_publish "$1" || true
+    watch_delivery_publish "$displayed_reason" || true
     # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
     FM_WATCH_DELIVERED_REASON=$1
   else
