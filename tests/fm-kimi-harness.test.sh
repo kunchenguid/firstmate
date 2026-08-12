@@ -158,6 +158,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    SSH_AUTH_SOCK="${FM_TEST_SSH_AUTH_SOCK:-}" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
