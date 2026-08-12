@@ -2310,6 +2310,28 @@ test_kill_tab_exact_retains_cleanup_on_empty_label() {
   pass "fm_backend_herdr_kill_tab_exact: empty matching labels retain cleanup while absent IDs prove gone"
 }
 
+test_kill_tab_exact_retains_cleanup_on_malformed_member() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/kill-exact-malformed-member"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"t1","label":"fm-task"},{"label":"fm-foreign"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_presentation_session_lock_path() { printf "/tmp/fm-herdr-malformed-member-test-lock"; }
+      fm_lock_try_acquire() { return 0; }
+      fm_lock_release() { return 0; }
+      fm_backend_herdr_kill_tab_exact firstmate ws1 t1 fm-task
+    ' "$ROOT" 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact Herdr cleanup accepted a malformed member as an absent-safe inventory"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' \
+    "exact Herdr cleanup closed a tab after a malformed inventory member"
+  pass "fm_backend_herdr_kill_tab_exact: malformed inventory members retain cleanup"
+}
+
 test_kill_tab_exact_retains_cleanup_on_multidoc_post_close() {
   local dir log resp fb status
   dir="$TMP_ROOT/kill-exact-multidoc-post-close"; mkdir -p "$dir/responses"
@@ -4447,6 +4469,7 @@ test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_tab_exact_retains_cleanup_on_empty_label
+test_kill_tab_exact_retains_cleanup_on_malformed_member
 test_kill_tab_exact_retains_cleanup_on_multidoc_post_close
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab

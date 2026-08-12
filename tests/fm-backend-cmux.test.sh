@@ -144,6 +144,15 @@ cmux_expected_scoped_title() {  # <fm-task-label> [home] [root]
   printf 'fm-%s-%s' "$(cmux_expected_home_label "$home" "$root")" "$rest"
 }
 
+cmux_recovery_meta() {  # <home> <label> <workspace-id> <surface-id>
+  local home=$1 label=$2 workspace_id=$3 surface_id=$4 id
+  id=${label#fm-}
+  mkdir -p "$home/state"
+  printf 'backend=cmux\nendpoint_task_id=%s\nwindow=%s:%s\nworktree=/tmp/%s\nproject=/tmp/project\ncmux_workspace_id=%s\ncmux_surface_id=%s\n' \
+    "$id" "$workspace_id" "$surface_id" "$id" "$workspace_id" "$surface_id" \
+    > "$home/state/$id.meta"
+}
+
 cmux_assert_call_order() {
   local log=$1 before=$2 after=$3 msg=$4 before_line after_line
   before_line=$(grep -anF -- "$before" "$log" | head -1 | cut -d: -f1)
@@ -958,8 +967,12 @@ test_send_key_normalizes_and_targets() {
 }
 
 test_send_key_recovers_stale_target_by_label() {
-  local dir fb title
+  local dir fb title home
   dir="$TMP_ROOT/sendkey-stale-target"; mkdir -p "$dir/responses"
+  home="$dir/home"
+  cmux_recovery_meta "$home" fm-label \
+    aaaaaaaa-0000-0000-0000-000000000000 \
+    bbbbbbbb-1111-1111-1111-111111111111
   title=$(cmux_expected_scoped_title fm-label)
   cmux_windows_response "$dir" 1 \
     "eeeeeeee-0000-0000-0000-000000000000" 1 \
@@ -968,14 +981,51 @@ test_send_key_recovers_stale_target_by_label() {
   cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title"
   cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
   fb=$(make_cmux_fakebin "$dir")
-  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+  PATH="$fb:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT"
   expect_code 0 $? "send_key should recover a stale cmux target when the expected label is live"
   assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''cccccccc-2222-2222-2222-222222222222'$'\x1f''--surface'$'\x1f''dddddddd-3333-3333-3333-333333333333'$'\x1f''enter' \
     "send_key did not use the refreshed cmux workspace/surface ids"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
     "send_key should not target the stale cmux workspace id after label recovery"
+  assert_grep 'window=cccccccc-2222-2222-2222-222222222222:dddddddd-3333-3333-3333-333333333333' \
+    "$home/state/label.meta" "send_key did not persist the recovered cmux target window"
+  assert_grep 'cmux_workspace_id=cccccccc-2222-2222-2222-222222222222' \
+    "$home/state/label.meta" "send_key did not persist the recovered cmux workspace id"
+  assert_grep 'cmux_surface_id=dddddddd-3333-3333-3333-333333333333' \
+    "$home/state/label.meta" "send_key did not persist the recovered cmux surface id"
   pass "fm_backend_cmux_send_key: recovers stale workspace/surface ids by expected label"
+}
+
+test_send_key_refuses_when_stale_recovery_persistence_fails() {
+  local dir fb failbin title home before status
+  dir="$TMP_ROOT/sendkey-stale-persist-failure"; mkdir -p "$dir/responses"
+  home="$dir/home"
+  cmux_recovery_meta "$home" fm-label-failure \
+    aaaaaaaa-0000-0000-0000-000000000000 \
+    bbbbbbbb-1111-1111-1111-111111111111
+  cp "$home/state/label-failure.meta" "$dir/meta.before"
+  title=$(cmux_expected_scoped_title fm-label-failure)
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "11111111-2222-2222-2222-222222222222" other
+  cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
+  failbin="$dir/failbin"; mkdir -p "$failbin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$failbin/mv"
+  chmod +x "$failbin/mv"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$failbin:$fb:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label-failure' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "send_key should refuse when recovered cmux metadata cannot be persisted"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-key' \
+    "send_key sent to cmux after recovery metadata persistence failed"
+  before=$(cat "$dir/meta.before")
+  [ "$(cat "$home/state/label-failure.meta")" = "$before" ] \
+    || fail "failed cmux recovery persistence changed canonical metadata"
+  pass "fm_backend_cmux_send_key: refuses stale recovery when canonical metadata persistence fails"
 }
 
 test_send_literal_uses_separator_for_option_shaped_text() {
@@ -1530,8 +1580,12 @@ test_published_kill_refuses_ambiguous_absent_or_malformed_relaunch_inventory() {
 }
 
 test_kill_recovers_stale_target_by_label() {
-  local dir fb title
+  local dir fb title home
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
+  home="$dir/home"
+  cmux_recovery_meta "$home" fm-label \
+    aaaaaaaa-0000-0000-0000-000000000000 \
+    bbbbbbbb-1111-1111-1111-111111111111
   title=$(cmux_expected_scoped_title fm-label)
   # target_ready label recovery: 1 list-windows, 2 workspace list in the first
   # window, 3 workspace list in the second window, 4 list-panes.
@@ -1548,7 +1602,8 @@ test_kill_recovers_stale_target_by_label() {
   cmux_workspace_list_response "$dir" 6 "11111111-2222-2222-2222-222222222222" other
   cmux_workspace_list_response "$dir" 7 "cccccccc-2222-2222-2222-222222222222" "$title" "99999999-0000-0000-0000-000000000000" other-two
   fb=$(make_cmux_fakebin "$dir")
-  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+  PATH="$fb:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
   expect_code 0 $? "kill should recover a stale cmux target when the expected label is live"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''cccccccc-2222-2222-2222-222222222222' \
@@ -1646,6 +1701,7 @@ test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
 test_send_key_normalizes_and_targets
 test_send_key_recovers_stale_target_by_label
+test_send_key_refuses_when_stale_recovery_persistence_fails
 test_send_literal_uses_separator_for_option_shaped_text
 test_send_text_line_clears_partial_input_when_enter_fails
 test_send_text_line_reports_unsafe_input_when_cleanup_fails

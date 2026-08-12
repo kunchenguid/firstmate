@@ -828,6 +828,91 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
   ' >/dev/null 2>&1
 }
 
+fm_backend_cmux_recovery_meta_path() {
+  local expected_label=$1 id state state_real
+  case "$expected_label" in
+    fm-*) id=${expected_label#fm-} ;;
+    *) return 1 ;;
+  esac
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  [ -d "$state" ] || return 1
+  state_real=$(CDPATH='' cd -P "$state" 2>/dev/null && pwd -P) || return 1
+  [ -f "$state_real/$id.meta" ] && [ ! -L "$state_real/$id.meta" ] || return 1
+  printf '%s/%s.meta' "$state_real" "$id"
+}
+
+fm_backend_cmux_recovery_meta_value() {
+  local meta=$1 key=$2 count value
+  count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || return 1
+  value=$(grep "^$key=" "$meta" 2>/dev/null | cut -d= -f2-) || return 1
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  printf '%s' "$value"
+}
+
+fm_backend_cmux_recovery_meta_matches() {
+  local expected_label=$1 workspace_id=$2 surface_id=$3 meta id
+  fm_backend_cmux_workspace_id_valid "$workspace_id" || return 1
+  fm_backend_cmux_provider_id_valid "$surface_id" || return 1
+  meta=$(fm_backend_cmux_recovery_meta_path "$expected_label") || return 1
+  id=${expected_label#fm-}
+  [ "$(fm_backend_cmux_recovery_meta_value "$meta" backend)" = cmux ] || return 1
+  [ "$(fm_backend_cmux_recovery_meta_value "$meta" endpoint_task_id)" = "$id" ] || return 1
+  [ "$(fm_backend_cmux_recovery_meta_value "$meta" window)" = "$workspace_id:$surface_id" ] || return 1
+  [ "$(fm_backend_cmux_recovery_meta_value "$meta" cmux_workspace_id)" = "$workspace_id" ] || return 1
+  [ "$(fm_backend_cmux_recovery_meta_value "$meta" cmux_surface_id)" = "$surface_id" ] || return 1
+}
+
+fm_backend_cmux_persist_recovered_target() {
+  local expected_label=$1 old_workspace=$2 old_surface=$3 new_workspace=$4 new_surface=$5
+  local meta id parent lock
+  fm_backend_cmux_workspace_id_valid "$old_workspace" || return 1
+  fm_backend_cmux_provider_id_valid "$old_surface" || return 1
+  fm_backend_cmux_workspace_id_valid "$new_workspace" || return 1
+  fm_backend_cmux_provider_id_valid "$new_surface" || return 1
+  meta=$(fm_backend_cmux_recovery_meta_path "$expected_label") || return 1
+  fm_backend_cmux_recovery_meta_matches "$expected_label" "$old_workspace" "$old_surface" || return 1
+  if ! declare -F fm_meta_lock_path >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_CMUX_ROOT/bin/fm-wake-lib.sh" || return 1
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  parent=${meta%/*}
+  id=${expected_label#fm-}
+  (
+    local staged= lock_held=0 original_identity current_identity
+    cleanup() {
+      [ -z "$staged" ] || rm -f "$staged"
+      [ "$lock_held" = 1 ] && fm_lock_release "$lock" || true
+    }
+    trap 'cleanup' EXIT HUP INT TERM
+    fm_lock_acquire_wait "$lock" || exit 1
+    lock_held=1
+    [ -f "$meta" ] && [ ! -L "$meta" ] || exit 1
+    fm_backend_cmux_recovery_meta_matches "$expected_label" "$old_workspace" "$old_surface" || exit 1
+    original_identity=$(fm_backend_cmux_acquisition_identity "$meta") || exit 1
+    staged=$(umask 077; mktemp "$parent/.$id.cmux-meta.XXXXXX") || exit 1
+    if ! { grep -vE '^(window|cmux_workspace_id|cmux_surface_id)=' "$meta" || true; } > "$staged"; then
+      exit 1
+    fi
+    printf 'window=%s:%s\ncmux_workspace_id=%s\ncmux_surface_id=%s\n' \
+      "$new_workspace" "$new_surface" "$new_workspace" "$new_surface" >> "$staged" || exit 1
+    chmod 600 "$staged" || exit 1
+    [ -f "$staged" ] && [ ! -L "$staged" ] || exit 1
+    current_identity=$(fm_backend_cmux_acquisition_identity "$meta") || exit 1
+    [ "$current_identity" = "$original_identity" ] || exit 1
+    mv -f "$staged" "$meta" || exit 1
+    staged=
+    fm_lock_release "$lock" || exit 1
+    lock_held=0
+    trap - EXIT HUP INT TERM
+  )
+}
+
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
 # header for the fresh-surface pitfall this avoids). When the caller knows
@@ -847,6 +932,10 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
     fi
     sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
     [ -n "$sfid" ] || return 1
+    if ! fm_backend_cmux_persist_recovered_target \
+      "$expected_label" "$recorded_workspace" "$recorded_surface" "$wsid" "$sfid"; then
+      fm_backend_cmux_recovery_meta_matches "$expected_label" "$wsid" "$sfid" || return 1
+    fi
     FM_BACKEND_CMUX_WORKSPACE=$wsid
     FM_BACKEND_CMUX_SURFACE=$sfid
     return 0

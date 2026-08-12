@@ -298,6 +298,31 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
     | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
+fm_backend_zellij_tab_inventory_valid() {  # <provider-response>
+  printf '%s' "$1" | jq -s -e '
+    def valid_tab:
+      if type != "object" then false
+      elif (.tab_id | type) != "number" then false
+      elif .tab_id < 0 or ((.tab_id | floor) != .tab_id) then false
+      elif (.name | type) != "string" then false
+      elif (.name | length) == 0 then false
+      else (.name | test("[[:cntrl:]]") | not)
+      end;
+    if length != 1 or (.[0] | type) != "array" then
+      false
+    else
+      .[0] as $tabs
+      | if any($tabs[]?; (valid_tab | not)) then
+          false
+        elif ([ $tabs[] | .tab_id ] | unique | length) != ($tabs | length) then
+          false
+        else
+          true
+        end
+    end
+  ' >/dev/null 2>&1
+}
+
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
 # tab name firstmate expects for the caller-facing task label <label>?
 # Checks the home-scoped, tagged title first (fm_backend_zellij_scoped_title
@@ -317,6 +342,7 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
   local session=$1 tab_id=$2 label=$3 scoped tabs count
   scoped=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  fm_backend_zellij_tab_inventory_valid "$tabs" || return 1
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
     '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \
@@ -406,7 +432,7 @@ fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
     return 1
   fi
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
-  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  fm_backend_zellij_tab_inventory_valid "$tabs" || return 1
   match_count=$(printf '%s' "$tabs" | jq -er --argjson id "$tab_id" '[.[] | select(.tab_id == $id)] | length' 2>/dev/null) || return 1
   case "$match_count" in
     0) return 0 ;;
@@ -426,7 +452,7 @@ fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
   fm_backend_zellij_tab_matches_label "$session" "$tab_id" "$expected_label" || return 1
   fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || return 1
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
-  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  fm_backend_zellij_tab_inventory_valid "$tabs" || return 1
   local rc
   if printf '%s' "$tabs" | jq -s -e --argjson id "$tab_id" '
     if length == 1 and (.[0] | type) == "array"

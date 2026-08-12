@@ -869,6 +869,23 @@ test_kill_tab_exact_retains_cleanup_on_empty_name() {
   pass "fm_backend_zellij_kill_tab_exact: empty matching names retain cleanup while absent IDs prove gone"
 }
 
+test_kill_tab_exact_retains_cleanup_on_malformed_member() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-exact-malformed-member"; mkdir -p "$dir/responses"
+  printf '%s\n' '[{"tab_id":3,"name":"fm-zghost"},{"tab_id":"not-a-number","name":"fm-foreign"}]' > "$dir/responses/1.out"
+  printf '%s\n' '[{"tab_id":3,"name":"fm-zghost"}]' > "$dir/responses/2.out"
+  printf '%s\n' '[]' > "$dir/responses/3.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill_tab_exact firstmate 3 fm-zghost' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact zellij cleanup accepted a malformed member as an absent-safe inventory"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "exact zellij cleanup closed a tab after a malformed inventory member"
+  pass "fm_backend_zellij_kill_tab_exact: malformed inventory members retain cleanup"
+}
+
 test_kill_tab_exact_retains_cleanup_on_multidoc_post_close() {
   local dir fb status
   dir="$TMP_ROOT/kill-exact-multidoc-post-close"; mkdir -p "$dir/responses"
@@ -1395,6 +1412,7 @@ test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
 test_kill_tab_exact_retains_cleanup_on_session_inspection_failure
 test_kill_tab_exact_retains_cleanup_on_empty_name
+test_kill_tab_exact_retains_cleanup_on_malformed_member
 test_kill_tab_exact_retains_cleanup_on_multidoc_post_close
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag

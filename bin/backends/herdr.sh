@@ -3030,6 +3030,38 @@ fm_backend_herdr_kill() {  # <target>
   fi
 }
 
+fm_backend_herdr_tab_inventory_valid() {  # <provider-response>
+  printf '%s' "$1" | jq -s -e '
+    def valid_id:
+      if type != "string" then false
+      elif length == 0 then false
+      else (test("[[:cntrl:]]") | not)
+      end;
+    def valid_tab:
+      if type != "object" then false
+      elif ((.tab_id | valid_id) | not) then false
+      elif ((.label | valid_id) | not) then false
+      elif (has("workspace_id") and ((.workspace_id | valid_id) | not)) then false
+      else true
+      end;
+    if length != 1
+       or (.[0] | type) != "object"
+       or (.[0].result | type) != "object"
+       or (.[0].result.tabs | type) != "array" then
+      false
+    else
+      .[0].result.tabs as $tabs
+      | if any($tabs[]?; (valid_tab | not)) then
+          false
+        elif ([ $tabs[] | .tab_id ] | unique | length) != ($tabs | length) then
+          false
+        else
+          true
+        end
+    end
+  ' >/dev/null 2>&1
+}
+
 fm_backend_herdr_kill_tab_exact() {  # <session> <workspace-id> <tab-id> <label>
   local session=$1 workspace_id=$2 tab_id=$3 expected_label=$4 tabs label lock_path attempt=0 lock_held=0 match_count
   [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] || return 1
@@ -3051,7 +3083,7 @@ fm_backend_herdr_kill_tab_exact() {  # <session> <workspace-id> <tab-id> <label>
     fm_lock_release "$lock_path" || true
     return 1
   }
-  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || {
+  fm_backend_herdr_tab_inventory_valid "$tabs" || {
     fm_lock_release "$lock_path" || true
     return 1
   }
@@ -3098,7 +3130,7 @@ fm_backend_herdr_kill_tab_exact() {  # <session> <workspace-id> <tab-id> <label>
     fm_lock_release "$lock_path" || true
     return 1
   }
-  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || {
+  fm_backend_herdr_tab_inventory_valid "$tabs" || {
     fm_lock_release "$lock_path" || true
     return 1
   }
