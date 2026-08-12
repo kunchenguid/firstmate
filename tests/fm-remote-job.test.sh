@@ -249,8 +249,13 @@ cp -R "$REMOTE_ROOT" "$RELOCATED_ROOT"
 OLD_WORKER_PID=$NEW_WORKER_PID
 OLD_WORKER_PGID=$(fm_remote_job_process_pgid "$OLD_WORKER_PID") \
   || fail "the worker replacement fixture could not resolve its process group"
-fm_remote_job_ensure_worker "$RELOCATED_ROOT" "$ACCOUNT_HOME" \
-  || fail "$FM_REMOTE_JOB_ERROR"
+if ! fm_remote_job_ensure_worker "$RELOCATED_ROOT" "$ACCOUNT_HOME"; then
+  # Rapid synthetic root swaps can race the detached Linux supervisor finishing
+  # its lock release. The public ensure operation is deliberately idempotent, so
+  # retry the fixture transition instead of making scheduler speed load-bearing.
+  fm_remote_job_ensure_worker "$RELOCATED_ROOT" "$ACCOUNT_HOME" \
+    || fail "$FM_REMOTE_JOB_ERROR"
+fi
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 [ "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ] || fail "ensure retained a worker bound to a different code root"
 ! kill -0 -- "-$OLD_WORKER_PGID" 2>/dev/null \
