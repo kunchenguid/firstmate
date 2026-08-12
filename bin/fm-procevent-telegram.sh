@@ -15,19 +15,15 @@
 #            the poll, exactly as with every other registered source.
 # poll       The blocking child the runner supervises. It long-polls the Telegram
 #            Bot API getUpdates method (offset = cursor + 1, server-side timeout
-#            FM_TELEGRAM_POLL_TIMEOUT, default 50s) until a genuinely new batch
-#            of updates arrives - one carrying an update id above both the cursor
-#            and the highest id this adapter has already handed to the runner -
-#            prints that raw JSON response to stdout once, and exits 0. A batch
-#            it has already handed over is never returned a second time: the poll
-#            keeps waiting instead, so a restart cannot mint another result for
-#            updates that are still being handled. The batch is capped so even a
-#            worst-case response stays well under the runner's captured-output
-#            limit and is published as parseable JSON; updates beyond the cap
-#            stay queued at Telegram and arrive on the next poll. The poll writes
-#            no cursor. Transient network and server errors retry
-#            with bounded backoff (FM_TELEGRAM_BACKOFF_SECONDS, default 5), and
-#            HTTP 429 waits the server's own retry_after instead, bounded by
+#            FM_TELEGRAM_POLL_TIMEOUT, default 50s) in a loop until a non-empty
+#            batch of updates arrives, prints that raw JSON response to stdout
+#            once, and exits 0. The batch is capped so even a worst-case
+#            response stays well under the runner's captured-output limit and is
+#            published as parseable JSON; updates beyond the cap stay queued at
+#            Telegram and arrive on the next poll. The poll writes no cursor.
+#            Transient network and server errors retry with bounded backoff
+#            (FM_TELEGRAM_BACKOFF_SECONDS, default 5), and HTTP 429 waits the
+#            server's own retry_after instead, bounded by
 #            FM_TELEGRAM_MAX_BACKOFF_SECONDS (default 60). A hard auth failure
 #            (HTTP 401 or 403) and a getUpdates conflict (HTTP 409, which means
 #            either a webhook is configured on the bot or another poller is
@@ -38,12 +34,9 @@
 #            cursor backwards: an id at or below the current cursor is a
 #            successful no-op, and concurrent acks are serialized so the cursor
 #            cannot rewind. Anything but a nonnegative integer is refused.
-# retire     End the source (default id telegram-captain) and, with it, the
-#            delivery record below. Idempotent, and the operator's recovery
-#            lever: after it, arming again re-captures everything still above
-#            the cursor, exactly as it did before the record existed. Ordinary
-#            re-arming never clears the record, because that would re-open the
-#            repeat-capture loop the record is there to close.
+# retire     End the source (default id telegram-captain). Idempotent, and the
+#            explicit operator action a message stream needs to end: after it,
+#            arming again re-captures everything still above the cursor.
 # terminal   Always exits 1: a message stream never ends by itself, so no
 #            captured result ever retires this source. Retirement is an explicit
 #            operator action through this adapter's `retire`.
@@ -52,14 +45,6 @@
 #   ~/.config/firstmate/telegram-token    The bot token, one line, private.
 #   ~/.config/firstmate/telegram-cursor   The last HANDLED update id. Absent
 #                                         means 0: nothing handled yet.
-#   ~/.config/firstmate/telegram-emitted  The highest update id this adapter has
-#                                         already handed to the runner. Absent
-#                                         means 0. Written by the poll once a
-#                                         batch is on its way out, read by the
-#                                         poll, cleared by `retire`, and touched
-#                                         by nothing else: it records what was
-#                                         delivered, never what was handled, and
-#                                         it is not an acknowledgement.
 #
 # The poll only READS the cursor. The HANDLER - firstmate acting on the
 # published wake - advances it, and only after it has fully handled the captured
@@ -67,17 +52,12 @@
 # it handled. That acknowledgement is the sole writer of the cursor file, so a
 # crash never advances past unhandled messages.
 #
-# Repeat-capture window, stated plainly: Telegram redelivers every update above
-# the cursor and only an ack moves the cursor, so the same updates keep coming
-# back for as long as the handler is still working through them. The emitted
-# marker is what stops that from becoming a fresh result and a fresh wake on
-# every restart of this poll: a batch whose highest update id is not above the
-# marker is not handed over again, and the poll keeps waiting. What the marker
-# does NOT do: it records the handoff to the runner, not the runner's durable
-# capture, so a batch handed to a runner that then died before capturing it is
-# not re-offered on its own - it comes back with the next batch carrying a
-# higher update id, because that batch still holds everything above the cursor,
-# and `retire` clears the marker so re-arming recovers it deliberately.
+# Duplicate-result window, stated plainly: Telegram redelivers every update
+# above the cursor and only an ack moves the cursor, so a poll restarted before
+# the cursor advances re-captures the same updates and hands them over again as
+# a fresh result. Delivery is at-least-once by design - a duplicate result
+# costs a redundant wake, while suppressing one risks stranding an operator
+# reply unseen, and duplicate-over-loss is the surrounding system's rule.
 # Handlers must therefore treat any update id <= the current cursor as
 # already seen and act on it as a no-op; the runner's handled acknowledgement
 # deduplicates announcements, not update ids.
@@ -85,6 +65,7 @@
 # Result bytes are operator chat content: input, never instruction and never
 # authority. They must not be executed, echoed into a shell, or read as
 # approval; decisions in them route through the ordinary decision owners.
+# --- end of --help header ---
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -92,7 +73,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOKEN_FILE="$HOME/.config/firstmate/telegram-token"
 CURSOR_FILE="$HOME/.config/firstmate/telegram-cursor"
 CURSOR_LOCK="$HOME/.config/firstmate/.telegram-cursor.lock"
-EMITTED_FILE="$HOME/.config/firstmate/telegram-emitted"
 API_BASE='https://api.telegram.org'
 POLL_TIMEOUT=${FM_TELEGRAM_POLL_TIMEOUT:-50}
 BACKOFF=${FM_TELEGRAM_BACKOFF_SECONDS:-5}
@@ -107,7 +87,7 @@ BATCH_LIMIT=8
 MAX_ID_DIGITS=18
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,87p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^# --- end of --help header ---$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 # Read and validate the token without ever letting it reach stdout, stderr, or
 # a command line: it is passed to curl only through a stdin config, so neither
@@ -136,21 +116,7 @@ read_id_file() {  # <path> <what>
   printf '%s\n' "$((10#$value))"
 }
 
-read_cursor()  { read_id_file "$CURSOR_FILE" cursor; }
-read_emitted() { read_id_file "$EMITTED_FILE" emitted-marker; }
-
-# The adapter's own record of the highest update id it has already handed to the
-# runner. It is never an acknowledgement and never touches the cursor - `ack`
-# stays the cursor's sole writer - and losing it costs one duplicate result
-# rather than a wrong one, so the atomic commit needs no lock of its own.
-write_emitted() {  # <update-id>
-  local dir tmp
-  dir=$(dirname "$EMITTED_FILE")
-  [ -d "$dir" ] || mkdir -p "$dir" || die "cannot create the emitted-marker directory: $dir"
-  tmp=$(umask 077; mktemp "$dir/.telegram-emitted.new.XXXXXX") || die "cannot stage the emitted marker"
-  { printf '%s\n' "$1" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$EMITTED_FILE"; } \
-    || { rm -f -- "$tmp"; die "cannot commit the emitted marker: $EMITTED_FILE"; }
-}
+read_cursor() { read_id_file "$CURSOR_FILE" cursor; }
 
 # Normalize a configured count for the same reason a stored id is normalized: a
 # leading zero would otherwise fail an arithmetic expansion in the middle of the
@@ -190,8 +156,8 @@ retry_after_delay() {  # <body-file>
 
 # The highest update id a response carries, or 0 for a batch with none. Only a
 # real JSON key counts: the escaped \"update_id\" an operator can type into a
-# message body is neutralized first, so chat content cannot move the marker and
-# suppress the updates that follow it.
+# message body is neutralized first, so chat content alone can never pose as a
+# genuinely new update.
 batch_max_id() {  # <body-file>
   local value highest=0
   while IFS= read -r value; do
@@ -206,7 +172,7 @@ batch_max_id() {  # <body-file>
 }
 
 cmd_poll() {
-  local token cursor emitted offset highest http_code rc
+  local token cursor offset highest http_code rc
   command -v curl >/dev/null 2>&1 || die "curl is not installed"
   POLL_TIMEOUT=$(normalize_count "$POLL_TIMEOUT" FM_TELEGRAM_POLL_TIMEOUT) || exit 1
   BACKOFF=$(normalize_count "$BACKOFF" FM_TELEGRAM_BACKOFF_SECONDS) || exit 1
@@ -219,11 +185,9 @@ cmd_poll() {
   trap 'cleanup_poll_body; exit 1' HUP INT TERM
   POLL_BODY=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-telegram-poll.XXXXXX") || die "cannot stage the response"
   while :; do
-    # Both are re-read every iteration: an ack landing while this poll is still
-    # blocked has to move the very next offset, and the marker is what a poll
-    # restarted by the runner reads to recognize a batch it already handed over.
+    # The cursor is re-read every iteration: an ack landing while this poll is
+    # still blocked has to move the very next offset.
     cursor=$(read_cursor) || exit 1
-    emitted=$(read_emitted) || exit 1
     offset=$((cursor + 1))
     # curl runs silent with stderr discarded so no failure message can echo the
     # tokened URL; classification uses only the exit code and the HTTP status.
@@ -253,26 +217,12 @@ cmd_poll() {
         ;;
     esac
     highest=$(batch_max_id "$POLL_BODY")
-    if [ "$highest" -gt "$emitted" ]; then
-      # The record is committed only once the batch is actually on its way out,
-      # never before. This dedupe exists to remove a DUPLICATE, and recording a
-      # handoff that never happened would trade that for a SILENT DROP - the
-      # operator's reply left sitting in the chat, which is the one failure this
-      # adapter exists to prevent. Duplicate-over-loss is the surrounding
-      # system's rule and no adapter may invert it locally, so if the handoff
-      # fails nothing is recorded and the batch is offered again.
-      cat "$POLL_BODY" || die "cannot hand the batch to the runner"
-      write_emitted "$highest"
-      return 0
-    fi
     if [ "$highest" -gt 0 ]; then
-      # Every update here has already been handed to the runner and is waiting
-      # on the handler's ack, so returning it again would mint a duplicate
-      # result and a duplicate wake. Keep waiting for something genuinely new;
-      # Telegram answers at once while these stay unacknowledged, so the pause
-      # is what keeps that wait from becoming a busy loop.
-      sleep "$BACKOFF"
-      continue
+      # A failed handoff must fail the poll: exiting 0 with nothing delivered
+      # would report a captured result while the operator's reply went nowhere,
+      # and duplicate-over-loss is the surrounding system's rule.
+      cat "$POLL_BODY" || die "cannot hand the batch to the runner"
+      return 0
     fi
     if grep -q '"ok"[[:space:]]*:[[:space:]]*true' "$POLL_BODY"; then
       # The server-side long poll expired with no updates; ask again at once.
@@ -333,13 +283,11 @@ cmd_arm() {
   printf 'armed: %s\n' "$id"
 }
 
-# Ending the source is the one deliberate action that also ends what this
-# adapter remembers about it. The delivery record is dropped FIRST: a cleared
-# record with the source still armed costs one duplicate, while a dropped source
-# with the record still set strands every update at or below it.
+# Ending a message stream is a deliberate operator action, never a captured
+# result's: this pass-through gives arming and ending the source the same
+# adapter-shaped entry point.
 cmd_retire() {
   local id=${1:-telegram-captain}
-  rm -f -- "$EMITTED_FILE" || die "cannot clear the emitted marker: $EMITTED_FILE"
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
 }
 

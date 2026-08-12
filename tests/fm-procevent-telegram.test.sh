@@ -58,9 +58,6 @@ case "$kind" in
   # The same unacknowledged update redelivered with a genuinely new one behind
   # it, which is exactly what Telegram returns once a second message arrives.
   updates-more) body='{"ok":true,"result":[{"update_id":901,"message":{"text":"ready to merge?"}},{"update_id":902,"message":{"text":"any news?"}}]}' ;;
-  # An operator message whose own text contains an escaped update_id key, so a
-  # naive scan would read a spoofed id out of chat content.
-  updates-spoof) body='{"ok":true,"result":[{"update_id":901,"message":{"text":"try \"update_id\": 999999"}}]}' ;;
   empty)   body='{"ok":true,"result":[]}' ;;
   denied)  body='{"ok":false,"error_code":401,"description":"Unauthorized"}' ;;
   webhook) body='{"ok":false,"error_code":409,"description":"Conflict: getUpdates is unavailable while a webhook is active"}' ;;
@@ -88,19 +85,10 @@ exit 0
 SH
 chmod +x "$SLEEPBIN/sleep"
 
-reset_api_keep_emitted() {  # <scripted step>...
+reset_api() {  # <scripted step>...
   rm -f "$TG_STATE/calls" "$TG_STATE/fields.log" "$TG_STATE/config.log" "$TG_STATE/last-step" \
     "$TG_STATE/sleeps.log"
   printf '%s\n' "$@" > "$TG_STATE/script"
-}
-
-# The same reset plus the adapter's own already-emitted marker, because each
-# scenario below is a fresh conversation rather than a redelivery of the last
-# one. The scenarios that are specifically about a restart against an
-# already-emitted batch use reset_api_keep_emitted instead.
-reset_api() {  # <scripted step>...
-  reset_api_keep_emitted "$@"
-  find "$TMP_ROOT" -name telegram-emitted -exec rm -f {} + 2>/dev/null || true
 }
 
 api_calls() {
@@ -236,18 +224,17 @@ cursor_after=$(cat "$CFG_HOME/.config/firstmate/telegram-cursor")
 [ "$cursor_after" = 123 ] || fail "poll advanced the cursor to $cursor_after; only the handler may advance it"
 pass "the cursor is read by the poll and advanced only by the handler"
 
-# --- a restart before the ack hands nothing over twice ----------------------
-# The runner restarts an unclaimed source on its ordinary reconcile cycle, so a
-# poll that returned the same unacknowledged updates again would mint a fresh
-# result and a fresh wake every cycle for as long as the handler takes to
-# finish. Only the cursor is the acknowledgement, and only the handler moves it,
-# so the adapter has to recognize a batch it already handed over by itself.
+# --- a restart before the ack re-hands the same batch -----------------------
+# Telegram redelivers every update above the cursor and only the handler's ack
+# moves it, so a poll restarted before the cursor advances re-captures the same
+# updates and hands them over again. Delivery is at-least-once by design: the
+# handler treats update ids at or below the cursor as already seen, and a
+# duplicate wake is the accepted cost of never stranding an operator reply.
 REPEAT_HOME="$TMP_ROOT/repeat-home"
 mkdir -p "$REPEAT_HOME/.config/firstmate"
 printf '%s\n' "$TOKEN" > "$REPEAT_HOME/.config/firstmate/telegram-token"
 chmod 0600 "$REPEAT_HOME/.config/firstmate/telegram-token"
 REPEAT_CURSOR="$REPEAT_HOME/.config/firstmate/telegram-cursor"
-REPEAT_MARKER="$REPEAT_HOME/.config/firstmate/telegram-emitted"
 repeat_poll() {  # <argv>...
   run_bounded 60 env "HOME=$REPEAT_HOME" "PATH=$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
     FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
@@ -258,48 +245,37 @@ out=$(repeat_poll poll)
 expect_code 0 $? "the first poll returns the operator's batch"
 assert_contains "$out" '"update_id":901' "the first poll hands the batch to the runner"
 [ "$(api_calls)" = 1 ] || fail "the first poll took $(api_calls) API calls"
-assert_present "$REPEAT_MARKER" "the poll records what it handed over"
-[ "$(cat "$REPEAT_MARKER")" = 901 ] || fail "the record does not name the emitted update: $(cat "$REPEAT_MARKER")"
-perms=$(path_mode "$REPEAT_MARKER")
-[ "$perms" = 600 ] || fail "the emitted record is readable beyond its owner: $perms"
 assert_absent "$REPEAT_CURSOR" "handing a batch to the runner is not an acknowledgement"
 
 # A fresh poll process, exactly as the next reconcile starts one: unchanged
-# cursor, the same batch redelivered, and only then a second message behind it.
-reset_api_keep_emitted '200 updates' '200 updates' '200 updates' '200 updates-more'
+# cursor, the same batch redelivered.
+reset_api '200 updates'
 out=$(repeat_poll poll)
-expect_code 0 $? "a restarted poll exits 0 once something genuinely new arrives"
-[ "$(api_calls)" = 4 ] || fail "a restarted poll returned after $(api_calls) calls instead of waiting for a new update"
-assert_contains "$out" '"update_id":902' "the restarted poll returns the genuinely new update"
-assert_contains "$out" '"update_id":901' "the new batch still carries what was never acknowledged"
+expect_code 0 $? "a restarted poll exits 0 on the redelivered batch"
+[ "$(api_calls)" = 1 ] || fail "the redelivered batch took $(api_calls) API calls instead of returning at once"
+assert_contains "$out" '"update_id":901' "the restarted poll re-hands the same unacknowledged batch"
 assert_absent "$REPEAT_CURSOR" "a restarted poll still never writes the cursor"
-[ "$(cat "$REPEAT_MARKER")" = 902 ] || fail "the record did not advance to the newly emitted update: $(cat "$REPEAT_MARKER")"
-pass "a poll restart hands over nothing until a genuinely new update arrives"
+extras=$(find "$REPEAT_HOME/.config/firstmate" -type f ! -name telegram-token 2>/dev/null)
+[ -z "$extras" ] || fail "the poll kept delivery state of its own: $extras"
 
-# --- chat content cannot pose as an update id -------------------------------
-# An operator can type an escaped update_id key into a message. Reading that as
-# a real id would move the record past updates that never arrived and silence
-# every message below it.
-reset_api '200 updates-spoof' '200 updates-more'
+# Once a second message arrives the redelivered batch carries both: everything
+# above the cursor stays included until the handler acks it.
+reset_api '200 updates-more'
 out=$(repeat_poll poll)
-expect_code 0 $? "a message quoting an update id still returns"
-[ "$(cat "$REPEAT_MARKER")" = 901 ] || fail "message text moved the emitted record to $(cat "$REPEAT_MARKER")"
-out=$(repeat_poll poll)
-expect_code 0 $? "the next genuinely new update is still delivered"
-assert_contains "$out" '"update_id":902' "an update after the quoted id is still handed over"
-pass "an update id quoted in chat content never becomes the emitted record"
+expect_code 0 $? "a poll after a second message returns the combined batch"
+assert_contains "$out" '"update_id":902' "the batch carries the genuinely new update"
+assert_contains "$out" '"update_id":901' "the batch still carries what was never acknowledged"
+pass "a restart before the ack re-captures and re-hands the same updates"
 
 # --- a batch the runner never received is offered again ---------------------
-# The dedupe exists to remove a duplicate, so it must never create a loss. If
-# the handoff itself fails - the runner died between the poll's write and its
-# durable capture - the batch was not delivered, and a poll that recorded it as
-# delivered would strand the operator's reply in the chat until an unrelated
-# later message happened to arrive.
+# If the handoff itself fails - the runner died between the poll's write and
+# its durable capture - the batch was not delivered, so the poll must exit
+# non-zero rather than report a captured result that went nowhere, and the
+# next poll must offer the same batch again.
 HANDOFF_HOME="$TMP_ROOT/handoff-home"
 mkdir -p "$HANDOFF_HOME/.config/firstmate"
 printf '%s\n' "$TOKEN" > "$HANDOFF_HOME/.config/firstmate/telegram-token"
 chmod 0600 "$HANDOFF_HOME/.config/firstmate/telegram-token"
-HANDOFF_MARKER="$HANDOFF_HOME/.config/firstmate/telegram-emitted"
 handoff_poll() {  # <argv>...
   run_bounded 60 env "HOME=$HANDOFF_HOME" "PATH=$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
     FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
@@ -310,51 +286,42 @@ handoff_status=0
 env "HOME=$HANDOFF_HOME" "PATH=$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
   FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" poll >&- 2>/dev/null || handoff_status=$?
 [ "$handoff_status" -ne 0 ] || fail "a poll whose handoff failed still reported a delivered batch"
-assert_absent "$HANDOFF_MARKER" "a batch the runner never received is not recorded as handed over"
-reset_api_keep_emitted '200 updates'
+reset_api '200 updates'
 out=$(handoff_poll poll)
 expect_code 0 $? "the undelivered batch is offered again"
 assert_contains "$out" '"update_id":901' "the reply the runner never received comes back"
 [ "$(api_calls)" = 1 ] || fail "the undelivered batch was not offered on the first call: $(api_calls) calls"
 pass "a batch lost before the runner received it is redelivered rather than dropped"
 
-# --- retire is the operator's recovery lever and clears the record ----------
-# An agent that dies mid-handling leaves the cursor where it was and the record
-# ahead of it. Retire is the deliberate operator action that ends a source, so
-# it is where the record is cleared: after it, arming again re-captures
-# everything above the cursor exactly as it did before the record existed.
+# --- retire is the explicit operator action that ends the source ------------
+# A message stream never self-terminates, so ending it is a deliberate operator
+# step through this adapter: idempotent, never an acknowledgement, and after a
+# re-arm everything still above the cursor is re-captured.
 RECOVER_HOME="$TMP_ROOT/recover-home"
 mkdir -p "$RECOVER_HOME/.config/firstmate"
 printf '%s\n' "$TOKEN" > "$RECOVER_HOME/.config/firstmate/telegram-token"
 chmod 0600 "$RECOVER_HOME/.config/firstmate/telegram-token"
 RECOVER_FM="$TMP_ROOT/recover-fm"
 mkdir -p "$RECOVER_FM/state"
-RECOVER_MARKER="$RECOVER_HOME/.config/firstmate/telegram-emitted"
 recover_adapter() {  # <argv>...
   run_bounded 60 env "HOME=$RECOVER_HOME" "FM_HOME=$RECOVER_FM" "PATH=$FAKEBIN:$PATH" \
     FM_TELEGRAM_BACKOFF_SECONDS=0 FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
 }
 
-reset_api '200 updates'
-out=$(recover_adapter poll)
-expect_code 0 $? "the stranded reply was handed over once"
-[ "$(cat "$RECOVER_MARKER")" = 901 ] || fail "the delivered update was not recorded: $(cat "$RECOVER_MARKER")"
 recover_adapter arm recovery-line >/dev/null
 assert_present "$RECOVER_FM/state/procevent/recovery-line.source" "the recovery fixture is armed"
 out=$(recover_adapter retire recovery-line)
 expect_code 0 $? "the adapter retires a source"
 assert_contains "$out" "recovery-line" "retire names the source it ended"
 assert_absent "$RECOVER_FM/state/procevent/recovery-line.source" "retire drops the registration"
-assert_absent "$RECOVER_MARKER" "retire clears the delivery record with the source"
 out=$(recover_adapter retire recovery-line)
 expect_code 0 $? "retiring an already retired source succeeds"
-assert_absent "$RECOVER_MARKER" "a repeat retire leaves nothing behind"
 assert_absent "$RECOVER_HOME/.config/firstmate/telegram-cursor" "retire is not an acknowledgement and writes no cursor"
-reset_api_keep_emitted '200 updates'
+reset_api '200 updates'
 out=$(recover_adapter poll)
 expect_code 0 $? "a poll after retire returns again"
 assert_contains "$out" '"update_id":901' "retire and re-arm re-captures everything above the cursor"
-pass "retire clears the delivery record so re-arming recovers a stranded reply"
+pass "retire ends the source deliberately and re-arming recovers a stranded reply"
 
 # --- a leading-zero poll timeout does not wedge the loop --------------------
 # Every numeric input here is a digit string, and 08 is a digit string: without
@@ -601,6 +568,7 @@ help_out=$("$ADAPTER" --help 2>&1 || true)
 assert_contains "$help_out" "telegram-token" "help names the token file"
 assert_contains "$help_out" "telegram-cursor" "help names the cursor file"
 assert_contains "$help_out" "HANDLER" "help says the handler owns advancing the cursor"
+assert_contains "$help_out" "re-captures the same updates" "help states that a restart re-captures unacknowledged updates"
 assert_contains "$help_out" "already seen" "help states the duplicate-result window"
 assert_contains "$help_out" "ack <update-id>" "help names the acknowledgement the handler calls"
 assert_contains "$help_out" "never instruction" "help states that result bytes are input, never instruction"
