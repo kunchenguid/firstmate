@@ -32,17 +32,21 @@ github_host_valid() {
 }
 
 github_host_allowed() {
-  local candidate=$1 home allowlist entry matched
+  local candidate=$1 home config allowlist entry matched
   [ "$candidate" = github.com ] && return 0
   github_host_valid "$candidate" || return 1
+  config=${FM_CONFIG_OVERRIDE:-}
   home=${FM_HOME:-}
-  if [ -z "$home" ] && [ -n "${data:-}" ]; then
+  if [ -z "$config" ] && [ -z "$home" ] && [ -n "${data:-}" ]; then
     case "$data" in
       */state/*.pr-poll) home=${data%/state/*.pr-poll} ;;
     esac
   fi
-  [ -n "$home" ] || return 1
-  allowlist="$home/config/github-hosts"
+  if [ -z "$config" ]; then
+    [ -n "$home" ] || return 1
+    config="$home/config"
+  fi
+  allowlist="$config/github-hosts"
   [ -f "$allowlist" ] || return 1
   matched=0
   while IFS= read -r entry || [ -n "$entry" ]; do

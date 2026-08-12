@@ -660,6 +660,7 @@ run_watcher_bounded() {
   shift 2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+      FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -718,7 +719,8 @@ make_poll_fixture() {
 
 run_poll() {
   local dir=$1
-  FM_HOME="$dir/home" FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+  FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="${FM_TEST_CONFIG_OVERRIDE:-}" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -805,11 +807,13 @@ test_static_poll_contract() {
 }
 
 test_github_enterprise_poll_contract() {
-  local dir out
+  local dir override out rc
   dir=$(make_case github-enterprise-poll)
-  printf '%s\n' github.company.com > "$dir/home/config/github-hosts"
+  override="$dir/override-config"
+  mkdir "$override"
+  printf '%s\n' github.company.com > "$override/github-hosts"
   write_task_meta "$dir"
-  run_check_entry "$dir" task-a https://github.company.com/o/r/pull/8 \
+  FM_CONFIG_OVERRIDE="$override" run_check_entry "$dir" task-a https://github.company.com/o/r/pull/8 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "enterprise PR check failed"
   grep -qxF 'GH_HOST=github.company.com pr view https://github.company.com/o/r/pull/8 --json headRefOid -q .headRefOid' \
     "$dir/gh.log" || fail "enterprise PR head lookup did not pass the exact host to gh"
@@ -820,22 +824,33 @@ o/r
 8' ] || fail "enterprise PR check did not publish the exact poll identity"
 
   : > "$dir/gh.log"
-  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  out=$(FM_TEST_CONFIG_OVERRIDE="$override" FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "enterprise poll did not emit an exact merged result"
   grep -qxF 'GH_HOST=github.company.com pr view https://github.company.com/o/r/pull/8 --json state -q .state' \
     "$dir/gh.log" || fail "enterprise poll did not pass the exact host to gh"
 
   : > "$dir/gh.log"
-  rm "$dir/home/config/github-hosts"
-  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  rm "$override/github-hosts"
+  out=$(FM_TEST_CONFIG_OVERRIDE="$override" FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "enterprise poll emitted after its allowlist was removed"
   [ ! -s "$dir/gh.log" ] || fail "enterprise poll called gh with absent config"
 
-  printf '%s\n' github.company.com 'Github.other.example' > "$dir/home/config/github-hosts"
-  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  printf '%s\n' github.company.com 'Github.other.example' > "$override/github-hosts"
+  out=$(FM_TEST_CONFIG_OVERRIDE="$override" FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "enterprise poll used a partially malformed allowlist"
   [ ! -s "$dir/gh.log" ] || fail "enterprise poll called gh with malformed config"
-  pass "GitHub Enterprise polling revalidates the live allowlist and passes the exact hostname"
+  printf '%s\n' github.company.com > "$override/github-hosts"
+  : > "$dir/gh.log"
+  rm -f "$dir/home/state/.last-check"
+  set +e
+  FM_CONFIG_OVERRIDE="$override" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "enterprise override watcher did not complete"
+  grep -q '^check: .*: merged$' "$dir/watch.out" \
+    || fail "watcher did not propagate the enterprise config override into the poll"
+  pass "GitHub Enterprise polling honors the active config override through the watcher"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
