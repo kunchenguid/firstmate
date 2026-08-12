@@ -39,9 +39,11 @@ PLATFORM="${FM_KEEP_AWAKE_PLATFORM:-$(uname -s 2>/dev/null || printf unknown)}"
 # must exceed that with margin rather than time out on a slow-but-legitimate
 # start. The mkdir-to-identity-file window it guards is normally instantaneous
 # (no sleep between them), so a lock still "incomplete" past this age is a
-# SIGKILL-interrupted creation, not a legitimate in-flight acquire.
+# SIGKILL-interrupted creation, not a legitimate in-flight acquire. fm_path_age
+# truncates to whole seconds (see fm-wake-lib.sh's fm_lock_mid_acquire_is_fresh),
+# so this floors at 2 like that primitive does.
 KEEP_AWAKE_LOCK_MAX_ATTEMPTS=80
-KEEP_AWAKE_LOCK_INCOMPLETE_STALE_AFTER=1
+KEEP_AWAKE_LOCK_INCOMPLETE_STALE_AFTER=2
 
 FM_KEEP_AWAKE_PID=
 FM_KEEP_AWAKE_IDENTITY=
