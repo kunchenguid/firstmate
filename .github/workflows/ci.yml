@@ -366,8 +366,8 @@ jobs:
           ledger_output=$(/bin/bash tests/fm-decision-ledger.test.sh)
           printf '%s\n' "$ledger_output"
           ledger_count=$(printf '%s\n' "$ledger_output" | grep -c '^ok - ')
-          [ "$ledger_count" -eq 13 ] || {
-            echo "::error::expected 13 decision-ledger tests, got $ledger_count"
+          [ "$ledger_count" -eq 14 ] || {
+            echo "::error::expected 14 decision-ledger tests, got $ledger_count"
             exit 1
           }
 

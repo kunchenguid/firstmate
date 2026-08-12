@@ -215,7 +215,7 @@ test_every_live_key_carries_a_disposition() {
     and (.keys_stale == 1)
     and (.status_open_decision_keys ==
          ([.open_decisions[] | select(.current_sources | index("folded-status-key"))] | length))
-    and (.captain_holds_active ==
+    and (.captain_decision_holds_active ==
          ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length))
     and (.keys_stale ==
          ([.open_decisions[] | select((.current_sources | index("folded-status-key"))
@@ -254,6 +254,7 @@ test_active_hold_transferred_out_of_status_fold_stays_enumerated() {
   printf '%s' "$json" | jq -e '
     .status_open_decision_keys == 0
     and .captain_holds_active == 1
+    and .captain_decision_holds_active == 1
     and .open_decision_keys == 1
     and (.open_decisions | length) == 1
     and (.open_decisions | any(
@@ -281,6 +282,7 @@ test_active_hold_without_status_key_stays_enumerated() {
     .keys_opened_distinct == 0
     and .status_open_decision_keys == 0
     and .captain_holds_active == 1
+    and .captain_decision_holds_active == 1
     and .open_decision_keys == 1
     and (.open_decisions | length) == 1
     and (.open_decisions[0] | .task == "backlog-only" and .key == "route"
@@ -301,6 +303,7 @@ test_blocked_captain_hold_is_not_an_actionable_source() {
   json=$(run_ledger "$home") || fail "ledger failed with a blocked captain hold"
   printf '%s' "$json" | jq -e '
     .captain_holds_active == 0
+    and .captain_decision_holds_active == 0
     and ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length) == 0
     and (.open_decisions | any(.task == "lane-held" and .disposition == "captain-hold-active"
       and .current_sources == ["folded-status-key"]))
@@ -316,6 +319,9 @@ test_canonical_hold_set_reaches_ledger() {
   printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
     .captain_holds_active == ([ $canonical.backlog.records[]
       | select(.structured == true and .captain_actionable == true) ] | length)
+    and .captain_decision_holds_active == ([ $canonical.backlog.records[]
+      | select(.structured == true and .captain_actionable == true
+        and (.id | test("^[A-Za-z0-9._-]+-decision-[A-Za-z0-9._-]+$"))) ] | length)
   ' >/dev/null || fail "ledger captain-hold set diverged from the canonical inventory: $json"
 
   malformed=$(sed 's/ (hold: captain route choice pending)//' "$home/data/backlog.md")
@@ -324,6 +330,7 @@ test_canonical_hold_set_reaches_ledger() {
   json=$(run_ledger "$home") || fail "ledger failed on a malformed captain row"
   printf '%s' "$json" | jq -e --argjson canonical "$canonical" '
     .captain_holds_active == 0
+    and .captain_decision_holds_active == 0
     and .captain_holds_active == ([ $canonical.backlog.records[]
       | select(.structured == true and .captain_actionable == true) ] | length)
   ' >/dev/null || fail "a captain row without hold reason diverged from canonical actionability: $json"
@@ -373,6 +380,31 @@ test_malformed_captain_hold_lineage_is_disclosed() {
     ' >/dev/null || fail "a captain hold missing $field was hidden instead of disclosed: $json"
   done
   pass "malformed captain-hold lineage remains enumerated and undetermined"
+}
+
+test_generic_captain_gate_stays_out_of_decision_union() {
+  local home json
+  home=$(build_coverage_home generic-captain-gate)
+  awk '
+    /^## Done$/ {
+      print "- [ ] captain-run - Run the captain gate (repo: sample) (kind: captain) (hold: captain run pending) (hold-kind: captain)"
+      print ""
+    }
+    { print }
+  ' "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  json=$(run_ledger "$home") || fail "ledger failed with an actionable generic captain gate"
+  printf '%s' "$json" | jq -e '
+    .captain_holds_active == 2
+    and (.captain_held_backlog_rows | length) == 2
+    and (.captain_held_backlog_rows | any(.hold_id == "captain-run"))
+    and .captain_decision_holds_active == 1
+    and .open_decision_keys == 4
+    and (.open_decisions | any(.hold_id == "captain-run") | not)
+    and (.open_decisions | any(.hold_id == "lane-held-decision-route"
+      and (.current_sources | index("captain-hold"))))
+  ' >/dev/null || fail "a generic captain gate entered the keyed decision union: $json"
+  pass "generic captain gates remain outside the keyed decision union"
 }
 
 test_bold_captain_hold_reaches_the_union() {
@@ -463,6 +495,7 @@ test_canonical_hold_set_reaches_ledger
 test_unreadable_backlog_refuses_the_ledger
 test_empty_captain_hold_set_is_not_an_unavailable_inventory
 test_malformed_captain_hold_lineage_is_disclosed
+test_generic_captain_gate_stays_out_of_decision_union
 test_bold_captain_hold_reaches_the_union
 test_unclassifiable_state_is_disclosed_not_hidden
 test_bearings_publishes_the_ledger_and_refuses_an_unbacked_count

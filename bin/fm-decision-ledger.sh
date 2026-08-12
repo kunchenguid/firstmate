@@ -154,11 +154,22 @@ SNAPSHOT_JSON=$(FM_SNAPSHOT_SECONDMATES="$LEDGER_SECONDMATES" \
   echo "fm-decision-ledger: canonical captain-hold inventory unavailable" >&2
   exit 1
 }
+CAPTAIN_HOLD_ROWS=$(printf '%s' "$SNAPSHOT_JSON" | jq -ce '
+  if .backlog.present != true then error("canonical backlog unavailable")
+  elif (.backlog.records | type) != "array" then error("canonical backlog records unavailable")
+  else [.backlog.records[]
+    | select(.structured == true and .captain_actionable == true)
+    | {hold_id:.id, summary:(.title // "captain hold pending")}]
+  end') || {
+  echo "fm-decision-ledger: canonical captain-hold inventory unavailable" >&2
+  exit 1
+}
 HOLD_TSV=$(printf '%s' "$SNAPSHOT_JSON" | jq -r '
   if .backlog.present != true then error("canonical backlog unavailable")
   elif (.backlog.records | type) != "array" then error("canonical backlog records unavailable")
   else .backlog.records[]
-    | select(.structured == true and .captain_actionable == true)
+    | select(.structured == true and .captain_actionable == true
+      and (.id | test("^[A-Za-z0-9._-]+-decision-[A-Za-z0-9._-]+$")))
     | [ .id, ([.body_lines[]? | select(startswith("Origin: ")) | ltrimstr("Origin: ")][0] // "\u001e"),
         ([.body_lines[]? | select(startswith("Decision key: ")) | ltrimstr("Decision key: ")][0] // "\u001e"),
         (.title // "captain decision pending") ]
@@ -192,6 +203,7 @@ HOLD_ROWS=$(printf '%s' "$HOLD_INPUT" | jq -R -s '
   exit 1
 }
 active_hold_count=$(printf '%s' "$HOLD_ROWS" | jq 'length')
+captain_hold_count=$(printf '%s' "$CAPTAIN_HOLD_ROWS" | jq 'length')
 
 # Per-key disposition. Keys are grouped by task so the hold classifier is invoked
 # once per owning lane rather than once per key.
@@ -309,7 +321,9 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
   --argjson stale "$stale_count" \
   --argjson status_open "$status_open_count" \
   --argjson active_holds "$active_hold_count" \
+  --argjson captain_holds "$captain_hold_count" \
   --argjson holds "$HOLD_ROWS" \
+  --argjson captain_hold_rows "$CAPTAIN_HOLD_ROWS" \
   --argjson opened "$OPENED_ROWS" \
   --argjson complete "$complete" '
   def trunc($n): if (length > $n) then (.[:$n] + "…") else . end;
@@ -368,7 +382,9 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
       keys_superseded: $superseded,
       keys_stale: $stale,
       status_open_decision_keys: $status_open,
-      captain_holds_active: $active_holds,
+      captain_holds_active: $captain_holds,
+      captain_held_backlog_rows: $captain_hold_rows,
+      captain_decision_holds_active: $active_holds,
       open_decision_keys: ($rows | length),
       open_decisions: $rows,
       definitions: {
@@ -377,7 +393,9 @@ LEDGER=$(printf '%s' "$ROWS" | jq -R -s \
         keys_superseded: "distinct keys that were opened and have since been closed.",
         keys_stale: "open keys whose owning lane already finished; they are still counted open and still carry a disposition.",
         status_open_decision_keys: "distinct still-open keys from fm-classify-lib.sh status_open_decisions. This is a folded status-key figure, not a raw event count.",
-        captain_holds_active: "actionable captain backlog rows with -decision- hold identities. This is a held-backlog-row figure, not a status-key or raw-event count.",
+        captain_holds_active: "all actionable captain backlog rows, including generic captain gates that are not decision holds.",
+        captain_held_backlog_rows: "the enumerated actionable captain backlog rows counted by captain_holds_active.",
+        captain_decision_holds_active: "actionable captain backlog rows with durable -decision- hold identities. This is a keyed-decision-hold subset, not a status-key or raw-event count.",
         open_decision_keys: "the deduplicated union of folded status keys and actionable captain holds. Always equal to the length of open_decisions; current_sources keeps the source figures derivable while origins preserves historical lineage.",
         open_decisions: "one row per distinct live decision identity, each with a disposition, current_sources, and origins. No key or captain hold is omitted, capped, or left blank.",
         complete: "false when any row is undetermined, so a partially classified ledger can never read as a fully accounted one."
@@ -404,8 +422,12 @@ printf '%s' "$LEDGER" | jq -e '
     error("a live decision identity carries no current source")
   elif .status_open_decision_keys != ([.open_decisions[] | select(.current_sources | index("folded-status-key"))] | length) then
     error("status_open_decision_keys does not equal its enumerated current-source rows")
-  elif .captain_holds_active != ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length) then
-    error("captain_holds_active does not equal its enumerated current-source rows")
+  elif .captain_holds_active != (.captain_held_backlog_rows | length) then
+    error("captain_holds_active does not equal its enumerated backlog rows")
+  elif (.captain_held_backlog_rows | any((.hold_id | type) != "string" or (.hold_id | length) == 0)) then
+    error("an actionable captain backlog row has no hold identity")
+  elif .captain_decision_holds_active != ([.open_decisions[] | select(.current_sources | index("captain-hold"))] | length) then
+    error("captain_decision_holds_active does not equal its enumerated current-source rows")
   elif .keys_stale != ([.open_decisions[] | select((.current_sources | index("folded-status-key")) and .disposition == "orphaned-terminal-lane")] | length) then
     error("keys_stale does not equal its enumerated current-source rows")
   elif (.complete == true and (.open_decisions | any(.disposition == "undetermined"))) then
