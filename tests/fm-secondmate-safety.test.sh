@@ -1496,7 +1496,7 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
 }
 
 test_secondmate_spawn_refuses_home_identity_overlap() {
-  local home identity_base identity code_root subhome relation expected opdir fakebin log err
+  local home identity_base identity code_root subhome relation target expected opdir fakebin log err
   home="$TMP_ROOT/spawn-identity-home"
   identity_base="$TMP_ROOT/spawn-home-identity"
   identity="$identity_base/primary"
@@ -1535,20 +1535,37 @@ descendant|cannot be inside the firstmate home identity
 ROWS
 
   for opdir in data state config projects; do
-    subhome="$TMP_ROOT/spawn-identity-subhome-$opdir"
-    mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$identity/$opdir"
-    printf 'domain\n' > "$subhome/.fm-secondmate-home"
-    printf 'charter\n' > "$subhome/data/charter.md"
-    rm -rf "${subhome:?}/${opdir:?}"
-    ln -s "$identity/$opdir" "$subhome/$opdir"
-    : > "$log"
-    if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-identity-fake/pane.txt" \
-      "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
-      fail "secondmate spawn accepted $opdir inside the preserved home identity"
-    fi
-    grep -F "secondmate $opdir directory cannot be inside the firstmate home identity" "$err" >/dev/null \
-      || fail "spawn did not explain unsafe $opdir home-identity rejection"
-    grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before $opdir home-identity rejection"
+    for relation in exact descendant ancestor; do
+      subhome="$TMP_ROOT/spawn-identity-subhome-$opdir-$relation"
+      case "$relation" in
+        exact)
+          target="$identity"
+          expected="secondmate $opdir directory cannot be the firstmate home identity"
+          ;;
+        descendant)
+          target="$identity/operational-$opdir"
+          expected="secondmate $opdir directory cannot be inside the firstmate home identity"
+          ;;
+        ancestor)
+          target="$identity_base"
+          expected="secondmate $opdir directory cannot be an ancestor of the firstmate home identity"
+          ;;
+      esac
+      mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$target"
+      printf 'domain\n' > "$subhome/.fm-secondmate-home"
+      printf 'charter\n' > "$subhome/data/charter.md"
+      rm -rf "${subhome:?}/${opdir:?}"
+      ln -s "$target" "$subhome/$opdir"
+      : > "$log"
+      if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-identity-fake/pane.txt" \
+        "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+        fail "secondmate spawn accepted $opdir $relation to the preserved home identity"
+      fi
+      grep -F "$expected" "$err" >/dev/null \
+        || fail "spawn did not explain unsafe $opdir $relation home-identity rejection"
+      grep -F 'new-window' "$log" >/dev/null \
+        && fail "spawn created a window before $opdir $relation home-identity rejection"
+    done
   done
   pass "secondmate spawn preserves the relocated home-identity boundary"
 }

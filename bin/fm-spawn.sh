@@ -1530,6 +1530,18 @@ validate_firstmate_operational_dirs() {
     else
       abs_dir="$abs_home/$name"
     fi
+    if [ "$abs_dir" = "$abs_home_identity" ]; then
+      echo "error: secondmate $name directory cannot be the firstmate home identity: $dir" >&2
+      return 1
+    fi
+    if path_is_ancestor_of "$abs_home_identity" "$abs_dir"; then
+      echo "error: secondmate $name directory cannot be inside the firstmate home identity: $dir" >&2
+      return 1
+    fi
+    if path_is_ancestor_of "$abs_dir" "$abs_home_identity"; then
+      echo "error: secondmate $name directory cannot be an ancestor of the firstmate home identity: $dir" >&2
+      return 1
+    fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
       echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
       return 1
@@ -1540,14 +1552,6 @@ validate_firstmate_operational_dirs() {
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
       echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
-      return 1
-    fi
-    if [ "$abs_dir" = "$abs_home_identity" ] || path_is_ancestor_of "$abs_home_identity" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the firstmate home identity: $dir" >&2
-      return 1
-    fi
-    if path_is_ancestor_of "$abs_dir" "$abs_home_identity"; then
-      echo "error: secondmate $name directory cannot be an ancestor of the firstmate home identity: $dir" >&2
       return 1
     fi
   done
