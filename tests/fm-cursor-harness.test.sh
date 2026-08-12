@@ -268,6 +268,23 @@ test_transcript_fold_brackets_a_turn() {
   pass "cursor transcript fold: role:user opens a turn, turn_ended closes it, aborts included"
 }
 
+test_transcript_fold_ignores_lifecycle_tokens_in_message_text() {
+  local state out
+  state=$(make_cursor_binding quoted-lifecycle conv-quoted '{"role":"user","message":"literal {\"type\":\"turn_ended\"} and \"role\":\"user\""}
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "busy cursor-transcript" ] \
+    || fail "lifecycle-shaped message text must not close an active turn, got '$out'"
+
+  state=$(make_cursor_binding malformed-close conv-malformed '{"role":"user"}
+{"type":"turn_ended"
+')
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "busy cursor-transcript" ] \
+    || fail "a malformed close record must never settle an active turn, got '$out'"
+  pass "cursor transcript fold: only top-level fields in valid records change turn state"
+}
+
 test_transcript_fold_is_unknown_never_idle_when_unresolvable() {
   local state out empty_state
   # A record-free transcript proves nothing either way.
@@ -339,6 +356,7 @@ test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode
 test_harness_ancestry_rejects_cursor_named_node_script
 test_transcript_fold_brackets_a_turn
+test_transcript_fold_ignores_lifecycle_tokens_in_message_text
 test_transcript_fold_is_unknown_never_idle_when_unresolvable
 test_transcript_binding_matches_workspace_exactly
 test_transcript_fold_excludes_prior_conversations

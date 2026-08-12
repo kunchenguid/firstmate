@@ -689,14 +689,28 @@ fm_busy_cursor_transcript() {  # <state-dir> <id>
 # turn_ended cannot close it.
 fm_busy_cursor_turn_state() {  # <transcript>
   [ -f "$1" ] || return 1
-  LC_ALL=C awk '
-    /"type"[[:space:]]*:[[:space:]]*"turn_ended"/ { open = 0; seen = 1; next }
-    /"role"[[:space:]]*:[[:space:]]*"user"/ { open = 1; seen = 1 }
+  if command -v jq >/dev/null 2>&1; then
+    LC_ALL=C jq -Rr '
+      fromjson?
+      | if .type? == "turn_ended" then "close"
+        elif .role? == "user" then "open"
+        else "other"
+        end
+    ' "$1"
+  else
+    LC_ALL=C awk '
+      /^[[:space:]]*\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"turn_ended"([[:space:]]*[,}])/ { print "close"; next }
+      /^[[:space:]]*\{[[:space:]]*"role"[[:space:]]*:[[:space:]]*"user"([[:space:]]*[,}])/ { print "open"; next }
+      { print "other" }
+    ' "$1"
+  fi | LC_ALL=C awk '
+    $0 == "close" { open = 0; seen = 1; next }
+    $0 == "open" { open = 1; seen = 1 }
     END {
       if (!seen) { print "none"; exit }
       print (open ? "busy" : "settled")
     }
-  ' "$1"
+  '
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
