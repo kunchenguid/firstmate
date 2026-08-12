@@ -84,12 +84,14 @@ In away mode, seen-status dedupe does not clear possible-wedge aging for nonterm
 The daemon escalates captain-relevant events, plus a bounded recheck for a declared pause that remains idle, as one batched, single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh` so firstmate can distinguish it structurally from real messages.
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr uses native busy state and native agent-state submit confirmation on idle baselines.
+`bin/fm-checked-submit-lib.sh` serializes local composer mutations by resolved endpoint identity across homes and revalidates that identity after acquiring the lock, so a concurrent send, interrupt, launch, or supervisor injection cannot interleave with another mutation of the same composer.
 The tmux submit core treats a busy pane plus retries-exhausted plus composer-still-pending as a queued Enter because OpenCode 1.18.4 accepts Enter mid-turn and queues it for after the turn, reported as `empty` so the daemon and `fm-send` do not re-send.
 An idle pane keeps the `pending` verdict as a genuine swallow.
 The same OpenCode busy-queue case is a known gap on the herdr adapter and is recorded in `docs/herdr-backend.md` rather than patched here.
 Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
 `fm-spawn.sh` also routes Kimi launch readiness through that classifier instead of carrying another shape copy.
 The daemon injects only into an affirmatively `empty` composer, so every other or future verdict defers; positive container proof is required, and a blank unidentified row or bare dead-shell prompt cannot receive an escalation.
+The `fm-send.sh` header owns its stronger user-facing delivery contract, including the empty-composer preflight that prevents a parked draft from being combined with a new steer.
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
