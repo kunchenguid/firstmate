@@ -23,7 +23,9 @@ mkdir -p "$REPO" "$FIXTURE"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name Test
+git -C "$REPO" commit -q --allow-empty -m initial
 git -C "$REPO" checkout -q -b fm/dashboard-test
+git -C "$REPO" commit -q --allow-empty -m current
 
 cat > "$FAKEBIN/no-mistakes" <<'SH'
 #!/usr/bin/env bash
@@ -32,13 +34,26 @@ printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:?}"
 case "${1:-} ${2:-}" in
   "axi status")
     count=$(wc -l < "${FM_FAKE_NM_CALLS:?}")
-    if [ -e "${FM_FAKE_NM_WRONG_BRANCH:-}" ]; then
-      printf '%s\n' 'run:' '  id: "OTHER123"' '  branch: fm/other' '  status: running'
+    if [ -e "${FM_FAKE_NM_STATUS_FAIL:-}" ]; then
+      printf '%s\n' 'simulated status transport failure' >&2
+      exit 42
+    elif [ -e "${FM_FAKE_NM_STATUS_MALFORMED:-}" ]; then
+      printf '%s\n' 'not a no-mistakes status payload'
+    elif [ -e "${FM_FAKE_NM_STATUS_EMPTY:-}" ]; then
+      :
+    elif [ -e "${FM_FAKE_NM_STATUS_NO_HEAD:-}" ]; then
+      printf '%s\n' 'run:' '  id: "NOHEAD123"' '  branch: fm/dashboard-test' '  status: running'
+    elif [ -n "${FM_FAKE_NM_TRANSIENT_FAILURES:-}" ] && [ "$count" -le "$FM_FAKE_NM_TRANSIENT_FAILURES" ]; then
+      printf '%s\n' 'simulated transient status failure' >&2
+      exit 42
+    elif [ -e "${FM_FAKE_NM_WRONG_BRANCH:-}" ]; then
+      printf '%s\n' 'run:' '  id: "OTHER123"' '  branch: fm/other' '  head: "deadbeef"' '  status: running'
     elif [ "$count" -le 1 ] && [ -e "${FM_FAKE_NM_TERMINAL_FIRST:-}" ]; then
-      printf '%s\n' 'run:' '  id: "OLD123"' '  branch: fm/dashboard-test' '  status: failed' 'outcome: failed'
-      exit 1
+      printf '%s\n' 'run:' '  id: "OLD123"' '  branch: fm/dashboard-test' "  head: \"${FM_FAKE_NM_RUN_HEAD:?}\"" '  status: failed' 'outcome: failed'
+    elif [ "$count" -le 1 ] && [ -e "${FM_FAKE_NM_STALE_HEAD_FIRST:-}" ]; then
+      printf '%s\n' 'run:' '  id: "STALE123"' '  branch: fm/dashboard-test' "  head: \"${FM_FAKE_NM_STALE_HEAD:?}\"" '  status: running'
     else
-      printf '%s\n' 'run:' '  id: "RUN123"' '  branch: fm/dashboard-test' '  status: running'
+      printf '%s\n' 'run:' '  id: "RUN123"' '  branch: fm/dashboard-test' "  head: \"${FM_FAKE_NM_RUN_HEAD:?}\"" '  status: running'
     fi
     ;;
   "attach --run")
@@ -88,6 +103,13 @@ export FM_FAKE_NM_CALLS="$FIXTURE/no-mistakes.calls"
 export FM_FAKE_NM_ATTACHED="$FIXTURE/attached"
 export FM_FAKE_HERDR_CALLS="$FIXTURE/herdr.calls"
 export FM_FAKE_HERDR_SOCKET="$FIXTURE/herdr.sock"
+FM_FAKE_NM_RUN_HEAD=$(git -C "$REPO" rev-parse HEAD)
+export FM_FAKE_NM_RUN_HEAD
+FM_FAKE_NM_STALE_HEAD=$(git -C "$REPO" rev-parse HEAD^)
+export FM_FAKE_NM_STALE_HEAD
+fixture_tree=$(git -C "$REPO" write-tree)
+FM_FAKE_NM_DESCENDANT_HEAD=$(git -C "$REPO" commit-tree "$fixture_tree" -p "$FM_FAKE_NM_RUN_HEAD" -m pipeline)
+export FM_FAKE_NM_DESCENDANT_HEAD
 : > "$FM_FAKE_NM_CALLS"
 : > "$FM_FAKE_HERDR_CALLS"
 
@@ -112,6 +134,8 @@ assert_grep "pane split w1:p7 --direction right --ratio 0.5 --cwd $REPO --no-foc
 assert_grep 'pane get w1:p8 --session test' "$FM_FAKE_HERDR_CALLS" 'prepare did not verify the response-derived sibling'
 grep -F 'pane run w1:p8 ' "$FM_FAKE_HERDR_CALLS" | grep -F ' wait ' | grep -F "'fm/dashboard-test'" >/dev/null \
   || fail 'prepare did not start the waiter in the sibling pane'
+grep -F 'pane run w1:p8 ' "$FM_FAKE_HERDR_CALLS" | grep -F "'$FM_FAKE_NM_RUN_HEAD'" >/dev/null \
+  || fail 'prepare did not bind the waiter to the current implementation commit'
 assert_no_grep ' focus ' "$FM_FAKE_HERDR_CALLS" 'prepare attempted to change focus'
 pass 'fm-no-mistakes-attach: Herdr prepare creates and binds one exact sibling without focus theft'
 
@@ -154,20 +178,107 @@ pass 'fm-no-mistakes-attach: sibling creation serializes with canonical Herdr pr
 : > "$FIXTURE/terminal-first"
 export FM_FAKE_NM_TERMINAL_FIRST="$FIXTURE/terminal-first"
 FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 \
-  "$HELPER" wait "$REPO" fm/dashboard-test "$FAKEBIN/no-mistakes" || fail 'wait did not exec native attach'
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" || fail 'wait did not exec native attach'
 [ "$(cat "$FM_FAKE_NM_ATTACHED")" = RUN123 ] || fail 'wait did not bind attach to the exact active run'
 [ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'wait did not poll status until the active run appeared'
 assert_grep 'attach --run RUN123' "$FM_FAKE_NM_CALLS" 'wait did not use exact native attach argv'
 assert_no_grep 'axi run' "$FM_FAKE_NM_CALLS" 'wait became a second AXI driver'
 assert_no_grep 'axi respond' "$FM_FAKE_NM_CALLS" 'wait answered an AXI gate'
 pass 'fm-no-mistakes-attach: waiter ignores terminal history and execs native attach for the exact active run'
+unset FM_FAKE_NM_TERMINAL_FIRST
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/stale-head-first"
+export FM_FAKE_NM_STALE_HEAD_FIRST="$FIXTURE/stale-head-first"
+FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" || fail 'wait did not skip stale same-branch run'
+[ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'stale same-branch run was not skipped'
+[ "$(cat "$FM_FAKE_NM_ATTACHED")" = RUN123 ] || fail 'stale same-branch run was attached'
+pass 'fm-no-mistakes-attach: waiter rejects an older same-branch run before attaching the current one'
+unset FM_FAKE_NM_STALE_HEAD_FIRST
+
+: > "$FM_FAKE_NM_CALLS"
+export FM_FAKE_NM_RUN_HEAD="$FM_FAKE_NM_DESCENDANT_HEAD"
+FM_NM_ATTACH_MAX_POLLS=1 FM_NM_ATTACH_POLL_SECONDS=0 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$(git -C "$REPO" rev-parse HEAD)" "$FAKEBIN/no-mistakes" || fail 'wait did not accept pipeline-descendant run head'
+[ "$(cat "$FM_FAKE_NM_ATTACHED")" = RUN123 ] || fail 'pipeline-descendant run was not attached'
+pass 'fm-no-mistakes-attach: waiter accepts the canonical pipeline-descendant run head'
+FM_FAKE_NM_RUN_HEAD=$(git -C "$REPO" rev-parse HEAD)
+export FM_FAKE_NM_RUN_HEAD
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/status-fail"
+export FM_FAKE_NM_STATUS_FAIL="$FIXTURE/status-fail"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=5 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=2 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'persistent status failure did not stop the waiter' "$output"
+assert_contains "$output" 'axi status failed 2 consecutive times: simulated status transport failure' \
+  'persistent status failure did not preserve the diagnostic'
+[ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'persistent status failure exceeded the bounded retry limit'
+assert_no_grep 'attach ' "$FM_FAKE_NM_CALLS" 'persistent status failure attached a run'
+pass 'fm-no-mistakes-attach: persistent status failure exits with a bounded diagnostic'
+unset FM_FAKE_NM_STATUS_FAIL
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/status-malformed"
+export FM_FAKE_NM_STATUS_MALFORMED="$FIXTURE/status-malformed"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=5 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=2 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'malformed status did not stop the waiter' "$output"
+assert_contains "$output" 'axi status failed 2 consecutive times: not a no-mistakes status payload' \
+  'malformed status failure was not explicit'
+pass 'fm-no-mistakes-attach: malformed status is not misreported as an absent run'
+unset FM_FAKE_NM_STATUS_MALFORMED
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/status-empty"
+export FM_FAKE_NM_STATUS_EMPTY="$FIXTURE/status-empty"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=5 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=2 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'empty status did not stop the waiter' "$output"
+assert_contains "$output" 'axi status failed 2 consecutive times: empty output' \
+  'empty status failure was not explicit'
+pass 'fm-no-mistakes-attach: empty status is not misreported as an absent run'
+unset FM_FAKE_NM_STATUS_EMPTY
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/status-no-head"
+export FM_FAKE_NM_STATUS_NO_HEAD="$FIXTURE/status-no-head"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=5 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=2 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'status without a head did not stop the waiter' "$output"
+assert_contains "$output" 'axi status failed 2 consecutive times: status output is missing required run id, branch, or head' \
+  'missing head was not reported as unusable status output'
+pass 'fm-no-mistakes-attach: status without a code identity is not misreported as an absent run'
+unset FM_FAKE_NM_STATUS_NO_HEAD
+
+: > "$FM_FAKE_NM_CALLS"
+export FM_FAKE_NM_TRANSIENT_FAILURES=1
+FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=2 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" || fail 'transient status failure did not recover'
+[ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'transient status recovery did not retry once'
+[ "$(cat "$FM_FAKE_NM_ATTACHED")" = RUN123 ] || fail 'transient status recovery did not attach the matching run'
+pass 'fm-no-mistakes-attach: transient status failure recovers before the bounded limit'
+unset FM_FAKE_NM_TRANSIENT_FAILURES
 
 : > "$FM_FAKE_NM_CALLS"
 : > "$FIXTURE/wrong-branch"
 export FM_FAKE_NM_WRONG_BRANCH="$FIXTURE/wrong-branch"
 set +e
 output=$(FM_NM_ATTACH_MAX_POLLS=2 FM_NM_ATTACH_POLL_SECONDS=0 \
-  "$HELPER" wait "$REPO" fm/dashboard-test "$FAKEBIN/no-mistakes" 2>&1)
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail_with_output 'wrong-branch wait did not time out' "$output"

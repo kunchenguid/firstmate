@@ -280,8 +280,8 @@ crewmate to prepare an unfocused sibling split immediately before it invokes the
 installed no-mistakes skill. `bin/fm-no-mistakes-attach.sh --help` owns the exact
 command and mutation mechanics. Sibling creation reuses the adapter's canonical
 live launcher identity and named-session presentation lock. The sibling waits
-for the same repository and branch to expose a nonterminal AXI run, then executes native
-`no-mistakes attach --run <id>`.
+for the same repository, branch, and code identity to expose a nonterminal AXI
+run, then executes native `no-mistakes attach --run <id>`.
 
 The native TUI exposes phases, logs, findings, tests, gates, PR, and CI state;
 its own keyboard navigation remains interactive after the pane is focused. A

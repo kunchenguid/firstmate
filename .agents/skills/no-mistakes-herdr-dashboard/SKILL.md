@@ -29,11 +29,11 @@ layout mutation with the canonical named-session presentation lock.
   Firstmate instead of starting AXI without the requested dashboard.
 
 The sibling polls only `no-mistakes axi status` in the same repository. Once it
-observes a nonterminal run for the crewmate's exact branch, it executes native
-`no-mistakes attach --run <id>`. It never calls `axi run`, `axi respond`, or any
-branch-mutating command. The implementation crewmate remains the sole AXI
-driver, and the native pipeline agent remains headless rather than becoming a
-second Herdr crewmate.
+observes a nonterminal run for the crewmate's exact branch and current code
+identity, it executes native `no-mistakes attach --run <id>`. It never calls
+`axi run`, `axi respond`, or any branch-mutating command. The implementation
+crewmate remains the sole AXI driver, and the native pipeline agent remains
+headless rather than becoming a second Herdr crewmate.
 
 The native dashboard is interactive. Focus the sibling pane and use its own
 keyboard navigation (`j`/`k`, `g`/`G`, `Ctrl-d`/`Ctrl-u`, arrows, Home, and End)
