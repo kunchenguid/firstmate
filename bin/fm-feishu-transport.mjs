@@ -212,25 +212,18 @@ async function sendOneOutbound(client, binding, ownerFence) {
   const claim = claimNextOutbound(HOME);
   if (!claim) return false;
   const content = JSON.stringify({ text: claim.chunk.chunk });
-  const payload = claim.outbox.reply_to_message_id
-    ? {
-        data: { content, msg_type: "text", uuid: claim.chunk.idempotency_key },
-        path: { message_id: claim.outbox.reply_to_message_id },
-      }
-    : {
-        data: {
-          receive_id: claim.outbox.destination_chat_id,
-          content,
-          msg_type: "text",
-          uuid: claim.chunk.idempotency_key,
-        },
-        params: { receive_id_type: "chat_id" },
-      };
+  const payload = {
+    data: {
+      receive_id: claim.outbox.destination_chat_id,
+      content,
+      msg_type: "text",
+      uuid: claim.chunk.idempotency_key,
+    },
+    params: { receive_id_type: "chat_id" },
+  };
   let response;
   try {
-    response = claim.outbox.reply_to_message_id
-      ? await client.im.v1.message.reply(payload, { timeout: COMMAND_TIMEOUT_MS })
-      : await client.im.v1.message.create(payload, { timeout: COMMAND_TIMEOUT_MS });
+    response = await client.im.v1.message.create(payload, { timeout: COMMAND_TIMEOUT_MS });
   } catch (error) {
     const errorType = sdkErrorType(error);
     failOutboundAttempt(HOME, claim, errorType, {

@@ -18,7 +18,7 @@ $ npm view @larksuiteoapi/node-sdk version dist-tags --json
 ```
 
 The package README's long-connection section documents `WSClient.start({ eventDispatcher })` with `EventDispatcher.register({ "im.message.receive_v1": ... })`.
-The package declarations expose `WSClient` lifecycle callbacks and `close()`, `Client.im.v1.chat.get`, `Client.im.v1.message.reply`, `Client.im.v1.message.create`, and message `uuid` fields used for idempotency.
+The package declarations expose `WSClient` lifecycle callbacks and `close()`, `Client.im.v1.chat.get`, `Client.im.v1.message.create`, and message `uuid` fields used for idempotency.
 The package is pinned in `package.json` and `package-lock.json`.
 No project dependency was installed into this worktree while recording this evidence.
 
@@ -36,7 +36,7 @@ A real integration check remains an explicit future operator action.
 
 ```console
 $ bash tests/fm-feishu-channel.test.sh
-ok - native Pi queue, exact Feishu provenance, durable state, and TUI-equivalent tool path
+ok - native Pi steering, all-origin Assistant mirroring, durable state, and TUI-equivalent tool path
 ok - local Pi bridge keeps native TUI/tool paths and stops transport before identity changes
 ok - official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized outbound
 ```
@@ -44,11 +44,11 @@ ok - official-SDK long-connection transport is inert, identity-fenced, deduplica
 The first section uses disposable private homes and persisted fake Pi session headers.
 It proves that the extension registers no TUI input, message-end, turn-start, or tool-call hook.
 It proves that native TUI and ordinary Firstmate operational input do not enter Feishu state.
-It proves that accepted Feishu text is durably recorded and offered to Pi through native follow-up delivery with an exact session and generation fence.
-It proves marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, exact reply and decision correlation, direct settled Assistant output, no TUI-output projection, URL-preserving chunking, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
+It proves that accepted Feishu text is durably recorded and offered to Pi through native steer delivery with an exact session and generation fence.
+It proves marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.` exclusion, non-Assistant exclusion, restart deduplication, URL-preserving chunking, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
 
 The SDK section uses a local module implementing the documented `Client`, `WSClient`, and `EventDispatcher` calls.
-It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, reconnect callback handling, replay deduplication, SDK reply/create mapping, stable UUID retry, Retry-After preservation, outbound serialization, body-free health, and owner-verified graceful stop.
+It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, reconnect callback handling, replay deduplication, canonical bound-chat SDK `message.create`, stable UUID retry, Retry-After preservation, outbound serialization, body-free health, and owner-verified graceful stop.
 A sentinel executable on `PATH` proves the transport does not invoke the former command transport.
 
 ## Pi compatibility results
@@ -76,4 +76,4 @@ ok - .pi primary extension: delivery failure resets the logical-run latch
 ...
 ```
 
-The watcher and turn-end tests exercise direct native `sendUserMessage(..., { deliverAs: "followUp" })` delivery without loading or writing Feishu state.
+The watcher and turn-end tests exercise direct native `sendUserMessage(..., { deliverAs: "followUp" })` delivery without loading or writing Feishu state, independently of Feishu's steer mode.

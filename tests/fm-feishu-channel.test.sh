@@ -48,7 +48,6 @@ import {
   pathsForHome,
   publishFeishuInbound,
   receiptOutbound,
-  registerPendingDecision,
   statusSummary,
   writeTransportHealth,
 } from "./bin/fm-feishu-state.mjs";
@@ -68,12 +67,20 @@ const pairing = createPairing(home, {
   allowedUser: "ou_captain1234",
   allowedChat: "oc_chat1234",
 });
+const preBindingAssistant = {
+  type: "message",
+  id: "00000001",
+  parentId: null,
+  timestamp: "2026-08-12T00:00:00.000Z",
+  message: { role: "assistant", content: [{ type: "text", text: "historical response before binding" }] },
+};
 const binding = bindSession(home, {
   sessionId,
   sessionFile,
   sessionCwd,
   headerId: sessionId,
   headerCwd: sessionCwd,
+  outboundAfterEntryId: preBindingAssistant.id,
 });
 const procStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
 const processStartToken = procStat.slice(procStat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
@@ -175,7 +182,7 @@ assert.throws(() => publishFeishuInbound(home, remote({ event_id: "evt_stale_fen
 }), /binding generation changed/);
 assert.equal(ingressCounts(home).pending, 1);
 
-const session = context();
+const session = context(sessionId, sessionFile, sessionCwd, [preBindingAssistant]);
 const pi = fakePi();
 registerFeishuNativeChannel(pi);
 assert(!pi.handlers.has("input"), "Feishu extension intercepted native TUI input");
@@ -184,7 +191,7 @@ assert(!pi.handlers.has("tool_call"), "Feishu extension retained a special tool-
 await emit(pi, "session_start", { reason: "startup" }, session.ctx);
 await new Promise((resolve) => setTimeout(resolve, 320));
 assert.equal(pi.sends.length, 1, "accepted Feishu input was not submitted to Pi's native queue");
-assert.equal(pi.sends[0].options?.deliverAs, "followUp", "Feishu input did not use Pi's native follow-up queue");
+assert.equal(pi.sends[0].options?.deliverAs, "steer", "Feishu input did not use Pi's native steering queue");
 const marker = parseFeishuMarker(pi.sends[0].content);
 assert.equal(marker?.deliveryRef, first.deliveryRef);
 assert(!pi.sends[0].content.includes("ou_captain1234") && !pi.sends[0].content.includes("oc_chat1234"), "private Feishu identity leaked into Pi context");
@@ -195,30 +202,43 @@ const stateBeforeNative = JSON.stringify(ingressCounts(home));
 pi.sendUserMessage("\u2063FIRSTMATE_OP: v1 watcher: native follow-up", { deliverAs: "followUp" });
 assert.equal(JSON.stringify(ingressCounts(home)), stateBeforeNative, "ordinary Firstmate input entered Feishu durable ingress state");
 assert.equal(pi.sends.at(-1).content, "\u2063FIRSTMATE_OP: v1 watcher: native follow-up");
+assert.equal(pi.sends.at(-1).options?.deliverAs, "followUp", "ordinary Firstmate operational input lost its existing follow-up mode");
 
-session.entries.push({ type: "message", id: "user-feishu-1", message: { role: "user", content: pi.sends[0].content } });
-await emit(pi, "message_start", { message: { role: "user", content: pi.sends[0].content } }, session.ctx);
+session.entries.push({ type: "message", id: "00000002", parentId: "00000001", timestamp: "2026-08-12T00:00:01.000Z", message: { role: "user", content: pi.sends[0].content } });
+await emit(pi, "message_start", { message: session.entries.at(-1).message }, session.ctx);
 const toolResults = await emit(pi, "tool_call", { toolName: "bash", toolCallId: "normal-tool", input: { command: "printf normal" } }, session.ctx);
 assert(toolResults.every((result) => result?.block !== true), "Feishu request did not reach Pi's normal tool path");
-registerPendingDecision(home, { decisionRef: "dec-native", decisionKey: "native-choice", sourceRef: first.deliveryRef, sessionId });
-await emit(pi, "turn_end", { message: { role: "assistant", content: "Direct native-queue answer https://example.test/full" } }, session.ctx);
-await emit(pi, "message_start", { message: { role: "user", content: "native TUI input remains unmarked" } }, session.ctx);
-await emit(pi, "turn_end", { message: { role: "assistant", content: "Local TUI answer must not enter Feishu outbox" } }, session.ctx);
-await emit(pi, "agent_settled", {}, session.ctx);
-let claim = claimNextOutbound(home);
-assert(claim, "settled Feishu response did not enter durable outbox");
-assert.equal(claim.outbox.text, "Direct native-queue answer https://example.test/full");
-assert.equal(claim.outbox.reply_to_message_id, "om_remoteA1234");
-assert.equal(claim.outbox.decision_ref, "dec-native");
-receiptOutbound(home, claim, { messageId: "om_outboundDecision1234", chatId: "oc_chat1234" });
-assert.equal(statusSummary(home).outbound_pending, 0, "native TUI response was incorrectly sent to Feishu");
 
-const unrelated = publishFeishuInbound(home, remote({ event_id: "evt_unrelated", message_id: "om_unrelated1234", reply_to: null, content: "unrelated" }));
-assert(encodeFeishuIngress(findInboundByDeliveryRef(home, unrelated.deliveryRef)).includes("must not resolve any open decision"));
-const exactReply = publishFeishuInbound(home, remote({ event_id: "evt_reply", message_id: "om_reply1234", reply_to: "om_outboundDecision1234", content: "exact reply" }));
-const exactEvent = findInboundByDeliveryRef(home, exactReply.deliveryRef);
-assert.equal(exactEvent.decision_ref, "dec-native");
-assert.equal(exactEvent.decision_key, "native-choice");
+async function finalizeAssistant(id, content, timestamp) {
+  const message = { role: "assistant", content };
+  session.entries.push({ type: "message", id, parentId: session.entries.at(-1)?.id ?? null, timestamp, message });
+  await emit(pi, "turn_end", { message, toolResults: [] }, session.ctx);
+}
+
+await finalizeAssistant("00000003", [{ type: "text", text: "Direct Feishu answer https://example.test/full" }], "2026-08-12T00:00:02.000Z");
+session.entries.push({ type: "message", id: "00000004", parentId: "00000003", timestamp: "2026-08-12T00:00:03.000Z", message: { role: "user", content: "native TUI input remains unmarked" } });
+await emit(pi, "message_start", { message: session.entries.at(-1).message }, session.ctx);
+await finalizeAssistant("00000005", [{ type: "text", text: "Local TUI answer is mirrored too" }], "2026-08-12T00:00:04.000Z");
+session.entries.push({ type: "message", id: "00000006", parentId: "00000005", timestamp: "2026-08-12T00:00:05.000Z", message: { role: "user", content: "\u2063FIRSTMATE_OP: v1 routine" } });
+await finalizeAssistant("00000007", [{ type: "text", text: "Captain, shipshape." }], "2026-08-12T00:00:06.000Z");
+await finalizeAssistant("00000008", [{ type: "thinking", thinking: "private" }, { type: "toolCall", id: "call-1", name: "read", arguments: {} }], "2026-08-12T00:00:07.000Z");
+session.entries.push({ type: "custom", id: "00000009", parentId: "00000008", timestamp: "2026-08-12T00:00:08.000Z", customType: "tui-only", data: { message: "local alert" } });
+await finalizeAssistant("0000000a", [{ type: "text", text: "Watcher answer is mirrored too" }], "2026-08-12T00:00:09.000Z");
+await finalizeAssistant("0000000b", [{ type: "text", text: "   " }], "2026-08-12T00:00:10.000Z");
+
+const mirrored = [];
+for (let claim = claimNextOutbound(home); claim; claim = claimNextOutbound(home)) {
+  mirrored.push({ id: claim.outbox.assistant_entry_id, text: claim.outbox.text });
+  assert.equal(claim.outbox.source, "pi-assistant");
+  assert(!Object.hasOwn(claim.outbox, "reply_to_message_id"), "general Assistant mirror retained originating-message reply coupling");
+  receiptOutbound(home, claim, { messageId: `om_outbound${claim.outbox.assistant_entry_id}`, chatId: "oc_chat1234" });
+}
+assert.deepEqual(mirrored, [
+  { id: "00000003", text: "Direct Feishu answer https://example.test/full" },
+  { id: "00000005", text: "Local TUI answer is mirrored too" },
+  { id: "0000000a", text: "Watcher answer is mirrored too" },
+]);
+assert.equal(statusSummary(home).outbound_pending, 0);
 
 await emit(pi, "session_shutdown", {}, session.ctx);
 const resumedPi = fakePi();
@@ -228,6 +248,7 @@ await emit(resumedPi, "session_start", { reason: "resume" }, resumed.ctx);
 await new Promise((resolve) => setTimeout(resolve, 320));
 assert(!resumedPi.sends.some((send) => parseFeishuMarker(send.content)?.deliveryRef === first.deliveryRef), "persisted Feishu input was resubmitted after exact session resume");
 assert.equal(ingressCounts(home).delivered, 1, "session marker did not reconcile prior native-queue submission");
+assert.equal(claimNextOutbound(home), undefined, "persisted Assistant entries were mirrored again after exact session resume");
 await emit(resumedPi, "session_shutdown", {}, resumed.ctx);
 
 const wrongPi = fakePi();
@@ -278,15 +299,14 @@ mkdirSync(secretSession);
 const secretFile = join(secretSession, "s.jsonl");
 writeFileSync(secretFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: secretSession })}\n`);
 const secretBinding = bindSession(secretHome, { sessionId, sessionFile: secretFile, sessionCwd: secretSession, headerId: sessionId, headerCwd: secretSession });
-const secretInbound = publishFeishuInbound(secretHome, remote({ event_id: "evt_secret", message_id: "om_secretSource1234" }));
 const paths = pathsForHome(secretHome);
 const beforeIntents = readdirSync(paths.outboundRegistrationIntents).length;
 const { persistAssistantOutboundIntent } = await import("./bin/fm-feishu-state.mjs");
-const refused = persistAssistantOutboundIntent(secretHome, { text: "Authorization: Bearer fixed-secret-value-123456", source: "feishu", sourceRef: secretInbound.deliveryRef, sessionId, bindingGeneration: secretBinding.generation, replyTo: "om_secretSource1234" });
+const refused = persistAssistantOutboundIntent(secretHome, { text: "Authorization: Bearer fixed-secret-value-123456", assistantEntryId: "abcdef01", sessionOrder: 1, sessionEntryTimestamp: "2026-08-12T00:00:00.000Z", sessionId, bindingGeneration: secretBinding.generation });
 assert.equal(refused.status, "secret-refused");
 assert.equal(readdirSync(paths.outboundRegistrationIntents).length, beforeIntents, "secret text was persisted before deterministic refusal");
 
-console.log("ok - native Pi queue, exact Feishu provenance, durable state, and TUI-equivalent tool path");
+console.log("ok - native Pi steering, all-origin Assistant mirroring, durable state, and TUI-equivalent tool path");
 JS
 
 BOOTSTRAP_INERT_HOME="$TMP_ROOT/bootstrap-inert-home"
@@ -363,6 +383,7 @@ const ctx = {
     getSessionFile() { return process.env.BRIDGE_SESSION_FILE; },
     getSessionId() { return process.env.SID; },
     getHeader() { return { id: process.env.SID, cwd: process.env.BRIDGE_SESSION }; },
+    getEntries() { return []; },
   },
   ui: { notify(message) { notices.push(String(message)); }, setStatus() {} },
   async reload() {},
@@ -500,16 +521,15 @@ export class WSClient {
 JS
 
 FM_HOME="$TRANSPORT_HOME" SESSION_FILE="$TRANSPORT_FILE" SESSION_DIR="$TRANSPORT_SESSION" SID="$SID" APP_FINGERPRINT="$APP_FINGERPRINT" TOUCH_SENTINEL="$TOUCH_SENTINEL" node --input-type=module <<'JS'
-import { bindSession, createPairing, publishFeishuInbound, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
+import { bindSession, createPairing, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const home = process.env.FM_HOME;
 createPairing(home, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
 const binding = bindSession(home, { sessionId: process.env.SID, sessionFile: process.env.SESSION_FILE, sessionCwd: process.env.SESSION_DIR, headerId: process.env.SID, headerCwd: process.env.SESSION_DIR });
-const source = publishFeishuInbound(home, { type: "im.message.receive_v1", event_id: "evt_sdk_a", message_id: "om_sdkA1234", sender_id: "ou_captain1234", sender_type: "user", chat_id: "oc_chat1234", chat_type: "p2p", message_type: "text", content: "sdk event A", create_time: "10" }, { transport: "feishu-sdk-long-connection" });
 const result = registerAssistantOutbound(home, {
   text: `literal $(touch ${process.env.TOUCH_SENTINEL}) https://example.test/kept`,
-  source: "feishu",
-  sourceRef: source.deliveryRef,
-  replyTo: "om_sdkA1234",
+  assistantEntryId: "feed0001",
+  sessionOrder: 1,
+  sessionEntryTimestamp: "2026-08-12T00:00:01.000Z",
   sessionId: binding.session_id,
   bindingGeneration: binding.generation,
 });
@@ -599,18 +619,17 @@ const events = readdirSync(dir).filter((name) => name.endsWith(".json")).map((na
 assert.deepEqual(events.map((event) => event.message_id), ["om_sdkA1234", "om_sdkB1234"]);
 assert(events.every((event) => event.transport === "feishu-sdk-long-connection"));
 JS
-node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);const sends=rows.filter(r=>r.type==="send");if(sends.length!==2||new Set(sends.map(r=>r.uuid)).size!==1||!rows.some(r=>r.type==="ws-start")||!rows.some(r=>r.type==="client"&&r.hasSecret===true)||rows.some(r=>JSON.stringify(r).includes(process.argv[2])))process.exit(1)' "$SDK_LOG" "$APP_SECRET" \
-  || fail "SDK startup, stable outbound UUID, or credential-redaction evidence was wrong"
+node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);const sends=rows.filter(r=>r.type==="send");if(sends.length!==2||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.kind!=="create"||r.receiveId!=="oc_chat1234"||r.replyTo!==null)||!rows.some(r=>r.type==="ws-start")||!rows.some(r=>r.type==="client"&&r.hasSecret===true)||rows.some(r=>JSON.stringify(r).includes(process.argv[2])))process.exit(1)' "$SDK_LOG" "$APP_SECRET" \
+  || fail "SDK startup, canonical bound-chat message.create, stable UUID, or credential-redaction evidence was wrong"
 [ "$(FM_HOME="$TRANSPORT_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).outbound_pending)))')" -eq 0 ] \
   || fail "SDK success did not publish a durable outbound receipt"
 [ -n "$(find "$TRANSPORT_HOME/state/feishu/quarantine" -type f -name '*.json' -print -quit)" ] \
   || fail "SDK boundary did not durably refuse unauthorized identity/chat events"
 
 FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
-import { publishFeishuInbound, readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
+import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const binding = readActiveBinding(process.env.FM_HOME);
-const source = publishFeishuInbound(process.env.FM_HOME, { type: "im.message.receive_v1", event_id: "evt_rate_source", message_id: "om_rateSource1234", sender_id: "ou_captain1234", sender_type: "user", chat_id: "oc_chat1234", chat_type: "p2p", message_type: "text", content: "rate source", create_time: "30" });
-const result = registerAssistantOutbound(process.env.FM_HOME, { text: "server delayed SDK retry", source: "feishu", sourceRef: source.deliveryRef, replyTo: "om_rateSource1234", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
+const result = registerAssistantOutbound(process.env.FM_HOME, { text: "server delayed SDK retry", assistantEntryId: "feed0002", sessionOrder: 2, sessionEntryTimestamp: "2026-08-12T00:00:02.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
 if (result.status !== "registered") throw new Error(JSON.stringify(result));
 JS
 rm -f "$SDK_SEND_MARK"
@@ -636,10 +655,9 @@ for _ in $(seq 1 150); do
 done
 [ "$healthy" -eq 1 ] || fail "direct SDK long connection did not become healthy"
 FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
-import { publishFeishuInbound, readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
+import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
 const binding = readActiveBinding(process.env.FM_HOME);
-const source = publishFeishuInbound(process.env.FM_HOME, { type: "im.message.receive_v1", event_id: "evt_single_source", message_id: "om_singleSource1234", sender_id: "ou_captain1234", sender_type: "user", chat_id: "oc_chat1234", chat_type: "p2p", message_type: "text", content: "single source", create_time: "40" });
-const result = registerAssistantOutbound(process.env.FM_HOME, { text: "single flight SDK send", source: "feishu", sourceRef: source.deliveryRef, replyTo: "om_singleSource1234", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
+const result = registerAssistantOutbound(process.env.FM_HOME, { text: "single flight SDK send", assistantEntryId: "feed0003", sessionOrder: 3, sessionEntryTimestamp: "2026-08-12T00:00:03.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation });
 if (result.status !== "registered") throw new Error(JSON.stringify(result));
 JS
 settled=0

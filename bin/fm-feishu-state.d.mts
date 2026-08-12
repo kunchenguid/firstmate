@@ -7,7 +7,6 @@ export const OUTBOUND_LEDGER_SCHEMA: string;
 export const OUTBOUND_RECEIPT_SCHEMA: string;
 export const OUTBOUND_INTENT_SCHEMA: string;
 export const TRANSPORT_HEALTH_SCHEMA: string;
-export const DECISION_SCHEMA: string;
 export const DEFAULT_MAX_INBOUND_BYTES: number;
 export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES: number;
 export const DEFAULT_MAX_PENDING_OUTBOUND: number;
@@ -33,12 +32,13 @@ export interface BindingRecord {
   home_id: string;
   fm_home_realpath: string;
   chat_id: string;
-  thread_policy: "reply-correlation-only";
+  thread_policy: "bound-chat-mirror";
   session_id: string;
   session_file_realpath: string;
   session_cwd_realpath: string;
   session_header_id: string;
   session_header_cwd_realpath: string;
+  outbound_after_entry_id: string | null;
   generation: number;
   status: "active" | "disabled";
   bound_by: "local-tui";
@@ -58,9 +58,6 @@ export interface InboundEvent {
   binding_generation: number;
   target_session_id: string;
   delivery_ref: string;
-  decision_ref: string | null;
-  decision_key: string | null;
-  decision_reply: "exact" | "unrelated" | "none";
 }
 
 export interface InboundLedger {
@@ -100,11 +97,8 @@ export interface StatePaths {
   outbox: string;
   outboundLedger: string;
   outboundReceipts: string;
-  outboundMessageMap: string;
   outboundPending: string;
   outboundRegistrationIntents: string;
-  pendingDecisions: string;
-  pendingDecisionOpen: string;
   attemptsOut: string;
   quarantine: string;
   alerts: string;
@@ -131,6 +125,7 @@ export function bindSession(home: string, session: {
   sessionCwd: string;
   headerId: string;
   headerCwd: string;
+  outboundAfterEntryId?: string | null;
 }, options?: { rebind?: boolean }): BindingRecord;
 export function publishFeishuInbound(home: string, raw: Record<string, unknown>, options?: {
   maxInboundBytes?: number;
@@ -171,13 +166,11 @@ export function assistantSecretPattern(text: string): string | null;
 export function deterministicChunks(text: string, maxBytes?: number): string[];
 export function registerAssistantOutbound(home: string, input: {
   text: string;
-  source: "feishu";
-  sourceRef: string;
+  assistantEntryId: string;
+  sessionOrder: number;
+  sessionEntryTimestamp: string;
   sessionId: string;
   bindingGeneration: number;
-  replyTo?: string | null;
-  decisionRef?: string | null;
-  decisionKey?: string | null;
   maxChunkBytes?: number;
   maxOutboundBytes?: number;
   maxPendingOutbound?: number;
@@ -196,15 +189,14 @@ export interface OutboundClaim {
   outbox: {
     schema: string;
     event_id: string;
-    source: "feishu";
-    source_ref: string;
+    source: "pi-assistant";
+    assistant_entry_id: string;
+    session_order: number;
+    session_entry_timestamp: string;
     session_id: string;
     binding_id: string;
     binding_generation: number;
     destination_chat_id: string;
-    reply_to_message_id: string | null;
-    decision_ref: string | null;
-    decision_key: string | null;
     text: string;
     chunks: Array<{ index: number; count: number; chunk: string; chunk_hash: string; idempotency_key: string }>;
   };
@@ -214,15 +206,13 @@ export interface OutboundClaim {
 export interface OutboundRegistrationIntent {
   schema: string;
   intent_id: string;
-  source: "feishu";
-  source_ref: string;
+  source: "pi-assistant";
+  assistant_entry_id: string;
+  session_order: number;
+  session_entry_timestamp: string;
   session_id: string;
   binding_id: string;
   binding_generation: number;
-  reply_to_message_id: string | null;
-  decision_captured: boolean;
-  decision_ref: string | null;
-  decision_key: string | null;
   text: string;
   text_hash: string;
   created_at: string;
@@ -233,14 +223,16 @@ export interface OutboundRegistrationIntentCandidate {
 }
 export function persistAssistantOutboundIntent(home: string, input: {
   text: string;
-  source: "feishu";
-  sourceRef: string;
+  assistantEntryId: string;
+  sessionOrder: number;
+  sessionEntryTimestamp: string;
   sessionId: string;
   bindingGeneration: number;
-  replyTo?: string | null;
   maxOutboundBytes?: number;
   maxPendingOutbound?: number;
 }): OutboundRegistrationIntent |
+  { status: "duplicate"; eventId: string } |
+  { status: "skipped"; reason: "empty" | "routine" } |
   { status: "resource-refused"; reason: "queue-limit" | "resource-limit"; alert: { id: string; created: boolean } } |
   { status: "secret-refused"; pattern: string; alert: { id: string; created: boolean } };
 export function readAssistantOutboundIntents(home: string, fence: {
@@ -248,7 +240,6 @@ export function readAssistantOutboundIntents(home: string, fence: {
   bindingId: string;
   bindingGeneration: number;
 }): OutboundRegistrationIntentCandidate[];
-export function bindAssistantOutboundIntentDecision(home: string, candidate: OutboundRegistrationIntentCandidate, decision: PendingDecisionCandidate | undefined): OutboundRegistrationIntentCandidate;
 export function completeAssistantOutboundIntent(home: string, candidate: OutboundRegistrationIntentCandidate): boolean;
 export function repairOutboundState(home: string): number;
 export function claimNextOutbound(home: string, options?: { nowMs?: number }): OutboundClaim | undefined;
@@ -261,21 +252,6 @@ export function receiptOutbound(home: string, claim: OutboundClaim, receipt: {
   messageId: string;
   chatId: string;
 }): boolean;
-export interface PendingDecisionCandidate {
-  name: string;
-  record: { decision_ref: string; decision_key: string; source: "feishu"; source_ref: string };
-}
-export function registerPendingDecision(home: string, input: {
-  decisionRef: string;
-  decisionKey: string;
-  sourceRef: string;
-  sessionId: string;
-  maxPendingOutbound?: number;
-}): Record<string, unknown>;
-export function findPendingDecisionForOutbound(home: string, decisionRef: string, decisionKey: string, sessionId: string, bindingGeneration: number, source: "feishu", sourceRef: string): PendingDecisionCandidate;
-export function claimPendingDecisionForOutbound(home: string, sessionId: string, bindingGeneration: number, source: "feishu", sourceRef: string): PendingDecisionCandidate | undefined;
-export function bindPendingDecisionToOutbound(home: string, candidate: PendingDecisionCandidate | undefined, eventId: string): void;
-export function finishPendingDecisionForOutbound(home: string, candidate: PendingDecisionCandidate | undefined, outcome: string): void;
 export function claimTransportOwner(home: string, owner: {
   nonce: string;
   moduleFile: string;

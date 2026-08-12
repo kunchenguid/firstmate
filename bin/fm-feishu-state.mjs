@@ -3,8 +3,8 @@
 //
 // This module contains no network or Agent code.  It owns the pairing and
 // binding schemas, private accepted-event publication, native Pi queue handoff,
-// direct-Assistant outbox records, attempts, receipts, correlation maps,
-// quarantine, transport health, and crash reconciliation.  The Pi extension
+// finalized-Assistant registration intents and outbox records, attempts,
+// receipts, quarantine, transport health, and crash reconciliation.  The Pi extension
 // and the no-Agent transport import this same owner rather than duplicating
 // those state machines.
 import {
@@ -29,15 +29,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PAIRING_SCHEMA = "fm-feishu-pairing.v2";
-export const BINDING_SCHEMA = "fm-feishu-binding.v1";
+export const BINDING_SCHEMA = "fm-feishu-binding.v2";
 export const INBOUND_SCHEMA = "fm-feishu-inbound.v1";
 export const INBOUND_LEDGER_SCHEMA = "fm-feishu-inbound-ledger.v2";
-export const OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound.v1";
+export const OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound.v2";
 export const OUTBOUND_LEDGER_SCHEMA = "fm-feishu-outbound-ledger.v1";
 export const OUTBOUND_RECEIPT_SCHEMA = "fm-feishu-outbound-receipt.v1";
-export const OUTBOUND_INTENT_SCHEMA = "fm-feishu-outbound-registration-intent.v1";
+export const OUTBOUND_INTENT_SCHEMA = "fm-feishu-outbound-registration-intent.v2";
 export const TRANSPORT_HEALTH_SCHEMA = "fm-feishu-transport-health.v2";
-export const DECISION_SCHEMA = "fm-feishu-pending-decision.v1";
 export const DEFAULT_MAX_INBOUND_BYTES = 64 * 1024;
 export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES = 20 * 1024;
 export const DEFAULT_MAX_OUTBOUND_BYTES = 1024 * 1024;
@@ -53,6 +52,7 @@ const MODULE_FILE = fileURLToPath(import.meta.url);
 const RECORD_HASH = /^sha256:[a-f0-9]{64}$/;
 const SESSION_ID = /^[0-9a-fA-F-]{16,128}$/;
 const DELIVERY_REF = /^in_[a-f0-9]{24}$/;
+const SESSION_ENTRY_ID = /^[a-f0-9]{8}$/;
 const OUTBOUND_EVENT_ID = /^out_[a-f0-9]{40}$/;
 const MESSAGE_ID = /^om_[A-Za-z0-9_-]{4,128}$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]{4,128}$/;
@@ -229,11 +229,8 @@ export function pathsForHome(home) {
     outbox: join(stateRoot, "outbox"),
     outboundLedger: join(stateRoot, "outbound-ledger"),
     outboundReceipts: join(stateRoot, "outbound-receipts"),
-    outboundMessageMap: join(stateRoot, "outbound-message-map"),
     outboundPending: join(stateRoot, "outbound-pending"),
     outboundRegistrationIntents: join(stateRoot, "outbound-registration-intents"),
-    pendingDecisions: join(stateRoot, "pending-decisions"),
-    pendingDecisionOpen: join(stateRoot, "pending-decision-open"),
     attemptsOut: join(stateRoot, "attempts", "out"),
     quarantine: join(stateRoot, "quarantine"),
     alerts: join(stateRoot, "alerts"),
@@ -262,11 +259,8 @@ export function ensurePrivateLayout(home) {
     paths.outbox,
     paths.outboundLedger,
     paths.outboundReceipts,
-    paths.outboundMessageMap,
     paths.outboundPending,
     paths.outboundRegistrationIntents,
-    paths.pendingDecisions,
-    paths.pendingDecisionOpen,
     join(paths.stateRoot, "attempts"),
     paths.attemptsOut,
     paths.quarantine,
@@ -355,10 +349,6 @@ function validateInboundEvent(event) {
   requireString(event.authorization_snapshot, "inbound authorization snapshot", RECORD_HASH);
   requireSafeInteger(event.ingress_seq, "inbound sequence", { min: 1 });
   requireString(event.delivery_ref, "inbound delivery ref", DELIVERY_REF);
-  requireNullableString(event.decision_ref, "inbound decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
-  requireNullableString(event.decision_key, "inbound decision key", /^[A-Za-z0-9._:-]{1,160}$/);
-  if ((event.decision_ref === null) !== (event.decision_key === null)) throw new Error("partial Feishu inbound decision identity");
-  if (!new Set(["exact", "unrelated", "none"]).has(event.decision_reply)) throw new Error("invalid Feishu inbound decision fence");
   return event;
 }
 
@@ -386,18 +376,15 @@ function validateInboundLedger(ledger) {
 }
 
 function validateOutbound(outbox) {
-  if (outbox.schema !== OUTBOUND_SCHEMA || outbox.source !== "feishu") throw new Error("invalid Feishu outbox schema or source");
+  if (outbox.schema !== OUTBOUND_SCHEMA || outbox.source !== "pi-assistant") throw new Error("invalid Feishu outbox schema or source");
   requireString(outbox.event_id, "outbound event id", OUTBOUND_EVENT_ID);
-  requireString(outbox.source_ref, "outbound source ref", DELIVERY_REF);
+  requireString(outbox.assistant_entry_id, "outbound Assistant entry", SESSION_ENTRY_ID);
+  requireSafeInteger(outbox.session_order, "outbound session order");
   requireString(outbox.session_id, "outbound session", SESSION_ID);
   requireString(outbox.binding_id, "outbound binding", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(outbox.binding_generation, "outbound generation", { min: 1 });
   requireString(outbox.destination_chat_id, "outbound destination", CHAT_ID);
-  requireNullableString(outbox.reply_to_message_id, "outbound reply", MESSAGE_ID);
-  requireNullableString(outbox.decision_ref, "outbound decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
-  requireNullableString(outbox.decision_key, "outbound decision key", /^[A-Za-z0-9._:-]{1,160}$/);
-  if ((outbox.decision_ref === null) !== (outbox.decision_key === null)) throw new Error("partial Feishu outbound decision identity");
-  if (typeof outbox.text !== "string" || outbox.text.trim().length === 0) throw new Error("invalid Feishu outbound text");
+  if (typeof outbox.text !== "string" || outbox.text.trim().length === 0 || outbox.text === "Captain, shipshape.") throw new Error("invalid Feishu outbound text");
   if (outbox.text_hash !== `sha256:${sha(outbox.text)}`) throw new Error("Feishu outbound text hash mismatch");
   if (!Array.isArray(outbox.chunks) || outbox.chunks.length === 0) throw new Error("invalid Feishu outbound chunks");
   let combined = "";
@@ -409,6 +396,7 @@ function validateOutbound(outbox) {
     combined += chunk.chunk;
   }
   if (combined !== outbox.text) throw new Error("Feishu outbound chunks changed final text");
+  requireIso(outbox.session_entry_timestamp, "outbound Assistant entry time");
   requireIso(outbox.created_at, "outbound creation time");
   return outbox;
 }
@@ -451,45 +439,17 @@ function validateOutboundReceipt(receipt) {
 }
 
 function validateOutboundIntent(intent) {
-  if (intent.schema !== OUTBOUND_INTENT_SCHEMA || intent.source !== "feishu") throw new Error("invalid Feishu outbound registration intent");
+  if (intent.schema !== OUTBOUND_INTENT_SCHEMA || intent.source !== "pi-assistant") throw new Error("invalid Feishu outbound registration intent");
   requireString(intent.intent_id, "outbound intent id", /^reg_[a-f0-9]{40}$/);
-  requireString(intent.source_ref, "outbound intent source ref", DELIVERY_REF);
+  requireString(intent.assistant_entry_id, "outbound intent Assistant entry", SESSION_ENTRY_ID);
+  requireSafeInteger(intent.session_order, "outbound intent session order");
   requireString(intent.session_id, "outbound intent session", SESSION_ID);
   requireString(intent.binding_id, "outbound intent binding", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(intent.binding_generation, "outbound intent generation", { min: 1 });
-  requireNullableString(intent.reply_to_message_id, "outbound intent reply", MESSAGE_ID);
-  if (typeof intent.decision_captured !== "boolean") throw new Error("invalid Feishu outbound intent decision snapshot");
-  requireNullableString(intent.decision_ref, "outbound intent decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
-  requireNullableString(intent.decision_key, "outbound intent decision key", /^[A-Za-z0-9._:-]{1,160}$/);
-  if ((intent.decision_ref === null) !== (intent.decision_key === null) || (!intent.decision_captured && intent.decision_ref !== null)) throw new Error("partial Feishu outbound intent decision identity");
-  if (typeof intent.text !== "string" || intent.text_hash !== `sha256:${sha(intent.text)}`) throw new Error("invalid Feishu outbound intent text");
+  if (typeof intent.text !== "string" || intent.text.trim().length === 0 || intent.text === "Captain, shipshape." || intent.text_hash !== `sha256:${sha(intent.text)}`) throw new Error("invalid Feishu outbound intent text");
+  requireIso(intent.session_entry_timestamp, "outbound intent Assistant entry time");
   requireIso(intent.created_at, "outbound intent creation time");
   return intent;
-}
-
-function validateDecision(record) {
-  if (record.schema !== DECISION_SCHEMA) throw new Error("invalid Feishu pending decision schema");
-  requireString(record.decision_ref, "decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
-  requireString(record.decision_key, "decision key", /^[A-Za-z0-9._:-]{1,160}$/);
-  requireString(record.session_id, "decision session", SESSION_ID);
-  requireSafeInteger(record.binding_generation, "decision generation", { min: 1 });
-  if (record.source !== "feishu") throw new Error("invalid Feishu decision source");
-  requireString(record.source_ref, "decision source ref", DELIVERY_REF);
-  if (!new Set(["awaiting-outbound", "sent-to-outbox", "reply-received", "outbound-skipped", "outbound-refused"]).has(record.state)) throw new Error("invalid Feishu decision state");
-  requireIso(record.registered_at, "decision registration time");
-  requireNullableString(record.outbound_event_id, "decision outbound event", OUTBOUND_EVENT_ID);
-  if (record.terminal_at !== undefined) requireIso(record.terminal_at, "decision terminal time");
-  if (record.outbound_outcome !== undefined) requireString(record.outbound_outcome, "decision outbound outcome", /^[a-z-]{1,80}$/);
-  if (record.state === "awaiting-outbound" && (record.outbound_event_id !== null || record.terminal_at !== undefined || record.outbound_outcome !== undefined)) throw new Error("awaiting Feishu decision has terminal state");
-  if (record.state === "sent-to-outbox" && (!record.outbound_event_id || record.terminal_at !== undefined || record.outbound_outcome !== undefined)) throw new Error("sent Feishu decision lacks exact outbound identity");
-  if (record.state === "reply-received") {
-    if (!record.outbound_event_id) throw new Error("replied Feishu decision lacks exact outbound identity");
-    requireString(record.inbound_delivery_ref, "decision inbound reply", DELIVERY_REF);
-    requireString(record.reply_message_id_hash, "decision reply message hash", RECORD_HASH);
-    requireIso(record.replied_at, "decision reply time");
-  }
-  if (new Set(["outbound-skipped", "outbound-refused"]).has(record.state) && (record.outbound_event_id !== null || record.terminal_at === undefined || record.outbound_outcome === undefined)) throw new Error("terminal Feishu decision lacks exact outcome proof");
-  return record;
 }
 
 function validateRecordAtPath(path, record) {
@@ -513,7 +473,6 @@ function validateRecordAtPath(path, record) {
     validateOutboundReceipt(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbound receipt filename identity mismatch");
   }
-  else if (parent === "pending-decisions") validateDecision(record);
   else if (parent === "outbound-registration-intents") {
     validateOutboundIntent(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.intent_id)}.json`) throw new Error("Feishu outbound intent filename identity mismatch");
@@ -538,32 +497,11 @@ function validateRecordAtPath(path, record) {
     requireSafeInteger(record.ingress_seq, "inbound pending sequence", { min: 1 });
     requireIso(record.created_at, "inbound pending creation time");
     if (path.split(/[\\/]/).pop() !== inboundFilename(record.message_id)) throw new Error("Feishu inbound pending filename identity mismatch");
-  } else if (parent === "pending-decision-open") {
-    if (record.schema !== "fm-feishu-pending-decision-index.v1") throw new Error("invalid Feishu pending decision index");
-    requireString(record.decision_ref, "pending decision index ref", /^[A-Za-z0-9._:-]{1,160}$/);
-    requireString(record.decision_key, "pending decision index key", /^[A-Za-z0-9._:-]{1,160}$/);
-    requireString(record.session_id, "pending decision index session", SESSION_ID);
-    requireSafeInteger(record.binding_generation, "pending decision index generation", { min: 1 });
-    if (record.source !== "feishu") throw new Error("invalid pending decision index source");
-    requireString(record.source_ref, "pending decision index source ref", DELIVERY_REF);
-    if (!new Set(["awaiting-outbound", "sent-to-outbox"]).has(record.state)) throw new Error("invalid pending decision index state");
-    if (path.split(/[\\/]/).pop() !== `${sha(record.decision_ref)}.json`) throw new Error("Feishu pending decision index filename mismatch");
   } else if (parent === "outbound-pending") {
     if (record.schema !== "fm-feishu-outbound-pending.v1") throw new Error("invalid Feishu outbound pending index");
     requireString(record.event_id, "outbound pending event", OUTBOUND_EVENT_ID);
     requireIso(record.created_at, "outbound pending creation time");
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbound pending filename identity mismatch");
-  } else if (parent === "outbound-message-map") {
-    if (record.schema !== "fm-feishu-outbound-message-map.v1") throw new Error("invalid Feishu outbound message map schema");
-    requireString(record.message_id, "outbound map message", MESSAGE_ID);
-    if (path.split(/[\\/]/).pop() !== `${sha(record.message_id)}.json`) throw new Error("Feishu outbound map filename identity mismatch");
-    requireString(record.event_id, "outbound map event", OUTBOUND_EVENT_ID);
-    requireSafeInteger(record.chunk_index, "outbound map chunk index");
-    requireNullableString(record.decision_ref, "outbound map decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
-    requireNullableString(record.decision_key, "outbound map decision key", /^[A-Za-z0-9._:-]{1,160}$/);
-    if ((record.decision_ref === null) !== (record.decision_key === null)) throw new Error("partial Feishu outbound map decision identity");
-    requireSafeInteger(record.binding_generation, "outbound map generation", { min: 1 });
-    requireIso(record.recorded_at, "outbound map time");
   } else if (parent === "inbound-event-ids") {
     if (record.schema !== "fm-feishu-inbound-event-id.v1") throw new Error("invalid Feishu event-id record schema");
     requireString(record.event_id_hash, "inbound event-id hash", RECORD_HASH);
@@ -605,7 +543,7 @@ function validateRecordAtPath(path, record) {
     for (const [key, label] of [["last_connected_at", "connection"], ["last_identity_verified_at", "identity verification"]]) if (record[key] !== null) requireIso(record[key], `transport ${label} time`);
     if (record.last_error_type !== null && typeof record.last_error_type !== "string") throw new Error("invalid Feishu transport health error");
     requireIso(record.updated_at, "transport update time");
-  } else if (grandparent === "pending-decisions") validateDecision(record);
+  }
   return record;
 }
 
@@ -649,7 +587,8 @@ function validateBindingRecord(binding) {
   requireString(binding.session_header_cwd_realpath, "binding session header cwd", undefined, 4096);
   if (!Number.isSafeInteger(binding.generation) || binding.generation <= 0) throw new Error("invalid Feishu binding generation");
   if (!new Set(["active", "disabled"]).has(binding.status)) throw new Error("invalid Feishu binding status");
-  if (binding.thread_policy !== "reply-correlation-only" || binding.bound_by !== "local-tui") throw new Error("invalid Feishu binding policy");
+  if (binding.thread_policy !== "bound-chat-mirror" || binding.bound_by !== "local-tui") throw new Error("invalid Feishu binding policy");
+  requireNullableString(binding.outbound_after_entry_id, "binding outbound history boundary", SESSION_ENTRY_ID);
   requireIso(binding.bound_at, "binding time");
   requireNullableString(binding.previous_binding_id, "previous binding id", /^bind_[a-f0-9]{24}$/);
   return binding;
@@ -734,8 +673,9 @@ function validateSessionIdentity(session) {
   const cwd = realpathSync(requireString(session.sessionCwd, "Pi session cwd", undefined, 4096));
   const headerId = requireString(session.headerId, "Pi session header id", /^[0-9a-fA-F-]{16,128}$/);
   const headerCwd = realpathSync(requireString(session.headerCwd, "Pi session header cwd", undefined, 4096));
+  const outboundAfterEntryId = requireNullableString(session.outboundAfterEntryId ?? null, "Pi outbound history boundary", SESSION_ENTRY_ID);
   if (id !== headerId || cwd !== headerCwd) throw new Error("Pi session identity does not match its persisted header");
-  return { id, file, cwd, headerId, headerCwd };
+  return { id, file, cwd, headerId, headerCwd, outboundAfterEntryId };
 }
 
 export function bindSession(home, session, { rebind = false } = {}) {
@@ -759,12 +699,13 @@ export function bindSession(home, session, { rebind = false } = {}) {
       home_id: pairing.home_id,
       fm_home_realpath: paths.home,
       chat_id: pairing.allowed_chats[0],
-      thread_policy: "reply-correlation-only",
+      thread_policy: "bound-chat-mirror",
       session_id: identity.id,
       session_file_realpath: identity.file,
       session_cwd_realpath: identity.cwd,
       session_header_id: identity.headerId,
       session_header_cwd_realpath: identity.headerCwd,
+      outbound_after_entry_id: identity.outboundAfterEntryId,
       generation,
       status: "active",
       bound_by: "local-tui",
@@ -886,43 +827,6 @@ function readInboundByDeliveryRef(paths, deliveryRef) {
   return { name: map.filename, event, ledger };
 }
 
-function writePendingDecisionIndex(paths, decision) {
-  atomicJson(join(paths.pendingDecisionOpen, `${sha(decision.decision_ref)}.json`), {
-    schema: "fm-feishu-pending-decision-index.v1",
-    decision_ref: decision.decision_ref,
-    decision_key: decision.decision_key,
-    session_id: decision.session_id,
-    binding_generation: decision.binding_generation,
-    source: decision.source,
-    source_ref: decision.source_ref,
-    state: decision.state,
-  });
-}
-
-function removePendingDecisionIndex(paths, decisionRef) {
-  return removeIndexedFile(join(paths.pendingDecisionOpen, `${sha(decisionRef)}.json`));
-}
-
-function repairPendingDecisionIndexesLocked(paths) {
-  const expected = new Set();
-  let repaired = 0;
-  for (const name of safeJsonNames(paths.pendingDecisions)) {
-    const decision = readJson(join(paths.pendingDecisions, name));
-    if (new Set(["awaiting-outbound", "sent-to-outbox"]).has(decision.state)) {
-      expected.add(name);
-      const marker = readJson(join(paths.pendingDecisionOpen, name), { optional: true });
-      if (!marker || marker.decision_ref !== decision.decision_ref || marker.decision_key !== decision.decision_key || marker.state !== decision.state || marker.source !== decision.source || marker.source_ref !== decision.source_ref) {
-        writePendingDecisionIndex(paths, decision);
-        repaired += 1;
-      }
-    } else if (removePendingDecisionIndex(paths, decision.decision_ref)) {
-      repaired += 1;
-    }
-  }
-  for (const name of safeJsonNames(paths.pendingDecisionOpen)) if (!expected.has(name)) throw new Error("orphan Feishu pending decision index");
-  return repaired;
-}
-
 function quarantine(paths, kind, identity, data) {
   const dir = join(paths.quarantine, requireString(kind, "quarantine kind", /^[a-z0-9-]+$/, 80));
   privateDir(dir);
@@ -1014,26 +918,6 @@ function completeInboundPublicationLocked(paths, name, publication) {
   for (const eventId of publication.event.event_ids) recordInboundEventId(paths, eventId, publication.event.message_id, publication.event.delivery_ref);
   writeInboundPendingIndex(paths, name, publication.ledger);
   syncInboundPendingCount(paths);
-  if (publication.event.decision_ref && publication.event.decision_key) {
-    withLock(paths, "outbound-state", () => {
-      const decisionPath = join(paths.pendingDecisions, `${sha(publication.event.decision_ref)}.json`);
-      const pending = readJson(decisionPath, { optional: true });
-      if (!pending || pending.decision_key !== publication.event.decision_key) throw new Error("Feishu inbound decision publication lost its exact pending decision");
-      if (pending.state === "sent-to-outbox") {
-        removePendingDecisionIndex(paths, pending.decision_ref);
-        atomicJson(decisionPath, {
-          ...pending,
-          state: "reply-received",
-          inbound_delivery_ref: publication.event.delivery_ref,
-          reply_message_id_hash: `sha256:${sha(publication.event.message_id)}`,
-          replied_at: nowIso(),
-        });
-      } else if (pending.state !== "reply-received" || pending.inbound_delivery_ref !== publication.event.delivery_ref || pending.reply_message_id_hash !== `sha256:${sha(publication.event.message_id)}`) {
-        throw new Error("Feishu inbound decision publication conflicts with its terminal reply");
-      }
-      removePendingDecisionIndex(paths, pending.decision_ref);
-    });
-  }
   removeIndexedFile(join(paths.inboundPublications, name));
 }
 
@@ -1087,23 +971,6 @@ function normalizeContent(content) {
   const bytes = Buffer.from(content, "utf8");
   if (bytes.toString("utf8") !== content) throw new Error("message content is not valid UTF-8");
   return content;
-}
-
-function decisionForReply(paths, replyTo, binding) {
-  if (!replyTo) return null;
-  const map = readJson(join(paths.outboundMessageMap, `${sha(replyTo)}.json`), { optional: true });
-  if (!map || map.message_id !== replyTo || map.binding_generation !== binding.generation || !map.decision_ref || !map.decision_key) return null;
-  const receipt = readJson(join(paths.outboundReceipts, `${sha(map.event_id)}.json`), { optional: true });
-  if (!receipt || receipt.event_id !== map.event_id || !receipt.message_ids.includes(replyTo)) throw new Error("Feishu decision map has no matching durable receipt");
-  return { decision_ref: map.decision_ref, decision_key: map.decision_key };
-}
-
-function hasPendingDecisionReply(paths, binding) {
-  for (const name of safeJsonNames(paths.pendingDecisionOpen)) {
-    const marker = readJson(join(paths.pendingDecisionOpen, name));
-    if (marker.state === "sent-to-outbox" && marker.binding_generation === binding.generation) return true;
-  }
-  return false;
 }
 
 export function publishFeishuInbound(home, raw, options = {}) {
@@ -1199,7 +1066,6 @@ export function publishFeishuInbound(home, raw, options = {}) {
     const ingressSeq = nextSequence(paths);
     const deliveryRef = stableId("in_", `${currentPairing.home_id}\0${messageId}`, 24);
     const replyTo = typeof raw.reply_to === "string" && /^om_[A-Za-z0-9_-]{4,128}$/.test(raw.reply_to) ? raw.reply_to : null;
-    const decision = decisionForReply(paths, replyTo, currentBinding);
     const event = {
       schema: INBOUND_SCHEMA,
       source: "feishu",
@@ -1225,9 +1091,6 @@ export function publishFeishuInbound(home, raw, options = {}) {
       target_session_id: currentBinding.session_id,
       ingress_seq: ingressSeq,
       delivery_ref: deliveryRef,
-      decision_ref: decision?.decision_ref ?? null,
-      decision_key: decision?.decision_key ?? null,
-      decision_reply: decision ? "exact" : hasPendingDecisionReply(paths, currentBinding) ? "unrelated" : "none",
     };
     const ledger = {
       schema: INBOUND_LEDGER_SCHEMA,
@@ -1565,7 +1428,7 @@ function newOutboundLedger(outbox, patch = {}) {
 }
 
 function outboundEventId(homeId, input) {
-  return stableId("out_", `${homeId}\0${input.bindingGeneration}\0${input.sessionId}\0${input.sourceRef}\0${sha(input.text)}\0${input.replyTo ?? "chat"}`, 40);
+  return stableId("out_", `${homeId}\0${input.bindingGeneration}\0${input.sessionId}\0${input.assistantEntryId}`, 40);
 }
 
 function outboundLogicalQueueCount(paths, pairing) {
@@ -1576,9 +1439,7 @@ function outboundLogicalQueueCount(paths, pairing) {
     const eventId = outboundEventId(pairing.home_id, {
       bindingGeneration: intent.binding_generation,
       sessionId: intent.session_id,
-      sourceRef: intent.source_ref,
-      text: intent.text,
-      replyTo: intent.reply_to_message_id,
+      assistantEntryId: intent.assistant_entry_id,
     });
     if (!pending.has(`${sha(eventId)}.json`)) count += 1;
   }
@@ -1596,33 +1457,12 @@ function assertOutboundPair(name, outbox, ledger, binding) {
   if (binding && outbox.binding_generation === binding.generation && (outbox.binding_id !== binding.binding_id || outbox.session_id !== binding.session_id || outbox.destination_chat_id !== binding.chat_id)) throw new Error("Feishu outbox destination does not match the active binding");
 }
 
-function writeOutboundMessageMap(paths, outbox, messageId, chunkIndex) {
-  const path = join(paths.outboundMessageMap, `${sha(messageId)}.json`);
-  const record = {
-    schema: "fm-feishu-outbound-message-map.v1",
-    message_id: messageId,
-    event_id: outbox.event_id,
-    chunk_index: chunkIndex,
-    decision_ref: outbox.decision_ref,
-    decision_key: outbox.decision_key,
-    binding_generation: outbox.binding_generation,
-    recorded_at: nowIso(),
-  };
-  const prior = readJson(path, { optional: true });
-  if (prior && (prior.message_id !== record.message_id || prior.event_id !== record.event_id || prior.chunk_index !== record.chunk_index || prior.decision_ref !== record.decision_ref || prior.decision_key !== record.decision_key || prior.binding_generation !== record.binding_generation)) throw new Error("conflicting Feishu outbound correlation map");
-  if (!prior) atomicJson(path, record);
-}
-
 function reconcileOutboundReceiptLocked(paths, name, outbox, ledger) {
   const receipt = readJson(join(paths.outboundReceipts, name), { optional: true });
   const receivedChunks = receipt?.message_ids.length ?? 0;
   let repaired = 0;
   if (receipt) {
     if (receipt.event_id !== outbox.event_id || receipt.chat_id !== outbox.destination_chat_id || receipt.idempotency_keys.length !== outbox.chunks.length || receipt.idempotency_keys.some((key, index) => key !== outbox.chunks[index].idempotency_key) || receivedChunks > outbox.chunks.length) throw new Error("Feishu outbound receipt does not match its immutable outbox");
-    for (let index = 0; index < receivedChunks; index += 1) {
-      if (!existsSync(join(paths.outboundMessageMap, `${sha(receipt.message_ids[index])}.json`))) repaired += 1;
-      writeOutboundMessageMap(paths, outbox, receipt.message_ids[index], index);
-    }
   }
   if (ledger.state === "posted" && (!receipt || receivedChunks !== outbox.chunks.length || ledger.next_chunk !== outbox.chunks.length)) throw new Error("posted Feishu outbound ledger has no complete durable receipt");
   if (ledger.next_chunk > receivedChunks) throw new Error("Feishu outbound ledger advances beyond its durable receipt");
@@ -1646,12 +1486,11 @@ function reconcileOutboundReceiptLocked(paths, name, outbox, ledger) {
 
 function repairOutboundStateLocked(paths, binding) {
   assertConfigurationIdentity(paths, undefined, binding);
-  let repaired = repairPendingDecisionIndexesLocked(paths);
+  let repaired = 0;
   const outboxNames = safeJsonNames(paths.outbox);
   const outboxSet = new Set(outboxNames);
   for (const name of safeJsonNames(paths.outboundLedger)) if (!outboxSet.has(name)) throw new Error("orphan Feishu outbound ledger");
   for (const name of safeJsonNames(paths.outboundReceipts)) if (!outboxSet.has(name)) throw new Error("orphan Feishu outbound receipt");
-  const validMapNames = new Set();
   for (const name of outboxNames) {
     const outbox = readJson(join(paths.outbox, name));
     const ledgerPath = join(paths.outboundLedger, name);
@@ -1665,7 +1504,6 @@ function repairOutboundStateLocked(paths, binding) {
     const reconciliation = reconcileOutboundReceiptLocked(paths, name, outbox, ledger);
     ledger = reconciliation.ledger;
     repaired += reconciliation.repaired;
-    for (const messageId of reconciliation.receipt?.message_ids ?? []) validMapNames.add(`${sha(messageId)}.json`);
     if (["pending", "retryable", "sending"].includes(ledger.state)) writeOutboundPendingIndex(paths, name, outbox);
     else if (removeOutboundPendingIndex(paths, name)) repaired += 1;
   }
@@ -1675,7 +1513,6 @@ function repairOutboundStateLocked(paths, binding) {
     removeOutboundPendingIndex(paths, name);
     repaired += 1;
   }
-  for (const name of safeJsonNames(paths.outboundMessageMap)) if (!validMapNames.has(name)) throw new Error("orphan Feishu outbound correlation map");
   return repaired;
 }
 
@@ -1694,36 +1531,42 @@ export function persistAssistantOutboundIntent(home, input) {
   privateDir(paths.outboundPending);
   privateDir(paths.outboundRegistrationIntents);
   privateDir(paths.alerts);
-  const source = requireString(input.source, "outbound intent source", /^feishu$/);
-  const sourceRef = requireString(input.sourceRef, "outbound intent source ref", DELIVERY_REF);
+  const assistantEntryId = requireString(input.assistantEntryId, "outbound intent Assistant entry", SESSION_ENTRY_ID);
+  const sessionOrder = requireSafeInteger(input.sessionOrder, "outbound intent session order");
+  const sessionEntryTimestamp = requireIso(input.sessionEntryTimestamp, "outbound intent Assistant entry time");
   const text = typeof input.text === "string" ? input.text : "";
-  const replyTo = input.replyTo ?? null;
-  requireNullableString(replyTo, "outbound intent reply", MESSAGE_ID);
+  if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
+  if (text === "Captain, shipshape.") return { status: "skipped", reason: "routine" };
   return withLock(paths, "outbound-state", () => {
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     if (!pairingIsActive(pairing) || !binding || binding.status !== "active" || binding.session_id !== input.sessionId || binding.generation !== input.bindingGeneration) throw new Error("outbound registration intent does not match the active binding");
-    const intentId = stableId("reg_", `${binding.binding_id}\0${binding.generation}\0${input.sessionId}\0${source}\0${sourceRef}\0${sha(text)}\0${replyTo ?? "chat"}`, 40);
+    const eventId = outboundEventId(pairing.home_id, { bindingGeneration: binding.generation, sessionId: input.sessionId, assistantEntryId });
+    const intentId = stableId("reg_", `${binding.binding_id}\0${eventId}`, 40);
+    const existingOutbox = readJson(join(paths.outbox, `${sha(eventId)}.json`), { optional: true });
+    if (existingOutbox) {
+      validateOutbound(existingOutbox);
+      if (existingOutbox.assistant_entry_id !== assistantEntryId || existingOutbox.session_order !== sessionOrder || existingOutbox.session_entry_timestamp !== sessionEntryTimestamp || existingOutbox.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its existing Feishu outbound record");
+      return { status: "duplicate", eventId };
+    }
     const secretPattern = assistantSecretPattern(text);
     if (secretPattern) {
       quarantine(paths, "outbound-secret-refused", intentId, { intent_id: intentId, pattern: secretPattern, text_hash: `sha256:${sha(text)}`, bytes: utf8Bytes(text) });
-      const alert = createLocalAlert(paths, "outbound-secret-refused", intentId, "A final Assistant response matched a fixed credential pattern. The entire response stayed local; inspect it in the TUI before deciding what to send.");
+      const alert = createLocalAlert(paths, "outbound-secret-refused", intentId, "A finalized Assistant response matched a fixed credential pattern. The entire response stayed local; inspect it in the TUI before deciding what to send.");
       return { status: "secret-refused", pattern: secretPattern, alert };
     }
     const record = {
       schema: OUTBOUND_INTENT_SCHEMA,
       intent_id: intentId,
-      source,
-      source_ref: sourceRef,
+      source: "pi-assistant",
+      assistant_entry_id: assistantEntryId,
+      session_order: sessionOrder,
+      session_entry_timestamp: sessionEntryTimestamp,
       session_id: input.sessionId,
       binding_id: binding.binding_id,
       binding_generation: binding.generation,
-      reply_to_message_id: replyTo,
-      decision_captured: false,
-      decision_ref: null,
-      decision_key: null,
       text,
       text_hash: `sha256:${sha(text)}`,
       created_at: nowIso(),
@@ -1740,11 +1583,11 @@ export function persistAssistantOutboundIntent(home, input) {
     const maxBytes = positiveInteger(input.maxOutboundBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_BYTES, DEFAULT_MAX_OUTBOUND_BYTES);
     const minFreeBytes = positiveInteger(process.env.FM_FEISHU_MIN_FREE_BYTES, DEFAULT_MIN_FREE_BYTES);
     if (utf8Bytes(text) > maxBytes || !Number.isFinite(freeBytes) || freeBytes < minFreeBytes) {
-      const alert = createLocalAlert(paths, "outbound-resource-refused", intentId, "A final Assistant response exceeded the local outbound resource policy or free-space floor. The entire response stayed local.");
+      const alert = createLocalAlert(paths, "outbound-resource-refused", intentId, "A finalized Assistant response exceeded the local outbound resource policy or free-space floor. The entire response stayed local.");
       return { status: "resource-refused", reason: "resource-limit", alert };
     }
     if (outboundLogicalQueueCount(paths, pairing) >= maxPendingOutbound(input)) {
-      const alert = createLocalAlert(paths, "outbound-queue-refused", intentId, "A final Assistant response reached the bounded Feishu outbound queue. The entire response stayed local until capacity is reconciled.");
+      const alert = createLocalAlert(paths, "outbound-queue-refused", intentId, "A finalized Assistant response reached the bounded Feishu outbound queue. The entire response stayed local until capacity is reconciled.");
       return { status: "resource-refused", reason: "queue-limit", alert };
     }
     atomicJson(path, record);
@@ -1761,26 +1604,8 @@ export function readAssistantOutboundIntents(home, fence) {
     if (record.session_id !== fence.sessionId || record.binding_generation !== fence.bindingGeneration || record.binding_id !== fence.bindingId) continue;
     records.push({ name, record });
   }
-  records.sort((a, b) => a.record.created_at.localeCompare(b.record.created_at) || a.name.localeCompare(b.name));
+  records.sort((a, b) => a.record.session_order - b.record.session_order || a.record.assistant_entry_id.localeCompare(b.record.assistant_entry_id));
   return records;
-}
-
-export function bindAssistantOutboundIntentDecision(home, candidate, decision) {
-  const paths = pathsForHome(home);
-  privateDir(paths.outboundRegistrationIntents);
-  return withLock(paths, "outbound-state", () => {
-    const path = join(paths.outboundRegistrationIntents, candidate.name);
-    const current = readJson(path);
-    const decisionRef = decision?.record.decision_ref ?? null;
-    const decisionKey = decision?.record.decision_key ?? null;
-    if (current.decision_captured) {
-      if (current.decision_ref !== decisionRef || current.decision_key !== decisionKey) throw new Error("conflicting Feishu outbound intent decision snapshot");
-      return { name: candidate.name, record: current };
-    }
-    const updated = { ...current, decision_captured: true, decision_ref: decisionRef, decision_key: decisionKey };
-    atomicJson(path, updated);
-    return { name: candidate.name, record: updated };
-  });
 }
 
 export function completeAssistantOutboundIntent(home, candidate) {
@@ -1805,42 +1630,39 @@ export function registerAssistantOutbound(home, input) {
   assertConfigurationIdentity(paths, pairing, binding);
   if (!pairingIsActive(pairing) || !binding || binding.status !== "active") return { status: "inactive" };
   if (binding.session_id !== input.sessionId || binding.generation !== input.bindingGeneration) return { status: "stale-binding" };
-  if (input.source !== "feishu") throw new Error("Feishu outbound requires an exact Feishu source turn");
+  const assistantEntryId = requireString(input.assistantEntryId, "outbound Assistant entry", SESSION_ENTRY_ID);
+  const sessionOrder = requireSafeInteger(input.sessionOrder, "outbound session order");
+  const sessionEntryTimestamp = requireIso(input.sessionEntryTimestamp, "outbound Assistant entry time");
   const text = typeof input.text === "string" ? input.text : "";
   if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
   if (text === "Captain, shipshape.") return { status: "skipped", reason: "routine" };
-  const eventId = outboundEventId(pairing.home_id, {
-    bindingGeneration: binding.generation,
-    sessionId: input.sessionId,
-    sourceRef: input.sourceRef,
-    text,
-    replyTo: input.replyTo,
-  });
+  const eventId = outboundEventId(pairing.home_id, { bindingGeneration: binding.generation, sessionId: input.sessionId, assistantEntryId });
   const maxOutboundBytes = positiveInteger(input.maxOutboundBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_BYTES, DEFAULT_MAX_OUTBOUND_BYTES);
   const minFreeBytes = positiveInteger(process.env.FM_FEISHU_MIN_FREE_BYTES, DEFAULT_MIN_FREE_BYTES);
   const free = statfsSync(paths.stateRoot);
   const freeBytes = Number(free.bavail) * Number(free.bsize);
   if (utf8Bytes(text) > maxOutboundBytes || !Number.isFinite(freeBytes) || freeBytes < minFreeBytes) {
-    const alert = createLocalAlert(paths, "outbound-resource-refused", eventId, "A final Assistant response exceeded the local outbound resource policy or free-space floor. The entire response stayed local.");
+    const alert = createLocalAlert(paths, "outbound-resource-refused", eventId, "A finalized Assistant response exceeded the local outbound resource policy or free-space floor. The entire response stayed local.");
     return { status: "resource-refused", alert };
   }
   const pattern = assistantSecretPattern(text);
   if (pattern) {
     quarantine(paths, "outbound-secret-refused", eventId, { event_id: eventId, pattern, text_hash: `sha256:${sha(text)}`, bytes: utf8Bytes(text) });
-    const alert = createLocalAlert(paths, "outbound-secret-refused", eventId, "A final Assistant response matched a fixed credential pattern. The entire response stayed local; inspect it in the TUI before deciding what to send.");
+    const alert = createLocalAlert(paths, "outbound-secret-refused", eventId, "A finalized Assistant response matched a fixed credential pattern. The entire response stayed local; inspect it in the TUI before deciding what to send.");
     return { status: "secret-refused", pattern, alert };
   }
   let chunks;
   try {
     chunks = deterministicChunks(text, input.maxChunkBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_CHUNK_BYTES);
   } catch (error) {
-    const alert = createLocalAlert(paths, "outbound-chunk-refused", eventId, "A final Assistant response could not be split without changing a complete URL. It stayed local.");
+    const alert = createLocalAlert(paths, "outbound-chunk-refused", eventId, "A finalized Assistant response could not be split without changing a complete URL. It stayed local.");
     return { status: "chunk-refused", error: String(error), alert };
   }
   const filename = `${sha(eventId)}.json`;
   return withLock(paths, "outbound-state", () => {
     if (existsSync(join(paths.outbox, filename))) {
       const outbox = readJson(join(paths.outbox, filename));
+      if (outbox.assistant_entry_id !== assistantEntryId || outbox.session_order !== sessionOrder || outbox.session_entry_timestamp !== sessionEntryTimestamp || outbox.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its existing Feishu outbound record");
       let ledger = readJson(join(paths.outboundLedger, filename), { optional: true });
       if (!ledger) {
         ledger = newOutboundLedger(outbox, { last_error: "ledger repaired by exact registration retry" });
@@ -1855,25 +1677,24 @@ export function registerAssistantOutbound(home, input) {
     let transferringIntent = false;
     if (input.registrationIntentId) {
       const intent = readJson(join(paths.outboundRegistrationIntents, `${sha(input.registrationIntentId)}.json`), { optional: true });
-      transferringIntent = Boolean(intent && intent.intent_id === input.registrationIntentId && intent.source === input.source && intent.source_ref === input.sourceRef && intent.session_id === input.sessionId && intent.binding_generation === input.bindingGeneration && intent.text_hash === `sha256:${sha(text)}` && intent.reply_to_message_id === (input.replyTo ?? null));
+      transferringIntent = Boolean(intent && intent.intent_id === input.registrationIntentId && intent.source === "pi-assistant" && intent.assistant_entry_id === assistantEntryId && intent.session_order === sessionOrder && intent.session_entry_timestamp === sessionEntryTimestamp && intent.session_id === input.sessionId && intent.binding_generation === input.bindingGeneration && intent.text_hash === `sha256:${sha(text)}`);
       if (!transferringIntent) throw new Error("outbound registration does not match its durable intent");
     }
     if (!transferringIntent && outboundLogicalQueueCount(paths, pairing) >= maxPendingOutbound(input)) {
-      const alert = createLocalAlert(paths, "outbound-queue-refused", eventId, "A final Assistant response reached the bounded Feishu outbound queue. The entire response stayed local until capacity is reconciled.");
+      const alert = createLocalAlert(paths, "outbound-queue-refused", eventId, "A finalized Assistant response reached the bounded Feishu outbound queue. The entire response stayed local until capacity is reconciled.");
       return { status: "resource-refused", reason: "queue-limit", alert };
     }
     const outbox = {
       schema: OUTBOUND_SCHEMA,
       event_id: eventId,
-      source: input.source,
-      source_ref: input.sourceRef,
+      source: "pi-assistant",
+      assistant_entry_id: assistantEntryId,
+      session_order: sessionOrder,
+      session_entry_timestamp: sessionEntryTimestamp,
       session_id: input.sessionId,
       binding_id: binding.binding_id,
       binding_generation: binding.generation,
       destination_chat_id: binding.chat_id,
-      reply_to_message_id: input.replyTo ?? null,
-      decision_ref: input.decisionRef ?? null,
-      decision_key: input.decisionKey ?? null,
       text,
       text_hash: `sha256:${sha(text)}`,
       chunks: chunks.map((chunk, index) => ({ index, count: chunks.length, chunk, chunk_hash: `sha256:${sha(chunk)}`, idempotency_key: stableId("fm", `${eventId}\0${index}`, 44) })),
@@ -1926,7 +1747,7 @@ export function claimNextOutbound(home, options = {}) {
       if (ledger.retry_at_ms > now) continue;
       candidates.push({ name, path, ledger, outbox });
     }
-    candidates.sort((a, b) => String(a.outbox.created_at).localeCompare(String(b.outbox.created_at)) || a.name.localeCompare(b.name));
+    candidates.sort((a, b) => a.outbox.session_order - b.outbox.session_order || a.outbox.assistant_entry_id.localeCompare(b.outbox.assistant_entry_id));
     const candidate = candidates[0];
     if (!candidate) return undefined;
     const chunk = candidate.outbox.chunks[candidate.ledger.next_chunk];
@@ -2021,7 +1842,6 @@ export function receiptOutbound(home, claim, receipt) {
     };
     validateOutboundReceipt(receiptRecord);
     atomicJson(join(paths.outboundReceipts, claim.filename), receiptRecord);
-    writeOutboundMessageMap(paths, outbox, messageId, claim.chunk.index);
     const nextChunk = claim.chunk.index + 1;
     const { attempt_id: _attemptId, last_attempt_ms: _lastAttemptMs, ...rest } = ledger;
     atomicJson(ledgerPath, {
@@ -2036,105 +1856,6 @@ export function receiptOutbound(home, claim, receipt) {
     });
     if (nextChunk >= outbox.chunks.length) removeOutboundPendingIndex(paths, claim.filename);
     return true;
-  });
-}
-
-export function registerPendingDecision(home, input) {
-  const paths = ensurePrivateLayout(home);
-  const decisionRef = requireString(input.decisionRef, "decision_ref", /^[A-Za-z0-9._:-]{1,160}$/);
-  const decisionKey = requireString(input.decisionKey, "decision_key", /^[A-Za-z0-9._:-]{1,160}$/);
-  const sessionId = requireString(input.sessionId, "Pi session id", /^[0-9a-fA-F-]{16,128}$/);
-  const sourceRef = requireString(input.sourceRef, "decision source ref", DELIVERY_REF);
-  const sourceRecord = withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
-    const found = readInboundByDeliveryRef(paths, sourceRef);
-    if (!found || !new Set(["queued", "delivered"]).has(found.ledger.state)) throw new Error("decision source is not an exact Feishu message submitted to this Pi native queue");
-    return found;
-  });
-  return withLock(paths, "outbound-state", () => {
-    const pairingRaw = readJson(paths.pairing, { optional: true });
-    const bindingRaw = readJson(paths.activeBinding, { optional: true });
-    const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
-    const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
-    assertConfigurationIdentity(paths, pairing, binding);
-    if (!pairingIsActive(pairing) || !binding || binding.status !== "active") throw new Error("Feishu channel is not active");
-    if (sessionId !== binding.session_id || sourceRecord.event.target_session_id !== sessionId || sourceRecord.ledger.binding_generation !== binding.generation) throw new Error("decision registration does not match the bound Pi turn");
-    const path = join(paths.pendingDecisions, `${sha(decisionRef)}.json`);
-    const prior = readJson(path, { optional: true });
-    if (prior && (prior.decision_ref !== decisionRef || prior.decision_key !== decisionKey || prior.source_ref !== sourceRef || prior.source !== sourceRecord.event.source)) throw new Error("decision_ref is already bound to another exact turn or key");
-    if (prior && !new Set(["awaiting-outbound", "sent-to-outbox"]).has(prior.state)) throw new Error("decision_ref is already terminal");
-    if (!prior && safeJsonNames(paths.pendingDecisionOpen).length >= maxPendingOutbound(input)) throw new Error("pending Feishu decision limit reached");
-    const record = prior ?? {
-      schema: DECISION_SCHEMA,
-      decision_ref: decisionRef,
-      decision_key: decisionKey,
-      session_id: sessionId,
-      binding_generation: binding.generation,
-      source: sourceRecord.event.source,
-      source_ref: sourceRef,
-      state: "awaiting-outbound",
-      registered_at: nowIso(),
-      outbound_event_id: null,
-    };
-    atomicJson(path, record);
-    writePendingDecisionIndex(paths, record);
-    return record;
-  });
-}
-
-export function findPendingDecisionForOutbound(home, decisionRef, decisionKey, sessionId, bindingGeneration, source, sourceRef) {
-  const paths = ensurePrivateLayout(home);
-  const name = `${sha(decisionRef)}.json`;
-  const record = readJson(join(paths.pendingDecisions, name), { optional: true });
-  if (!record || record.decision_ref !== decisionRef || record.decision_key !== decisionKey || record.session_id !== sessionId || record.binding_generation !== bindingGeneration || record.source !== source || record.source_ref !== sourceRef) throw new Error("Feishu outbound intent decision snapshot is unavailable for this exact turn");
-  return { name, record };
-}
-
-export function claimPendingDecisionForOutbound(home, sessionId, bindingGeneration, source, sourceRef) {
-  const paths = ensurePrivateLayout(home);
-  const candidates = [];
-  for (const name of safeJsonNames(paths.pendingDecisionOpen)) {
-    const marker = readJson(join(paths.pendingDecisionOpen, name));
-    const record = readJson(join(paths.pendingDecisions, name));
-    if (marker.decision_ref !== record.decision_ref || marker.decision_key !== record.decision_key || marker.state !== record.state || marker.source !== record.source || marker.source_ref !== record.source_ref) throw new Error("Feishu pending decision index mismatch");
-    if (record.state === "awaiting-outbound" && record.session_id === sessionId && record.binding_generation === bindingGeneration && record.source === source && record.source_ref === sourceRef) candidates.push({ name, record });
-  }
-  if (candidates.length === 0) return undefined;
-  if (candidates.length > 1) {
-    createLocalAlert(paths, "ambiguous-decision-correlation", stableId("decision_", `${sessionId}\0${bindingGeneration}\0${source}\0${sourceRef}`, 24), "More than one exact Feishu decision registration awaited the same final response. None was guessed; reconcile the registrations locally.");
-    return undefined;
-  }
-  return candidates[0];
-}
-
-export function bindPendingDecisionToOutbound(home, candidate, eventId) {
-  if (!candidate) return;
-  const paths = ensurePrivateLayout(home);
-  return withLock(paths, "outbound-state", () => {
-    const path = join(paths.pendingDecisions, candidate.name);
-    const current = readJson(path);
-    if (current.state !== "awaiting-outbound") return;
-    const updated = { ...current, state: "sent-to-outbox", outbound_event_id: eventId, outbound_registered_at: nowIso() };
-    atomicJson(path, updated);
-    writePendingDecisionIndex(paths, updated);
-  });
-}
-
-export function finishPendingDecisionForOutbound(home, candidate, outcome) {
-  if (!candidate) return;
-  const paths = ensurePrivateLayout(home);
-  return withLock(paths, "outbound-state", () => {
-    const path = join(paths.pendingDecisions, candidate.name);
-    const current = readJson(path);
-    if (current.state !== "awaiting-outbound") return;
-    const refused = new Set(["secret-refused", "chunk-refused", "resource-refused"]).has(outcome);
-    removePendingDecisionIndex(paths, current.decision_ref);
-    atomicJson(path, {
-      ...current,
-      state: refused ? "outbound-refused" : "outbound-skipped",
-      outbound_outcome: requireString(outcome, "decision outbound outcome", /^[a-z-]{1,80}$/),
-      terminal_at: nowIso(),
-    });
   });
 }
 
@@ -2312,7 +2033,7 @@ export function publicStatusSummary(home) {
 }
 
 function cliUsage() {
-  return "usage: fm-feishu-state.mjs status [--public] [--home <path>] | decision-register <decision-ref> <decision-key> <source-ref> [--home <path>]";
+  return "usage: fm-feishu-state.mjs status [--public] [--home <path>]";
 }
 
 async function main(argv) {
@@ -2336,18 +2057,6 @@ async function main(argv) {
     } else {
       process.stdout.write(`${JSON.stringify(value)}\n`);
     }
-    return;
-  }
-  if (command === "decision-register") {
-    const [decisionRef, decisionKey, sourceRef] = argv;
-    if (!decisionRef || !decisionKey || !sourceRef || !process.env.PI_SESSION_ID) throw new Error(cliUsage());
-    const record = registerPendingDecision(home, {
-      decisionRef,
-      decisionKey,
-      sourceRef,
-      sessionId: process.env.PI_SESSION_ID,
-    });
-    process.stdout.write(`${JSON.stringify({ ok: true, decision_ref: record.decision_ref, decision_key: record.decision_key })}\n`);
     return;
   }
   throw new Error(cliUsage());

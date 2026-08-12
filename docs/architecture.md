@@ -272,20 +272,20 @@ The [Relay configuration reference](configuration.md#promised-public-replies-sta
 ## Feishu current-Pi channel
 
 The optional Feishu channel has three owners and no second Agent authority.
-The dedicated `bin/fm-feishu-transport.mjs` process owns one official Feishu Node SDK long connection, SDK P2P identity verification, SDK message reply/create, reconnect health, and no Pi or Agent access.
-`bin/fm-feishu-state.mjs` owns private pairing, exact binding generations, accepted Feishu events, native-queue submission evidence, direct-Assistant outbox records, attempts, receipts, correlation, quarantine, and local alerts.
+The dedicated `bin/fm-feishu-transport.mjs` process owns one official Feishu Node SDK long connection, SDK P2P identity verification, SDK bound-chat `message.create`, reconnect health, and no Pi or Agent access.
+`bin/fm-feishu-state.mjs` owns private pairing, exact binding generations and Assistant-history boundaries, accepted Feishu events, native-queue submission evidence, finalized-Assistant registration intents and outbox records, attempts, receipts, quarantine, and local alerts.
 `.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-feishu-native-channel.ts` are the only components allowed to offer authorized Feishu text to the current Pi native queue.
 
 The extension binds canonical `FM_HOME`, stable home identity, full persisted Pi session UUID and file, session and header cwd, verified Firstmate lock ancestry, exact P2P chat, and binding generation.
-It calls only the current extension API's `sendUserMessage` with native follow-up delivery, so no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
+It calls only the current extension API's `sendUserMessage` with native steer delivery, so a busy Pi receives Feishu input after the current turn's tool calls and before its next model call, while no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
 Native TUI input is not intercepted, transformed, copied into Feishu state, acknowledged, or reinjected.
 Watcher and turn-end operational messages call Pi directly and never enter Feishu state.
 The bridge records one owner-fenced handoff for each durable Feishu event and offers all pending events to Pi without a Firstmate scheduling policy.
-Pi owns native TUI order, follow-up order, and pending-message sequencing.
+Pi owns native TUI order, steering order, and pending-message sequencing.
 
 A privacy-safe leading marker carries only the derived delivery reference and generation.
-The marker lets session restart reconcile a prior native-queue handoff and lets the following Assistant response retain the exact Feishu reply target.
-An unmarked native TUI or operational user message clears response provenance without being reclassified or modified.
+The marker lets session restart reconcile a prior native-queue handoff and render the authorized source badge; it does not govern outbound eligibility.
+Native TUI and operational user messages remain unmarked, unclassified, and unmodified.
 Feishu and TUI use the same normal Pi tool path with no channel-specific tool fence or confirmation command.
 
 The transport authenticates through the SDK's app-credential mechanism, verifies the safe app fingerprint and P2P chat, and durably publishes accepted SDK callbacks before returning.
@@ -293,11 +293,12 @@ The callback never waits for Pi or executes a model or tool.
 The SDK owns protocol reconnect and replay, while durable `event_id` and `message_id` indexes converge redelivery without history polling or an invented replay service.
 A reconnect, malformed event, disk failure, authorization mismatch, or unsupported message type becomes body-free health or quarantine evidence rather than an in-memory success.
 
-Direct egress is a deterministic settlement projection rather than a second reasoning path.
-At `agent_settled`, the extension persists the latest non-empty Assistant text for each exact Feishu source marker and never projects native TUI or internal output.
-Intent processing skips fixed non-output cases, refuses the whole message before body persistence on a fixed credential pattern, applies deterministic URL-preserving chunking, and transfers each eligible response to the outbox.
-The transport maps stable chunk identities to the SDK message `uuid`, durable pre-send attempts, receipts, bounded same-UUID ambiguous retries, and an explicit uncertain state after the platform window.
-Reply-to receipts provide the only decision correlation, so an unrelated Feishu message cannot resolve an open decision.
+Direct egress is a deterministic persisted-session projection rather than a second reasoning path.
+After Pi persists a finalized Assistant message, the extension scans message entries strictly after the binding's history boundary and registers every non-empty Assistant text regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused it.
+Persisted session-entry identity, order, timestamp, session, binding generation, and text hash make restart capture converge without source provenance or transient turn ordinals.
+The exact `Captain, shipshape.` response stays local, and thinking, partial streams, tool calls/results, user/system/custom messages, and TUI-only alerts are excluded.
+Intent processing refuses the whole message before body persistence on a fixed credential pattern, applies deterministic URL-preserving chunking, and transfers each eligible response to the outbox.
+The transport always uses SDK `message.create` for the bound P2P chat and maps stable chunk identities to SDK `uuid`, durable pre-send attempts, receipts, bounded same-UUID ambiguous retries, and an explicit uncertain state after the platform window.
 
 The operator contract, supported MVP, local commands, scopes, and failure recovery live in [`docs/feishu-channel.md`](feishu-channel.md).
 The agent-only response and local-control procedure lives in [`.agents/skills/feishu-channel/SKILL.md`](../.agents/skills/feishu-channel/SKILL.md).
