@@ -64,8 +64,8 @@ The third is recorded below.
 Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec`.
-The interactive TUI remains on the tracked nudge floor through `AGENTS.md` and the Ahoy fallback; Firstmate ships no global hook and does not depend on one.
+Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
+The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -79,8 +79,34 @@ Compacted from 7,697 tokens
 compact
 ```
 
-Pi disagrees with Claude and Codex on `resume`: a NEW Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-That is correct for the run tier rather than a problem, because a new process holds no lock and must take the helm; the routing table in [`../sessionstart-nudge.md`](../sessionstart-nudge.md#source-routing) is written to whichever source each harness actually reports.
+Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
+The current adapter classification and baseline mechanics are owned by [`../sessionstart-nudge.md`](../sessionstart-nudge.md#harness-transports) and the `bin/fm-session-start.sh` header.
+Their continuation classification is covered by portable tests, not claimed as live validation in this record.
+
+### Post-start instruction refresh
+
+The isolated real-Pi instruction-refresh regression ran on 2026-08-11 with Pi 0.84.0.
+It used a scratch `FM_HOME`, a private tmux socket, and a disposable Firstmate checkout.
+The historical `origin/main` implementation first reproduced the stale original marker after a real compaction.
+The current implementation then recorded `source=startup`, changed and committed the lab's `AGENTS.md`, compacted the same real Pi session, and answered with the replacement marker.
+The fixed run also proved that the true-start baseline remained different from the updated file after compaction.
+
+```sh
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=origin/main \
+FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=stale \
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+# ok - Pi 0.84.0 reproduces stale AGENTS.md after a real compact
+
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+# ok - Pi 0.84.0 re-injects updated AGENTS.md after a real compact in an isolated session
+```
+
+This is live coverage only for Pi compaction.
+The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
+Pi compaction is the only supported stale-cache refresh pair.
+Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook
 
@@ -131,6 +157,7 @@ tests/fm-sessionstart-nudge.test.sh
 tests/fm-session-start.test.sh
 tests/fm-startup-network.test.sh
 FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
