@@ -24,6 +24,15 @@ mkdir -p "$FAKEBIN" "$HOME_DIR/state" "$HOME_DIR/config"
 touch "$HOME_DIR/config/herdr-presentation-spaces"
 printf '%s\n' herdr > "$HOME_DIR/config/backend"
 
+# This guard asserts the adapter's lone-idle-childless-shell proof SUCCEEDS on
+# a real restored pane, so the pane's shell must be a bare one rather than the
+# contributor's own (tests/herdr-test-safety.sh owns that contract). Pinned
+# before the lab server is provisioned, since a running server keeps the config
+# it booted with.
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
+herdr_pin_bare_pane_shell "$TMP_ROOT" || fail 'could not pin the lab pane shell to a bare shell'
+
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-session-start-stale-projection-cleanup-r1)
 export HERDR_LAB_HELPER HERDR_LAB_SESSION REAL_HERDR HERDR_ORIGINAL_PATH
 cleanup() {

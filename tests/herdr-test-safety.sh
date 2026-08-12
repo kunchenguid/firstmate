@@ -41,6 +41,43 @@ herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
 
+# herdr_pin_bare_pane_shell: make every pane this test's lab server opens run a
+# bare shell that loads no user rc files, by pointing the server at a throwaway
+# Herdr config in <scratch-dir> (HERDR_CONFIG_PATH, herdr's own documented
+# override).
+#
+# A guard that asserts the ABSENCE of an agent depends on the adapter's
+# lone-idle-childless-shell proof succeeding
+# (bin/backends/herdr.sh's fm_backend_herdr_pane_idle_shell_pid), and a pane
+# whose shell is the contributor's own login shell can never satisfy it when
+# that shell keeps a persistent child: powerlevel10k's gitstatusd, a zsh-async
+# worker, and some direnv setups all leave one. Such a pane reads `live`, the
+# guard fails, and the failure looks like a product break while being purely a
+# property of the machine it ran on. Pinning the shell leaves the assertion
+# depending only on the classifier, and the pane still holds a genuine idle
+# shell - exactly the shape an exited agent leaves behind.
+#
+# Export it before the lab server starts (before provisioning, and before any
+# adapter call that would start the server itself); a server already running
+# for the session keeps the config it booted with.
+herdr_pin_bare_pane_shell() { # <scratch-dir>
+  local dir=$1 bash_bin
+  bash_bin=$(command -v bash) || return 1
+  mkdir -p "$dir" || return 1
+  cat > "$dir/bare-pane-shell" <<EOF
+#!$bash_bin
+unset ENV BASH_ENV
+exec "$bash_bin" --noprofile --norc -i
+EOF
+  chmod +x "$dir/bare-pane-shell" || return 1
+  cat > "$dir/herdr-config.toml" <<EOF
+[terminal]
+default_shell = "$dir/bare-pane-shell"
+shell_mode = "non_login"
+EOF
+  export HERDR_CONFIG_PATH="$dir/herdr-config.toml"
+}
+
 # herdr_occupy_pane: give <pane-id> a real foreground process, so a fixture
 # that means "a live agent is here" is genuinely live.
 #

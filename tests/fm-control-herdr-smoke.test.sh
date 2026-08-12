@@ -45,6 +45,10 @@ fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab se
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
+# Before the first adapter call, because that call starts this lab's server:
+# the bare-shell case below asserts the absence proof SUCCEEDS, which a
+# contributor's own login shell can prevent by keeping a persistent child.
+herdr_pin_bare_pane_shell "$SCRATCH" || fail "could not pin the lab's pane shell to a bare shell"
 HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
 printf '# brief\n' > "$HOME_DIR/data/hsmoke/brief.md"

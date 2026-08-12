@@ -578,13 +578,13 @@ Polling remained active and is covered as the fallback for capability, connect, 
 ### Agent lifecycle control
 
 Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary.
-Reverified 2026-08-10 on Herdr 0.8.0 protocol 19, macOS aarch64, after the stale-registration fix recorded in the next section extended the guard with the two corroboration cases; measured 2026-08-08 on Herdr 0.8.0 and first on 2026-08-02 on Herdr 0.7.5, both with identical results for the five cases that existed then:
+Reverified 2026-08-11 on Herdr 0.8.0 protocol 19, macOS aarch64, after the guard began pinning its lab pane to a bare rc-less shell; measured 2026-08-10 on Herdr 0.8.0 protocol 19 after the stale-registration fix recorded in the next section extended the guard with the two corroboration cases, 2026-08-08 on Herdr 0.8.0, and first on 2026-08-02 on Herdr 0.7.5, the last two with identical results for the five cases that existed then:
 
 ```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-control-herdr-smoke.test.sh
+tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output on the 2026-08-10 run, exit status 0:
+Observed output on the 2026-08-11 run, exit status 0:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
@@ -600,6 +600,8 @@ The guarded teardown's fleet-state tripwire verified the live default session un
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent, and occupying or not occupying the pane's terminal, exercise exactly the gate every lifecycle verb depends on, with no real agent launched.
 The occupant is a SIGINT-ignoring shell loop rather than a harness, which is what lets the same pane pin both the interrupt-survival postcondition and the corroborated `alive` verdict.
+The lab's panes run a bare rc-less shell, pinned through a throwaway `HERDR_CONFIG_PATH` config (`herdr_pin_bare_pane_shell` in `tests/herdr-test-safety.sh`), because the stale-record case asserts the lone-idle-childless-shell proof succeeds and a contributor's own login shell can keep a persistent child that no such pane could ever shed.
+`tests/fm-herdr-session-cleanup-e2e.test.sh` asserts the same proof on a real restored pane and pins its lab the same way; the live-agent fixtures need the proof to fail while an occupant owns the foreground, which the occupancy alone decides, so they are left on the default shell.
 That command is the guard that maintains this record; run it after every Herdr upgrade and after any change to the agent-state classifier rather than trusting the version above.
 
 ### Agent status semantics and stale registrations
