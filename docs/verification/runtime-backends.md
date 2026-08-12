@@ -8,7 +8,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Shared project skill discovery
 
-Claude Code 2.1.228 and Codex CLI 0.147.0 were verified on 2026-08-11 from the same Firstmate worktree.
+Claude Code 2.1.228 and Codex CLI 0.147.0 were verified on 2026-08-11 from the same isolated Firstmate task worktree, which was each session's working directory.
 The canonical skill source was `.agents/skills/`, with `.claude/skills` resolving to `../.agents/skills` and no project `.codex/skills` directory.
 
 ```sh
@@ -29,7 +29,12 @@ INVOKED Reconstruct the handoff entirely from durable records. Never use convers
 ```
 
 Codex discovered the project-local `.agents/skills/` source directly, while Claude reached that same source through the existing `.claude/skills` symlink.
-This gives crewmates, worktree-local primaries, and a captain-run session rooted in the Firstmate checkout one shared skill source without a second copy under `.codex/skills`.
+Both harnesses returned the skill's own body text under its title, so this records skill resolution and invocation rather than the mere existence of a path.
+This gives crewmates and worktree-local primaries one shared skill source without a second copy under `.codex/skills`.
+
+This evidence covers exactly one rooting: a session whose working directory is an isolated Firstmate task worktree.
+A session rooted in the primary Firstmate checkout is not covered here, because a crewmate must never write to or experiment in that checkout, which places that rooting outside worker scope.
+The shared source is committed, so a maintainer closes that gap after merge by running the recorded `codex exec` command from the primary checkout and confirming the same `INVOKED` output.
 
 ## tmux
 

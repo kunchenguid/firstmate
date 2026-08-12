@@ -52,11 +52,16 @@ Write the completed packet to `data/<task-id>/harness-handoff.md` so another col
 task_id=<task-id>
 fm_home=<absolute-firstmate-home>
 meta="$fm_home/state/$task_id.meta"
+worktree=$(sed -n 's/^worktree=//p' "$meta" | head -1)
+[ -n "$worktree" ] || { echo "no recorded worktree for $task_id; stop and escalate" >&2; exit 1; }
 
 sed -n '1,240p' "$meta"
 sed -n '1,260p' "$fm_home/state/$task_id.status"
 FM_HOME="$fm_home" bin/fm-crew-state.sh "$task_id"
 ```
+
+Derive `$worktree` from the meta and refuse to continue while it is empty.
+`git -C ""` silently runs in the current directory instead of failing, so an unset worktree records whatever repository you happen to be standing in as this task's durable evidence.
 
 Take the worktree, project, harness, backend, kind, delivery mode, yolo posture, and endpoint only from `state/<id>.meta`.
 Treat `state/<id>.status` as an event log, not current-state truth.
@@ -67,11 +72,13 @@ Prove the local copy without changing it:
 ```sh
 git -C "$worktree" status --short
 git -C "$worktree" rev-parse HEAD
-git -C "$worktree" rev-parse --abbrev-ref HEAD
+git -C "$worktree" symbolic-ref --quiet --short HEAD
 git -C "$worktree" branch --contains HEAD
 ```
 
-An empty branch name means detached HEAD, not lost work.
+Empty output from `symbolic-ref --quiet --short HEAD` means detached HEAD, not lost work.
+Do not read detachment from `rev-parse --abbrev-ref HEAD`, which prints the literal string `HEAD` at a detached head and never prints an empty name.
+`git branch --contains HEAD` lists a detached head as the placeholder row `* (no branch)`; record the real branch rows and never that placeholder.
 Record every branch that contains the commit and do not move HEAD while reconstructing.
 Record every uncommitted file from `git status`; uncommitted work must remain in place.
 
@@ -82,20 +89,35 @@ For a no-mistakes task, inspect the run named by durable records from the record
 (cd "$worktree" && no-mistakes axi status --run <run-id>)
 ```
 
+Bare `no-mistakes axi` reports the active-or-most-recent run for the current branch when one exists, and otherwise displays some other branch's run purely as informational output.
+Before recording custody, confirm that the displayed run's branch and head match this worktree's branch and HEAD.
+When they do not match, attribute by branch from the repository-wide listing instead:
+
+```sh
+(cd "$worktree" && no-mistakes runs)
+```
+
+A run you cannot positively attribute to this worktree's branch and head is not this task's run.
+Record `unknown` for pipeline custody rather than supervising, resuming, or acting on another task's run.
+
 Record the run id, outcome, submitted head, current pipeline head, pushed head, and the complete `branch_sync.next_action` object.
-An active run matched to the branch remains authoritative even when the worker endpoint is dead.
+An active run positively attributed to this worktree's branch remains authoritative even when the worker endpoint is dead.
 Do not create a duplicate run or act on custody until structured status tells you the next action.
 
 When status names a preserved or current pipeline head, prove that it is a real commit object in the gate repository before trusting recovery:
 
 ```sh
-gate_repo="$HOME/.no-mistakes/repos/<repo-hash>.git"
+gate_repo=$(git -C "$worktree" remote get-url no-mistakes)
 preserved_head=<full-object-id>
 git --git-dir="$gate_repo" cat-file -e "$preserved_head^{commit}"
 git --git-dir="$gate_repo" cat-file -t "$preserved_head"
 ```
 
-A recorded head whose `cat-file -e` check fails is the known phantom-custody class tracked by `fm-nomistakes-phantom-custody`.
+Derive the gate repository from the worktree's `no-mistakes` remote rather than guessing a directory hash, because a machine holds one gate repository per registered project and the wrong one fails every object check.
+When `remote get-url no-mistakes` itself fails, the worktree is not gate-registered; that is a registration gap, and `cat-file` proves nothing until you hold the correct repository.
+Resolve the repository before classifying anything, because a failed check in the wrong repository looks exactly like a missing object.
+
+A recorded head whose `cat-file -e` check fails in the correctly derived gate repository is the known phantom-custody class tracked by `fm-nomistakes-phantom-custody`.
 Do not run custody recovery, invent the object, or treat the record as preserved work.
 Leave the branch, worktree, run, and gate records intact and escalate the blocked recovery with the exact missing object id.
 
