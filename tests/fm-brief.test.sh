@@ -125,6 +125,55 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+# Captain feedback (2026-08-12): no-mistakes ship PRs were shipping a
+# wall-of-text `## Intent` because the brief gave the worker zero guidance on
+# how to write it. The concise-intent guidance is scoped to the no-mistakes
+# DOD branch only - direct-PR and scout tasks never invoke `no-mistakes axi
+# run`, so they must not carry the guidance.
+test_no_mistakes_intent_guidance_is_scoped() {
+  local home id brief
+  home="$TMP_ROOT/intent-guidance-home"
+  write_registry "$home"
+
+  id="brief-intent-nm-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`## Problem`' "$brief" \
+    "no-mistakes DOD missing the Problem-bullet intent guidance"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`## Fix`' "$brief" \
+    "no-mistakes DOD missing the Fix-bullet intent guidance"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`## Proof`' "$brief" \
+    "no-mistakes DOD missing the Proof-bullet intent guidance"
+  assert_grep "No single multi-paragraph run-on" "$brief" \
+    "no-mistakes DOD missing the anti-wall-of-text instruction"
+
+  id="brief-intent-dp-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "direct-PR brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep '`## Problem`' "$brief" \
+    "direct-PR brief leaked no-mistakes intent guidance"
+  assert_no_grep "No single multi-paragraph run-on" "$brief" \
+    "direct-PR brief leaked no-mistakes intent guidance"
+
+  id="brief-intent-scout-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep '`## Problem`' "$brief" \
+    "scout brief leaked no-mistakes intent guidance"
+  assert_no_grep "No single multi-paragraph run-on" "$brief" \
+    "scout brief leaked no-mistakes intent guidance"
+
+  pass "fm-brief.sh: concise-intent PR guidance is scoped to the no-mistakes DOD"
+}
+
 # The scaffold owns the crew branch-naming convention, keyed off the project's
 # +ticket:<prefix> registry flag (bin/fm-project-mode.sh). A ticketless project
 # branches <type>/<slug>; a ticket-mandated one branches <prefix>-<ticket-id>-<slug>
@@ -543,6 +592,7 @@ test_non_shortcut_ticket_prefix_keeps_tracker_generic
 test_help_states_branch_convention
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_intent_guidance_is_scoped
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
