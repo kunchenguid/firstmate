@@ -270,7 +270,7 @@ test_legacy_lock_from_same_home_is_preserved() {
     "a same-home live harness did not preserve its legacy lock"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$NAMED_CLAUDE" \
-    -c '"$FM_ROOT_OVERRIDE/bin/fm-lock.sh"' 2>&1) || rc=$?
+    -c '"$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; rc=$?; :; exit "$rc"' 2>&1) || rc=$?
 
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
