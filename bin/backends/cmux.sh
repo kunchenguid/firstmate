@@ -708,6 +708,7 @@ fm_backend_cmux_acquisition_record_write() {
     mv -f "$staged" "$file" || exit 1
     staged=
     trap - EXIT HUP INT TERM
+    cleanup
   )
 }
 
@@ -879,7 +880,7 @@ fm_backend_cmux_persist_recovered_target() {
   parent=${meta%/*}
   id=${expected_label#fm-}
   (
-    local staged= lock_held=0 original_identity current_identity
+    local staged='' lock_held=0 original_identity current_identity
     cleanup() {
       [ -z "$staged" ] || rm -f "$staged"
       [ "$lock_held" = 1 ] && fm_lock_release "$lock" || true
@@ -905,6 +906,7 @@ fm_backend_cmux_persist_recovered_target() {
     fm_lock_release "$lock" || exit 1
     lock_held=0
     trap - EXIT HUP INT TERM
+    cleanup
   )
 }
 
@@ -1139,7 +1141,7 @@ fm_backend_cmux_workspace_exact_location_for_title() {
 fm_backend_cmux_target_workspace_for_label() {  # <recorded-workspace-id> <expected-title>
   local recorded_workspace=$1 expected_title=$2 inventory window_id workspace_id title count
   local exact_count=0 title_count=0 identity_count=0 exact_title=
-  local title_workspace= title_window= title_count_value=
+  local title_workspace='' title_window='' title_count_value=''
   FM_BACKEND_CMUX_EXACT_WINDOW=
   FM_BACKEND_CMUX_EXACT_COUNT=
   FM_BACKEND_CMUX_EXACT_TITLE=

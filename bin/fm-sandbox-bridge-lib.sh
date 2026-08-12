@@ -322,6 +322,7 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
     return 1
   fi
   FM_SANDBOX_BRIDGE_ACQUIRED_PATH=$expected
+  export FM_SANDBOX_BRIDGE_ACQUIRED_PATH
   FM_SANDBOX_BRIDGE_ACQUIRED_ID=$(fm_sandbox_bridge_lstat_identity "$expected") || {
     umask "$old_umask"
     fm_sandbox_bridge_error "could not identify private sandbox bridge for $task_id"

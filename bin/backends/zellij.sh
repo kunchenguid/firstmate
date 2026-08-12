@@ -376,10 +376,10 @@ fm_backend_zellij_acquisition_record() {
   printf 'backend=zellij\nkind=%s\nsession=%s\ntab_id=%s\npane_id=%s\nlabel=%s\n' \
     "$([ -n "$pane_id" ] && printf target || printf zellij-tab)" \
     "$session" "$tab_id" "$pane_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$file"; }; then
     rm -f "$tmp"
     return 1
-  }
+  fi
 }
 
 fm_backend_zellij_create_task() {  # <session> <label> <cwd>

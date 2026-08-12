@@ -6,8 +6,8 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-sandbox-bridge)
 HOME_DIR="$TMP_ROOT/home"
-STATE="$HOME_DIR/state"
-mkdir -p "$STATE"
+STATE_DIR="$HOME_DIR/state"
+mkdir -p "$STATE_DIR"
 PORTABLE_BIN="$TMP_ROOT/portable-bin"
 REAL_MV=$(command -v mv)
 REAL_RM=$(command -v rm)
@@ -28,13 +28,13 @@ exec "$REAL_RM" "\$@"
 SH
 chmod 700 "$PORTABLE_BIN/mv" "$PORTABLE_BIN/rm"
 
-cat > "$STATE/bogus.meta" <<EOF
+cat > "$STATE_DIR/bogus.meta" <<EOF
 window=tmux:bogus
 placement=bogus
 EOF
 
 (
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE_DIR"
   export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
   # shellcheck source=bin/fm-watch.sh disable=SC1091
   . "$ROOT/bin/fm-watch.sh"
@@ -45,13 +45,13 @@ EOF
 ) || fail 'unknown placement metadata was silently skipped'
 pass 'unknown placement metadata produces an actionable bridge failure'
 
-rm -f -- "$STATE/bogus.meta"
-cat > "$STATE/host.meta" <<EOF
+rm -f -- "$STATE_DIR/bogus.meta"
+cat > "$STATE_DIR/host.meta" <<EOF
 window=tmux:host
 placement=host
 EOF
 (
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE_DIR"
   export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
   # shellcheck source=bin/fm-watch.sh disable=SC1091
   . "$ROOT/bin/fm-watch.sh"
@@ -60,11 +60,11 @@ EOF
 pass 'host placement remains a silent no-op for bridge synchronization'
 
 (
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE_DIR"
   export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
   # shellcheck source=bin/fm-watch.sh disable=SC1091
   . "$ROOT/bin/fm-watch.sh"
-  fm_spawn_cleanup_record_write "$STATE" cleanup-task \
+  fm_spawn_cleanup_record_write "$STATE_DIR" cleanup-task \
     'endpoint_cleanup=1' 'endpoint_backend=tmux' 'endpoint_target=@cleanup' || exit 1
   if watch_spawn_cleanup_records; then
     exit 1
@@ -76,36 +76,36 @@ pass 'durable unpublished cleanup records produce an actionable watcher candidat
 (
   PATH="$PORTABLE_BIN:$PATH"
   export PATH
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE_DIR"
   export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
   # shellcheck source=bin/fm-watch.sh disable=SC1091
   . "$ROOT/bin/fm-watch.sh"
-  fm_spawn_cleanup_record_write "$STATE" portable-task \
+  fm_spawn_cleanup_record_write "$STATE_DIR" portable-task \
     'endpoint_cleanup=1' 'endpoint_backend=tmux' 'endpoint_target=@portable' || exit 1
-  [ -f "$STATE/.spawn-cleanup/portable-task.record" ] || exit 1
-  fm_spawn_cleanup_record_remove "$STATE" portable-task || exit 1
-  [ ! -e "$STATE/.spawn-cleanup/portable-task.record" ] || exit 1
-  if fm_spawn_cleanup_record_write "$STATE" newline-task $'endpoint_target=one\ninjected=1'; then
+  [ -f "$STATE_DIR/.spawn-cleanup/portable-task.record" ] || exit 1
+  fm_spawn_cleanup_record_remove "$STATE_DIR" portable-task || exit 1
+  [ ! -e "$STATE_DIR/.spawn-cleanup/portable-task.record" ] || exit 1
+  if fm_spawn_cleanup_record_write "$STATE_DIR" newline-task $'endpoint_target=one\ninjected=1'; then
     exit 1
   fi
-  if fm_spawn_cleanup_record_write "$STATE" carriage-task $'endpoint_target=one\rinjected=1'; then
+  if fm_spawn_cleanup_record_write "$STATE_DIR" carriage-task $'endpoint_target=one\rinjected=1'; then
     exit 1
   fi
-  if fm_spawn_cleanup_record_write "$STATE" tab-task $'endpoint_target=one\tinjected=1'; then
+  if fm_spawn_cleanup_record_write "$STATE_DIR" tab-task $'endpoint_target=one\tinjected=1'; then
     exit 1
   fi
-  if fm_spawn_cleanup_record_write "$STATE" control-task $'endpoint_target=one\vinjected=1'; then
+  if fm_spawn_cleanup_record_write "$STATE_DIR" control-task $'endpoint_target=one\vinjected=1'; then
     exit 1
   fi
-  if fm_spawn_cleanup_record_write "$STATE" duplicate-task \
+  if fm_spawn_cleanup_record_write "$STATE_DIR" duplicate-task \
     'endpoint_cleanup=1' 'endpoint_cleanup=0'; then
     exit 1
   fi
-  if fm_spawn_cleanup_record_write "$STATE" malformed-task 'endpoint_cleanup'; then
+  if fm_spawn_cleanup_record_write "$STATE_DIR" malformed-task 'endpoint_cleanup'; then
     exit 1
   fi
-  [ ! -e "$STATE/.spawn-cleanup/newline-task.record" ] || exit 1
-  [ ! -e "$STATE/.spawn-cleanup/duplicate-task.record" ] || exit 1
+  [ ! -e "$STATE_DIR/.spawn-cleanup/newline-task.record" ] || exit 1
+  [ ! -e "$STATE_DIR/.spawn-cleanup/duplicate-task.record" ] || exit 1
 ) || fail 'cleanup journals accepted unsafe or duplicate fields, or used GNU-only separators'
 pass 'cleanup journals reject controls and duplicates with BSD-safe publication'
 

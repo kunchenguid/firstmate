@@ -180,7 +180,8 @@ make_case() {
 }
 
 run_spawn() {
-  local case_dir=$1 id=$2 home=$3 proj=$4 wt=$5 fakebin=$6 state_dir=${7:-$home/state} harness=${8:-codex}
+  local case_dir=$1 id=$2 home=$3 proj=$4 wt=$5 fakebin=$6
+  local state_dir=${7:-$home/state} harness=${8:-codex}
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state_dir" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

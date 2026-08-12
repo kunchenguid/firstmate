@@ -1602,11 +1602,13 @@ fm_backend_herdr_launcher_identity() {  # <session>
     echo "error: herdr launcher pane '$pane' returned an ambiguous tab or workspace identity in session '$session'; refusing to place a worker without its exact parent workspace" >&2
     return 1
   fi
-  fm_backend_herdr_acquisition_value_valid "$tab" \
-    && fm_backend_herdr_acquisition_value_valid "$workspace" || {
+  if ! {
+    fm_backend_herdr_acquisition_value_valid "$tab" &&
+      fm_backend_herdr_acquisition_value_valid "$workspace"
+  }; then
     echo "error: herdr launcher pane '$pane' returned a control-character identity; refusing to place a worker without its exact parent workspace" >&2
     return 1
-  }
+  fi
 
   # Independent second read: the tab must agree that it lives in the same
   # workspace the pane just claimed. A restored-but-stale pane record that
@@ -2132,10 +2134,10 @@ fm_backend_herdr_acquisition_record() {
     "$task_id" \
     "$([ -n "$pane_id" ] && printf target || printf herdr-tab)" \
     "$session" "$workspace_id" "$tab_id" "$pane_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$file"; }; then
     rm -f "$tmp"
     return 1
-  }
+  fi
 }
 
 fm_backend_herdr_unresolved_acquisition_record() {
@@ -2147,10 +2149,10 @@ fm_backend_herdr_unresolved_acquisition_record() {
   tmp="$file.tmp.${BASHPID:-$$}"
   printf 'backend=herdr\ntask_id=%s\nkind=herdr-unresolved\nlabel=%s\nreason=provider-identity-unresolved\n' \
     "$task_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$file"; }; then
     rm -f "$tmp"
     return 1
-  }
+  fi
 }
 
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>

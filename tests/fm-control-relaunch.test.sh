@@ -618,17 +618,17 @@ test_docker_opencode_turnend_hook_cleanup_is_placement_scoped() {
   real_rm=$(command -v rm)
   make_rm_failure_stub "$dir"
   (
-    PATH="$dir/fakebin:$PATH"
     FM_REAL_RM="$real_rm"
-    export PATH FM_REAL_RM
-    fm_control_remove_sandbox_turnend_hook opencode "$wt" host
+    export FM_REAL_RM
+    PATH="$dir/fakebin:$PATH" \
+      fm_control_remove_sandbox_turnend_hook opencode "$wt" host
   )
   [ -e "$hook" ] || fail "host cleanup removed the Docker-only OpenCode hook"
   (
-    PATH="$dir/fakebin:$PATH"
     FM_REAL_RM="$real_rm"
-    export PATH FM_REAL_RM
-    fm_control_remove_sandbox_turnend_hook opencode "$wt" docker-sandbox
+    export FM_REAL_RM
+    PATH="$dir/fakebin:$PATH" \
+      fm_control_remove_sandbox_turnend_hook opencode "$wt" docker-sandbox
   ) \
     || fail "Docker OpenCode hook cleanup refused"
   [ ! -e "$hook" ] || fail "Docker cleanup left the exact OpenCode hook"
@@ -640,10 +640,10 @@ test_docker_opencode_turnend_hook_cleanup_is_placement_scoped() {
   printf '{}\n' > "$dash_hook"
   (
     cd "$dir" || exit 1
-    PATH="$dir/fakebin:$PATH"
     FM_REAL_RM="$real_rm"
-    export PATH FM_REAL_RM
-    fm_control_remove_sandbox_turnend_hook opencode "$dash_wt" docker-sandbox
+    export FM_REAL_RM
+    PATH="$dir/fakebin:$PATH" \
+      fm_control_remove_sandbox_turnend_hook opencode "$dash_wt" docker-sandbox
   ) \
     || fail "option-shaped Docker OpenCode hook cleanup refused"
   [ ! -e "$dash_hook" ] || fail "option-shaped Docker OpenCode hook remained"

@@ -91,10 +91,10 @@ fm_backend_tmux_acquisition_record() {
   tmp="$file.tmp.${BASHPID:-$$}"
   printf 'backend=tmux\nkind=tmux-id\nsession=%s\nwindow_id=%s\nlabel=%s\n' \
     "$session" "$window_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$file"; }; then
     rm -f "$tmp"
     return 1
-  }
+  fi
 }
 
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
