@@ -320,6 +320,7 @@ test_kimi_hook_recovers_only_one_exact_unmarked_block() {
     printf "decoy = '''\n"
     cat "$body"
     printf "'''\n\n"
+    # shellcheck disable=SC2016 # Literal TOML fixture bytes must not expand in the test shell.
     printf '%s\n' \
       '[[hooks]]' \
       'event = "\u0053top"' \
