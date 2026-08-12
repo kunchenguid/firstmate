@@ -790,6 +790,7 @@ SH
 test_raw_omp_dispatch_policy_is_structural() {
   local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script canonical_dir canonical_omp canonical_bun canonical_wrapper
   local decoy_omp decoy_wrapper nonexec_wrapper wrapper_collision omp_only cwd_decoy node_bin
+  local path_decoy missing_dir
   command -v node >/dev/null 2>&1 || { pass "raw OMP structural policy skipped without node"; return; }
   canonical_dir="$TMP_ROOT/raw-policy-bin"
   mkdir -p "$canonical_dir"
@@ -802,18 +803,21 @@ test_raw_omp_dispatch_policy_is_structural() {
   wrapper_collision="$TMP_ROOT/raw-policy-collision"
   omp_only="$TMP_ROOT/raw-policy-omp-only"
   cwd_decoy="$TMP_ROOT/raw-policy-cwd"
+  path_decoy="$TMP_ROOT/raw-policy-path-decoy"
+  missing_dir="$TMP_ROOT/raw-policy-missing"
   node_bin=$(command -v node)
-  mkdir -p "${decoy_omp%/*}"
+  mkdir -p "${decoy_omp%/*}" "$path_decoy"
   mkdir -p "${nonexec_wrapper%/*}" "$wrapper_collision" "$omp_only" "$cwd_decoy"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$canonical_omp"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$canonical_bun"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$decoy_omp"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$path_decoy/omp"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$canonical_wrapper"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$decoy_wrapper"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$nonexec_wrapper"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$wrapper_collision/start-omp.sh"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$cwd_decoy/start-omp.sh"
-  chmod +x "$canonical_omp" "$canonical_bun" "$decoy_omp" "$canonical_wrapper" "$decoy_wrapper" "$wrapper_collision/start-omp.sh" "$cwd_decoy/start-omp.sh"
+  chmod +x "$canonical_omp" "$canonical_bun" "$decoy_omp" "$path_decoy/omp" "$canonical_wrapper" "$decoy_wrapper" "$wrapper_collision/start-omp.sh" "$cwd_decoy/start-omp.sh"
   chmod -x "$nonexec_wrapper"
   ln -s "$canonical_omp" "$omp_only/omp"
   omp_script="$TMP_ROOT/raw-policy-agent.sh"
@@ -832,6 +836,11 @@ test_raw_omp_dispatch_policy_is_structural() {
     "env FOO=bar $canonical_omp --raw-flag" \
     "env --ignore-environment $canonical_omp --raw-flag" \
     "env --split-string='$canonical_omp --raw-flag'" \
+    "env PATH=$canonical_dir omp --raw-flag" \
+    "env PATH=$canonical_dir env omp --raw-flag" \
+    "env -C $canonical_dir ./omp --raw-flag" \
+    "env --chdir=$canonical_dir ./omp --raw-flag" \
+    "env PATH=$path_decoy -C $canonical_dir ./omp --raw-flag" \
     "nice env -S '$canonical_omp --raw-flag'" \
     "time --format=%E env --split-string='$canonical_omp --raw-flag'" \
     "setsid env FOO=bar $canonical_omp --raw-flag" \
@@ -850,6 +859,14 @@ test_raw_omp_dispatch_policy_is_structural() {
     "echo 'omp'" \
     "xargs echo omp" \
     "env FOO=omp echo safe" \
+    "env PATH=$path_decoy omp --raw-flag" \
+    "env -u PATH omp --raw-flag" \
+    "env -C $path_decoy ./omp --raw-flag" \
+    "env --chdir=$path_decoy ./omp --raw-flag" \
+    "env -C $missing_dir $canonical_omp --raw-flag" \
+    "env -C" \
+    "env PATH=$path_decoy env omp --raw-flag" \
+    "nice env PATH=$path_decoy omp --raw-flag" \
     "env -S 'echo omp'" \
     "env -S" \
     "nice env -S 'echo omp'" \

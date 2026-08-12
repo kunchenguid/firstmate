@@ -2632,18 +2632,30 @@ const rotateRun = () => {
   atomicWrite(SESSION_STOP, "pending\\n");
   return token;
 };
-const adoptCurrentRun = () => {
-  if (runToken) return runToken;
+const persistedRun = () => {
   try {
-    const current = readFileSync(SESSION_RUN, "utf8").split(/\r?\n/, 1)[0].trim();
+    const runLines = readFileSync(SESSION_RUN, "utf8").split(/\r?\n/).filter(Boolean);
     const stop = readFileSync(SESSION_STOP, "utf8").trim();
-    if (current && stop === "pending") {
-      runToken = current;
-      runSettledToken = "";
-      runRecords.push({ token: current, startedAt: 0, active: true });
-      if (runRecords.length > 64) runRecords.shift();
-    }
-  } catch {}
+    const busyFields = new Set(readFileSync("$STATE_REAL/$ID.busy-state", "utf8").trim().split(/\s+/));
+    if (runLines.length !== 1 || stop !== "pending") return null;
+    if (!busyFields.has("gen=$BUSY_GEN") || !busyFields.has("state=busy")) return null;
+    const token = runLines[0];
+    if (!/^[A-Za-z0-9._-]+$/.test(token) || !token.startsWith("$BUSY_GEN.")) return null;
+    const match = token.match(/\.([0-9]+)\.[0-9]+$/);
+    const startedAt = match ? Number(match[1]) : 0;
+    return { token, startedAt: Number.isSafeInteger(startedAt) ? startedAt : 0 };
+  } catch {
+    return null;
+  }
+};
+const adoptCurrentRun = (timestamp?: number) => {
+  if (runToken) return runToken;
+  const persisted = persistedRun();
+  if (!persisted || (timestamp !== undefined && (persisted.startedAt <= 0 || timestamp < persisted.startedAt))) return "";
+  runToken = persisted.token;
+  runSettledToken = "";
+  runRecords.push({ token: persisted.token, startedAt: persisted.startedAt, active: true });
+  if (runRecords.length > 64) runRecords.shift();
   return runToken;
 };
 const eventTimestamp = (event: any) => {
@@ -2660,11 +2672,12 @@ const eventTimestamp = (event: any) => {
   return latest;
 };
 const eventRunToken = (event: any) => {
+  const timestamp = eventTimestamp(event);
+  adoptCurrentRun(timestamp);
   for (const key of ["run_token", "runToken"]) {
     const token = event?.[key];
     if (typeof token === "string" && token) return token;
   }
-  const timestamp = eventTimestamp(event);
   if (timestamp === undefined) return runRecords.length === 1 ? runToken : "";
   let matched = "";
   for (let index = 0; index < runRecords.length; index += 1) {

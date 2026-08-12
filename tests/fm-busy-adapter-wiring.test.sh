@@ -211,6 +211,18 @@ switch (process.env.MODE) {
     break;
   case "session-stop": await fire("session_stop"); break;
   case "session-shutdown": await fire("session_shutdown"); break;
+  case "timestamped-agent-end":
+    await fire("agent_end", { last_assistant_message: { timestamp: Number(process.env.EVENT_TIMESTAMP) } });
+    break;
+  case "timestamped-session-shutdown":
+    await fire("session_shutdown", { last_assistant_message: { timestamp: Number(process.env.EVENT_TIMESTAMP) } });
+    break;
+  case "explicit-session-shutdown":
+    await fire("session_shutdown", {
+      run_token: process.env.EVENT_TOKEN,
+      last_assistant_message: { timestamp: Number(process.env.EVENT_TIMESTAMP) },
+    });
+    break;
   case "session-stop-agent-end-shutdown":
     await fire("session_stop");
     await fire("agent_end");
@@ -387,6 +399,67 @@ test_omp_extension_persistent_run_correlation() {
   [ "$out" = "busy omp-ext" ] \
     || fail "ambiguous active runs must remain busy after tokenless agent_end, got '$out'"
   pass "omp extension correlates repeated tokenless terminal events to one active run"
+}
+
+test_omp_extension_reloads_and_reconciles_persisted_run() {
+  local rec id out state ext run_token started_at record_before record_after
+  local fresh_token fresh_started_at stale_token
+  rec=$(make_spawn_case omp-reload omp busy-omp-reload)
+  read_case_record "$rec"
+  id=busy-omp-reload
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "persisted-run agent_start drive failed: $out"
+  run_token=$(cat "$state/$id.omp-session-run")
+  started_at=$(printf '%s\n' "$run_token" | awk -F. '{ print $(NF - 1) }')
+  rm -f "$state/$id.turn-ended"
+  out=$(EVENT_TIMESTAMP=$((started_at + 1)) drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
+    || fail "timestamped reload agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a reloaded extension must settle its uniquely persisted run, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "a reloaded timestamped terminal event must publish turn-end evidence"
+  record_before=$(fm_busy_record_read "$state" "$id")
+  out=$(EVENT_TIMESTAMP=$((started_at + 1)) drive_omp_ext "$ext" timestamped-agent-end "$state" "$id") \
+    || fail "duplicate reload agent_end drive failed: $out"
+  record_after=$(fm_busy_record_read "$state" "$id")
+  [ "$record_after" = "$record_before" ] || fail "a duplicate terminal event after reload rewrote the busy record"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "fresh persisted-run agent_start drive failed: $out"
+  fresh_token=$(cat "$state/$id.omp-session-run")
+  fresh_started_at=$(printf '%s\n' "$fresh_token" | awk -F. '{ print $(NF - 1) }')
+  rm -f "$state/$id.turn-ended"
+  out=$(EVENT_TIMESTAMP=$((fresh_started_at - 1)) drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
+    || fail "stale timestamp reload shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a timestamp before the persisted run lifetime must not settle it, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a stale timestamp must not publish turn-end evidence"
+
+  stale_token="${fresh_token}.stale"
+  out=$(EVENT_TIMESTAMP=$((fresh_started_at + 1)) EVENT_TOKEN="$stale_token" \
+    drive_omp_ext "$ext" explicit-session-shutdown "$state" "$id") \
+    || fail "stale-token reload shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "an explicit stale token must not settle the persisted run, got '$out'"
+  printf '%s\n%s\n' "$fresh_token" "$stale_token" > "$state/$id.omp-session-run"
+  out=$(EVENT_TIMESTAMP=$((fresh_started_at + 1)) drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
+    || fail "ambiguous persisted-run shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "multiple persisted pending runs must remain busy, got '$out'"
+  printf '%s\n' "$fresh_token" > "$state/$id.omp-session-run"
+  printf '%s\n' conflicting-token > "$state/$id.omp-session-stop"
+  out=$(EVENT_TIMESTAMP=$((fresh_started_at + 1)) drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
+    || fail "conflicting stop-evidence shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "conflicting persisted stop evidence must remain busy, got '$out'"
+  printf '%s\n' pending > "$state/$id.omp-session-stop"
+  out=$(EVENT_TIMESTAMP=$((fresh_started_at + 1)) drive_omp_ext "$ext" timestamped-session-shutdown "$state" "$id") \
+    || fail "fresh timestamped reload shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a fresh persisted run must settle after reload, got '$out'"
+  pass "omp extension reconciles persisted runs across reloads with timestamp and ambiguity guards"
 }
 
 test_omp_agent_end_continuation_stays_busy() {
@@ -604,6 +677,7 @@ test_omp_extension_semantic_lifecycle
 test_omp_extension_rejects_late_prior_run_stop
 test_omp_session_shutdown_requires_one_active_run
 test_omp_extension_persistent_run_correlation
+test_omp_extension_reloads_and_reconciles_persisted_run
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
