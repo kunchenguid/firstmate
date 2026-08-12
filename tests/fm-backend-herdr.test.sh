@@ -44,6 +44,11 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
+if [ "${1:-}" = api ] && [ "${2:-}" = schema ] && [ "${3:-}" = --json ] \
+   && [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" != 1 ]; then
+  printf '%s\n' '{"properties":{"method":{"const":"pane.close_bound"}},"$defs":{"PaneCloseBoundParams":{"properties":{"expected_pid":{"type":"integer"}}}}}'
+  exit 0
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
@@ -104,6 +109,11 @@ for ((i=0; i<${#args[@]}; i++)); do
 done
 
 case "$cmd $sub" in
+  "api schema")
+    if [ "${3:-}" = --json ] && [ "${FM_HERDR_NO_BOUND_CLOSE:-0}" != 1 ]; then
+      printf '%s\n' '{"properties":{"method":{"const":"pane.close_bound"}},"$defs":{"PaneCloseBoundParams":{"properties":{"expected_pid":{"type":"integer"}}}}}'
+    fi
+    ;;
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
     ;;
@@ -212,6 +222,19 @@ test_version_check_refuses_old_protocol() {
   [ "$status" -ne 0 ] || fail "version_check should refuse protocol 5 (below min)"
   assert_contains "$out" "protocol 5" "version_check error did not name the rejected protocol"
   pass "fm_backend_herdr_version_check: refuses an old protocol loudly"
+}
+
+test_version_check_refuses_without_atomic_bound_close() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/version-no-bound-close"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","channel":"stable","protocol":14}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_NO_BOUND_CLOSE=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "version_check should refuse a provider without atomic bound close"
+  assert_contains "$out" "pane.close_bound" "version_check did not report the missing atomic close capability"
+  pass "fm_backend_herdr_version_check: refuses a provider without atomic bound close"
 }
 
 test_version_check_refuses_missing_herdr() {
@@ -3345,6 +3368,7 @@ test_wait_transition_clean_timeout_returns_1() {
 
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
+test_version_check_refuses_without_atomic_bound_close
 test_version_check_refuses_missing_herdr
 test_workspace_label_primary_home_no_marker
 test_workspace_label_secondmate_home_uses_marker_id

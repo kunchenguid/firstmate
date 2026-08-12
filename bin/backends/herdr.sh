@@ -162,6 +162,15 @@ fm_backend_herdr_tool_check() {
   return 0
 }
 
+fm_backend_herdr_bound_close_capable() {
+  local schema
+  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  printf '%s' "$schema" | jq -e '
+    any(.. | objects; .const? == "pane.close_bound")
+    and any(.. | objects; ((.properties? // {}) | has("expected_pid")))
+  ' >/dev/null 2>&1
+}
+
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
 # herdr client. Verified locally: v0.7.1, protocol 14 (herdr status --json's
 # .client.protocol; client info is session-independent, unlike .server).
@@ -179,6 +188,10 @@ fm_backend_herdr_version_check() {
   esac
   if [ "$protocol" -lt "$FM_BACKEND_HERDR_MIN_PROTOCOL" ]; then
     echo "error: herdr protocol $protocol (version ${version:-unknown}) is older than the verified minimum $FM_BACKEND_HERDR_MIN_PROTOCOL; update herdr (herdr update) before using backend=herdr" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_bound_close_capable; then
+    echo "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" >&2
     return 1
   fi
   return 0
