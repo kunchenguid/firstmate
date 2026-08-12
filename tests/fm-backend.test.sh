@@ -18,6 +18,9 @@
 #      collapses to HEAD and can no longer supply that baseline.
 #   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
 #      and the blocked `codex-app` backend loudly.
+#   4. Exercises explicit, configured, primary-runtime, and marker-free spawn
+#      selection through public commands, including the marker-free refusal
+#      that prevents an expected visible Herdr task from silently using tmux.
 #
 # fm-watch.sh's signal/stale/check/heartbeat wake-string contract is already
 # exercised end-to-end against this refactor by tests/fm-watch-triage.test.sh
@@ -461,6 +464,45 @@ test_backend_name_explicit_beats_detection() {
   [ "$out" = tmux ] || fail "config/backend=tmux should win over an ambient CMUX_WORKSPACE_ID auto-detect marker, got '$out'"
 
   pass "fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection, including an ambient cmux marker"
+}
+
+# New-task selection is intentionally stricter than the operational-home name
+# used by bootstrap. Configuration and verified runtime markers remain valid,
+# while a process outside every detectable runtime needs an explicit choice.
+test_backend_spawn_name_requires_selection_evidence() {
+  local dir cfg out errfile status
+
+  dir="$TMP_ROOT/spawn-name-evidence"
+  cfg="$dir/config"
+  errfile="$dir/err.txt"
+  mkdir -p "$cfg"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_spawn_name 2>"$errfile")
+  status=$?
+  expect_code 1 "$status" "marker-free new-task backend resolution should refuse"
+  [ -z "$out" ] || fail "marker-free new-task backend resolution printed an unexpected backend '$out'"
+  assert_contains "$(cat "$errfile")" "no runtime backend is applicable for this spawn" \
+    "marker-free refusal did not explain the missing selection evidence"
+  assert_contains "$(cat "$errfile")" "--backend herdr" \
+    "marker-free refusal did not name the explicit visible Herdr choice"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_spawn_name)
+  [ "$out" = tmux ] || fail "FM_BACKEND=tmux should remain applicable for a new spawn, got '$out'"
+
+  printf 'herdr\n' > "$cfg/backend"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_spawn_name)
+  [ "$out" = herdr ] || fail "config/backend=herdr should remain applicable for a new spawn, got '$out'"
+  rm -f "$cfg/backend"
+
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_spawn_name)
+  [ "$out" = tmux ] || fail "a primary running inside tmux should continue to auto-detect tmux, got '$out'"
+
+  out=$(unset TMUX CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_spawn_name 2>"$errfile")
+  [ "$out" = herdr ] || fail "a primary running inside Herdr should continue to auto-detect herdr, got '$out'"
+  assert_contains "$(cat "$errfile")" "auto-detected herdr runtime" \
+    "Herdr primary-runtime selection lost its operator-visible notice"
+
+  pass "fm_backend_spawn_name: configured and primary-runtime choices remain applicable; marker-free selection refuses with explicit tmux/Herdr guidance"
 }
 
 test_backend_validate_refuses_unknown() {
@@ -1059,6 +1101,57 @@ test_spawn_default_backend_writes_no_meta_field() {
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
+test_spawn_configured_tmux_remains_applicable() {
+  local proj wt data id state config out fb
+  proj="$TMP_ROOT/configured-backend-project"; wt="$TMP_ROOT/configured-backend-wt"; data="$TMP_ROOT/configured-backend-data"
+  id="configuredbackendz4"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/configured-backend-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/configured-backend-state"; config="$TMP_ROOT/configured-backend-config"
+  mkdir -p "$state" "$config"
+  printf 'tmux\n' > "$config/backend"
+
+  out=$(env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
+    PATH="$FAKE_NONDARWIN_BIN:$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_BACKEND='' \
+    FM_TMUX_LOG="$TMP_ROOT/configured-backend.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 $? "config/backend=tmux should remain applicable without a per-task flag"$'\n'"$out"
+  assert_no_grep 'backend=' "$state/$id.meta" \
+    "configured tmux must preserve the absent backend= metadata compatibility contract"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: config/backend remains an applicable selection outside a detected primary runtime"
+}
+
+test_spawn_marker_free_backend_refuses_before_launch() {
+  local data id state config out status log
+  id="markerfreebackendz5"
+  data="$TMP_ROOT/marker-free-backend-data"; state="$TMP_ROOT/marker-free-backend-state"; config="$TMP_ROOT/marker-free-backend-config"
+  log="$TMP_ROOT/marker-free-backend.log"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+
+  out=$(env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
+    PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_BACKEND='' \
+    FM_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" projects/none claude --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "marker-free spawn should refuse instead of launching tmux"$'\n'"$out"
+  assert_contains "$out" "no runtime backend is applicable for this spawn" \
+    "marker-free spawn refusal did not name the missing evidence"
+  assert_contains "$out" "--backend tmux" \
+    "marker-free spawn refusal did not name intentional tmux selection"
+  assert_contains "$out" "--backend herdr" \
+    "marker-free spawn refusal did not name visible Herdr selection"
+  assert_absent "$state/$id.meta" "marker-free refusal created task metadata"
+  [ ! -s "$log" ] || fail "marker-free refusal reached the tmux adapter before stopping"$'\n'"$(cat "$log")"
+  pass "fm-spawn.sh: a marker-free request refuses before endpoint creation instead of silently launching tmux"
+}
+
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   local proj wt data id state config out fb
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
@@ -1124,6 +1217,7 @@ test_backend_detect_cmux_fallback_ancestry_stops_at_launchd
 test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
+test_backend_spawn_name_requires_selection_evidence
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
@@ -1138,5 +1232,7 @@ test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
+test_spawn_configured_tmux_remains_applicable
+test_spawn_marker_free_backend_refuses_before_launch
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

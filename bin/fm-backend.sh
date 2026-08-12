@@ -227,30 +227,33 @@ fm_backend_detect_cmux_app_is_ancestor() {
   return 1
 }
 
-# fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
-# explicit per-task override. Precedence: FM_BACKEND env, then config/backend
-# (a single word on its first non-empty line, mirroring config/crew-harness),
-# then runtime auto-detection (fm_backend_detect), then default tmux. A
-# per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
-# precedence over this resolution entirely; it is not read here. Auto-detect
-# fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
-# notice (both are experimental); auto-detecting tmux stays silent - it is
-# today's default-path behavior and callers must see zero change. The cmux
-# notice names the winning signal, so a fallback-detected cmux (bundle id or
-# ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case.
-fm_backend_name() {
-  local line v detected marker
+# fm_backend_resolve_name: the single resolver behind operational-home checks
+# and new-task spawning. Precedence is FM_BACKEND, then config/backend (a
+# single word on its first non-empty line, mirroring config/crew-harness), then
+# runtime auto-detection (fm_backend_detect). The <allow-default-tmux> argument
+# controls only the marker-free tail: operational-home checks retain their
+# historical tmux default, while a new spawn refuses because no explicit,
+# configured, or primary-runtime choice can prove tmux was intended.
+#
+# A per-task `--backend` flag is parsed by fm-spawn.sh and takes precedence over
+# this resolver entirely. Auto-detect fires only when nothing was explicitly
+# configured, so an explicit setting always wins. Selecting herdr or cmux via
+# auto-detect prints one loud stderr notice (both are experimental);
+# auto-detecting tmux stays silent. The cmux notice names the winning signal, so
+# a fallback-detected cmux (bundle id or ancestry, after the claude wrapper
+# stripped CMUX_WORKSPACE_ID) is visibly distinct from the primary-marker case.
+fm_backend_resolve_name() {  # <allow-default-tmux: 0|1>
+  local allow_default=$1 line v detected marker
+  FM_BACKEND_RESOLVED=""
   if [ -n "${FM_BACKEND:-}" ]; then
-    printf '%s' "$FM_BACKEND"
+    FM_BACKEND_RESOLVED=$FM_BACKEND
     return 0
   fi
   if [ -f "$FM_BACKEND_CONFIG_DIR/backend" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       v=$(printf '%s' "$line" | tr -d '[:space:]')
       if [ -n "$v" ]; then
-        printf '%s' "$v"
+        FM_BACKEND_RESOLVED=$v
         return 0
       fi
     done < "$FM_BACKEND_CONFIG_DIR/backend"
@@ -270,10 +273,32 @@ fm_backend_name() {
       esac
       echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
-    printf '%s' "$detected"
+    FM_BACKEND_RESOLVED=$detected
     return 0
   fi
-  printf 'tmux'
+  if [ "$allow_default" = 1 ]; then
+    FM_BACKEND_RESOLVED=tmux
+    return 0
+  fi
+  echo "error: no runtime backend is applicable for this spawn: no --backend flag, FM_BACKEND value, config/backend value, or primary-runtime marker selected one. Pass --backend tmux for an intentional tmux worker or --backend herdr for a visible Herdr worker; refusing before launch." >&2
+  return 1
+}
+
+# fm_backend_name: resolve the backend for operational-home checks. Its
+# marker-free tmux default is retained for bootstrap compatibility; new task
+# spawns use fm_backend_spawn_name's stricter contract instead.
+fm_backend_name() {
+  fm_backend_resolve_name 1 || return 1
+  printf '%s' "$FM_BACKEND_RESOLVED"
+}
+
+# fm_backend_spawn_name: resolve a backend for a new task when fm-spawn.sh did
+# not receive an explicit --backend. A configured value or verified marker is
+# sufficient evidence. Marker-free resolution refuses before endpoint creation
+# instead of silently treating tmux as the requested task surface.
+fm_backend_spawn_name() {
+  fm_backend_resolve_name 0 || return 1
+  printf '%s' "$FM_BACKEND_RESOLVED"
 }
 
 # fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.

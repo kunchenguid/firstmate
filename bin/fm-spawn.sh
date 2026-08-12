@@ -44,8 +44,8 @@
 #   config/backend, then runtime auto-detection from the runtime firstmate's
 #   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
 #   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
-#   docs/cmux-backend.md),
-#   then tmux.
+#   docs/cmux-backend.md). If none applies, the spawn refuses before creating an
+#   endpoint and names explicit tmux and visible Herdr choices.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
@@ -927,8 +927,9 @@ if [ "$KIND" = secondmate ]; then
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
+# FM_BACKEND env, else config/backend, else runtime auto-detection.
+# fm_backend_spawn_name refuses a marker-free implicit tmux choice before any
+# endpoint exists, and fm_backend_validate_spawn refuses unknown or
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
@@ -937,7 +938,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
-    BACKEND=$(fm_backend_name)
+    BACKEND=$(fm_backend_spawn_name) || exit 1
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
