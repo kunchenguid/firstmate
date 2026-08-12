@@ -53,6 +53,10 @@ fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path term
   # result.terminal or a root terminal object with .handle. Undocumented
   # result.id and result.worktree.terminal shapes are ignored until a real Orca
   # smoke run proves them.
+  # worktree-path is normalized to a host-usable absolute path: Orca on WSL may
+  # return \\wsl.localhost\<Distro>\home\... (or //wsl.localhost/..., \\wsl$\...)
+  # which Linux cannot cd into until rewritten as /home/.... Worktree ids keep
+  # the opaque Orca form for API calls; only filesystem paths are rewritten.
   local field=$1
   node -e '
 const fs = require("fs");
@@ -75,9 +79,23 @@ function handle(obj) {
   if (typeof obj === "string" || typeof obj === "number") return String(obj);
   return scalar(obj.handle) || "";
 }
+// Orca WSL returns Windows UNC forms for in-distro paths. Map them to the
+// Linux absolute path Firstmate isolation checks and git -C need. Leave true
+// Windows drive paths and non-WSL UNCs unchanged so a mismatch still fails
+// closed rather than inventing a local path.
+function normalizeHostPath(p) {
+  if (typeof p !== "string" || !p) return p;
+  if (p.startsWith("/") && !p.startsWith("//")) return p;
+  const unified = p.replace(/\//g, "\\");
+  let m = unified.match(/^\\\\wsl\.localhost\\([^\\]+)\\(.+)$/i);
+  if (!m) m = unified.match(/^\\\\wsl\$\\([^\\]+)\\(.+)$/i);
+  if (!m) return p;
+  const rest = m[2].replace(/\\/g, "/").replace(/^\/+/, "");
+  return rest ? "/" + rest : p;
+}
 let v = "";
 if (field === "worktree-id") v = wt.id || wt.worktreeId || r.worktreeId || "";
-if (field === "worktree-path") v = wt.path || (wt.git && wt.git.path) || r.path || "";
+if (field === "worktree-path") v = normalizeHostPath(wt.path || (wt.git && wt.git.path) || r.path || "");
 if (field === "terminal-handle") v = handle(explicitTerm || r) || "";
 if (field === "worktree-terminal-handle") v = handle(explicitTerm) || "";
 if (field === "repo-id") v = repo.id || repo.repoId || r.repoId || "";

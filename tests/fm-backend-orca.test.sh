@@ -380,6 +380,53 @@ test_worktree_path_resolves_id() {
   pass "fm_backend_orca_worktree_path: resolves an Orca worktree id to its path"
 }
 
+test_worktree_path_normalizes_wsl_unc() {
+  local out wt_id wt_path unc_id unc_path
+  # Orca on WSL returns Windows UNC paths for in-distro worktrees. Isolation
+  # checks and git -C need the Linux absolute form; the opaque worktree id is
+  # left unchanged for Orca API calls. Build the JSON with node so the UNC
+  # bytes match a real orca --json response rather than hand-escaped printf.
+  orca_case path-wsl-unc
+  unc_path='\\wsl.localhost\Ubuntu\home\ldh\orca\workspaces\proj\fm-task'
+  unc_id="repo-1::${unc_path}"
+  node -e 'const id=process.argv[1], p=process.argv[2]; process.stdout.write(JSON.stringify({ok:true,result:{worktree:{id,path:p}}})+"\n")' \
+    "$unc_id" "$unc_path" > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_path "$1"' "$ROOT" "$unc_id" )
+  [ "$out" = /home/ldh/orca/workspaces/proj/fm-task ] || \
+    fail "worktree path helper should normalize wsl.localhost UNC to a Linux path, got '$out'"
+
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-1"}}}\n' > "$RESP/2.out"
+  node -e 'const id=process.argv[1], p=process.argv[2]; process.stdout.write(JSON.stringify({ok:true,result:{worktree:{id,path:p}}})+"\n")' \
+    "$unc_id" "$unc_path" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" )
+  wt_id=${out%%$'\t'*}
+  wt_path=${out#*$'\t'}
+  wt_path=${wt_path%%$'\t'*}
+  [ "$wt_path" = /home/ldh/orca/workspaces/proj/fm-task ] || \
+    fail "worktree create should print a normalized Linux path, got '$wt_path'"
+  [ "$wt_id" = "$unc_id" ] || \
+    fail "worktree create should keep the opaque Orca worktree id unchanged, got '$wt_id'"
+
+  # Forward-slash UNC and wsl$ share forms must also normalize.
+  out=$( node -e 'process.stdout.write(JSON.stringify({ok:true,result:{worktree:{path:"//wsl.localhost/Ubuntu/home/ldh/wt"}}})+"\n")' | \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_json_get worktree-path' "$ROOT" )
+  [ "$out" = /home/ldh/wt ] || fail "json_get should normalize //wsl.localhost/... paths, got '$out'"
+  out=$( node -e 'process.stdout.write(JSON.stringify({ok:true,result:{worktree:{path:"\\\\wsl$\\Ubuntu\\home\\ldh\\wt2"}}})+"\n")' | \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_json_get worktree-path' "$ROOT" )
+  [ "$out" = /home/ldh/wt2 ] || fail "json_get should normalize \\\\wsl$\\... paths, got '$out'"
+  # Already-Linux and true Windows drive paths stay as returned.
+  out=$( node -e 'process.stdout.write(JSON.stringify({ok:true,result:{worktree:{path:"/tmp/already-linux"}}})+"\n")' | \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_json_get worktree-path' "$ROOT" )
+  [ "$out" = /tmp/already-linux ] || fail "json_get should leave Linux paths alone, got '$out'"
+  out=$( node -e 'process.stdout.write(JSON.stringify({ok:true,result:{worktree:{path:"C:\\Users\\x\\wt"}}})+"\n")' | \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_json_get worktree-path' "$ROOT" )
+  [ "$out" = 'C:\Users\x\wt' ] || fail "json_get should not invent a Linux path for a Windows drive path, got '$out'"
+  pass "Orca worktree path: normalizes WSL UNC forms to Linux absolute paths"
+}
+
 test_json_get_ignores_undocumented_terminal_id_shapes() {
   local out status wt_id wt_path term
   orca_case parser-pruned-terminal-shapes
@@ -1319,6 +1366,7 @@ test_kill_is_best_effort_close
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
+test_worktree_path_normalizes_wsl_unc
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
