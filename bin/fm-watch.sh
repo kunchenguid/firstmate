@@ -613,6 +613,17 @@ routine_check_ack() {
     || { echo 'watcher: routine fire state acknowledgement failed' >&2; return 1; }
 }
 
+routine_scan_generation() {
+  local generation
+  [ -f "$STATE/.routine-generation" ] && [ ! -L "$STATE/.routine-generation" ] \
+    || return 1
+  generation=$(cat "$STATE/.routine-generation") || return 1
+  case "$generation" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$generation"
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
@@ -938,8 +949,14 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         wake_key=$c
-        if [ "$id" = routine-scan ] && [ "$FM_CHECK_RC" -ne 0 ]; then
-          wake_key="$c:routine-error"
+        if [ "$id" = routine-scan ]; then
+          if [ "$FM_CHECK_RC" -ne 0 ]; then
+            wake_key="$c:routine-error"
+          else
+            routine_generation=$(routine_scan_generation) \
+              || { echo 'watcher: routine scan generation is unavailable' >&2; exit 1; }
+            wake_key="$c:routine-generation:$routine_generation"
+          fi
         fi
         fm_wake_append check "$wake_key" "$reason" || exit 1
         routine_check_ack "$id" "$out" "$FM_CHECK_RC" || exit 1

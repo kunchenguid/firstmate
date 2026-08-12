@@ -82,14 +82,19 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
 # this recovery path completes the promotion before consuming the wake. A
 # failed promotion leaves the queue untouched for the next handling turn.
 routine_wake_acknowledge_queued() {
-  local cutoff=$1 epoch seq kind key payload
+  local cutoff=$1 epoch seq kind key payload generation
   while IFS=$'\t' read -r epoch seq kind key payload; do
     case "$seq" in
       ''|*[!0-9]*) continue ;;
     esac
     [ "$seq" -le "$cutoff" ] || continue
     case "$key" in
-      */routine-scan.check.sh|routine-scan.check.sh) ;;
+      */routine-scan.check.sh:routine-generation:*|routine-scan.check.sh:routine-generation:*)
+        generation=${key##*:}
+        case "$generation" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        ;;
       *) continue ;;
     esac
     case "$payload" in
@@ -97,10 +102,10 @@ routine_wake_acknowledge_queued() {
       *) continue ;;
     esac
     FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-routine-scan.sh" --ack >/dev/null 2>&1 \
+      "$SCRIPT_DIR/fm-routine-scan.sh" --ack --generation "$generation" >/dev/null 2>&1 \
       || { echo 'wake drain: routine fire state acknowledgement failed' >&2; return 1; }
-    return 0
   done < "$FM_WAKE_QUEUE"
+  return 0
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open

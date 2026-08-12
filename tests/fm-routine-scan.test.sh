@@ -278,7 +278,7 @@ test_deferred_check_acknowledges_after_wake() {
   pass "routine fire state commits after wake acknowledgement"
 }
 test_deferred_publication_does_not_refire_after_restart() {
-  local home check first second
+  local home check first second generation
   home=$(make_home publication-restart)
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
     || fail "routine setup could not create the publication fixture"
@@ -288,8 +288,9 @@ test_deferred_publication_does_not_refire_after_restart() {
   first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   [ "$first" = 'routine-due: publication-item | captain | survive restart routine-check-error: literal' ] \
     || fail "the publication fixture did not emit its due wake"
+  generation=$(cat "$home/state/.routine-generation")
   FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh" "$first" \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
     || fail "the publication fixture could not append its durable wake"
   [ ! -e "$home/state/.routine-fired" ] \
     || fail "the publication fixture promoted fire state before its wake was handled"
@@ -352,9 +353,9 @@ SH
 #!/usr/bin/env bash
 set -u
 umask 077
-printf '%s\n' \
-  'item-a|daily|2026-08-10|captain|check priorities' \
-  'item-b|daily|2026-08-10|captain|review the week' > "$FM_STATE_OVERRIDE/.routine-pending"
+  printf '%s\n' \
+  'item-a|daily|2026-08-10|captain|check priorities|1' \
+  'item-b|daily|2026-08-10|captain|review the week|1' > "$FM_STATE_OVERRIDE/.routine-pending"
 chmod 0600 "$FM_STATE_OVERRIDE/.routine-pending"
 printf '%s\n' 'routine-due: item-a | captain | check priorities'
 sleep 5
@@ -397,6 +398,57 @@ SH
   [ "$(cat "$home/state/.routine-fired")" = "$fired_expected" ] \
     || fail "acknowledged fire state does not match the surfaced routines"
   pass "watcher acknowledges routines only after a complete scan"
+}
+test_recovery_does_not_acknowledge_stale_routine_generation() {
+  local home check first generation second
+  home=$(make_home stale-generation)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the generation fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- item-a | daily | captain | first routine'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  generation=$(cat "$home/state/.routine-generation")
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh:routine-generation:$generation" "$first" \
+    || fail "the stale-generation wake could not enter the wake rail"
+  printf '%s\n' \
+    'item-a|daily|2026-08-10|captain|first routine|2' \
+    'item-b|daily|2026-08-10|captain|second routine|2' > "$home/state/.routine-pending"
+  write_registry "$home" \
+    '- item-a | daily | captain | first routine' \
+    '- item-b | daily | captain | second routine'
+  ack_watcher_cycle "$home/state" \
+    || fail "the stale-generation wake could not be recovered"
+  [ -f "$home/state/.routine-pending" ] \
+    || fail "recovery consumed newer pending routine state"
+  [ ! -s "$home/state/.routine-fired" ] \
+    || fail "recovery fired newer pending routine state"
+  second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  case "$second" in
+    *'routine-due: item-b | captain | second routine'*) ;;
+    *) fail "newer pending routine did not resurface after stale recovery: $second" ;;
+  esac
+  pass "recovery binds routine acknowledgement to its scan generation"
+}
+test_ack_rejects_dangling_pending_symlink() {
+  local home check out rc
+  home=$(make_home dangling-pending)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the dangling-state fixture"
+  check="$home/state/routine-scan.check.sh"
+  ln -s "$home/state/missing-pending" "$home/state/.routine-pending"
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "acknowledgement accepted a dangling pending symlink"
+  case "$out" in
+    *'pending routine state is unavailable:'*) ;;
+    *) fail "dangling pending symlink lacked an actionable diagnostic: $out" ;
+  esac
+  pass "acknowledgement rejects dangling pending state"
 }
 test_symlink_registry_is_rejected_at_scan_boundary() {
   local home outside out rc
@@ -459,5 +511,7 @@ test_deferred_check_acknowledges_after_wake
 test_deferred_publication_does_not_refire_after_restart
 test_ack_fails_when_routine_state_lock_is_held
 test_watcher_acknowledges_only_after_complete_scan
+test_recovery_does_not_acknowledge_stale_routine_generation
+test_ack_rejects_dangling_pending_symlink
 test_symlink_registry_is_rejected_at_scan_boundary
 test_check_surfaces_registry_diagnostics
