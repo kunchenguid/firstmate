@@ -1513,6 +1513,10 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   fi
 done
 case "$cmd $sub" in
+  "session list")
+    jq -n --arg socket "${FM_FAKE_HERDR_SOCKET:?}" \
+      '{sessions:[{name:"fmtest",running:true,socket_path:$socket}]}'
+    ;;
   "workspace list") jq '{result:{workspaces:.workspaces}}' "$state" ;;
   "tab list") jq --arg workspace "$workspace" '{result:{tabs:[.tabs[] | select(.workspace_id == $workspace)]}}' "$state" ;;
   "tab get")
@@ -1587,6 +1591,7 @@ SH
   (
     export FM_HERDR_LOG="$case_dir/herdr.log"
     export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
+    export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
     run_teardown "$case_dir" --force
   ) > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -1603,6 +1608,40 @@ SH
   assert_contains "$(cat "$case_dir/herdr.log")" 'pane close w9:p2' \
     "projection-journal-order: exact Herdr endpoint was not closed before return"
   pass "projection journal retires after endpoint close and before a failed worktree return"
+}
+
+test_projection_teardown_refuses_missing_identity() {
+  local case_dir rc
+  case_dir=$(make_case projection-missing-identity)
+  write_meta "$case_dir" local-only ship
+  sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_tab_id=w9:t2' \
+    'display_label=fm-task-x1' \
+    'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
+  make_herdr_teardown_fake "$case_dir"
+  : > "$case_dir/herdr.log"
+
+  set +e
+  (
+    export FM_HERDR_LOG="$case_dir/herdr.log"
+    export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
+    export FM_FAKE_HERDR_SOCKET="$case_dir/herdr.sock"
+    run_teardown "$case_dir" --force
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "projection-missing-identity: teardown must fail closed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "projection-missing-identity: task metadata was removed"
+  assert_not_contains "$(cat "$case_dir/herdr.log")" 'pane close' \
+    "projection-missing-identity: unbound pane was closed"
+  jq -e '.panes | any(.[]; .pane_id == "w9:p2")' "$case_dir/herdr-state.json" >/dev/null \
+    || fail "projection-missing-identity: pane state changed after identity refusal"
+  pass "projection teardown refuses to close a pane without bound identity"
 }
 
 test_local_only_fork_remote_allows
@@ -1644,3 +1683,4 @@ test_nested_secondmate_late_report_handoffs_resolved_history
 test_nested_secondmate_teardown_handoffs_archived_resolution
 test_nested_secondmate_teardown_failure_keeps_active_reply
 test_projection_journal_retires_before_worktree_return
+test_projection_teardown_refuses_missing_identity
