@@ -50,6 +50,16 @@ wait_for_text() {
   return 1
 }
 
+wait_for_file() {
+  local file=$1 i=0
+  while [ "$i" -lt 600 ]; do
+    [ -s "$file" ] && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 find_chrome() {
   local candidate
   if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
@@ -827,6 +837,7 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -1126,6 +1137,48 @@ if (operationalComponent.render(100).length !== 0) {
 }
 if (legacyOperationalComponent.render(100).length !== 0) {
   throw new Error("Calm left the supported bare-marker legacy user row visible");
+}
+const pendingUpdate = InteractiveMode.prototype.updatePendingMessagesDisplay;
+const pendingQueueReader = InteractiveMode.prototype.getAllQueuedMessages;
+if (typeof pendingUpdate === "function" && typeof pendingQueueReader === "function") {
+  const pendingContainer = {
+    children: [],
+    clear() {
+      this.children = [];
+    },
+    addChild(component) {
+      this.children.push(component);
+    },
+  };
+  const pendingMode = {
+    pendingMessagesContainer: pendingContainer,
+    session: {
+      getSteeringMessages: () => [watcherMessage, "CAPTAIN_STEERING_PENDING"],
+      getFollowUpMessages: () => ["CAPTAIN_FOLLOW_UP_PENDING", watcherMessage],
+    },
+    compactionQueuedMessages: [],
+    getAppKeyDisplay: () => "Option+Up",
+  };
+  const pendingText = () => pendingContainer.children
+    .flatMap((component) => component.render?.(180) ?? [])
+    .join("\n");
+  pendingUpdate.call(pendingMode);
+  if (pendingText().includes(watcherMessage) || !pendingText().includes("CAPTAIN_FOLLOW_UP_PENDING")) {
+    throw new Error("Calm did not filter current operational text from the pending-message dock");
+  }
+  if (!pendingText().includes("CAPTAIN_STEERING_PENDING")) {
+    throw new Error("Calm hid genuine queued steering text");
+  }
+  await calmCommand.handler("", commandContext);
+  pendingUpdate.call(pendingMode);
+  if (!pendingText().includes(watcherMessage)) {
+    throw new Error("Calm-off pending-message rendering did not restore operational text");
+  }
+  await calmCommand.handler("", commandContext);
+  pendingUpdate.call(pendingMode);
+  if (pendingText().includes(watcherMessage)) {
+    throw new Error("re-enabling Calm did not hide current operational pending text");
+  }
 }
 const operationalNearMisses = [
   {
@@ -1552,9 +1605,18 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    i=0
+    while [ "$i" -lt 120 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" && \
+        printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+        break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+      || fail "Pi follow-up $label case did not render exactly one captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
@@ -2815,7 +2877,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot pending_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2834,6 +2896,7 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
+  pending_snapshot="$TMP_ROOT/pending.txt"
   export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
@@ -3017,6 +3080,12 @@ export default function (pi: ExtensionAPI): void {
         throw new Error("could not select the long-delay Calm E2E model");
       }
       await pi.sendUserMessage("CALM_BOAT_E2E_PROMPT");
+    },
+  });
+  pi.registerCommand("calm-queue-genuine-e2e", {
+    description: "Queue one genuine captain follow-up for the Calm pending-dock check.",
+    handler: async () => {
+      await pi.sendUserMessage("CALM_GENUINE_QUEUED_E2E", { deliverAs: "followUp" });
     },
   });
   pi.registerCommand("calm-working-e2e", {
@@ -3234,12 +3303,69 @@ JS
   done
   assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "operational arrival lost its preceding transient diagnostic"
   assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
+
+  # A follow-up can remain in Pi's pending-message dock while a long run is active.
+  # This is a separate presentation path from addMessageToChat: Calm must hide the
+  # known operational envelope there too, while retaining genuine queued captain text.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$pending_snapshot"
+    if grep -Fq '\__/' "$pending_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_contains "$(cat "$pending_snapshot")" "CALM_BOAT_E2E_PROMPT" \
+    "pending-dock fixture did not start the long Calm run"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e watcher"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$pending_snapshot"
+    if grep -Fq "operational-error" "$pending_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$pending_snapshot")" "CURRENT_WATCHER_E2E" \
+    "Calm left a current operational follow-up visible in Pi's pending-message dock"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-queue-genuine-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  wait_for_text "$pending_snapshot" "CALM_GENUINE_QUEUED_E2E" \
+    || fail "the genuine queued captain follow-up did not remain visible"
+  assert_contains "$(cat "$pending_snapshot")" "CALM_GENUINE_QUEUED_E2E" \
+    "Calm hid genuine queued captain text"
+  # Dequeue the two test messages into the editor, clear that editor text, and
+  # then abort. This exercises Pi's public queue-edit path so the fixture does
+  # not accidentally start the queued follow-ups while the rest of the E2E
+  # checks continue.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-Up
+  sleep 0.1
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-c
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$pending_snapshot"
+    if ! grep -Fq '\__/' "$pending_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$pending_snapshot")" '\__/' \
+    "pending-dock fixture did not abort cleanly"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  if ! wait_for_file "$export_file"; then
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_snapshot" 2>/dev/null || true
+    fail "/export did not create a non-empty file while calm mode was on: $(cat "$export_snapshot")"
+  fi
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);

@@ -13,8 +13,9 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows both in the transcript and while they wait in Pi's pending-message dock.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+Genuine queued Captain messages remain visible in the pending-message dock.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.

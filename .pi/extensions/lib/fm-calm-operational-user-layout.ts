@@ -1,8 +1,7 @@
-// Verified against Pi 0.81.1 and 0.82.0, which add the ordinary-user spacer and row
-// together via InteractiveMode.addMessageToChat. This adapter probes that exact method
-// and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
-// diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
-// message delivery.
+// Verified against Pi 0.81.1, 0.82.0, and 0.84.1, which add the ordinary-user spacer and
+// row together via InteractiveMode.addMessageToChat and expose the pending-message dock
+// through InteractiveMode.updatePendingMessagesDisplay. This adapter probes those exact
+// methods and changes only presentation; it never changes message delivery.
 import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
@@ -16,6 +15,10 @@ type UserMessageLike = {
 type AddMessageOptions = {
   populateHistory?: boolean;
 };
+type PendingMessages = {
+  steering: string[];
+  followUp: string[];
+};
 type InteractiveModePresentation = {
   chatContainer: {
     children: unknown[];
@@ -25,6 +28,7 @@ type InteractiveModePresentation = {
     addToHistory?(text: string): void;
   };
   getMarkdownThemeWithSettings(): UserMessageConstructorArgs[1];
+  getMarkdownTransformers?(): UserMessageConstructorArgs[3];
   getUserMessageText(message: UserMessageLike): string;
   outputPad: number;
 };
@@ -34,10 +38,14 @@ type InteractiveModePrototype = {
     message: UserMessageLike,
     options?: AddMessageOptions,
   ): void;
+  getAllQueuedMessages(): PendingMessages;
+  setHiddenThinkingLabel(label?: string): void;
+  updatePendingMessagesDisplay(): void;
 };
 type CalmOperationalUserLayoutPatch = {
   hidesOperationalInput: () => boolean;
   isOperationalInput: (text: string) => boolean;
+  pendingDisplayHidesOperational: boolean | undefined;
 };
 
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
@@ -81,6 +89,7 @@ export function installCalmOperationalUserLayout(): void {
   const patch: CalmOperationalUserLayoutPatch = {
     hidesOperationalInput,
     isOperationalInput,
+    pendingDisplayHidesOperational: undefined,
   };
   const InteractiveMode = PiCodingAgent.InteractiveMode;
   if (typeof InteractiveMode !== "function") {
@@ -104,8 +113,9 @@ export function installCalmOperationalUserLayout(): void {
       markdownTheme: UserMessageConstructorArgs[1],
       outputPad: number,
       hasLeadingSpacer: boolean,
+      markdownTransformers: UserMessageConstructorArgs[3],
     ) {
-      super(text, markdownTheme, outputPad);
+      super(text, markdownTheme, outputPad, markdownTransformers);
       this.hasLeadingSpacer = hasLeadingSpacer;
     }
 
@@ -136,10 +146,71 @@ export function installCalmOperationalUserLayout(): void {
       this.getMarkdownThemeWithSettings(),
       this.outputPad,
       this.chatContainer.children.length > 0,
+      this.getMarkdownTransformers?.(),
     );
     this.chatContainer.addChild(component);
     if (options?.populateHistory) this.editor.addToHistory?.(text);
   };
+
+  const originalGetAllQueuedMessages = prototype.getAllQueuedMessages;
+  const originalSetHiddenThinkingLabel = prototype.setHiddenThinkingLabel;
+  const originalUpdatePendingMessagesDisplay = prototype.updatePendingMessagesDisplay;
+  if (
+    typeof originalGetAllQueuedMessages !== "function" ||
+    typeof originalSetHiddenThinkingLabel !== "function" ||
+    typeof originalUpdatePendingMessagesDisplay !== "function"
+  ) {
+    console.error(
+      "Firstmate Calm: pending operational-message presentation adapter unavailable; " +
+        "Pi's pending-message display API is missing",
+    );
+  } else {
+    prototype.updatePendingMessagesDisplay = function (this: InteractiveModePrototype): void {
+      if (!patch.hidesOperationalInput()) {
+        originalUpdatePendingMessagesDisplay.call(this);
+        return;
+      }
+
+      const mode = this as unknown as InteractiveModePrototype & Record<string, unknown>;
+      const hadOwnQueueReader = Object.prototype.hasOwnProperty.call(mode, "getAllQueuedMessages");
+      const previousQueueReader = mode.getAllQueuedMessages;
+      mode.getAllQueuedMessages = (): PendingMessages => {
+        const pending = originalGetAllQueuedMessages.call(this);
+        return {
+          steering: pending.steering.filter((text) => !patch.isOperationalInput(text)),
+          followUp: pending.followUp.filter((text) => !patch.isOperationalInput(text)),
+        };
+      };
+      try {
+        originalUpdatePendingMessagesDisplay.call(this);
+      } finally {
+        if (hadOwnQueueReader) {
+          mode.getAllQueuedMessages = previousQueueReader;
+        } else {
+          delete mode.getAllQueuedMessages;
+        }
+      }
+    };
+    prototype.setHiddenThinkingLabel = function (
+      this: InteractiveModePrototype,
+      label?: string,
+    ): void {
+      const hidesOperational = patch.hidesOperationalInput();
+      if (
+        patch.pendingDisplayHidesOperational !== undefined &&
+        hidesOperational !== patch.pendingDisplayHidesOperational
+      ) {
+        // Calm changes state before it calls this public UI method. Rebuild the
+        // pending dock before Pi requests its render so already-queued operational
+        // rows disappear or return on the same frame as delivered rows. Queue
+        // arrivals use the patched update method directly, so the initial state
+        // needs no extra render.
+        prototype.updatePendingMessagesDisplay.call(this);
+      }
+      patch.pendingDisplayHidesOperational = hidesOperational;
+      originalSetHiddenThinkingLabel.call(this, label);
+    };
+  }
 
   registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH] = patch;
 }
