@@ -483,8 +483,11 @@ test_legacy_generationless_wake_is_adopted() {
   pass "wake drain: generation-less legacy wakes are adopted and acknowledged"
 }
 
-test_stale_recovery_generation_is_rejected() {
-  local dir state first_err replay_err sequence generation newer_marker newer_sequence newer_generation rc
+# Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
+# the queue-library boundary.
+test_stale_recovery_generation_cannot_touch_a_newer_episode() {
+  local dir state first_err replay_err sequence generation handling_marker
+  local newer_marker newer_sequence newer_generation rc
   dir=$(make_case stale-recovery-generation)
   state="$dir/state"
 
@@ -498,35 +501,63 @@ test_stale_recovery_generation_is_rejected() {
   [ -n "$sequence" ] && [ -n "$generation" ] \
     || fail "first drain did not emit a generation-bound acknowledgement"
 
-  append_wake "$state" check second 'check: newer recovery generation' \
-    || fail "newer generation wake append failed"
-  newer_marker=$(cat "$state/.watcher-down")
-  [ "${newer_marker##*:}" != "$generation" ] \
-    || fail "new durable publication did not advance the recovery generation"
+  append_wake "$state" check second 'check: same episode' \
+    || fail "first same-episode wake append failed"
+  append_wake "$state" check third 'check: same episode again' \
+    || fail "second same-episode wake append failed"
+  handling_marker=$(cat "$state/.watcher-down")
+  [ "${handling_marker##*:}" = "$generation" ] \
+    || fail "repeated publications replaced the outstanding recovery generation"
 
-  set +e
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "stale acknowledgement consumed a newer recovery generation"
-  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
-    || fail "stale acknowledgement changed the newer recovery marker"
+    --recovery-generation "$generation" > "$dir/handled-ack.out" 2> "$dir/handled-ack.err" \
+    || fail "a publication during handling invalidated the printed acknowledgement"
+  ! grep "$(printf '\tcheck\tfirst\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the handled row was not consumed"
   grep "$(printf '\tcheck\tsecond\t')" "$state/.wake-queue" >/dev/null \
-    || fail "stale acknowledgement removed the newer durable wake"
+    || fail "a row above the acknowledged sequence was consumed"
+  grep "$(printf '\tcheck\tthird\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the second row above the acknowledged sequence was consumed"
+  case "$(cat "$state/.watcher-down")" in
+    pending:*) ;;
+    *) fail "an episode with rows still queued was retired" ;;
+  esac
 
+  # Retire that episode, then let a genuinely newer one open.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
-    || fail "newer generation could not be re-drained"
+    || fail "remaining wake could not be re-drained"
   replay_err="$dir/replay.err"
   grep "$(printf '\tcheck\tsecond\t')" "$dir/replay.out" >/dev/null \
-    || fail "newer generation wake did not re-surface"
+    || fail "remaining wake did not re-surface"
+  grep "$(printf '\tcheck\tthird\t')" "$dir/replay.out" >/dev/null \
+    || fail "second remaining wake did not re-surface"
   newer_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
   newer_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$newer_sequence" \
     --recovery-generation "$newer_generation" \
-    || fail "newer recovery generation could not be acknowledged"
-  [ ! -s "$state/.wake-queue" ] || fail "newer acknowledgement left durable wakes queued"
-  pass "wake drain: stale acknowledgement cannot consume a newer recovery generation"
+    || fail "the handled episode could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledgement left durable wakes queued"
+
+  append_wake "$state" check fourth 'check: newer recovery generation' \
+    || fail "newer generation wake append failed"
+  newer_marker=$(cat "$state/.watcher-down")
+  [ "${newer_marker##*:}" != "$generation" ] \
+    || fail "a retired episode did not open a new recovery generation"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale-ack.err")"
+  if ! grep -F 'WAKE_ACK_REQUIRED' "$dir/stale-ack.err" >/dev/null \
+    || ! grep -F 're-run' "$dir/stale-ack.err" >/dev/null; then
+    fail "a stale acknowledgement did not name its own remedy: $(cat "$dir/stale-ack.err")"
+  fi
+  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
+    || fail "a stale acknowledgement retired the newer recovery episode"
+  grep "$(printf '\tcheck\tfourth\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a stale acknowledgement consumed the newer durable wake"
+  pass "wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode"
 }
 
 test_recovery_ack_failure_is_reported() {
@@ -557,8 +588,10 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "recovery acknowledgement failure was reported as success"
-  grep -F 'recovery generation is stale or could not be acknowledged safely' "$dir/drain.err" >/dev/null \
+  grep -F 'recovery episode could not be retired safely' "$dir/drain.err" >/dev/null \
     || fail "recovery acknowledgement failure had no explicit diagnostic"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null \
+    || fail "recovery acknowledgement failure did not name its own remedy"
   [ "$(cat "$state/.watcher-down")" = "pending:handling:$generation" ] \
     || fail "failed acknowledgement corrupted the pending recovery marker"
 
@@ -639,6 +672,6 @@ test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_wake_publish_requires_atomic_recovery_evidence
 test_legacy_generationless_wake_is_adopted
-test_stale_recovery_generation_is_rejected
+test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
