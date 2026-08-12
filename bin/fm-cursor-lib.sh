@@ -16,7 +16,7 @@
 # carries a positive verdict, so no single vendor string is load-bearing:
 #
 #   Structural (no subprocess, safe during a process scan): the canonical path
-#   is named cursor-agent or lives under a cursor-agent directory component.
+#   is named cursor-agent or lives under Cursor's versioned install tree.
 #   Cursor's installer places both names as symlinks into
 #   ~/.local/share/cursor-agent/versions/<version>/cursor-agent (verified
 #   2026-08-11, cursor-agent 2026.08.11-e8db854), so the alias resolves to
@@ -69,14 +69,15 @@ fm_cursor_canonical_path() {  # <path>
 }
 
 # True when path $1 carries Cursor's own structural evidence: its canonical
-# name is cursor-agent, or a cursor-agent directory component appears in the
-# canonical path. A directory component merely named `agent` is NEVER enough.
+# name is cursor-agent, or it is inside Cursor's
+# cursor-agent/versions/<version>/ install tree. A directory component merely
+# named `agent` or `cursor-agent` is NEVER enough.
 fm_cursor_path_is_cursor() {  # <path>
   local path=$1 canonical
   [ -n "$path" ] || return 1
   canonical=$(fm_cursor_canonical_path "$path") || return 1
   case "${canonical##*/}" in cursor-agent) return 0 ;; esac
-  case "/$canonical/" in */cursor-agent/*) return 0 ;; esac
+  case "$canonical" in */cursor-agent/versions/*/*) return 0 ;; esac
   return 1
 }
 

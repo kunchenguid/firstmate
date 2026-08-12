@@ -87,9 +87,12 @@ test_identity_accepts_cursor_shapes_rejects_lookalikes() {
   fi
   kill "$impostor_pid" 2>/dev/null || true
 
-  # A path with a directory component merely named `agent/` is never enough.
+  # A path with a directory component merely named `agent/` or
+  # `cursor-agent/` is never enough.
   ! fm_cursor_process_matches node '' /opt/agent/bin/runner \
     || fail "an 'agent/' directory component must not identify as cursor"
+  ! fm_cursor_process_matches node '' /tmp/cursor-agent/bin/runner \
+    || fail "a cursor-agent directory outside the versioned install tree must not identify"
   ! fm_cursor_process_matches MainThread '' '' \
     || fail "a bare MainThread with no cursor evidence must not identify"
   ! fm_cursor_process_matches node '' '' \
