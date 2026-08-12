@@ -297,6 +297,44 @@ FM_HOME="$TABS_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$TABS_HOME/stat
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a sibling-tab state change stole focus from the captain's workspace"
 pass "real herdr E2E: sibling worker tab creation and state changes retain one human-titled tab without focus drift"
 
+RACE_IDS=(tabrace-a tabrace-b tabrace-c)
+RACE_HOMES=()
+RACE_PIDS=()
+for id in "${RACE_IDS[@]}"; do
+  home="$TMP_ROOT/$id-home"
+  RACE_HOMES+=("$home")
+  mkdir -p "$home/state" "$home/config" "$home/data/$id"
+  printf 'tabs\n' > "$home/config/herdr-presentation-spaces"
+  printf '# Task\nCoordinate the same visible task\n' > "$home/data/$id/brief.md"
+  (
+    spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$home" "$id" "$PROJ" --mode no-mistakes --yolo off
+    printf '%s\n' "$SPAWN_RC" > "$TMP_ROOT/$id.rc"
+  ) &
+  RACE_PIDS+=("$!")
+done
+for pid in "${RACE_PIDS[@]}"; do
+  wait "$pid" || true
+done
+RACE_LABELS=
+for i in "${!RACE_IDS[@]}"; do
+  id=${RACE_IDS[$i]}
+  home=${RACE_HOMES[$i]}
+  [ -f "$TMP_ROOT/$id.rc" ] || fail "concurrent sibling-tab spawn $id did not report an outcome"
+  [ "$(cat "$TMP_ROOT/$id.rc")" = 0 ] \
+    || fail "concurrent sibling-tab spawn $id failed"$'\n'"$(cat "$TMP_ROOT/$id.err" 2>/dev/null)"
+  meta="$home/state/$id.meta"
+  record_worktree "$meta"
+  pane=$(grep '^herdr_pane_id=' "$meta" | cut -d= -f2-)
+  tab=$(grep '^herdr_tab_id=' "$meta" | cut -d= -f2-)
+  [ -n "$pane" ] && [ -n "$tab" ] || fail "concurrent sibling-tab spawn $id did not publish its real endpoint"
+  lab pane get "$pane" >/dev/null 2>&1 || fail "concurrent sibling-tab spawn $id lost its real task pane"
+  RACE_LABELS="$RACE_LABELS$(lab tab get "$tab" | jq -r '.result.tab.label')"$'\n'
+done
+[ "$(printf '%s' "$RACE_LABELS" | sed '/^$/d' | sort -u | wc -l | tr -d '[:space:]')" = 3 ] \
+  || fail "concurrent sibling tabs with one human title were not given distinct visible labels: $RACE_LABELS"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "concurrent sibling-tab spawns stole focus from the captain's workspace"
+pass "real herdr E2E: concurrent sibling workers receive distinct real task tabs without focus drift"
+
 # A raw fixture has no control adapter, while a completed real worker's process
 # is already agent-free. Mark this fixture pi only to exercise the existing
 # stopped-agent lifecycle path without launching a second process.
@@ -318,6 +356,12 @@ if FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TABS_HOME" FM_STATE_OVERRIDE="$TABS_HOME/s
 fi
 grep -F 'retained completed sibling-tab worker' "$TMP_ROOT/tabs-relaunch.out" >/dev/null \
   || fail "completed sibling-tab relaunch refusal did not name the retained worker boundary"
+if FM_SPAWN_NO_GUARD=1 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TABS_HOME" FM_STATE_OVERRIDE="$TABS_HOME/state" \
+    "$ROOT/bin/fm-spawn.sh" tabsA --relaunch --harness pi >"$TMP_ROOT/tabs-spawn-relaunch.out" 2>&1; then
+  fail "fm-spawn directly reused a retained completed sibling tab"
+fi
+grep -F 'retained completed sibling-tab worker' "$TMP_ROOT/tabs-spawn-relaunch.out" >/dev/null \
+  || fail "fm-spawn completed sibling-tab refusal did not name the retained worker boundary"
 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TABS_HOME" FM_STATE_OVERRIDE="$TABS_HOME/state" \
   FM_DATA_OVERRIDE="$TABS_HOME/data" FM_CONFIG_OVERRIDE="$TABS_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" tabsA --clear-completed >"$TMP_ROOT/tabs-clear.out" 2>&1 \

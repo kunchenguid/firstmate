@@ -984,6 +984,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
+  if [ "$BACKEND" = herdr ] \
+     && [ "$(fm_meta_get "$RELAUNCH_META" herdr_presentation)" = tabs ] \
+     && [ "$(fm_meta_get "$RELAUNCH_META" herdr_tab_completed)" = 1 ]; then
+    echo "error: task $ID is a retained completed sibling-tab worker; clear it before creating a new task instead of reusing its tab" >&2
+    exit 1
+  fi
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
@@ -2008,6 +2014,14 @@ case "$BACKEND" in
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      if [ "$HERDR_SIBLING_TABS" -eq 1 ]; then
+        HERDR_SES=$(fm_backend_herdr_session)
+        fm_backend_herdr_server_ensure "$HERDR_SES" || exit 1
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr sibling-task tab creation could not acquire its session lock" >&2
+          exit 1
+        }
+      fi
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
@@ -2027,6 +2041,9 @@ case "$BACKEND" in
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+      if [ "$HERDR_SIBLING_TABS" -eq 1 ]; then
+        spawn_herdr_presentation_order_lock_release
+      fi
     fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2

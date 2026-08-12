@@ -25,8 +25,32 @@ case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid task id" >&2; exit 2 ;;
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || exit 0
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+META_LOCK_HELD=0
+TAB_LOCK=
+TAB_LOCK_HELD=0
+
+task_tab_release_locks() {
+  local status=$?
+  if [ "$TAB_LOCK_HELD" = 1 ]; then
+    TAB_LOCK_HELD=0
+    fm_lock_release "$TAB_LOCK" || true
+  fi
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    META_LOCK_HELD=0
+    fm_lock_release "$META_LOCK" || true
+  fi
+  return "$status"
+}
+trap task_tab_release_locks EXIT
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
+[ -f "$META" ] && [ ! -L "$META" ] || exit 0
+
 meta_value() {
   local key=$1 count
   count=$(grep -c "^${key}=" "$META" 2>/dev/null || true)
@@ -45,6 +69,10 @@ TITLE=$(meta_value task_title) || exit 1
 DISAMBIGUATOR=$(meta_value task_title_disambiguator 2>/dev/null || true)
 KIND=$(meta_value kind 2>/dev/null || true)
 [ -n "$KIND" ] || KIND=ship
+TAB_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$SESSION") || exit 1
+fm_lock_acquire_wait "$TAB_LOCK"
+TAB_LOCK_HELD=1
+[ "$(fm_backend_herdr_presentation_session_lock_path "$SESSION")" = "$TAB_LOCK" ] || exit 1
 
 marker_for_refresh() {
   local log="$STATE/$ID.status" line verb
@@ -62,11 +90,41 @@ marker_for_refresh() {
   printf '●'
 }
 
-case "$ACTION" in
-  refresh) MARKER=$(marker_for_refresh) ;;
-  working) MARKER='●' ;;
-  stopped) MARKER='!' ;;
-  complete) MARKER='✓' ;;
-esac
+mark_completed() {
+  local tmp
+  tmp=$(mktemp "$STATE/.$ID.meta.completed.XXXXXX") || return 1
+  if ! awk '!/^herdr_tab_completed=/' "$META" > "$tmp" \
+      || ! printf 'herdr_tab_completed=1\n' >> "$tmp" \
+      || ! mv -f "$tmp" "$META"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+COMPLETED=$(meta_value herdr_tab_completed 2>/dev/null || true)
+case "$COMPLETED" in ''|1) ;; *) exit 1 ;; esac
+if [ "$ACTION" = complete ]; then
+  case "$(fm_backend_herdr_pane_agent_state "$SESSION" "$PANE")" in
+    no-agent) ;;
+    *)
+      echo "error: sibling-tab worker $ID still has a registered or unreadable Herdr agent; stop it before retaining completion" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$COMPLETED" != 1 ]; then
+    mark_completed || exit 1
+    COMPLETED=1
+  fi
+fi
+if [ "$COMPLETED" = 1 ]; then
+  MARKER='✓'
+else
+  case "$ACTION" in
+    refresh) MARKER=$(marker_for_refresh) ;;
+    working) MARKER='●' ;;
+    stopped) MARKER='!' ;;
+    complete) MARKER='✓' ;;
+  esac
+fi
 LABEL=$(fm_backend_herdr_task_tab_label "$MARKER" "$TITLE" "$DISAMBIGUATOR") || exit 1
 fm_backend_herdr_tab_rename_exact "$SESSION" "$WORKSPACE" "$TAB" "$PANE" "$LABEL"

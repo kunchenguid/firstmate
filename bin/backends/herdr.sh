@@ -366,15 +366,46 @@ fm_backend_herdr_task_tab_label() {
 # human working label. Herdr permits duplicate labels, but the suffix avoids
 # making two captain-visible tasks indistinguishable.
 fm_backend_herdr_task_tab_disambiguator() {
-  local container=$1 label=$2 id=$3 session workspace tabs
+  local container=$1 label=$2 id=$3 session workspace tabs width candidate candidate_label n
   session=${container%%:*}
   workspace=${container#*:}
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
-  if printf '%s' "$tabs" | jq -e --arg label "$label" '
-    (.result.tabs | type) == "array" and any(.result.tabs[]?; .label == $label)
+  if ! printf '%s' "$tabs" | jq -e --arg label "$label" '
+    (.result.tabs | type) == "array"
   ' >/dev/null 2>&1; then
-    printf '%s' "${id:0:8}"
+    return 1
   fi
+  if ! printf '%s' "$tabs" | jq -e --arg label "$label" '
+    any(.result.tabs[]?; .label == $label)
+  ' >/dev/null 2>&1; then
+    return 0
+  fi
+  width=8
+  [ "${#id}" -ge "$width" ] || width=${#id}
+  while [ "$width" -le "${#id}" ]; do
+    candidate=${id:0:width}
+    candidate_label="$label · $candidate"
+    if ! printf '%s' "$tabs" | jq -e --arg label "$candidate_label" '
+      any(.result.tabs[]?; .label == $label)
+    ' >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    width=$((width + 1))
+  done
+  n=2
+  while [ "$n" -le 9999 ]; do
+    candidate="$id-$n"
+    candidate_label="$label · $candidate"
+    if ! printf '%s' "$tabs" | jq -e --arg label "$candidate_label" '
+      any(.result.tabs[]?; .label == $label)
+    ' >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    n=$((n + 1))
+  done
+  return 1
 }
 
 # fm_backend_herdr_tab_rename_exact <session> <workspace> <tab> <pane> <label>:

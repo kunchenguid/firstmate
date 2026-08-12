@@ -2389,18 +2389,18 @@ if [ "$BACKEND" = herdr ] \
    && [ "$(meta_value "$META" herdr_presentation)" = tabs ] \
    && [ "$CLEAR_COMPLETED" = 0 ] \
    && [ "$FORCE" != --force ]; then
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-task-tab.sh" complete "$ID"; then
     echo "error: completed sibling-tab worker $ID could not be marked complete; retaining every record and isolated copy" >&2
     exit 1
   fi
-  COMPLETED_META_TMP=$(mktemp "$STATE/.$ID.meta.completed.XXXXXX") || exit 1
-  if ! awk '!/^herdr_tab_completed=/' "$META" > "$COMPLETED_META_TMP" \
-      || ! printf 'herdr_tab_completed=1\n' >> "$COMPLETED_META_TMP" \
-      || ! mv -f "$COMPLETED_META_TMP" "$META"; then
-    rm -f "$COMPLETED_META_TMP"
-    echo "error: completed sibling-tab worker $ID could not record its retained completion; retaining every record and isolated copy" >&2
+  fm_lock_acquire_wait "$META_LOCK"
+  META_LOCK_HELD=1
+  [ -f "$META" ] && [ ! -L "$META" ] || {
+    echo "error: completed sibling-tab worker $ID lost its durable record while retaining completion" >&2
     exit 1
-  fi
+  }
   echo "retained completed sibling-tab worker $ID (clear with fm-teardown.sh $ID --clear-completed)"
   exit 0
 fi
