@@ -261,6 +261,70 @@ EOF
   pass "Kimi hook install is idempotent and removal restores every foreign config byte"
 }
 
+test_kimi_hook_recovers_only_one_exact_unmarked_block() {
+  local altered before body config duplicate exact marked normal out rc seed
+  seed="$TMP_ROOT/config-unmarked-seed"
+  exact="$TMP_ROOT/config-unmarked-exact"
+  altered="$TMP_ROOT/config-unmarked-altered"
+  duplicate="$TMP_ROOT/config-unmarked-duplicate"
+  normal="$TMP_ROOT/config-unmarked-normal"
+  marked="$seed/marked.toml"
+  body="$seed/body.toml"
+  mkdir -p "$seed/.kimi-code" "$exact/.kimi-code" "$altered/.kimi-code" \
+    "$duplicate/.kimi-code" "$normal/.kimi-code"
+  printf 'default_model = "test"\n' > "$seed/.kimi-code/config.toml"
+  HOME="$seed" "$KIMI_HOOK" install || fail "seed Kimi hook install failed"
+  cp "$seed/.kimi-code/config.toml" "$marked"
+  awk '
+    /^# BEGIN FIRSTMATE KIMI TURN-END HOOK/ { inside = 1; next }
+    /^# END FIRSTMATE KIMI TURN-END HOOK/ { inside = 0 }
+    inside { print }
+  ' "$marked" > "$body"
+
+  sed '/^# BEGIN FIRSTMATE KIMI TURN-END HOOK/d; /^# END FIRSTMATE KIMI TURN-END HOOK/d' \
+    "$marked" > "$exact/.kimi-code/config.toml"
+  HOME="$exact" "$KIMI_HOOK" install || fail "exact unmarked Kimi hook block was not recovered"
+  cmp -s "$marked" "$exact/.kimi-code/config.toml" \
+    || fail "exact unmarked Kimi hook block was not re-marked in place"
+
+  {
+    printf 'default_model = "test"\n'
+    sed 's/^timeout = 1$/timeout = 2/' "$body"
+  } > "$altered/.kimi-code/config.toml"
+  before="$altered/before.toml"
+  cp "$altered/.kimi-code/config.toml" "$before"
+  rc=0
+  out=$(HOME="$altered" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "altered unmarked Kimi hook block was recovered"
+  assert_contains "$out" "references fm-turn-end.sh outside" \
+    "altered unmarked Kimi hook refusal lost the outside-reference reason"
+  cmp -s "$before" "$altered/.kimi-code/config.toml" \
+    || fail "altered unmarked Kimi hook refusal changed config bytes"
+
+  {
+    printf 'default_model = "test"\n'
+    cat "$body" "$body"
+  } > "$duplicate/.kimi-code/config.toml"
+  before="$duplicate/before.toml"
+  cp "$duplicate/.kimi-code/config.toml" "$before"
+  rc=0
+  out=$(HOME="$duplicate" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "duplicate unmarked Kimi hook blocks were recovered"
+  assert_contains "$out" "duplicated unmarked Firstmate hook blocks" \
+    "duplicate unmarked Kimi hook refusal lost the ambiguity reason"
+  cmp -s "$before" "$duplicate/.kimi-code/config.toml" \
+    || fail "duplicate unmarked Kimi hook refusal changed config bytes"
+
+  config="$normal/.kimi-code/config.toml"
+  printf 'default_model = "normal"\n' > "$config"
+  HOME="$normal" "$KIMI_HOOK" install || fail "normal Kimi hook install regressed"
+  assert_grep '# BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config" \
+    "normal Kimi hook install omitted its begin marker"
+  assert_present "$normal/.kimi-code/fm-turn-end.sh" \
+    "normal Kimi hook install omitted its hook script"
+  pass "Kimi hook install re-marks only one exact orphan and preserves fail-closed installs"
+}
+
 test_kimi_hook_remove_preserves_owned_newline_boundary() {
   local appended config expected home original
   home="$TMP_ROOT/config-owned-newline"
@@ -658,6 +722,7 @@ test_kimi_bordered_prompt_needs_no_override() {
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable
+test_kimi_hook_recovers_only_one_exact_unmarked_block
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq

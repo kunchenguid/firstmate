@@ -4,8 +4,10 @@
 # This command is the sole owner of the text-level edit to
 # $HOME/.kimi-code/config.toml. It validates the existing TOML but never
 # serializes it: install adds or replaces one marker-delimited Firstmate region,
-# and remove excises only that region. Missing, malformed, symlinked, partially
-# marked, or otherwise surprising config is refused without a config write.
+# or re-marks one byte-identical canonical hook block left by a comment-stripping
+# Kimi rewrite. Remove excises only a marked region. Missing, malformed,
+# symlinked, altered, ambiguous, or otherwise surprising config is refused
+# without a config write.
 #
 # The installed Stop hook always exits 0 and stays silent. It reads cwd from the
 # hook payload, checks for a .fm-kimi-turnend pointer before registry work, and
@@ -159,15 +161,39 @@ def block(marker: bytes) -> bytes:
     return b"\n".join(
         (
             marker,
+            unmarked_block(),
+            END,
+            b"",
+        )
+    )
+
+
+def unmarked_block() -> bytes:
+    return b"\n".join(
+        (
             b"[[hooks]]",
             b'event = "Stop"',
             b'matcher = "^$"',
             b'command = "bash \\"$HOME/.kimi-code/fm-turn-end.sh\\" >/dev/null 2>&1 || true"',
             b"timeout = 1",
-            END,
-            b"",
         )
     )
+
+
+def locate_unmarked_block(data: bytes, parsed):
+    body = unmarked_block() + b"\n"
+    count = data.count(body)
+    if count > 1:
+        refuse("config.toml has duplicated unmarked Firstmate hook blocks.")
+    if count == 0:
+        return None
+    expected = tomllib.loads(unmarked_block().decode("utf-8"))["hooks"][0]
+    if sum(item == expected for item in parsed.get("hooks", [])) != 1:
+        refuse("the byte-identical unmarked Firstmate hook text is not one unambiguous hook block.")
+    start = data.find(body)
+    if start != 0 and data[start - 1 : start] != b"\n":
+        refuse("the unmarked Firstmate hook block is not at a line boundary.")
+    return start, start + len(body)
 
 
 def without_region(data: bytes, region) -> bytes:
@@ -223,9 +249,14 @@ try:
     config_info = regular_not_symlink(CONFIG, "Kimi config")
     with open(CONFIG, "rb") as stream:
         original = stream.read()
-    parse_toml(original, "config.toml")
+    parsed = parse_toml(original, "config.toml")
     region = locate_region(original)
     outside = original if region is None else without_region(original, region)
+    unmarked = None
+    if ACTION == "install" and region is None:
+        unmarked = locate_unmarked_block(original, parsed)
+        if unmarked is not None:
+            outside = original[: unmarked[0]] + original[unmarked[1] :]
     if HOOK_NAME in outside:
         refuse("config.toml references fm-turn-end.sh outside the Firstmate-owned region.")
 
@@ -242,7 +273,9 @@ try:
                 b"#!/usr/bin/env bash\n# Firstmate Kimi turn-end hook."
             ):
                 refuse(f"Firstmate hook path has unexpected content at {HOOK}.")
-        if region is None:
+        if unmarked is not None:
+            candidate = original[: unmarked[0]] + block(BEGIN) + original[unmarked[1] :]
+        elif region is None:
             marker = BEGIN if original.endswith(b"\n") else BEGIN_OWNS_NEWLINE
             addition = block(marker)
             candidate = original + (b"" if original.endswith(b"\n") else b"\n") + addition
