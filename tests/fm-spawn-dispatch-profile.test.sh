@@ -136,6 +136,14 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+assert_launch_identity_prefix() {
+  local launch=$1 identity=$2 harness=$3
+  case "$launch" in
+    "FM_HOME_IDENTITY='$identity' "*) ;;
+    *) fail "$harness launch did not begin with the exact home identity: $launch" ;;
+  esac
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -152,6 +160,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   launch=$(cat "$LAUNCH_LOG")
   expected="FM_HOME_IDENTITY='$HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_launch_identity_prefix "$launch" "$HOME_DIR" claude
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -348,6 +357,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
+  assert_launch_identity_prefix "$launch" "$ROOT" codex
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
@@ -448,6 +458,7 @@ test_grok_threads_model_and_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
   launch=$(cat "$LAUNCH_LOG")
+  assert_launch_identity_prefix "$launch" "$ROOT" grok
   assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
     "grok launch did not thread model and reasoning-effort flags"
   assert_not_contains "$launch" "--effort" "grok launch must use --reasoning-effort, not --effort"
@@ -502,6 +513,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
+  assert_launch_identity_prefix "$launch" "$ROOT" opencode
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
@@ -522,6 +534,7 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
+  assert_launch_identity_prefix "$launch" "$ROOT" pi
   assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
