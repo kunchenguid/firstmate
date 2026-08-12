@@ -166,6 +166,38 @@ test_ship_spawn_rejects_web_without_visual_gate_contract() {
   pass "fm-spawn: web surface without visual gate contract refuses before launch"
 }
 
+test_ship_spawn_rejects_incomplete_web_gate_body() {
+  local rec id out status
+  id=profile-incomplete-web-gate-z9
+  rec=$(make_spawn_case incomplete-web-gate claude "$id")
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=no-mistakes\nSurface contract: web\nWeb gate contract: custom-domain/interceptor/revision-marker/screenshot\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "ship spawn with an incomplete web gate body must fail"
+  assert_contains "$out" "lacks the canonical Web gate body" \
+    "incomplete web gate body refusal did not explain the fail-closed boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "incomplete web gate body refusal still wrote task metadata"
+  pass "fm-spawn: incomplete web gate body refuses before launch"
+}
+
+test_ship_spawn_accepts_compliant_web_gate() {
+  local rec id out status
+  id=profile-compliant-web-gate-z9
+  rec=$(make_spawn_case compliant-web-gate claude "$id")
+  read_case_record "$rec"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" website --mode no-mistakes --web >/dev/null 2>&1 \
+    || fail "web brief scaffold for spawn acceptance should succeed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "ship spawn with a compliant web gate should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "compliant web spawn did not launch"
+  pass "fm-spawn: compliant web gate reaches launch"
+}
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
@@ -959,6 +991,8 @@ test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_ship_spawn_rejects_missing_surface_contract
 test_ship_spawn_rejects_web_without_visual_gate_contract
+test_ship_spawn_rejects_incomplete_web_gate_body
+test_ship_spawn_accepts_compliant_web_gate
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

@@ -18,3 +18,12 @@ HTTP 200, a preview URL, or bare reachability alone is explicitly rejected as in
 Do not append a done status or claim completion when any visual, marker, custom-domain, or screenshot evidence is missing.
 EOF
 }
+
+fm_web_gate_body_present() {
+  local brief=$1 line
+  while IFS= read -r line; do
+    [ -z "$line" ] || grep -Fqx -- "$line" "$brief" || return 1
+  done <<EOF
+$(fm_web_gate_text)
+EOF
+}

@@ -144,6 +144,10 @@ if [ -n "$existing_surface" ] && [ "$existing_surface" != web ] && [ "$existing_
   echo "error: $BRIEF has an invalid Surface contract" >&2
   exit 1
 fi
+if [ "$WEB" -eq 1 ] && [ "$existing_surface" = web ] && ! fm_web_gate_body_present "$BRIEF"; then
+  echo "error: $BRIEF declares web but lacks the canonical Web gate body; promotion refused" >&2
+  exit 1
+fi
 
 BRIEF_TMP="$STATE/.$ID.brief.promote.${BASHPID:-$$}"
 WEB_GATE_TMP="$STATE/.$ID.web-gate.promote.${BASHPID:-$$}"
@@ -170,6 +174,10 @@ awk -v surface="$SURFACE" -v web="$WEB" -v gate="$WEB_GATE_TMP" '
 }
 mv "$BRIEF_TMP" "$BRIEF"
 rm -f -- "$WEB_GATE_TMP"
+if [ "$WEB" -eq 1 ] && ! fm_web_gate_body_present "$BRIEF"; then
+  echo "error: promoted web brief lacks the canonical Web gate body; promotion refused" >&2
+  exit 1
+fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"

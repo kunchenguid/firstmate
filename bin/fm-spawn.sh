@@ -248,6 +248,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-web-gate-lib.sh
+. "$SCRIPT_DIR/fm-web-gate-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -1675,8 +1677,8 @@ if [ "$KIND" = ship ]; then
     web)
       BRIEF_WEB_GATE_COUNT=$(grep -Ec '^Web gate contract:' "$BRIEF" || true)
       BRIEF_WEB_GATE=$(sed -n 's/^Web gate contract: //p' "$BRIEF")
-      if [ "$BRIEF_WEB_GATE_COUNT" -ne 1 ] || [ "$BRIEF_WEB_GATE" != custom-domain/interceptor/revision-marker/screenshot ]; then
-        echo "error: $BRIEF declares web but lacks the required Web gate contract; re-scaffold the ship brief with --web" >&2
+      if [ "$BRIEF_WEB_GATE_COUNT" -ne 1 ] || [ "$BRIEF_WEB_GATE" != custom-domain/interceptor/revision-marker/screenshot ] || ! fm_web_gate_body_present "$BRIEF"; then
+        echo "error: $BRIEF declares web but lacks the canonical Web gate body; re-scaffold the ship brief with --web" >&2
         exit 1
       fi
       ;;

@@ -46,7 +46,7 @@ make_case() {
 
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf 'Delivery contract: mode=no-mistakes\nSurface contract: non-web\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
 
   git init --quiet -b "$default" "$project"
@@ -106,7 +106,7 @@ test_stale_pool_base_refreshes_before_branching() {
 
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  printf 'Delivery contract: mode=no-mistakes\nSurface contract: non-web\nbrief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"

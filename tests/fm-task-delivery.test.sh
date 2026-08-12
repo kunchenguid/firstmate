@@ -247,6 +247,16 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_contains "$out" "ship mode=direct-PR yolo=on surface=non-web" "promotion output did not carry the decided surface"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
 
+  web_bad_meta="$home/state/promote-web-bad-d2.meta"
+  printf 'window=fm-promote-web-bad-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_bad_meta"
+  mkdir -p "$home/data/promote-web-bad-d2"
+  printf '# Definition of done\nSurface contract: web\nWeb gate contract: custom-domain/interceptor/revision-marker/screenshot\n' > "$home/data/promote-web-bad-d2/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-web-bad-d2 --mode local-only --yolo off --web 2>&1)
+  status=$?
+  expect_code 1 "$status" "promotion with an incomplete web gate body should fail"
+  assert_contains "$out" "lacks the canonical Web gate body" "promotion did not reject an incomplete web gate body"
+  assert_grep 'kind=scout' "$web_bad_meta" "incomplete web promotion changed the task record"
+
   web_meta="$home/state/promote-web-d2.meta"
   printf 'window=fm-promote-web-d2\nkind=scout\nworktree=/tmp/wt\n' > "$web_meta"
   mkdir -p "$home/data/promote-web-d2"
