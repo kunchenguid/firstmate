@@ -42,6 +42,8 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+FM_FAKE_HARNESS_PID=$$
+export FM_FAKE_HARNESS_PID
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -58,7 +60,7 @@ make_case() {
   token="teardown-$name"
   : > "$case_dir/data/backlog.md"
   fm_test_write_primary_attestation "$ROOT" \
-    "$case_dir/state/.primary-attestation" "$token"
+    "$case_dir/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID"
   printf '%s\n' '1|codex:teardown-fixture|fallback' > "$case_dir/state/.lock"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
@@ -124,9 +126,21 @@ SH
 case "${1:-} ${2:-}" in
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
 esac
-exit 0
+  exit 0
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*|*args=*|*command=*)
+    pid="${@: -1}"
+    [ "$pid" = "$FM_FAKE_HARNESS_PID" ] && printf 'claude\n' || printf 'bash\n'
+    ;;
+  *ppid=*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -143,7 +157,7 @@ SH
   printf '# agents\n' > "$case_dir/project/AGENTS.md"
   cp -R "$ROOT/bin" "$case_dir/project/bin"
   fm_test_write_primary_attestation "$case_dir/project" \
-    "$case_dir/state/.primary-attestation" "$token"
+    "$case_dir/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID"
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
