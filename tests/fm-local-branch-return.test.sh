@@ -219,16 +219,21 @@ test_divergence_refuses() {
 }
 
 test_absent_capability_and_ownership_conflict_refuse() {
-  local row home sub project wt route err
+  local row home sub project wt route err fakebin
   row=$(make_world absent)
   IFS=$'\t' read -r home sub project <<< "$row"
   wt=$(make_task "$sub" absent-task)
   route=$(route_record "$home")
   rm -f "$route"
   err="$TMP_ROOT/absent.err"
+  # Harness resolution checks for a real `pi` executable before the local-only
+  # route guard runs; stub it so the test proves the guard, not the machine's
+  # installed harnesses (CI runners have no pi).
+  fakebin=$(fm_fakebin "$TMP_ROOT/absent-fakebin")
+  fm_fake_exit0 "$fakebin" pi
   FM_HOME="$sub" "$ROOT/bin/fm-brief.sh" no-capability alpha --mode local-only >/dev/null \
     || fail "could not scaffold absent-capability spawn fixture"
-  if FM_HOME="$sub" FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" no-capability "$sub/projects/alpha" \
+  if PATH="$fakebin:$PATH" FM_HOME="$sub" FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" no-capability "$sub/projects/alpha" \
       --mode local-only --yolo off --harness pi > /dev/null 2>"$err"; then
     fail "secondmate spawn accepted local-only work without the guarded capability"
   fi
@@ -237,7 +242,7 @@ test_absent_capability_and_ownership_conflict_refuse() {
   assert_absent "$sub/state/no-capability.meta" "refused local-only spawn still published task metadata"
   FM_HOME="$sub" "$ROOT/bin/fm-brief.sh" no-capability-scout alpha --scout >/dev/null \
     || fail "could not scaffold absent-capability scout spawn fixture"
-  if FM_HOME="$sub" FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" no-capability-scout "$sub/projects/alpha" \
+  if PATH="$fakebin:$PATH" FM_HOME="$sub" FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" no-capability-scout "$sub/projects/alpha" \
       --scout --harness pi > /dev/null 2>"$err"; then
     fail "secondmate scout spawn accepted a local-only project without the guarded capability"
   fi
