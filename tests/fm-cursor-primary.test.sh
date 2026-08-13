@@ -481,6 +481,29 @@ test_park_inert_without_session_lock() {
   pass "cursor park: inert when this session does not hold the home lock"
 }
 
+test_park_stands_down_after_session_takeover() {
+  local dir park_pid out waited budget_count
+  dir=$(make_primary_dir "$TMP_ROOT/park-session-takeover")
+  : > "$dir/state/task1.meta"
+  printf 'session=sess-cursor\ncount=1\n' > "$dir/state/.turnend-cursor-blocks"
+  write_arm_fixture "$dir" switchable
+  ( run_park "$dir" > "$dir/state/takeover-out" ) &
+  park_pid=$!
+  waited=0
+  while [ ! -e "$dir/state/arm-ran" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || fail "the park never began polling before takeover"
+  done
+  printf '%s\n' "$$" > "$dir/state/.lock"
+  wait "$park_pid" 2>/dev/null || true
+  out=$(cat "$dir/state/takeover-out" 2>/dev/null || true)
+  [ -z "$out" ] || fail "the replaced session emitted a follow-up after takeover: $out"
+  budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-cursor-blocks" 2>/dev/null || true)
+  [ "$budget_count" = 1 ] || fail "the replaced session mutated nag state after takeover: $budget_count"
+  pass "cursor park: session takeover stops polling without output or state mutation"
+}
+
 test_park_inert_in_child_worktree() {
   local base child out
   base=$(make_primary_dir "$TMP_ROOT/park-base")
@@ -598,6 +621,7 @@ test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
 test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
+test_park_stands_down_after_session_takeover
 test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context

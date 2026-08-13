@@ -120,7 +120,7 @@ emit_followup() {  # <kind> <body> [reset-budget]
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
-  if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+  if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
@@ -160,7 +160,7 @@ budget_reset() {
 
 budget_reset_if_ours() {
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
-  if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+  if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
@@ -187,7 +187,7 @@ $reason"
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
 
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
-  if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+  if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
@@ -225,6 +225,14 @@ park_still_ours() {
   local seq
   seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
   [ "$seq" = "$PARK_SEQ" ]
+}
+
+current_session_still_ours() {
+  local owner
+  owner=$(cat "$STATE/.lock" 2>/dev/null) || return 1
+  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$owner" = "$OWNER_ID" ] || return 1
+  fm_session_lock_owned_by_self "$STATE"
 }
 
 # Only the lock-owning session may arm or wake. A prior session that died
@@ -281,6 +289,7 @@ trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm 
 
 attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
+  current_session_still_ours || exit 0
   attempt=$((attempt + 1))
   ARM_OUT=$(mktemp "$STATE/.cursor-park-output.XXXXXX") || ARM_OUT=
   if [ -n "$ARM_OUT" ]; then
@@ -292,7 +301,7 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   while kill -0 "$ARM_PID" 2>/dev/null; do
     # Stand down for either reason: a newer stop claimed the baton, or away mode
     # started and its daemon now owns the watcher and all triage.
-    if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+    if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
       STAND_DOWN=1
       break
     fi

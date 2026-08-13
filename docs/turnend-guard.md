@@ -116,6 +116,7 @@ A captain message typed while the hook is parked is accepted and runs its turn i
 Each invocation publishes its sequence in `state/.cursor-park-owner` under the short publication and commit lock `state/.cursor-park-owner.lock`.
 The same bounded critical section covers the final owner and away-mode checks, follow-up output, and repair-budget commit, so a published newer sequence makes the older park stand down without emitting or changing shared state.
 The lock is never held while the arm is sleeping, while the hook is polling, or while output is prepared.
+The park revalidates session ownership while polling and again inside the final commit section, but it deliberately does not hold the fleet session lock across output because an awaited hook must not block home-wide session acquisition; the remaining microsecond takeover window can produce at most one harmless wake that drains the durable queue.
 Without those records every captain message during a park would leak one process and one duplicate wake.
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
