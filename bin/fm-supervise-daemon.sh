@@ -644,13 +644,13 @@ escalate_add() {  # <state> <distilled-item> [wake-id]
     fi
     [ -s "$buf" ] || was_empty=1
     tmp="$buf.queue.${BASHPID:-$$}"
-    {
+    if ! {
       [ ! -e "$buf" ] || cat "$buf"
       printf '@wake:%s\t%s\n' "$wake_id" "$item"
-    } > "$tmp" && mv "$tmp" "$buf" || {
+    } > "$tmp" || ! mv "$tmp" "$buf"; then
       rm -f "$tmp" 2>/dev/null || true
       return 1
-    }
+    fi
     [ "$was_empty" -eq 0 ] || _now > "${buf}.since"
     return $?
   fi
@@ -1350,11 +1350,11 @@ queued_wake_check_store() {  # <state> <epoch> <seq> <key> <payload>
       }
     done < "$ledger"
   fi
-  printf '%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$key" "$payload" >> "$tmp" \
-    && mv "$tmp" "$ledger" || {
+  if ! printf '%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$key" "$payload" >> "$tmp" \
+    || ! mv "$tmp" "$ledger"; then
       rm -f "$tmp" 2>/dev/null || true
       return 1
-    }
+  fi
 }
 
 classify_pending_queued_wake() {  # <state> <pending-file> <cursor-file>
