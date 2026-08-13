@@ -68,6 +68,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
+| OMP | 17.3.0 | OMP extension `agent_start` / `agent_end` | OMP embedded the Pi extension surface but exposes `agent_end`, not `agent_settled`; the real wired worker classified `busy source=omp-ext` on start and `idle source=omp-ext` on end. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
@@ -93,6 +94,32 @@ tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
+
+The OMP worker adapter was live-verified on 2026-08-13 with Oh My Pi 17.3.0, Pi 0.84.1, tmux, and a real isolated scout worktree.
+The version commands returned:
+
+```text
+$ omp --version
+omp/17.3.0
+$ pi --version
+0.84.1
+```
+
+The raw launch command used by the trial was:
+
+```sh
+omp --profile fm-omp-worker-adapter-scout --auto-approve --thinking high \
+  "$(bin/fm-operational-input.sh encode launch-brief < brief.md)"
+```
+
+Observed output included `omp v17.3.0`, `◒ high`, and `OMP_SCOUT_DONE` in the pane, with `fm-spawn` reporting `spawned omp-scout harness=omp kind=scout`.
+A first counterfactual extension that listened for Pi's `agent_settled` stayed at `busy source=pi-ext` after the prompt completed; inspecting the installed OMP bundle showed `agent_start`, `agent_end`, and `turn_end` but no `agent_settled`.
+The corrected OMP extension then produced `busy source=omp-ext event=agent-start` followed by `idle source=omp-ext event=agent-end` in the real pane.
+A fresh OMP profile showed four setup screens; Escape skipped them, and no separate project-trust dialog appeared in the fresh git worktree.
+The rejected counterfactual `omp --prompt probe` returned `Error: unknown flag: --prompt`, so firstmate passes the launch brief as one positional prompt.
+After `/quit`, OMP printed `Resume this session with omp --resume <session-id>`; both `--resume` with the printed id and `--continue` reopened the session in the same profile and cwd.
+The process group showed `bun /Users/.../.bun/bin/omp ...` as the foreground client and no separate Pi executable, so detection and tmux liveness match the OMP path rather than assuming a Pi child.
+The session-lock owner is therefore the OMP client PID, and the harness ancestry matcher accepts Bun only when its full argv contains the exact OMP executable path.
 
 ## Turn-end guard
 

@@ -35,7 +35,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_exit0 "$fakebin" treehouse pi omp opencode claude codex
   printf '%s\n' "$fakebin"
 }
 
@@ -95,6 +95,7 @@ switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
   case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
   case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "agent-end": await handlers["agent_end"]({}, ctx); break;
   case "settle-then-start":
     await handlers["agent_settled"]({}, ctx);
     await handlers["agent_start"]({}, ctx);
@@ -143,6 +144,27 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+test_omp_extension_uses_its_verified_semantic_lifecycle() {
+  local rec id=busy-omp-1 out state ext
+  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+  assert_present "$ext" "omp spawn did not write the Pi-family extension"
+
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "OMP seed must classify 'busy fm-spawn', got '$out'"
+  out=$(drive_pi_ext "$ext" agent-start) || fail "OMP agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "OMP agent_start must classify 'busy omp-ext', got '$out'"
+  out=$(drive_pi_ext "$ext" agent-end) || fail "OMP agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "OMP agent_end must classify 'idle omp-ext', got '$out'"
+  pass "OMP uses its verified agent_start/agent_end lifecycle and no separate busy source"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -346,6 +368,7 @@ test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
+test_omp_extension_uses_its_verified_semantic_lifecycle
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless

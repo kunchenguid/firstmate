@@ -254,6 +254,65 @@ SH
 }
 
 # ===========================================================================
+# A/D) OMP worker preference and Bun ancestry.
+# ===========================================================================
+test_omp_worker_preference_falls_back_to_pi() {
+  local dir fakebin cfg got
+  dir="$TMP_ROOT/omp-preference"
+  fakebin=$(fm_fakebin "$dir")
+  cfg="$dir/config"
+  mkdir -p "$cfg"
+  : > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
+  got=$(PI_CODING_AGENT=true FM_PI_HARNESS=pi FM_CONFIG_OVERRIDE="$cfg" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" crew)
+  [ "$got" = omp ] || fail "an installed OMP should be preferred for Pi workers, got '$got'"
+  rm -f "$fakebin/omp"
+  got=$(PI_CODING_AGENT=true FM_PI_HARNESS=pi FM_CONFIG_OVERRIDE="$cfg" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" crew)
+  [ "$got" = pi ] || fail "an unavailable OMP should fall back to Pi workers, got '$got'"
+  pass "worker dispatch prefers OMP and falls back to plain Pi when unavailable"
+}
+
+test_omp_bun_ancestry_is_detected() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-bun-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  900:comm=) printf '%s\n' bun ;;
+  900:args=) printf '%s\n' '/Users/test/.bun/bin/omp --thinking low' ;;
+  900:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] || fail "Bun OMP ancestry resolved '$got', expected omp"
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$got" = 900 ] || fail "OMP session-lock ancestry selected '$got', expected pid 900"
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 900' "$ROOT" \
+    || fail "session-lock liveness rejected the Bun OMP client"
+  pass "OMP detection: Bun client ancestry is recognized without a vendor environment marker"
+}
+
+# ===========================================================================
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
 test_propagate_lib() {
@@ -2456,6 +2515,8 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
+test_omp_worker_preference_falls_back_to_pi
+test_omp_bun_ancestry_is_detected
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback

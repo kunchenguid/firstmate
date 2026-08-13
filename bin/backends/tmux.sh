@@ -160,13 +160,23 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   base=${path##*/}
   base=${base#-}
   case "$base" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|omp|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    bun)
+      case "$argv0" in
+        */omp|*/omp\ *|*"/omp/"*) printf 'agent' ;;
+        *) printf 'other' ;;
+      esac
+      ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
-      if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
+      if fm_harness_path_name "$path" >/dev/null \
+         || fm_harness_path_name "$argv0" >/dev/null; then
         printf 'agent'
       else
-        printf 'other'
+        case "$argv0" in
+          */omp|*/omp\ *|*"/omp/"*) printf 'agent' ;;
+          *) printf 'other' ;;
+        esac
       fi
       ;;
   esac
@@ -190,8 +200,8 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
 # left running in the background of an otherwise idle pane is deliberately NOT
 # reported, so a genuinely agent-free pane still classifies `dead`. It also
 # reports every member of a multi-process launcher (the Pi Launcher path runs a
-# `pi-signed` wrapper and a `pi` engine in one group), so no launcher needs its
-# own special case here.
+# `pi-signed` wrapper and a `pi` engine in one group). OMP's Bun client requires
+# the companion full-argv read below because its executable path is argv[1].
 #
 # Like fm_backend_tmux_current_command this is a RAW pane read: tmux answers an
 # absent target from the client's active window rather than failing, so callers
@@ -224,6 +234,22 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_foreground_args: full argv lines for the pane's foreground
+# process group. This is separate from foreground_argv0s because Bun keeps
+# argv[0] as `bun` while OMP's executable path is its second argument.
+fm_backend_tmux_foreground_args() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        [ -n "$args" ] && printf '%s\n' "$args"
+      done
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -242,7 +268,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s args name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -293,6 +319,17 @@ EOF
     fi
   done <<EOF
 $argv0s
+EOF
+
+  args=$(fm_backend_tmux_foreground_args "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$args
 EOF
 
   comm=$(fm_backend_tmux_current_command "$target") || {

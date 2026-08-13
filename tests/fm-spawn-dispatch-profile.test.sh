@@ -42,7 +42,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" treehouse pi-signed omp
   printf '%s\n' "$fakebin"
 }
 
@@ -509,6 +509,28 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+test_omp_threads_model_and_thinking() {
+  local rec id out status launch
+  id=profile-omp-z8a
+  rec=$(make_spawn_case profile-omp omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "omp spawn with high effort should succeed"
+  assert_contains "$out" "spawned $id harness=omp" "omp spawn did not preserve its visible identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp openai-codex/gpt-5.6-sol high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --auto-approve --model 'openai-codex/gpt-5.6-sol' --thinking 'high' -e" \
+    "omp launch did not thread the model and thinking flags"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "omp launch lost the canonical typed launch-brief envelope"
+  assert_present "$HOME_DIR/state/$id.pi-ext.ts" "omp launch did not install the Pi-family extension"
+  assert_present "$HOME_DIR/state/$id.busy-gen" "omp spawn did not arm the busy-state contract"
+  pass "OMP receives --model and --thinking while retaining Pi-family extension wiring"
+}
+
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   local rec id out status launch
   id=profile-pi-signed-z8b
@@ -691,6 +713,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_omp_threads_model_and_thinking
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

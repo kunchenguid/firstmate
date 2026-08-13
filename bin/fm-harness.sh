@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|omp|grok|kimi|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -31,7 +31,7 @@ detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
+  # omp, and kimi are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -53,10 +53,11 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      omp) echo omp; return ;;
       kimi) echo kimi; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*)
+      node*|python*|bun*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
@@ -64,6 +65,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          */omp|*/omp\ *|*"/omp/"*) echo omp; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
@@ -78,9 +80,23 @@ detect_own() {
 # Resolve the effective crewmate harness: config/crew-harness (a bare adapter
 # name) wins; absent or "default" mirrors firstmate's own harness.
 resolve_crew() {
-  local crew=
+  local crew own
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
+  if [ -z "$crew" ] || [ "$crew" = "default" ]; then
+    own=$(detect_own)
+    case "$own" in
+      pi|pi-signed|omp)
+        if command -v omp >/dev/null 2>&1; then echo omp; else echo pi; fi
+        ;;
+      *) echo "$own" ;;
+    esac
+  elif [ "$crew" = omp ] && ! command -v omp >/dev/null 2>&1; then
+    # OMP is the preferred Pi-family worker launcher, but an unavailable
+    # executable must not strand ordinary worker dispatch.
+    echo pi
+  else
+    echo "$crew"
+  fi
 }
 
 # Print the first non-empty, non-comment line of config/secondmate-harness

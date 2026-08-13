@@ -70,6 +70,12 @@ chmod +x "$LAB/bin/agent-launcher"
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
+[ "$(fm_backend_tmux_classify_process_name bun '/Users/test/.bun/bin/omp --thinking high')" = agent ] \
+  || fail "Bun OMP argv must classify as an agent"
+[ "$(fm_backend_tmux_classify_process_name bun '/Users/test/.bun/bin/other --thinking high')" = other ] \
+  || fail "unrelated Bun argv must not classify as an agent"
+pass "tmux liveness: Bun OMP argv is classified by its executable path"
+
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" \
   || fail "could not start the private tmux server"
 

@@ -125,6 +125,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
+| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-08-13 on Oh My Pi 17.3.0. OMP embeds the Pi app and renders the requested thinking level; `--prompt` is rejected, so firstmate passes one positional prompt. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 
@@ -300,6 +301,31 @@ Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-prima
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both the turn-end guard and watcher extensions, and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
+
+## omp (VERIFIED 2026-08-13, Oh My Pi 17.3.0)
+
+OMP is the Oh My Pi launcher around the Pi application.
+OMP exposes the Pi extension surface but its verified run lifecycle is `agent_start` followed by `agent_end`, not Pi's `agent_settled` event.
+Firstmate uses an OMP-specific generated extension and records the semantic source as `omp-ext`; `turn_end` remains the wake notification.
+The OMP worker launch is `omp --auto-approve [--model <model>] [--thinking <effort>] -e <state-extension> "<positional prompt>"`.
+`--auto-approve` is the autonomy flag and was observed to run the worker without a tool-approval prompt.
+The `--prompt` flag is rejected by OMP 17.3.0 with `Error: unknown flag: --prompt`, so it is not part of the Firstmate launch shape.
+
+| Fact | Value |
+|---|---|
+| Busy state | The OMP extension's `agent_start` and `agent_end` events, plus `turn_end` as the wake notification. OMP has no `agent_settled` event in the verified 17.3.0 bundle. |
+| Exit command | `/quit`; OMP prints `Resume this session with omp --resume <session-id>`. |
+| Interrupt | Escape follows the embedded Pi TUI behavior. |
+| Skill invocation | Normal slash commands, with no OMP-specific Firstmate skill syntax. |
+| Trust dialog | A new OMP profile showed a four-step provider/model/setup flow; Escape skipped each step. No separate project-trust dialog appeared in a fresh git worktree after setup was skipped. |
+| Resume | `omp --resume <session-id>` restored the exited session, and `omp --continue` restored the most recent session in the same cwd/profile. |
+| Environment marker | None observed. Detection uses the exact `omp` executable path in process ancestry. |
+| Session-lock owner | The OMP client is the lock owner: `ps` reports `bun /Users/.../.bun/bin/omp ...` as the harness process, with the embedded Pi engine not presented as a separate lock-owner process. |
+
+OMP 17.3.0 was launched through `fm-spawn`'s raw launch-command escape hatch in a real tmux pane on 2026-08-13.
+The pane ran a trivial scout prompt to `OMP_SCOUT_DONE`, and `fm-spawn` recorded `harness=omp` with the isolated worktree.
+The observed process was `bun /Users/walter/.bun/bin/omp ...`, with the OMP client as the foreground process and no separate Pi process visible in the process group.
+The generated OMP extension path is explicit and remains outside the worktree, matching the Pi-family trust boundary.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
