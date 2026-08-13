@@ -3491,22 +3491,22 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: send-text
   # 2: agent get - pre-Enter baseline is working, so the composer branch runs
-  # 3: pane read - the RENDERED footer baseline; a pane already mid-turn shows
-  #    a busy footer, which is exactly what must NOT be accepted as proof that
-  #    OUR Enter started a turn
-  # 4,6: send-keys enter; 5,7: pane read - the composer still holds the message
+  # 3: pane read - the RENDERED footer baseline is still idle because the
+  #    pre-existing turn has not rendered its token yet
+  # 4: send-keys enter; 5: pane read - the composer still holds the message
+  # 6: pane read - the pre-existing turn's footer has become busy
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '  thinking... esc to interrupt\n' > "$resp/3.out"
+  printf '  ready\n' > "$resp/3.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/7.out"
+  printf '  thinking... esc to interrupt\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
   [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
+  [ "$enter_count" -eq 1 ] || fail "preexisting-working swallowed Enter should use the configured retry count, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 3 ] || fail "preexisting-working confirmation should read the footer baseline once and then fall back to composer reads, made $read_count read(s)"
+  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should read one footer baseline and one composer verdict without accepting the later busy footer, made $read_count read(s)"
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
