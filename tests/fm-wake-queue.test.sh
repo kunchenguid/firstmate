@@ -659,6 +659,152 @@ test_interruption_before_and_after_raw_commit() {
   pass "interruptions preserve durable rows until post-handling acknowledgement"
 }
 
+# The guarded self-announced status append (fm_wake_status_append_self_announced)
+# and the seen-signature gate it shares with the watcher's signal scan. Both
+# directions of the dedup contract are pinned through the real library
+# functions: a fully announced file plus the home's own bookkeeping close stays
+# announced (no wake), while ANY unannounced byte - a pending foreign line, a
+# missing marker, a later different note - reads as wake-worthy.
+test_self_announced_append_guards() {
+  local dir state status
+  dir=$(make_case self-announced-append)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  # FIRST status change: a fresh file with no marker is unannounced (wakes).
+  printf 'working: first line\n' > "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a never-announced status file read as already announced"
+
+  # Prime the marker to current (the watcher just surfaced/absorbed everything).
+  prime_status_seen "$state" "$status" || fail "could not prime the seen marker"
+
+  # A self-announced bookkeeping close on a fully announced file is suppressed.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: closed by this home' \
+    || fail "self-announced append on an announced file was not suppressed (rc=$?)"
+  grep -Fq 'resolved [key=k1]: answered: closed by this home' "$status" \
+    || fail "the suppressed close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the self-announced close left unannounced bytes behind"
+
+  # A later DIFFERENT note from any other writer still wakes.
+  printf 'needs-decision [key=k2]: a new decision\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later different note on the same task read as already announced"
+
+  # With that foreign line pending, a bookkeeping close must NOT advance the
+  # marker over it: the close appends but the file stays wake-worthy.
+  local rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: second close' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
+  grep -Fq 'resolved [key=k1]: answered: second close' "$status" \
+    || fail "the fail-toward-waking close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a close over pending foreign bytes swallowed the pending wake"
+
+  # UTF-8 close on an announced file: byte accounting must hold for multibyte.
+  prime_status_seen "$state" "$status" || fail "could not re-prime the seen marker"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    "$(printf 'resolved [key=k2]: answered: caf\xc3\xa9 rentr\xc3\xa9e')" \
+    || fail "a multibyte self-announced close was not suppressed (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "multibyte byte accounting broke the self-announce guard"
+
+  pass "self-announced appends suppress only their own bytes and fail toward waking"
+}
+
+# A trap that fires inside a lock's critical section abandons the holding
+# frame, and the exit path then re-acquires the same lock (a TERM inside a
+# recovery-marker section is the reproduced case: the watcher's reap wedged
+# forever spinning against its own pid). The same-process re-acquire must
+# reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
+# live hold exactly as before.
+test_self_held_lock_reclaims_instead_of_deadlocking() {
+  local dir state rc
+  dir=$(make_case self-held-lock)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    fm_lock_try_acquire "$lock" || exit 11
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture2.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
+  pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
+}
+
+# Drain-time historical annotation staleness: a turn-ended-only wake row must
+# not present an already-announced status line as a new update, while a status
+# file with unannounced bytes keeps its annotation and a direct status row is
+# always annotated. Driven through the real drain executable.
+test_historical_annotation_skips_announced_status() {
+  local dir state out err
+  dir=$(make_case historical-annotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+
+  printf 'working: long scout still going\n' > "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the scout seen marker"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  if grep -F 'scout.status: working: long scout still going' "$out" >/dev/null; then
+    fail "a fully announced status line was replayed as a historical annotation"
+  fi
+  grep -F 'scout.turn-ended' "$out" >/dev/null \
+    || fail "suppressing the stale annotation dropped the turn-ended wake row itself"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the first drain"
+
+  # Unannounced status bytes: the historical annotation is genuinely new
+  # information and must stay.
+  printf 'working: fresh unannounced progress\n' >> "$state/scout.status"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "second turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "second drain failed"
+  grep -F 'historical / not necessarily the triggering event: scout.status: working: fresh unannounced progress' "$out" >/dev/null \
+    || fail "an unannounced status line lost its historical annotation"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the second drain"
+
+  # A direct status row is the announcement itself and is always annotated,
+  # even when the seen marker already covers the file.
+  printf 'done: scout finished\n' >> "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the marker for the direct-row leg"
+  append_wake "$state" signal scout.status "signal: $state/scout.status" \
+    || fail "direct status wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "third drain failed"
+  grep -F 'scout.status: done: scout finished' "$out" >/dev/null \
+    || fail "a direct status row lost its annotation"
+  pass "historical annotations replay nothing already announced and keep everything new"
+}
+
+test_self_held_lock_reclaims_instead_of_deadlocking
+test_self_announced_append_guards
+test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

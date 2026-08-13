@@ -345,10 +345,17 @@ EOF
 
     # Transfer any still-open status decision to its durable backlog owner so the
     # live status fold does not duplicate the same Captain's Call item.
+    # The transfer line is this home's own bookkeeping close, written by the
+    # turn that just reviewed the decision, so it uses the guarded
+    # self-announced append (bin/fm-wake-lib.sh) and does not wake this same
+    # session; an append failure still fails this command loudly.
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
-      printf 'captain-held [key=%s]: tracked by %s\n' "$key" "$(hold_id "$origin" "$key")" >> "$status_file"
+      transfer_rc=0
+      fm_wake_status_append_self_announced "$STATE" "$status_file" \
+        "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
+      [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
       key_seen=1
     done <<EOF
 $raw_open
