@@ -820,7 +820,7 @@ test_decision_options_are_never_silently_dropped() {
       | .option_count == 3 and .unsupported_options == 1 and .options_complete == true
         and .binary == false
         and (.options | map(test(\"/Users/bob\")) | any | not)
-        and (.options | map(test(\"^Unsupported option [0-9]+\")) | any)" >/dev/null \
+        and (.options | map(test(\"^<unsupported #[0-9]+>\")) | any)" >/dev/null \
     || fail "a private-path option was silently discarded instead of explicitly marked"
   assert_not_contains "$out" "/Users/bob" "decision option leaked a private path"
 
@@ -836,7 +836,7 @@ test_decision_options_are_never_silently_dropped() {
       | .option_count == 3 and .distinct_options == 3
         and .options_retained == 3 and .unsupported_options == 2
         and .options_complete == true
-        and ((.options | map(select(test(\"^Unsupported option [0-9]+\"))) | unique | length) == 2)" \
+        and ((.options | map(select(test(\"^<unsupported #[0-9]+>\"))) | unique | length) == 2)" \
     >/dev/null || fail "two distinct unsupported options collapsed into one card row"
   assert_not_contains "$out" "/Users/a" "decision option leaked a private path"
   assert_not_contains "$out" "/Users/b" "decision option leaked a private path"
@@ -863,6 +863,36 @@ test_decision_options_are_never_silently_dropped() {
   assert_not_contains "$text" "unsupported - select explicitly" \
     "duplicate options produced a false unsupported-option notice"
   assert_contains "$text" "1 duplicate" "duplicate options were not disclosed"
+
+  local long_a long_b
+  long_a=$(printf 'a%.0s' $(seq 1 40))XX
+  long_b=$(printf 'a%.0s' $(seq 1 40))YY
+  fixture="$TMP_ROOT/options-truncation-collision.json"
+  jq --arg a "$long_a" --arg b "$long_b" \
+    '.tasks["multi-option"].decision.options = [$a,$b,"zip"]' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 3 and .options_retained == 3
+        and .options_complete == true
+        and ((.options | length) == (.options | unique | length))" >/dev/null \
+    || fail "two options colliding after truncation rendered identical card rows"
+  printf '%s' "$out" | jq -e "$card_query
+      | (.keys | map(capture(\"^\\\\[(?<k>[^]]+)\\\\] (?<label>.+)\$\").label))
+        as \$labels
+      | (\$labels | length) == (\$labels | unique | length)" >/dev/null \
+    || fail "truncated option collision produced duplicate key labels"
+
+  fixture="$TMP_ROOT/options-placeholder-collision.json"
+  jq '.tasks["multi-option"].decision.options =
+        ["/Users/a/x.md","Unsupported option 1 (select explicitly)","<unsupported #1>"]' \
+    "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 3 and .options_retained == 3
+        and ((.options | length) == (.options | unique | length))
+        and .unsupported_options >= 1" >/dev/null \
+    || fail "a literal option matching the unsupported placeholder collided with a redacted row"
+  assert_not_contains "$out" "/Users/a" "decision option leaked a private path"
 
   text=$("$CONSOLE" --fixture "$FIXTURE" --format decisions --no-color --now 2026-08-13T12:00:00Z)
   assert_contains "$text" "all shown" \

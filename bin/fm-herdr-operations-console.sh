@@ -428,13 +428,21 @@ NORMALIZED=$(
               | unique_by(.value)
               | sort_by(.key)
               | to_entries
-              | map(.value.value as $raw
-                    | (safe($raw; ""; 40)) as $display
+              | map(.key as $slot
+                    | .value.value as $raw
+                    | (safe($raw; ""; 34)) as $display
                     | if $display != "" and ($display | test("^[A-Za-z0-9][A-Za-z0-9 ()/_.,:+-]*$"))
-                      then {label:$display, supported:true}
-                      else {label:("Unsupported option " + ((.key + 1) | tostring)
-                                   + " (select explicitly)"), supported:false}
-                      end)) as $option_entries
+                      then {label:$display, supported:true, slot:$slot}
+                      else {label:("<unsupported #" + (($slot + 1) | tostring) + ">"),
+                            supported:false, slot:$slot}
+                      end)
+              | (map(.label) | group_by(.) | map(select(length > 1) | .[0])) as $collisions
+              | map(. as $entry
+                    | if ($collisions | index($entry.label)) != null
+                      then $entry + {label:($entry.label + " #" + (($entry.slot + 1) | tostring))}
+                      else $entry
+                      end)
+              | map(del(.slot))) as $option_entries
            | ($option_entries | map(.label)) as $named_options
            | ([$option_entries[] | select(.supported | not)] | length) as $unsupported_option_count
            | (safe($decision.question; ""; 120)) as $question
