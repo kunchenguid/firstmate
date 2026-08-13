@@ -8,6 +8,13 @@
         "timeout": 180
       }
     ],
+    "preCompact": [
+      {
+        "type": "command",
+        "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-precompact-cursor.sh",
+        "timeout": 180
+      }
+    ],
     "stop": [
       {
         "type": "command",

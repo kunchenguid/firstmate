@@ -61,6 +61,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.cursor-park-owner"
 OWNER_LOCK="$STATE/.cursor-park-owner.lock"
 BUDGET_FILE="$STATE/.turnend-cursor-blocks"
+PENDING_CONTEXT="$STATE/.cursor-pending-context"
 
 LOOP_CEILING=${FM_CURSOR_TURNEND_LOOP_CEILING:-180}
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
@@ -235,6 +236,31 @@ current_session_still_ours() {
   fm_session_lock_owned_by_self "$STATE"
 }
 
+emit_pending_context() {
+  local body encoded response current
+  [ -f "$PENDING_CONTEXT" ] && [ ! -L "$PENDING_CONTEXT" ] || return 1
+  body=$(cat "$PENDING_CONTEXT" 2>/dev/null) || return 1
+  [ -n "$body" ] || return 1
+  fm_operational_input_encode session-start "$body" encoded || return 1
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || return 1
+  lock_acquire_bounded "$OWNER_LOCK" || return 1
+  if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  current=$(cat "$PENDING_CONTEXT" 2>/dev/null) || {
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  }
+  if [ "$current" != "$body" ] || ! rm -f "$PENDING_CONTEXT" 2>/dev/null; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  printf '%s\n' "$response" || true
+  fm_lock_release "$OWNER_LOCK"
+  exit 0
+}
+
 # Only the lock-owning session may arm or wake. A prior session that died
 # leaving its numeric harness pid behind is the one recoverable
 # case, delegated to bin/fm-lock.sh so acquisition keeps its single owner.
@@ -251,6 +277,10 @@ case "$OWNER_ID" in ''|*[!0-9]*) exit 0 ;; esac
 
 PARK_SEQ=
 claim_park || exit 0
+
+# preCompact cannot inject context itself, so it stages the refreshed digest for
+# this next stop boundary. Context refresh takes priority over watcher work.
+emit_pending_context
 
 # Cursor's own loop_limit is the outer ceiling; this inner one bites first so the
 # session is told once, loudly, instead of supervision going quiet unannounced.
