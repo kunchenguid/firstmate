@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # project's checked-out clean target branch to the crewmate's fm/<id> branch.
-# The target defaults to the remote default branch exactly as before. An exact
-# Captain-approved landing may instead name an existing local integration branch
+# The target defaults to the project's resolved default branch exactly as before.
+# An exact Captain-approved landing may instead name an existing local integration branch
 # with --target-branch; the helper never switches branches and records the chosen
 # branch as pending before the ref update and completed afterward.
 #
