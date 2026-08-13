@@ -2812,22 +2812,7 @@ const persistedRuns = () => {
   try {
     if (!generationIsCurrent()) return null;
     const runLines = readOptional(SESSION_RUN).split(/\r?\n/).filter(Boolean);
-    const stopLine = readOptional(SESSION_STOP).trim();
-    let stop = stopLine;
-    let settling = false;
-    let settlingTimestamp: number | undefined;
-    if (stopLine.startsWith("settling ")) {
-      const settlingFields = stopLine.split(/\s+/);
-      if (settlingFields.length !== 3) return null;
-      stop = settlingFields[1];
-      settling = true;
-      if (settlingFields[2] !== "none") {
-        if (!/^[0-9]+$/.test(settlingFields[2])) return null;
-        const timestamp = Number(settlingFields[2]);
-        if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return null;
-        settlingTimestamp = timestamp;
-      }
-    }
+    const stop = readOptional(SESSION_STOP).trim();
     const busyFields = new Set(readRegularFile("$STATE_REAL/$ID.busy-state").trim().split(/\s+/));
     const busy = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=busy");
     const idle = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=idle");
@@ -2859,21 +2844,17 @@ const persistedRuns = () => {
       evidence.set(record.token, record);
     }
     let pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
-    if (settling) {
-      const settlingRecord = evidence.get(stop);
-      if (!settlingRecord) return null;
-      if (settlingRecord.stoppedAt === 0) {
-        const stoppedAt = settlingTimestamp === undefined
-          ? Math.max(settlingRecord.startedAt, settlingRecord.lastEventAt)
-          : settlingTimestamp;
-        if (stoppedAt < settlingRecord.lastEventAt || stoppedAt < settlingRecord.startedAt) return null;
-        const recoveredRecord = { ...settlingRecord, stoppedAt };
+    if (stop !== "" && stop !== "pending") {
+      const stopRecord = evidence.get(stop);
+      if (stopRecord?.stoppedAt === 0) {
+        const recoveredRecord = {
+          ...stopRecord,
+          stoppedAt: Math.max(stopRecord.startedAt, stopRecord.lastEventAt),
+        };
         evidence.set(stop, recoveredRecord);
         materialize.push(recoveredRecord);
-      } else if (settlingTimestamp !== undefined && settlingRecord.stoppedAt !== settlingTimestamp) {
-        return null;
+        pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
       }
-      pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
     }
     const pointerRecord = token ? evidence.get(token) : undefined;
     if (pointerRecord?.stoppedAt > 0 && pendingEvidence.length > 0) {
@@ -2884,7 +2865,7 @@ const persistedRuns = () => {
     if (!token && stop !== "" && stop !== "pending") {
       const stopRecord = evidence.get(stop);
       if (!stopRecord) return null;
-      if (stopRecord?.stoppedAt === 0) token = stop;
+      if (stopRecord.stoppedAt === 0) token = stop;
       else if (pendingEvidence.length > 0) token = pendingEvidence[0].token;
       else token = stop;
     }
@@ -2898,6 +2879,19 @@ const persistedRuns = () => {
       const record = { token, startedAt: tokenData.startedAt, lastEventAt: tokenData.startedAt, stoppedAt: 0 };
       evidence.set(token, record);
       materialize.push(record);
+    }
+    if (stop !== "" && stop !== "pending") {
+      const stopRecord = evidence.get(stop);
+      if (!stopRecord) return null;
+      if (stopRecord.stoppedAt === 0) {
+        const recoveredRecord = {
+          ...stopRecord,
+          stoppedAt: Math.max(stopRecord.startedAt, stopRecord.lastEventAt),
+        };
+        evidence.set(stop, recoveredRecord);
+        materialize.push(recoveredRecord);
+      }
+      pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
     }
     if (stop !== "" && stop !== "pending" && stop !== token) {
       const stoppedSibling = evidence.get(stop);
@@ -3094,10 +3088,11 @@ const settleRun = async (token: string, event: string, timestamp?: number) => {
   const hasActiveSibling = runRecords.some((candidate) => candidate.active && candidate.token !== token);
   if (timestamp !== undefined && !timestampMatchesRun(record, timestamp)) return;
   if (hasActiveSibling) {
-    atomicWrite(SESSION_STOP, "settling " + token + " " +
-      (timestamp === undefined ? "none" : String(timestamp)) + "\n");
+    if (!rememberRunTimestamp(record, timestamp)) return;
+    atomicWrite(SESSION_STOP, token + "\n");
+  } else if (!rememberRunTimestamp(record, timestamp)) {
+    return;
   }
-  if (!rememberRunTimestamp(record, timestamp)) return;
   if (record.finalizing) {
     record.active = false;
     if (!record.idlePending) {

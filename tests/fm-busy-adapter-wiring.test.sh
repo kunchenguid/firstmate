@@ -203,6 +203,26 @@ const removeMarker = (path) => {
 };
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
+  case "marker-temp-recovery": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    const generation = readFileSync(
+      process.env.STATE_DIR + "/" + process.env.TASK_ID + ".busy-gen", "utf8",
+    ).trim();
+    const foreignTemps = [
+      runPath + "." + process.pid + ".1.tmp",
+      runPath + "." + generation + "." + process.pid +
+        ".00000000-0000-0000-0000-000000000000.1.tmp",
+    ];
+    for (const foreignTemp of foreignTemps) {
+      writeFileSync(foreignTemp, "foreign marker temporary\n", { encoding: "utf8", flag: "wx" });
+    }
+    await fire("agent_start");
+    for (const foreignTemp of foreignTemps) {
+      if (!existsSync(foreignTemp)) throw new Error("an unowned marker temp was removed");
+    }
+    if (!readFileSync(runPath, "utf8").trim()) throw new Error("the next run did not publish its marker");
+    break;
+  }
   case "state-marker-symlinks": {
     const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
     const paths = [
@@ -1017,9 +1037,7 @@ test_omp_extension_repairs_stopped_pointer_before_pending_run() {
   second_token=$(cat "$state/$id.omp-session-run")
   [ "$first_token" != "$second_token" ] || fail "stopped-pointer setup did not create a pending sibling"
 
-  awk '{ $4 = $3 + 1; print }' "$evidence_dir/$second_token" > "$evidence_dir/$second_token.recovered"
-  mv "$evidence_dir/$second_token.recovered" "$evidence_dir/$second_token"
-  printf 'settling %s none\n' "$second_token" > "$state/$id.omp-session-stop"
+  printf '%s\n' "$second_token" > "$state/$id.omp-session-stop"
   rm -f "$state/$id.turn-ended"
 
   out=$(drive_omp_ext "$ext" session-stop "$state" "$id") \
@@ -1050,7 +1068,7 @@ test_omp_extension_rejects_state_marker_symlinks() {
 }
 
 test_omp_extension_uses_incarnation_unique_marker_temps() {
-  local rec id=busy-omp-marker-temp out state ext first_token second_token evidence_dir gen foreign_token foreign_temp
+  local rec id=busy-omp-marker-temp out state ext first_token second_token marker_temp
   rec=$(make_spawn_case omp-marker-temp omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -1059,17 +1077,14 @@ test_omp_extension_uses_incarnation_unique_marker_temps() {
   ext="$state/$id.omp-ext.ts"
   out=$(drive_omp_ext "$ext" agent-start) || fail "incarnation-temp first agent_start drive failed: $out"
   first_token=$(cat "$state/$id.omp-session-run")
-  gen=$(cat "$state/$id.busy-gen")
-  evidence_dir="$state/$id.omp-session-evidence"
-  foreign_token="$gen.999999.1.1"
-  foreign_temp="$evidence_dir/$foreign_token.$gen.999999.00000000-0000-0000-0000-000000000000.4.tmp"
-  printf '%s\n' "foreign temporary evidence" > "$foreign_temp"
-  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+  out=$(drive_omp_ext "$ext" marker-temp-recovery "$state" "$id") \
     || fail "incarnation-temp reload agent_start drive failed: $out"
   second_token=$(cat "$state/$id.omp-session-run")
   [ "$first_token" != "$second_token" ] \
     || fail "incarnation-temp reload did not publish a fresh run marker"
-  [ -e "$foreign_temp" ] || fail "an unowned same-shaped temp was removed during reload"
+  marker_temp=$(find "$state" -maxdepth 1 -type f \
+    -name "$id.omp-session-run.*.1.tmp" -print -quit)
+  [ -n "$marker_temp" ] || fail "an unowned marker temp was not preserved beside SESSION_RUN"
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy omp-ext" ] || fail "an unowned marker temp poisoned the next run, got '$out'"
   pass "omp reload uses incarnation-unique marker temps and preserves unowned temps"
