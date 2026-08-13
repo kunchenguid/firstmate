@@ -681,6 +681,30 @@ test_local_only_merged_to_recorded_target_allows() {
   pass "local-only worktree merged into its recorded integration target is torn down"
 }
 
+test_local_only_merged_to_pending_target_allows() {
+  local case_dir rc wt_head
+  case_dir=$(make_case merged-pending-target)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "pending integration work"
+  git -C "$case_dir/project" branch integration main
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/integration "$wt_head"
+  printf '%s\n' 'local_merge_target_pending=integration' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-pending-target: teardown should resolve the pending integration target"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "merged-pending-target: teardown printed a REFUSED line"
+  assert_grep "tasks-axi done task-x1 --note 'local-target:integration'" "$case_dir/stdout" \
+    "merged-pending-target: completion reminder lost the proven pending target"
+  pass "local-only worktree landed before metadata completion is safely torn down"
+}
+
 test_local_only_recorded_non_main_default_preserves_legacy_note() {
   local case_dir rc wt_head
   case_dir=$(make_case merged-master-default)
@@ -2648,6 +2672,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_local_only_merged_to_recorded_target_allows
+test_local_only_merged_to_pending_target_allows
 test_local_only_recorded_non_main_default_preserves_legacy_note
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses

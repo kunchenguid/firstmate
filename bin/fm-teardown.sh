@@ -457,6 +457,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 LOCAL_MERGE_TARGET=$(fm_meta_get "$META" local_merge_target)
+LOCAL_MERGE_TARGET_PENDING=$(fm_meta_get "$META" local_merge_target_pending)
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1150,7 +1151,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed landing_target landing_ref unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed landing_target landing_target_pending landing_ref unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1179,9 +1180,14 @@ validate_worktree_teardown_safety() {
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     landing_target=$LOCAL_MERGE_TARGET
-    if [ -z "$landing_target" ]; then
+    landing_target_pending=0
+    if [ -n "$LOCAL_MERGE_TARGET_PENDING" ]; then
+      landing_target=$LOCAL_MERGE_TARGET_PENDING
+      landing_target_pending=1
+    elif [ -z "$landing_target" ]; then
       landing_target=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    elif ! git -C "$PROJ" check-ref-format --branch "$landing_target" >/dev/null 2>&1; then
+    fi
+    if ! git -C "$PROJ" check-ref-format --branch "$landing_target" >/dev/null 2>&1; then
       echo "REFUSED: recorded local merge target '$landing_target' is invalid." >&2
       return 1
     fi
@@ -1205,6 +1211,9 @@ validate_worktree_teardown_safety() {
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$landing_target" "$unmerged" >&2
       echo "Merge the branch into local $landing_target first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
+    fi
+    if [ "$landing_target_pending" = 1 ]; then
+      LOCAL_MERGE_TARGET=$landing_target
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2

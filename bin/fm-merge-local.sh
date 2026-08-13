@@ -4,7 +4,7 @@
 # The target defaults to the remote default branch exactly as before. An exact
 # Captain-approved landing may instead name an existing local integration branch
 # with --target-branch; the helper never switches branches and records the chosen
-# branch as local_merge_target in the task metadata for safe teardown.
+# branch as pending before the ref update and completed afterward.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -159,17 +159,28 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$TASK_REF"; then
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
-META_TMP=$(mktemp "$STATE/.fm-merge-local-meta.XXXXXX") || exit 1
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    local_merge_target=*) ;;
-    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
-  esac
-done < "$META"
-printf 'local_merge_target=%s\n' "$TARGET" >> "$META_TMP" || exit 1
-chmod 0600 "$META_TMP" || exit 1
-mv -f -- "$META_TMP" "$META" || exit 1
-META_TMP=
-git -C "$PROJ" merge --ff-only "$TASK_REF" >/dev/null
+publish_merge_target() {
+  local phase=$1 line key=local_merge_target
+  [ "$phase" != pending ] || key=local_merge_target_pending
+  META_TMP=$(mktemp "$STATE/.fm-merge-local-meta.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      local_merge_target_pending=*) ;;
+      local_merge_target=*)
+        if [ "$phase" = pending ]; then
+          printf '%s\n' "$line" >> "$META_TMP" || return 1
+        fi
+        ;;
+      *) printf '%s\n' "$line" >> "$META_TMP" || return 1 ;;
+    esac
+  done < "$META"
+  printf '%s=%s\n' "$key" "$TARGET" >> "$META_TMP" || return 1
+  chmod 0600 "$META_TMP" || return 1
+  mv -f -- "$META_TMP" "$META" || return 1
+  META_TMP=
+}
+publish_merge_target pending || exit 1
+git -C "$PROJ" merge --ff-only "$TASK_REF" >/dev/null || exit 1
+publish_merge_target completed || exit 1
 after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

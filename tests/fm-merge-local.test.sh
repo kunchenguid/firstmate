@@ -12,6 +12,8 @@ fm_git_identity fmtest fmtest@example.invalid
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 REAL_MKTEMP_FOR_TEST=$(command -v mktemp)
 export REAL_MKTEMP_FOR_TEST
+REAL_GIT_FOR_TEST=$(command -v git)
+export REAL_GIT_FOR_TEST
 TMP_ROOT=$(fm_test_tmproot fm-merge-local-tests)
 ID=task-x1
 TASK_BRANCH="fm/$ID"
@@ -83,6 +85,8 @@ test_default_target_compatibility() {
     "default-target: success did not identify the established default target"
   assert_grep 'local_merge_target=main' "$case_dir/state/$ID.meta" \
     "default-target: selected landing target was not recorded"
+  ! grep -q '^local_merge_target_pending=' "$case_dir/state/$ID.meta" \
+    || fail "default-target: completed landing retained pending metadata"
   pass "fm-merge-local preserves default-target fast-forward behavior"
 }
 
@@ -108,6 +112,8 @@ test_explicit_integration_target() {
     "explicit-target: success did not identify the integration target"
   assert_grep 'local_merge_target=integration' "$case_dir/state/$ID.meta" \
     "explicit-target: selected landing target was not recorded"
+  ! grep -q '^local_merge_target_pending=' "$case_dir/state/$ID.meta" \
+    || fail "explicit-target: completed landing retained pending metadata"
   pass "fm-merge-local fast-forwards an explicit checked-out integration branch only"
 }
 
@@ -207,6 +213,37 @@ SH
   pass "fm-merge-local persists teardown metadata before moving the target branch"
 }
 
+test_merge_failure_retains_pending_target() {
+  local case_dir fakebin target_before rc
+  case_dir=$(make_case merge-failure integration integration)
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' merge --ff-only '*) exit 1 ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$fakebin/git"
+  target_before=$(ref_sha "$case_dir" integration)
+
+  set +e
+  MERGE_LOCAL_TEST_PATH="$fakebin:$PATH" run_merge "$case_dir" "$ID" --target-branch integration \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merge-failure"
+  [ "$(ref_sha "$case_dir" integration)" = "$target_before" ] \
+    || fail "merge-failure: integration branch moved"
+  ! grep -q '^local_merge_target=' "$case_dir/state/$ID.meta" \
+    || fail "merge-failure: failed landing was recorded as completed"
+  assert_grep 'local_merge_target_pending=integration' "$case_dir/state/$ID.meta" \
+    "merge-failure: attempted landing target was not retained as pending"
+  pass "fm-merge-local distinguishes failed attempts from completed landings"
+}
+
 test_non_local_only_mode_refuses() {
   local case_dir target_before rc
   case_dir=$(make_case wrong-mode integration integration direct-PR)
@@ -277,6 +314,7 @@ test_dirty_target_refuses
 test_nonexistent_and_invalid_targets_refuse
 test_divergence_refuses
 test_metadata_failure_prevents_landing
+test_merge_failure_retains_pending_target
 test_non_local_only_mode_refuses
 test_option_errors_refuse
 test_task_branch_cannot_be_target
