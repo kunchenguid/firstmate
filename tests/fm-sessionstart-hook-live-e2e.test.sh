@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the RUN-tier session-open adapters (Claude, Codex exec, Pi).
+# Opt-in live guard for the Claude, Codex exec, and Pi RUN-tier session-open adapters.
+# Cursor's source-free RUN-tier transport is covered with its stop-hook park by
+# tests/fm-cursor-primary-live-e2e.test.sh.
 #
 # Three facts in this area come from the vendor, not from Firstmate, so a stub
 # can only confirm the assumption already written into the stub:
@@ -31,7 +33,7 @@
 #
 #   FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 #
-# It costs real model turns on every installed run-tier harness.
+# It costs real model turns on every installed adapter in this suite.
 set -u
 
 if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ]; then
