@@ -198,7 +198,7 @@ fleet_sync_run_bounded() {
       FM_FLEET_SYNC_BOUNDED_ELAPSED=$elapsed
       return 124
     fi
-    sleep 1
+    sleep 0.1
   done
   wait "$pid"
   status=$?

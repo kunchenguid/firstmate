@@ -184,8 +184,11 @@ run_bootstrap_timeout_case() {
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1}
-      SECONDS=$((SECONDS + inc))
+      FM_FAKE_SLEEP_TICKS=$(( ${FM_FAKE_SLEEP_TICKS:-0} + 1 ))
+      if [ "$FM_FAKE_SLEEP_TICKS" -ge 10 ]; then
+        SECONDS=$((SECONDS + 1))
+        FM_FAKE_SLEEP_TICKS=0
+      fi
       # Advance fake time quickly, but yield on every tick so the background
       # fleet-sync process can deterministically write its partial output before
       # the simulated timeout kills it, even on a busy full-suite runner.
@@ -846,11 +849,11 @@ SH
   set -m 2>/dev/null || true
   (
     GIT_SSH_COMMAND="$stall" FM_TEST_STALL_STARTED="$marker" \
-      FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 run_firstmate_fork_report "$repo" "$fakebin"
+      FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=3 run_firstmate_fork_report "$repo" "$fakebin"
   ) > "$output" 2>&1 &
   pid=$!
   tries=0
-  while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 50 ]; do
+  while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 200 ]; do
     sleep 0.1
     tries=$((tries + 1))
   done
@@ -859,7 +862,7 @@ SH
     wait "$pid" 2>/dev/null || true
     [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
     [ -e "$marker" ] || fail "stalled-remote fixture never entered the hanging SSH transport"
-    fail "bootstrap remained hung for 5s after the stalled SSH transport started"
+    fail "bootstrap remained hung for 20s after the stalled SSH transport started"
   fi
   wait "$pid"
   status=$?

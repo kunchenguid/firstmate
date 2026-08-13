@@ -36,6 +36,12 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
+- `FLEET_SYNC: firstmate: <default> is ahead of origin/<default> by N commit(s)` - the fork is stale, so backup and any clone sourced from that fork lack the named local commits.
+  Tell the captain the consequence and wait for explicit push authorization; never push automatically.
+- `FLEET_SYNC: firstmate: <default> is behind origin/<default> by N commit(s)|has diverged from origin/<default> (...)` - the local default branch and fork no longer have the expected backup relationship.
+  Do not push or reconcile automatically; inspect both histories and ask for the exact safe operation needed to preserve every commit.
+- Any other `FLEET_SYNC: firstmate:` line means the read-only guard could not establish the fork relationship.
+  Report the exact reason as unknown safety, not as healthy; restore the named remote, authentication, ref, local object, or temporary-output prerequisite, then rerun bootstrap before claiming the fork is current.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
 - `PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home` - a retry proved canonical publication provenance, metadata identity binding, and single-link integrity for a replacement poll resolving an earlier ambiguous migration outcome.
