@@ -673,6 +673,42 @@ EOF
   printf '%s' "$offset"
 }
 
+status_retire_presentation_task() {  # <state> <task-id>
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0
+  lock="$state/.status-presentation-lock"
+  manifest="$state/.status-presentation-cursor"
+  tmp="$manifest.tmp.$$"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
+      rc=1
+    elif ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+      rc=1
+    elif ! : > "$tmp"; then
+      rc=1
+    else
+      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+        [ -n "$row_task" ] || continue
+        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
+        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        if [ "$row_task" != "$task" ]; then
+          printf '%s\t%s\t%s\n' "$row_task" "$ident" "$offset" >> "$tmp" \
+            || { rc=1; break; }
+        fi
+      done <<EOF
+$data
+EOF
+      if [ "$rc" -eq 0 ]; then mv -f "$tmp" "$manifest" || rc=1; fi
+      [ "$rc" -eq 0 ] || rm -f "$tmp"
+    fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" || rc=1
+  fi
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
 status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
   tmp="$state/.status-presentation-cursor.tmp.$$"
@@ -723,14 +759,15 @@ EOF
 # the supervisor. Those verbs also never enter the OPEN DECISIONS fold, so they
 # had no other surfacing path.
 # These helpers are the ONE owner of "what is still unread since the last drain
-# presentation": they read the same cursor format and invalidation rules as
-# status_open_decisions_incremental, but they never write that cursor. The drain
-# prints the unread surface first, then the incremental fold advances the
-# cursor, so a presented line is not re-printed on the next drain.
-# Missing or invalid cursor state is offset 0 (every current line is unread):
-# fail toward showing more rather than dropping a line that was never presented.
+# presentation": one fleet manifest records each status identity and last-ack
+# byte offset, and one atomic replacement commits a successfully presented
+# snapshot. Missing or invalid cursor state is offset 0 (every current line is
+# unread): fail toward showing more rather than dropping a line that was never
+# presented. That fail-open rule may rarely replay a handled line after an I/O
+# failure or concurrent replacement, but never acknowledges uncertain bytes.
 # A trusted cursor at EOF prints nothing: already-presented bytes are not
-# replayed as new.
+# replayed as new. Teardown retires a task's manifest row with its status file,
+# so reusing a task ID starts the replacement log unread at byte 0.
 # Informational `note:` lines and reserved-key pending-reply resolutions are
 # the fleet-wide unread surface; they are not open decisions and are not
 # persisted in the folded open-set.

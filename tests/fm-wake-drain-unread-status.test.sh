@@ -207,6 +207,33 @@ test_snapshot_does_not_ack_a_later_append() {
   pass "presentation cursor advances only through its captured endpoint"
 }
 
+test_retired_task_id_starts_new_status_unread() {
+  local dir state out
+  dir=$(make_case retired-task-reuse)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'note: old reused-task history\n' > "$state/reused.status"
+  printf 'note: stable neighboring history\n' > "$state/neighbor.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "drain failed while acknowledging pre-retirement histories"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    status_retire_presentation_task "$STATE" reused
+  ' _ "$ROOT" || fail "retiring the reused task presentation state failed"
+  printf 'note: first event from reused task id\n' > "$state/reused.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed after reusing a retired task id"
+  grep -F 'reused note: first event from reused task id' "$out" >/dev/null \
+    || fail "the retired manifest row skipped the new task prefix: $(cat "$out")"
+  if grep -F 'stable neighboring history' "$out" >/dev/null; then
+    fail "retiring one task replayed a neighboring task's handled history: $(cat "$out")"
+  fi
+  pass "a reused task id starts its replacement status log unread at byte zero"
+}
+
 test_open_decisions_fold_is_unchanged() {
   local dir state out
   dir=$(make_case open-decisions-regression)
@@ -263,5 +290,6 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
+test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged
 test_routine_working_lines_stay_silent_on_the_empty_queue
