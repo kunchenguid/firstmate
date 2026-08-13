@@ -218,6 +218,18 @@ status_is_paused_or_captain_held() {  # <status-line>
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
 # folds skip the line), never rewritten to "default".
+# MULTIPLE "[key=...]" tokens before the colon each state an independent
+# decision on the SAME line - the before-colon position is documented above
+# to carry "any number of tags", and repeated same-named key tags are no
+# exception: needs-decision/blocked opens every named key with the identical
+# note, and resolved/captain-held closes every named key, never only the
+# first. Taking only the first silently orphaned a decision forever the
+# moment a closing line named it second, which is why every key on the line
+# is now folded, not just the first one found. The note-head position is
+# unchanged and stays single-token: a second bracket token later in the note
+# remains prose per the paragraph above, never a second stated key. A
+# malformed slug ANYWHERE in a multi-key line rejects the whole line, exactly
+# like the single-key case.
 # The parsers are pure reads of a single line. Status metadata may contain any
 # number of "[name=value]" tags before the colon, in any order, so verb parsing
 # ends at the first tag rather than special-casing "[key=...]".
@@ -308,6 +320,27 @@ _fm_key_before_colon() {  # <status-line>
     *) return 1 ;;
   esac
 }
+# Every "[key=<slug>]" token before the line's first colon (or anywhere on a
+# line with no colon at all), left to right, one raw slug per line. The
+# before-colon position is documented to carry any number of "[name=value]"
+# tags, so more than one same-named "[key=...]" tag there is enumerated
+# rather than only the first being seen. Empty output when the position
+# carries none. A pure text scan; slug charset validity is the caller's job
+# via _fm_decision_slug_ok, exactly as for the single-token extractors above.
+_fm_keys_before_colon() {  # <status-line> -> raw slugs, one per line
+  local rest=${1%%:*} slug
+  while :; do
+    case "$rest" in
+      *\[key=*\]*)
+        rest=${rest#*\[key=}
+        slug=${rest%%\]*}
+        rest=${rest#*\]}
+        printf '%s\n' "$slug"
+        ;;
+      *) break ;;
+    esac
+  done
+}
 # Raw slug of a complete "[key=<slug>]" token at the head of the note (the
 # first thing after the line's first colon, ignoring whitespace). Fails when
 # the line has no colon or no complete token there; slug charset validity is
@@ -348,17 +381,41 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   fi
   printf '%s' "$n"
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local k
-  if _fm_key_before_colon "$1"; then
-    k=${1%%:*}
-    k=${k#*\[key=}
-    k=${k%%\]*}
-  else
-    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+# Every key a status line states, or "default" when it states none, one slug
+# per line. The before-colon position may name more than one distinct
+# decision (see _fm_keys_before_colon); the note-head position stays a single
+# token, unchanged from the historical single-key contract - a second bracket
+# token later in the note remains prose, never a second stated key. Fails
+# (no output) when ANY found slug's charset is invalid, exactly like the
+# single-key extractor below: the fold skips the whole line rather than
+# substituting "default" for one bad slug among several.
+_fm_decision_keys() {  # <status-line> -> newline-separated slug(s), or "default"
+  local line=$1 slug keys=
+  if _fm_key_before_colon "$line"; then
+    while IFS= read -r slug; do
+      _fm_decision_slug_ok "$slug" || return 1
+      keys="${keys}${slug}"$'\n'
+    done <<EOF
+$(_fm_keys_before_colon "$line")
+EOF
+    printf '%s' "$keys"
+    return 0
   fi
-  _fm_decision_slug_ok "$k" || return 1
-  printf '%s' "$k"
+  slug=$(_fm_key_at_note_head "$line") || { printf 'default'; return 0; }
+  _fm_decision_slug_ok "$slug" || return 1
+  printf '%s\n' "$slug"
+}
+# Single-key convenience wrapper around _fm_decision_keys, for callers that
+# only ever handle one key by construction (e.g. fm-pending-reply-lib.sh's
+# self-authored escalation lines). Fails on a line that states more than one
+# key - taking only the first there would be the exact silent-drop bug this
+# file's multi-key fold fix exists to remove, just at a different call site.
+_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
+  local keys n
+  keys=$(_fm_decision_keys "$1") || return 1
+  n=$(printf '%s\n' "$keys" | grep -c '.')
+  [ "$n" -le 1 ] || return 1
+  printf '%s' "$keys"
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
@@ -427,7 +484,7 @@ _fm_is_pending_reply_escalation() {  # <key> <note>
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note
+  local open=$1 line=$2 resolve=$3 held=$4 verb keys key note
   # Blank-line guard. A `case` glob answers "does this line hold any non-space
   # character" in one pattern match; the equivalent ${line//[[:space:]]/} costs
   # tens of milliseconds per line under bash 3.2's global bracket-class
@@ -438,21 +495,29 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *) printf '%s' "$open"; return 0 ;;
   esac
   verb=$(status_line_verb "$line")
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
-    || { printf '%s' "$open"; return 0; }
-  case "$verb" in
-    needs-decision|blocked)
-      note=$(status_line_note "$line")
-      open=$(_fm_decision_drop "$open" "$key")
-      [ -n "$open" ] && open="${open}"$'\n'
-      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
-      ;;
-    "$resolve"|"$held")
-      open=$(_fm_decision_drop "$open" "$key")
-      [ -n "$open" ] && open="${open}"$'\n'
-      ;;
-  esac
+  keys=$(_fm_decision_keys "$line") || { printf '%s' "$open"; return 0; }
+  note=$(status_line_note "$line")
+  # A multi-key line opens/closes EVERY stated key with this one note, not
+  # just the first (see the multi-key grammar paragraph above
+  # _fm_decision_key); each key gets its own reserved-namespace check since a
+  # single line can legally mix a reserved and an ordinary key.
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    _fm_decision_key_transition_allowed "$key" "$note" || continue
+    case "$verb" in
+      needs-decision|blocked)
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      "$resolve"|"$held")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+    esac
+  done <<EOF
+$keys
+EOF
   printf '%s' "$open"
 }
 
@@ -642,7 +707,10 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+# 6: a line carrying more than one "[key=...]" token before the colon now
+# opens/closes every stated key instead of only the first, so a cursor
+# persisted under the old single-key reading must be discarded and rebuilt.
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -1504,7 +1572,7 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' pause
+  local line verb keys key note resolve held open='' pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -1515,19 +1583,27 @@ _fm_status_open_activities_stream() {
       *) continue ;;
     esac
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
-    case "$verb" in
-      working|"$pause")
-        note=$(status_line_note "$line")
-        open=$(_fm_decision_drop "$open" "$key")
-        [ -n "$open" ] && open="${open}"$'\n'
-        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
-        ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
-        open=$(_fm_decision_drop "$open" "$key")
-        [ -n "$open" ] && open="${open}"$'\n'
-        ;;
-    esac
+    keys=$(_fm_decision_keys "$line") || continue
+    note=$(status_line_note "$line")
+    # Same multi-key-opens/closes-every-named-key rule as
+    # _fm_decision_fold_line, so this sibling fold cannot disagree with it on
+    # what a multi-key line means.
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      case "$verb" in
+        working|"$pause")
+          open=$(_fm_decision_drop "$open" "$key")
+          [ -n "$open" ] && open="${open}"$'\n'
+          open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+          ;;
+        done|failed|needs-decision|blocked|"$resolve"|"$held")
+          open=$(_fm_decision_drop "$open" "$key")
+          [ -n "$open" ] && open="${open}"$'\n'
+          ;;
+      esac
+    done <<KEYSEOF
+$keys
+KEYSEOF
   done
   printf '%s' "$open"
 }

@@ -102,6 +102,30 @@ test_later_unrelated_terminal_line_does_not_close_it() {
   pass "a later unrelated terminal line never clears an open decision"
 }
 
+# Display-truth regression: a "[key=...]" token positioned neither before the
+# colon nor at the head of the note (e.g. trailing at the end, a common shape
+# when a worker appends the key as an afterthought) is prose, not a stated
+# key - fm-classify-lib.sh's grammar intentionally folds it under "default".
+# Before this fix the drain OMITTED the "[key=default]" annotation for the
+# default bucket, so the line displayed only the note's own trailing
+# "[key=...]" text - a reader would reasonably (but wrongly) pass that
+# visible text to --resolve-key and be refused with no way to tell why. The
+# drain must always show the REGISTERED key, including "default", so the
+# printed line is never more misleading than the ledger it reports on.
+test_misplaced_key_position_shows_its_registered_key_not_the_raw_text() {
+  local dir state out
+  dir=$(make_case misplaced-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision: something needs a human call [key=my-decision]\n' > "$state/task10.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a misplaced-key line"
+
+  grep -F 'task10 [key=default]' "$out" >/dev/null \
+    || fail "the drain did not show the ACTUAL registered key (default) for a misplaced-key line: $(cat "$out")"
+  pass "a misplaced-position [key=...] line displays its true registered key (default), not just the raw note text"
+}
+
 test_no_open_decisions_prints_nothing() {
   local dir state out
   dir=$(make_case none-open)
@@ -217,6 +241,7 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
+test_misplaced_key_position_shows_its_registered_key_not_the_raw_text
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library

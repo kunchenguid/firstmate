@@ -421,7 +421,14 @@ print_open_decisions_section() {
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
     line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
+    # Always show the REGISTERED key, including "default" - never inferred
+    # from the note text. A misplaced-position [key=...] token folds to
+    # "default" (fm-classify-lib.sh's decision-key grammar), and the note
+    # text can still carry that stray, non-functioning token verbatim; a
+    # reader who trusted the note's bracket text over an omitted "[key=...]"
+    # annotation would pass that visible-but-unregistered key to
+    # --resolve-key and be refused with no way to tell why.
+    line="$line [key=$key]"
     line="$line $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
