@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, then assert liveness.
+# annotate every unread line for validated signal status keys, surface unread
+# informational status lines and OPEN DECISIONS, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -79,13 +80,47 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
+# Print still-unread informational status lines (note: answers and pending-reply
+# resolutions) that the OPEN DECISIONS fold never carries. Uses the same
+# cursor-backed unread span as the annotation path, and runs on every drain -
+# including the empty-queue fast path - so a buried answer cannot be swallowed
+# when the fold later advances the cursor. Prints nothing when nothing is
+# unread, which is the common case.
+print_unread_status_section() {
+  local snapshot=${1:-} unread task line shown=0
+
+  if [ -n "$snapshot" ]; then
+    unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
+  else
+    unread=$(scan_unread_surface_lines "$STATE") || return 1
+  fi
+  [ -n "$unread" ] || return 0
+
+  while IFS=$(printf '\t') read -r task line; do
+    [ -n "$task" ] || continue
+    [ -n "$line" ] || continue
+    line="$task $line"
+    if [ "$shown" -eq 0 ]; then
+      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
+    fi
+    printf '%s\n' "$line" || return 1
+    shown=$((shown + 1))
+  done <<EOF
+$unread
+EOF
+
+  [ "$shown" -gt 0 ] || return 0
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
-# scan_open_decisions_incremental wrapper) rather than from the latest-line
-# annotations above, so a decision buried under later unrelated appends cannot
-# be silently missed. Runs on every drain - including the empty-queue fast path
-# - because the decision can still be open even when nothing new is queued for
+# scan_open_decisions_incremental wrapper) rather than from the annotations
+# above, so a decision buried under later unrelated appends cannot be silently
+# missed. Informational `note:` lines and pending-reply resolutions are not
+# decisions; print_unread_status_section owns their one-shot surface. Runs on
+# every drain - including the empty-queue fast path - because the decision can
+# still be open even when nothing new is queued for
 # its task this turn. The incremental wrapper bounds this scan's cost to bytes
 # appended to each task's status log since the LAST drain, not that log's whole
 # lifetime, while still never dropping an old buried decision (see
@@ -93,10 +128,14 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
-  open=$(scan_open_decisions_incremental "$STATE") || return 0
+  if [ -n "$snapshot" ]; then
+    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
+  else
+    open=$(scan_open_decisions_incremental "$STATE") || return 1
+  fi
   [ -n "$open" ] || return 0
 
   while IFS=$(printf '\t') read -r task key verb note; do
@@ -123,16 +162,42 @@ $open
 EOF
 
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n'
-  printf '%s' "$output"
+  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
+  printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted"
+    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+}
+
+print_status_sections() {
+  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
+  [ -n "$snapshot" ] || return 0
+  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  print_unread_status_section "$snapshot" || return 1
+  print_open_decisions_section "$snapshot" || return 1
+  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+}
+
+print_status_presentation() {  # [<deduped-raw-rows>]
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+  fm_lock_acquire_wait "$lock" || return 1
+  snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
+    fm_wake_print_annotations "$rows" "$snapshot" || rc=1
+    if [ "$rc" -eq 0 ]; then
+      annotation_manifest=$(fm_wake_annotation_manifest "$rows") || rc=1
+      fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -218,7 +283,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_open_decisions_section) || true
+  (print_status_presentation) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -270,7 +335,6 @@ DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(fm_wake_print_annotations "$RAW_ROWS") || true
-(print_open_decisions_section) || true
+(print_status_presentation "$RAW_ROWS") || true
 assert_watcher_liveness
 exit 0
