@@ -583,9 +583,9 @@ test_sessionstart_emits_additional_context() {
   case "$ctx" in *'second line'*) ;; *) fail "the digest was truncated at the first line: $ctx" ;; esac
   grep -q -- '--source startup' "$dir/state/digest-args" \
     || fail "the adapter must supply --source itself; Cursor's payload has no source field"
-  [ ! -e "$dir/state/.cursor-pending-context" ] \
-    || fail "a successful new session start retained obsolete staged context"
-  pass "fm-sessionstart-cursor: sessionStart injects the whole digest as additional_context"
+  [ -e "$dir/state/.cursor-pending-context" ] \
+    || fail "a new session deleted staged context whose owner identity did not match"
+  pass "fm-sessionstart-cursor: sessionStart injects context without deleting foreign state"
 }
 
 test_precompact_stages_instead_of_injecting() {
@@ -594,8 +594,8 @@ test_precompact_stages_instead_of_injecting() {
   install_digest_fixture "$dir"
   out=$(run_session "$dir" preCompact compact)
   [ -z "$out" ] || fail "preCompact cannot inject context, so it must emit nothing, got: $out"
-  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
-  staged_session=$(jq -r '.session_id // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged=$(jq -r '[.contexts[]?.digest][0] // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged_session=$(jq -r '[.contexts[]?.session_id][0] // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
   case "$staged" in *'FIRSTMATE DIGEST'*) ;; *) fail "the compaction digest was not staged for the next turn boundary: $staged" ;; esac
   [ "$staged_session" = sess-cursor ] || fail "the staged digest is not bound to its Cursor session"
   pass "fm-sessionstart-cursor: preCompact stages the digest for the next turn boundary"
@@ -606,7 +606,7 @@ test_precompact_stands_down_after_session_takeover() {
   dir=$(make_primary_dir "$TMP_ROOT/session-compact-takeover")
   install_digest_fixture "$dir"
   jq -n --arg session_id sess-new --arg digest 'CURRENT SESSION DIGEST' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+    '{contexts:{"new-owner":{session_id:$session_id,digest:$digest}}}' > "$dir/state/.cursor-pending-context"
   hold_pending_context_lock "$dir"
   ( run_session "$dir" preCompact compact > "$dir/state/orphan-precompact-out" ) &
   old_pid=$!
@@ -622,7 +622,7 @@ test_precompact_stands_down_after_session_takeover() {
   wait "$old_pid" 2>/dev/null || true
   out=$(cat "$dir/state/orphan-precompact-out" 2>/dev/null || true)
   [ -z "$out" ] || fail "an orphaned preCompact hook emitted output: $out"
-  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged=$(jq -r '.contexts["new-owner"].digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
   [ "$staged" = 'CURRENT SESSION DIGEST' ] \
     || fail "an orphaned preCompact hook replaced the current session's digest: $staged"
   : > "$dir/state/replacement-owner-release"
@@ -635,7 +635,7 @@ test_sessionstart_stands_down_after_session_takeover() {
   dir=$(make_primary_dir "$TMP_ROOT/session-start-takeover")
   install_digest_fixture "$dir"
   jq -n --arg session_id sess-new --arg digest 'CURRENT SESSION DIGEST' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+    '{contexts:{"new-owner":{session_id:$session_id,digest:$digest}}}' > "$dir/state/.cursor-pending-context"
   hold_pending_context_lock "$dir"
   ( run_session "$dir" sessionStart startup > "$dir/state/orphan-sessionstart-out" ) &
   old_pid=$!
@@ -651,7 +651,7 @@ test_sessionstart_stands_down_after_session_takeover() {
   wait "$old_pid" 2>/dev/null || true
   out=$(cat "$dir/state/orphan-sessionstart-out" 2>/dev/null || true)
   [ -z "$out" ] || fail "an orphaned sessionStart hook did not stand down silently: $out"
-  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged=$(jq -r '.contexts["new-owner"].digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
   [ "$staged" = 'CURRENT SESSION DIGEST' ] \
     || fail "an orphaned sessionStart hook deleted the current session's digest: $staged"
   : > "$dir/state/replacement-owner-release"
@@ -660,7 +660,7 @@ test_sessionstart_stands_down_after_session_takeover() {
 }
 
 test_precompact_replacement_cannot_be_deleted_by_consumer() {
-  local dir park_pid compact_pid second_pid out second_out waited
+  local dir park_pid compact_pid out staged waited
   dir=$(make_primary_dir "$TMP_ROOT/session-compact-race")
   jq -n --arg session_id sess-cursor --arg digest 'OLD STAGED DIGEST' \
     '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
@@ -690,18 +690,15 @@ SH
   ( run_session "$dir" preCompact compact > "$dir/state/compact-out" ) &
   compact_pid=$!
   wait "$compact_pid" 2>/dev/null || true
-  ( run_park "$dir" > "$dir/state/new-context-out" ) &
-  second_pid=$!
-  wait "$second_pid" 2>/dev/null || true
   : > "$dir/state/context-consume-release"
   wait "$park_pid" 2>/dev/null || true
   out=$(cat "$dir/state/context-consume-out" 2>/dev/null || true)
-  second_out=$(cat "$dir/state/new-context-out" 2>/dev/null || true)
+  staged=$(jq -r '[.contexts[]?.digest | select(. == "NEW STAGED DIGEST")][0] // empty' \
+    "$dir/state/.cursor-pending-context" 2>/dev/null || true)
   [ -z "$out" ] || fail "the superseded consumer emitted obsolete context: $out"
-  case "$(followup_of "$second_out")" in *'NEW STAGED DIGEST'*) ;; *) fail "the newest park did not deliver the replacement digest: $second_out" ;; esac
-  [ ! -e "$dir/state/.cursor-pending-context" ] \
-    || fail "the delivered replacement digest was not consumed"
-  pass "fm-sessionstart-cursor: newest park exclusively consumes staged replacement"
+  [ "$staged" = 'NEW STAGED DIGEST' ] \
+    || fail "the old consumer deleted the replacement digest: $staged"
+  pass "fm-sessionstart-cursor: an old consumer preserves staged replacement"
 }
 
 test_sessionstart_silent_in_child_worktree() {

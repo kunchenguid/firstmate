@@ -183,7 +183,7 @@ budget_reset_if_ours() {
 }
 
 emit_staged_context() {
-  local snapshot current staged_session staged encoded response
+  local snapshot current staged_session staged encoded response remaining tmp
   lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || exit 0
   if [ ! -s "$PENDING_CONTEXT" ] || [ -L "$PENDING_CONTEXT" ] || [ "$SESSION_ID" = unknown ]; then
     fm_lock_release "$PENDING_CONTEXT_LOCK"
@@ -191,8 +191,10 @@ emit_staged_context() {
   fi
   snapshot=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
   fm_lock_release "$PENDING_CONTEXT_LOCK"
-  staged_session=$(printf '%s' "$snapshot" | jq -r '.session_id // empty' 2>/dev/null || true)
-  staged=$(printf '%s' "$snapshot" | jq -r '.digest // empty' 2>/dev/null || true)
+  staged_session=$(printf '%s' "$snapshot" | jq -r --arg owner "$OWNER_ID" \
+    '.contexts[$owner].session_id // .session_id // empty' 2>/dev/null || true)
+  staged=$(printf '%s' "$snapshot" | jq -r --arg owner "$OWNER_ID" \
+    '.contexts[$owner].digest // .digest // empty' 2>/dev/null || true)
   [ "$staged_session" = "$SESSION_ID" ] && [ -n "$staged" ] || return 0
   fm_operational_input_encode session-start "$staged" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
@@ -208,7 +210,24 @@ emit_staged_context() {
     commit_locks_release
     exit 0
   fi
-  rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+  if printf '%s' "$current" | jq -e '(.contexts | type) == "object"' >/dev/null 2>&1; then
+    tmp=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
+      fm_lock_release "$PENDING_CONTEXT_LOCK"
+      commit_locks_release
+      exit 0
+    }
+    if printf '%s' "$current" | jq --arg owner "$OWNER_ID" 'del(.contexts[$owner])' > "$tmp" 2>/dev/null; then
+      remaining=$(jq -r '.contexts | length' "$tmp" 2>/dev/null || printf 1)
+      if [ "$remaining" = 0 ]; then
+        rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+      else
+        mv -f "$tmp" "$PENDING_CONTEXT" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  else
+    rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+  fi
   fm_lock_release "$PENDING_CONTEXT_LOCK"
   commit_locks_release
   exit 0
@@ -310,6 +329,9 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
+
+OWNER_ID=$(cat "$STATE/.lock" 2>/dev/null || true)
+case "$OWNER_ID" in ''|*[!0-9]*) exit 0 ;; esac
 
 PARK_SEQ=
 claim_park || exit 0

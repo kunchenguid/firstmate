@@ -79,28 +79,37 @@ case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID= ;; esac
 DIGEST=$("$SCRIPT_DIR/fm-sessionstart-run.sh" --source "$SOURCE" </dev/null 2>/dev/null || true)
 [ -n "$DIGEST" ] || exit 0
 
+OWNER_ID=
+if fm_session_lock_owned_by_self "$STATE"; then
+  OWNER_ID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$OWNER_ID" in ''|*[!0-9]*) OWNER_ID= ;; esac
+fi
+
 if [ "$EVENT" = preCompact ]; then
   # Staged, not injected. A stale stage from an interrupted compaction is
   # replaced rather than appended, so the session never receives two digests.
   [ -d "$STATE" ] && [ -n "$SESSION_ID" ] || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
+  [ -n "$OWNER_ID" ] || exit 0
   lock_acquire_bounded || exit 0
-  fm_session_lock_owned_by_self "$STATE" || {
+  if ! fm_session_lock_owned_by_self "$STATE" \
+     || [ "$(cat "$STATE/.lock" 2>/dev/null || true)" != "$OWNER_ID" ]; then
     fm_lock_release "$PENDING_CONTEXT_LOCK"
     exit 0
-  }
+  fi
   TMP=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
     fm_lock_release "$PENDING_CONTEXT_LOCK"
     exit 0
   }
-  STAGE_ID=${TMP##*/}
-  if jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" --arg stage_id "$STAGE_ID" \
-    '{session_id:$session_id,digest:$digest,stage_id:$stage_id}' > "$TMP" 2>/dev/null; then
-    fm_session_lock_owned_by_self "$STATE" || {
-      rm -f "$TMP" 2>/dev/null || true
-      fm_lock_release "$PENDING_CONTEXT_LOCK"
-      exit 0
-    }
+  if jq --arg owner "$OWNER_ID" --arg session_id "$SESSION_ID" --arg digest "$DIGEST" '
+    if (.contexts | type) == "object" then .
+    elif type == "object" and ((.session_id // "") != "") and ((.digest // "") != "") then
+      {contexts:{legacy:{session_id:.session_id,digest:.digest}}}
+    else {contexts:{}}
+    end
+    | .contexts[$owner] = {session_id:$session_id,digest:$digest}
+  ' "$PENDING_CONTEXT" > "$TMP" 2>/dev/null \
+    || jq -n --arg owner "$OWNER_ID" --arg session_id "$SESSION_ID" --arg digest "$DIGEST" \
+      '{contexts:{($owner):{session_id:$session_id,digest:$digest}}}' > "$TMP" 2>/dev/null; then
     mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null || true
   fi
   rm -f "$TMP" 2>/dev/null || true
@@ -110,16 +119,32 @@ fi
 
 command -v jq >/dev/null 2>&1 || exit 0
 RESPONSE=$(jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null) || exit 0
-if fm_session_lock_owned_by_self "$STATE"; then
+if [ -n "$OWNER_ID" ]; then
   lock_acquire_bounded || {
     printf '%s\n' "$RESPONSE"
     exit 0
   }
-  fm_session_lock_owned_by_self "$STATE" || {
+  if ! fm_session_lock_owned_by_self "$STATE" \
+     || [ "$(cat "$STATE/.lock" 2>/dev/null || true)" != "$OWNER_ID" ]; then
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
+    exit 0
+  fi
+  TMP=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
     fm_lock_release "$PENDING_CONTEXT_LOCK"
     exit 0
   }
-  rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+  if jq --arg owner "$OWNER_ID" --arg session_id "$SESSION_ID" '
+    if (.contexts | type) == "object"
+       and ((.contexts[$owner].session_id // "") == $session_id)
+    then del(.contexts[$owner]) else . end
+  ' "$PENDING_CONTEXT" > "$TMP" 2>/dev/null; then
+    if jq -e '(.contexts | type) == "object" and (.contexts | length) == 0' "$TMP" >/dev/null 2>&1; then
+      rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+    else
+      mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$TMP" 2>/dev/null || true
   fm_lock_release "$PENDING_CONTEXT_LOCK"
 fi
 printf '%s\n' "$RESPONSE"
