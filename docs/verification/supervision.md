@@ -318,7 +318,8 @@ FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=280160
 ```
 
 The same correction was verified against a live Pi primary's own supervision evidence on 2026-08-13.
-The home's `state/.lock`, both `state/.pi-*-extension-loaded` markers, and both `.pi/extensions/*.ts` builds were copied into an isolated fixture with no watcher lock, reproducing the hand-off state captured live at beacon age 63s.
+The hand-off was captured live at beacon age 63s, then the home's `state/.lock`, `state/.last-watcher-beat`, both `state/.pi-*-extension-loaded` markers, and both `.pi/extensions/*.ts` builds were copied into an isolated fixture with no watcher lock.
+The fixture's copied beacon was fresh at 0s in the output below; the deterministic stale-beacon case separately verifies the grace boundary.
 
 ```sh
 FM_SUPERVISION_MODEL=persistent FM_GUARD_READ_ONLY=1 bin/fm-guard.sh
