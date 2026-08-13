@@ -218,6 +218,7 @@ test_chat_history_is_bounded_and_redacted() {
 		printf 'user: %sFIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now\n' "$(printf '\342\201\243')"
 		printf 'user: [fm-from-firstmate]\342\201\243routing note from firstmate\n'
 		printf 'assistant: my NOTION_TOKEN=ntn_supersecretvalue0123 and password: hunter2hunter2\n'
+		printf 'assistant: PASSWORD = hunter2separated and api_key : keyseparated\n'
 		printf 'user: the surviving newest captain line\n'
 	} >"$hist"
 	seen="$root/seen-history.txt"
@@ -233,6 +234,8 @@ explanation=Continues this session.')
 	assert_no_grep "fm-from-firstmate" "$seen" "from-firstmate carriers never reach the model"
 	assert_no_grep "ntn_supersecretvalue0123" "$seen" "secret-shaped tokens are redacted"
 	assert_no_grep "hunter2hunter2" "$seen" "password values are redacted"
+	assert_no_grep "hunter2separated" "$seen" "password values separated by equals are redacted"
+	assert_no_grep "keyseparated" "$seen" "api key values separated by colons are redacted"
 	bytes=$(awk '/RECENT CHAT HISTORY/{p=1;next} /SESSION BRIEFS/{p=0} p' "$seen" | wc -c | tr -d ' ')
 	[ "$bytes" -le 1600 ] || fail "history excerpt must honor the char cap, got $bytes bytes"
 	pass "router: the chat excerpt is bounded and redacts injections and secrets"
@@ -462,6 +465,125 @@ EOF
 	pass "router: the dependency-free timeout bound terminates a hung spawn"
 }
 
+test_submit_large_timeout_override_reaches_shared_owner() {
+	local root="$TMP_ROOT/submit-large-timeout" out status=0 fakebin timeout_args
+	make_primary "$root"
+	printf 'Do you want me to proceed?' | run "$root" --on-settle --session-id primary >/dev/null
+	fakebin=$(fm_fakebin "$root")
+	timeout_args="$root/timeout-args.txt"
+	cat >"$fakebin/timeout" <<EOF
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$@" >"$timeout_args"
+shift 3
+exec "\$@"
+EOF
+	cat >"$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'verdict=same\ntarget=-\nexplanation=probe.\n'
+SH
+	chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+	out=$(printf 'anything' | PATH="$fakebin:$PATH" FM_CAPTAIN_ROUTER_TIMEOUT_SECS=180 \
+		run "$root" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "large timeout override exit"
+	assert_contains "$out" "verdict=same target=primary confidence=model" \
+		"a large bound still completes through the shared owner"
+	assert_present "$timeout_args" "the shared timeout owner was invoked"
+	assert_grep "180" "$timeout_args" "the 180-second override reaches the shared timeout owner"
+	pass "router: large timeout overrides remain owned by the shared shell bound"
+}
+
+test_pending_route_publication_failure_falls_back_to_same() {
+	local root="$TMP_ROOT/pending-publication-failure" out status=0 pending log
+	make_primary "$root"
+	printf 'Do you want me to start the blender export fix?' |
+		run "$root" --on-settle --session-id primary >/dev/null
+	pending=$(pending_dir "$root")
+	printf 'not a directory\n' >"$pending"
+	out=$(printf 'a new unrelated topic' |
+		FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=new\ntarget=-\nexplanation=new topic\n"' \
+			run "$root" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "pending publication failure exit"
+	assert_contains "$out" "verdict=same target=primary confidence=det" \
+		"a route that cannot be published fails open to the current session"
+	log=$(failures_log "$root")
+	assert_grep "pending route publication failed" "$log" \
+		"the durable staging failure is recorded"
+	assert_grep $'same\tprimary\tdet' "$(verdicts_log "$root")" \
+		"the verdict log records only the surfaced deterministic fallback"
+	assert_absent "$pending/LATEST" "a failed publication does not claim a latest route"
+	pass "router: pending publication failure never surfaces an unstaged handoff"
+}
+
+test_pi_hook_uses_context_session_ids_without_outer_timeout() {
+	local out status=0
+	if ! command -v node >/dev/null 2>&1; then
+		echo "skip: node not found for the Pi hook context test"
+		return 0
+	fi
+	out=$(FM_OPERATIONAL_INPUT_SCRIPT=/probe/fm-operational-input.sh \
+		node --experimental-test-module-mocks --experimental-strip-types --no-warnings \
+		--input-type=module 2>&1 <<'JS'
+import { mock } from "node:test";
+const ownerCalls = [];
+mock.module("node:child_process", { namedExports: {
+  spawn(command, args, options) {
+    ownerCalls.push({ kind: "settle", command, args, options });
+    return {
+      on() {},
+      stdin: { on() {}, end() {} },
+    };
+  },
+  spawnSync(command, args, options) {
+    if (String(command).endsWith("fm-operational-input.sh")) {
+      return { status: 1, stdout: "", stderr: "" };
+    }
+    ownerCalls.push({ kind: "submit", command, args, options });
+    return {
+      status: 0,
+      stdout: `verdict=same target=${args[2]} confidence=model\n`,
+      stderr: "",
+    };
+  },
+} });
+const extension = await import(`./.pi/extensions/fm-primary-captain-message-router.ts?context-test=${Date.now()}`);
+const handlers = new Map();
+extension.default({ on: (event, handler) => handlers.set(event, handler) });
+const context = (id) => ({ sessionManager: { getSessionId: () => id } });
+await handlers.get("before_agent_start")(
+  { type: "before_agent_start", prompt: "first captain message", sessionId: "wrong-event-id" },
+  context("session-alpha"),
+);
+await handlers.get("agent_end")({
+  type: "agent_end",
+  messages: [{ role: "assistant", content: [{ type: "text", text: "Ready?" }] }],
+});
+await handlers.get("agent_settled")(
+  { type: "agent_settled", sessionId: "wrong-event-id" },
+  context("session-beta"),
+);
+await handlers.get("before_agent_start")(
+  { type: "before_agent_start", prompt: "second captain message" },
+  context("session-beta"),
+);
+const calls = ownerCalls.map(({ kind, args, options }) => ({ kind, args, timeout: options?.timeout }));
+console.log(JSON.stringify(calls));
+JS
+	) || status=$?
+	expect_code 0 "$status" "hook context session test exit ($out)"
+	assert_contains "$out" '"args":["--on-submit","--session-id","session-alpha"]' \
+		"the first context session id reaches the submit owner call"
+	assert_contains "$out" '"args":["--on-settle","--session-id","session-beta"]' \
+		"the second context session id reaches the settle owner call"
+	assert_contains "$out" '"args":["--on-submit","--session-id","session-beta","--chat-history-file"' \
+		"distinct context session ids remain distinct across submit calls"
+	assert_not_contains "$out" "wrong-event-id" "event payload session ids are ignored"
+	assert_not_contains "$out" '"timeout":' \
+		"the hook has no outer timeout that can preempt the shared shell owner"
+	pass "router: the Pi hook uses context session ids and leaves timeout ownership to bash"
+}
+
 test_verdict_is_logged() {
 	local root="$TMP_ROOT/verdict-log" log
 	make_primary "$root"
@@ -627,6 +749,9 @@ test_model_override_keeps_cursor_cli_read_only
 test_builtin_default_uses_cursor_cli_read_only
 test_submit_prompt_rides_the_file_not_argv
 test_submit_dependency_free_timeout_terminates_hung_spawn
+test_submit_large_timeout_override_reaches_shared_owner
+test_pending_route_publication_failure_falls_back_to_same
+test_pi_hook_uses_context_session_ids_without_outer_timeout
 test_verdict_is_logged
 test_pi_hook_threads_bounded_redacted_history
 test_inert_in_child_worktree

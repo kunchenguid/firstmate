@@ -44,7 +44,7 @@ Local-only under `state/captain-router/` (gitignored with `state/`):
 ### Session id assumption
 
 Prefer `--session-id` from the hook, else `FM_CAPTAIN_ROUTER_SESSION_ID`, else the prior `current.session` pointer, else the stable home-scoped fallback `primary`.
-Hooks should pass the harness session id when the event exposes one.
+The Pi hook reads the harness session id from the callback context session manager.
 
 ### Brief format
 
@@ -121,7 +121,7 @@ It exists so the captain can audit why a verdict was chosen and dial the prompt 
 
 ### Fail-open fallback
 
-A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, or a `reroute` naming a session with no brief all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
+A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, a `reroute` naming a session with no brief, or a pending-route publication failure all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
 The captain is never locked out by a broken or slow router.
 
 ### Configuration

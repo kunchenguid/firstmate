@@ -36,11 +36,12 @@
 #     explanation=<up to 3 sentences>
 #   `explanation` is recorded (explanations.log + the staged pending route) and
 #   is NEVER forwarded into the routed/new session context. A model verdict is
-#   recorded with confidence=model. Spawn error, timeout, or unparseable output
-#   fails open to `same` against the current session with confidence=det and a
-#   failures.log row. Every verdict is appended to verdicts.log. Reroute/new also
-#   stage a durable pending route under state/captain-router/pending/. Cross-session
-#   delivery is not implemented, so this owner does not compact or inject sessions.
+#   recorded with confidence=model. Spawn error, timeout, unparseable output, or
+#   pending-route publication failure fails open to `same` against the current
+#   session with confidence=det and a failures.log row. Every surfaced verdict is
+#   appended to verdicts.log. Reroute/new also stage a durable pending route under
+#   state/captain-router/pending/. Cross-session delivery is not implemented, so
+#   this owner does not compact or inject sessions.
 #
 # --chat-history-file <path>: optional bounded recent-transcript excerpt for the
 #   submit prompt. The harness hook writes it; this owner re-bounds it
@@ -228,14 +229,15 @@ write_session_brief() { # <session-id> <topic> ; anchors on stdin (or empty)
 }
 
 stage_pending_route() { # <verdict> <target> <confidence> <explanation> ; message on stdin
-	local verdict=$1 target=$2 conf=$3 explanation=${4-} ts digest path rel msg
+	local verdict=$1 target=$2 conf=$3 explanation=${4-} ts digest path rel msg tmp latest_tmp
 	msg=$(cat)
 	ts=$(iso_now | tr -d ':-')
 	digest=$(printf '%s' "$msg" | digest_message)
 	[ -n "$digest" ] || digest=nodigest
-	mkdir -p "$PENDING_DIR" 2>/dev/null || return 0
+	mkdir -p "$PENDING_DIR" 2>/dev/null || return 1
 	rel="${ts}-${digest}.route"
 	path="$PENDING_DIR/$rel"
+	tmp=$(mktemp "$PENDING_DIR/.route.XXXXXX" 2>/dev/null) || return 1
 	{
 		printf 'verdict=%s\n' "$verdict"
 		printf 'target=%s\n' "$target"
@@ -249,8 +251,24 @@ stage_pending_route() { # <verdict> <target> <confidence> <explanation> ; messag
 			printf 'explanation=%s\n' "$(printf '%s' "$explanation" | tr '\n' ' ')"
 		printf -- '---\n'
 		printf '%s\n' "$msg"
-	} >"$path" 2>/dev/null || return 0
-	printf '%s\n' "$rel" >"$PENDING_DIR/LATEST" 2>/dev/null || true
+	} >"$tmp" 2>/dev/null || {
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	}
+	mv -f "$tmp" "$path" 2>/dev/null || {
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	}
+	latest_tmp=$(mktemp "$PENDING_DIR/.latest.XXXXXX" 2>/dev/null) || {
+		rm -f "$path" 2>/dev/null || true
+		return 1
+	}
+	printf '%s\n' "$rel" >"$latest_tmp" 2>/dev/null &&
+		mv -f "$latest_tmp" "$PENDING_DIR/LATEST" 2>/dev/null || {
+		rm -f "$latest_tmp" "$path" 2>/dev/null || true
+		return 1
+	}
+	return 0
 }
 
 # redact_history: read a raw transcript excerpt on stdin, print a bounded,
@@ -267,19 +285,23 @@ redact_history() {
     {
       n = split($0, w, / /)
       out = ""
-      prev = ""
+      pending_secret = 0
       for (i = 1; i <= n; i++) {
         t = tolower(w[i])
         if (t ~ /(token|secret|password|passwd|api_?key|access_?key|authorization)[^a-z0-9]*[:=]/) {
           sub(/[:=].*/, "=[redacted]", w[i])
         } else if (t ~ /^(sk|pk|ghp|gho|ghu|ghs|ghr|github_pat|ntn)[-_]/ || t ~ /^xox[abposr]-/) {
           w[i] = "[redacted]"
-        } else if (prev ~ /^(bearer|token|secret|password|passwd|api_?key|access_?key)$/) {
+          pending_secret = 0
+        } else if (pending_secret && t !~ /^[:=]+$/) {
           w[i] = "[redacted]"
+          pending_secret = 0
         }
-        # Keep only the bare keyword so `password:` still guards the next word.
-        prev = t
-        gsub(/[^a-z0-9_]/, "", prev)
+        key = t
+        gsub(/[^a-z0-9_]/, "", key)
+        if (key ~ /^(bearer|token|secret|password|passwd|api_?key|access_?key|authorization)$/) {
+          pending_secret = 1
+        }
         out = (i == 1 ? w[i] : out " " w[i])
       }
       print out
@@ -429,17 +451,24 @@ parse_verdict_block() { # <blob>
 emit_verdict() { # <verdict> <target> <confidence> [explanation] ; message on stdin
 	local verdict=$1 target=$2 conf=$3 explanation=${4-} msg digest
 	msg=$(cat)
+	case "$verdict" in
+	reroute | new)
+		if ! printf '%s' "$msg" |
+			stage_pending_route "$verdict" "$target" "$conf" "$explanation"; then
+			record_failure "pending route publication failed for verdict=$verdict target=$target"
+			verdict=same
+			target=$(resolve_session_id)
+			conf=det
+			explanation=
+		fi
+		;;
+	esac
 	printf '%s' "$msg" | record_verdict "$verdict" "$target" "$conf"
 	if [ -n "$explanation" ]; then
 		digest=$(printf '%s' "$msg" | digest_message)
 		[ -n "$digest" ] || digest=nodigest
 		record_explanation "$verdict" "$target" "$digest" "$explanation"
 	fi
-	case "$verdict" in
-	reroute | new)
-		printf '%s' "$msg" | stage_pending_route "$verdict" "$target" "$conf" "$explanation"
-		;;
-	esac
 	printf 'verdict=%s target=%s confidence=%s\n' "$verdict" "$target" "$conf"
 }
 

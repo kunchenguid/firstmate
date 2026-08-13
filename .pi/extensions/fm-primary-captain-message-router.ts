@@ -96,7 +96,7 @@ function runRouterSubmit(text: string, sessionId?: string): string {
 				...sessionArgs(sessionId),
 				...(historyFile ? ["--chat-history-file", historyFile] : []),
 			],
-			{ input: text, encoding: "utf8", timeout: 120_000 },
+			{ input: text, encoding: "utf8" },
 		);
 		if (result.error) {
 			rememberHookNote(`submit-spawn-error ${result.error.message}`);
@@ -166,17 +166,19 @@ function surfaceHandoff(
 	}
 }
 
-function eventSessionId(event: unknown): string | undefined {
-	const record = event as {
-		sessionId?: unknown;
-		sessionID?: unknown;
-		session_id?: unknown;
-	};
-	for (const key of ["sessionId", "sessionID", "session_id"] as const) {
-		const value = record[key];
-		if (typeof value === "string" && value.trim()) return value.trim();
+function contextSessionId(context: unknown): string | undefined {
+	try {
+		const sessionId = (
+			context as {
+				sessionManager?: { getSessionId?: () => unknown };
+			}
+		).sessionManager?.getSessionId?.();
+		return typeof sessionId === "string" && sessionId.trim()
+			? sessionId.trim()
+			: undefined;
+	} catch {
+		return undefined;
 	}
-	return undefined;
 }
 
 // Flatten one message's text blocks. Non-text blocks (tool calls, images) are
@@ -235,11 +237,11 @@ function newestAssistantText(event: AgentEndEvent): string {
 export default function (pi: ExtensionAPI) {
 	// Submit side: the raw captain prompt, after expansion, before the agent loop.
 	// Firstmate's own operational injections are not captain messages.
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", (event, context) => {
 		const prompt = String((event as { prompt?: unknown }).prompt ?? "");
 		if (!prompt.trim()) return;
 		if (classifyFirstmateOperationalText(prompt) !== undefined) return;
-		const stdout = runRouterSubmit(prompt, eventSessionId(event));
+		const stdout = runRouterSubmit(prompt, contextSessionId(context));
 		const parsed = parseVerdict(stdout);
 		if (!parsed) {
 			if (stdout)
@@ -256,9 +258,9 @@ export default function (pi: ExtensionAPI) {
 		recentChatHistory = recentTranscript(event as AgentEndEvent);
 	});
 
-	pi.on("agent_settled", (event) => {
+	pi.on("agent_settled", (_event, context) => {
 		const text = lastAssistantText;
 		lastAssistantText = "";
-		runRouterSettle(text, eventSessionId(event));
+		runRouterSettle(text, contextSessionId(context));
 	});
 }
