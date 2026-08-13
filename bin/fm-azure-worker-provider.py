@@ -1395,12 +1395,19 @@ def mutate_delete_compute(controller, action):
             controller, action, "compute-action", action["idempotency_key"]
         )
         worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+    # ttl-schedule may be absent only on re-entry after the VM already
+    # cascaded away (Azure deletes shutdown-computevm schedules with their
+    # target VM); the fresh-entry path above still required it alongside the
+    # live deallocated VM.
     resources = recorded_exact(
         action, worker, allow_missing=(
             "vm", "nic", "os-disk", "monitor-extension", "bootstrap-command", "task-command",
+            "ttl-schedule",
         ),
         skip_immutable=("state-container",),
     )
+    if resources.get("ttl-schedule") is None and resources.get("vm") is not None:
+        raise ProviderError("TTL disappeared while the worker VM still exists")
     worker = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
     if worker is None:
         raise ProviderError("VM deletion also lost exact retained task/account capacity")
@@ -1449,12 +1456,15 @@ def mutate_delete_compute(controller, action):
     if any(kind in final_resources for kind in compute_kinds):
         raise ProviderError("disposable VM/NIC/OS/child capacity remains after exact cleanup")
     ttl = final_resources.get("ttl-schedule")
-    if ttl is None:
-        raise ProviderError("TTL disappeared before exact VM absence and detach cleanup were proved")
-    conditional_delete(controller, "ttl-schedule", ttl)
-    final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
-    if final is None:
-        raise ProviderError("TTL cleanup lost retained task/account ownership")
+    if ttl is not None:
+        conditional_delete(controller, "ttl-schedule", ttl)
+        final = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
+        if final is None:
+            raise ProviderError("TTL cleanup lost retained task/account ownership")
+    # An absent TTL here is the Azure cascade outcome: shutdown-computevm
+    # schedules delete with their target VM, VM absence was proved just above,
+    # and entry exactness proved the TTL alive alongside the live VM, so the
+    # bound held for the worker's whole compute lifetime.
     recorded_exact(
         action, final, allow_missing=compute_kinds + ("ttl-schedule",),
         skip_immutable=("state-container",),
