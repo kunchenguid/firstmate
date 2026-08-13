@@ -196,7 +196,9 @@ Firstmate's skills live in two separate places with different audiences:
 
 ## Documentation
 
+- [VISION.md](VISION.md) - what firstmate is for and where it is going.
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
+- [docs/agent-control.md](docs/agent-control.md) - the data/control plane split and the `interrupt`, `exit`, and `relaunch` lifecycle contract.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
