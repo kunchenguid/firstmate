@@ -1276,22 +1276,49 @@ observe_telemetry_gate_facts() {  # <worktree>
   TELEMETRY_STEP_RERUNS=null
   TELEMETRY_GATE_RUN_ID=
   TELEMETRY_GATE_REFUSAL=
-  [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -d "$wt" ] || return 0
-  if ! command -v no-mistakes >/dev/null 2>&1; then
-    TELEMETRY_GATE_REFUSAL='no no-mistakes on PATH'
-  elif ! out=$(fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi status); then
-    TELEMETRY_GATE_REFUSAL='status query failed'
-  elif telemetry_status_is_own_terminal_run "$wt" "$out"; then
-    TELEMETRY_GATE_SOURCE=no-mistakes
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -d "$wt" ]; then
+    if ! command -v no-mistakes >/dev/null 2>&1; then
+      TELEMETRY_GATE_REFUSAL='no no-mistakes on PATH'
+    elif ! out=$(fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi status); then
+      TELEMETRY_GATE_REFUSAL='status query failed'
+    elif telemetry_status_is_own_terminal_run "$wt" "$out"; then
+      TELEMETRY_GATE_SOURCE=no-mistakes
+    fi
   fi
-  if [ "$TELEMETRY_GATE_SOURCE" != no-mistakes ]; then
-    echo "teardown: no-mistakes gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
+
+  if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ]; then
+    # An unreadable step table leaves the count unknown; it never demotes an
+    # observed gate result, because the result and the count are separate facts.
+    if reruns=$(telemetry_step_reruns_from_stats "$wt" "$TELEMETRY_GATE_RUN_ID"); then
+      TELEMETRY_STEP_RERUNS=$reruns
+    fi
     return 0
   fi
-  # An unreadable step table leaves the count unknown; it never demotes an
-  # observed gate result, because the result and the count are separate facts.
-  if reruns=$(telemetry_step_reruns_from_stats "$wt" "$TELEMETRY_GATE_RUN_ID"); then
-    TELEMETRY_STEP_RERUNS=$reruns
+
+  # Delivery acceptance is a property, not a status-file wording check. A
+  # local-only ship is accepted only after its exact commit reached local main;
+  # a PR ship is accepted only when the forge proves that exact work merged;
+  # and a scout is accepted only after the report and decision gates above.
+  if [ "$FORCE" != --force ]; then
+    if [ "$KIND" = scout ]; then
+      TELEMETRY_GATE_RESULT=green
+      return 0
+    fi
+    if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
+      local default_name
+      if default_name=$(default_branch) \
+        && git -C "$wt" merge-base --is-ancestor HEAD "refs/heads/$default_name" 2>/dev/null; then
+        TELEMETRY_GATE_RESULT=green
+        return 0
+      fi
+    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ -d "$wt" ] && pr_is_merged; then
+      TELEMETRY_GATE_RESULT=green
+      return 0
+    fi
+  fi
+
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    echo "teardown: no-mistakes gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
   fi
 }
 
@@ -2332,13 +2359,29 @@ fi
 # Model outcome is sealed only after every existing report, public-followup,
 # landed-work, and endpoint preflight gate passes, but before any endpoint,
 # worktree, or task state is deleted. A matching no-mistakes run supplies the
-# quality result and step-rerun count mechanically. Spend stays absent because no
-# harness reports billed spend; every harness cost rendering is derived from its
-# own token counts and price catalog, which this ledger refuses on purpose.
+# quality result and step-rerun count mechanically. Other delivery modes use the
+# completed report, local-main ancestry, or merged-PR property their teardown
+# gate just proved. Exact-attempt harness sessions supply token totals and
+# active wall time; teardown latency is never substituted for missing session
+# facts. Spend stays absent because no harness reports billed spend; every
+# harness cost rendering is derived from its own token counts and price catalog,
+# which this ledger refuses on purpose.
 # Cleanup itself never supplies success.
 TELEMETRY_ATTEMPT=$(fm_meta_get "$META" telemetry_attempt)
 if [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
+  TELEMETRY_WALL_SECONDS=null
+  if [ -d "$WT" ]; then
+    if TELEMETRY_OBSERVATION=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-model-telemetry.sh" usage --attempt "$TELEMETRY_ATTEMPT" --worktree "$WT"); then
+      TELEMETRY_USAGE=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c .usage)
+      TELEMETRY_WALL_SECONDS=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c .wallSeconds)
+    else
+      echo "teardown: exact-attempt harness session facts were unreadable for $ID; token counts and active duration remain absent" >&2
+      TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
+      TELEMETRY_WALL_SECONDS=null
+    fi
+  fi
   if [ -n "$TERMINAL_PAYLOAD" ]; then
     printf '%s' "$TERMINAL_PAYLOAD" | jq -e 'type=="object"' >/dev/null 2>&1 || {
       echo "error: --terminal-payload is not a JSON object" >&2
@@ -2348,7 +2391,10 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
   observe_telemetry_gate_facts "$WT"
   TELEMETRY_OUTCOME_KIND=none
   TELEMETRY_OUTCOME_ID=null
-  if [ -n "$PR_URL" ]; then
+  if [ "$KIND" = scout ]; then
+    TELEMETRY_OUTCOME_KIND=report
+    TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "data/$ID/report.md" '$value')
+  elif [ -n "$PR_URL" ]; then
     TELEMETRY_OUTCOME_KIND=pull-request
     TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "$PR_URL" '$value')
   elif [ -d "$WT" ] && TELEMETRY_COMMIT=$(git -C "$WT" rev-parse HEAD 2>/dev/null); then
@@ -2358,7 +2404,8 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_FACTS=$(jq -cn --arg source "$TELEMETRY_GATE_SOURCE" --arg result "$TELEMETRY_GATE_RESULT" \
     --argjson reruns "$TELEMETRY_STEP_RERUNS" --arg kind "$TELEMETRY_OUTCOME_KIND" \
     --argjson outcomeId "$TELEMETRY_OUTCOME_ID" --argjson usage "$TELEMETRY_USAGE" \
-    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage}')
+    --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" \
+    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds}')
   if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] || [ -z "$TERMINAL_PAYLOAD" ]; then
     [ -z "$TERMINAL_PAYLOAD" ] ||
       echo "note: task $ID has an observed no-mistakes gate result ($TELEMETRY_GATE_RESULT), so its mechanical quality facts were sealed and --terminal-payload was not recorded" >&2

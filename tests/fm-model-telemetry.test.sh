@@ -39,7 +39,7 @@ exploration_intake_payload() {
 
 terminal_facts_payload() {
   local result=$1 reruns=$2 cost=${3:-null} currency=${4:-null}
-  jq -cn --arg result "$result" --argjson reruns "$reruns" --argjson cost "$cost" --argjson currency "$currency" '{gate:{source:"no-mistakes",result:$result,stepReruns:$reruns},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:$cost,currency:$currency}}'
+  jq -cn --arg result "$result" --argjson reruns "$reruns" --argjson cost "$cost" --argjson currency "$currency" '{gate:{source:"no-mistakes",result:$result,stepReruns:$reruns},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:$cost,currency:$currency},wallSeconds:60}'
 }
 
 run_intake() {
@@ -260,7 +260,7 @@ test_mechanical_quality_cost_and_exploration_projection() {
     .terminal.classification=="accepted" and .terminal.firstPassAccepted==false and
     .terminal.correctionCount==2 and .terminal.gateFacts=={source:"no-mistakes",result:"green",stepReruns:2} and
     .terminal.usage.cost==10.101 and .terminal.usage.currency=="USD" and
-    .terminal.endedAt!=null and .terminal.wallSeconds>=0
+    .terminal.endedAt!=null and .terminal.wallSeconds==60
   ' >/dev/null || fail "terminal facts did not mechanically derive accepted-after-two-step-reruns quality and reported cost"
   if FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task invalid-prose --payload \
     "$(terminal_facts_payload green 0 | jq -c '.classification="accepted"')" >/dev/null 2>&1; then
@@ -294,7 +294,7 @@ test_mechanical_quality_cost_and_exploration_projection() {
   printf '%s' "$sheet" | jq -e '
     .[0].exploration=="deliberate" and .[0].machineLoadAverage1m==7.25 and
     .[0].machineLogicalCpuCount==12 and .[0].quality=="accepted-after-step-reruns" and
-    .[0].stepReruns==2 and .[0].gateSource=="no-mistakes" and .[0].wallSeconds>=0 and
+    .[0].stepReruns==2 and .[0].gateSource=="no-mistakes" and .[0].wallSeconds==60 and
     .[0].costReported==true and .[0].cost==10.101 and .[0].currency=="USD" and
     .[0].costPerAcceptedDelivery==10.101 and
     .[1].quality=="accepted-first-pass" and .[1].stepReruns==0 and

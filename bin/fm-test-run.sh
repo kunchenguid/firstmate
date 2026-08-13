@@ -926,7 +926,7 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-model-telemetry.sh)
+    bin/fm-model-telemetry.sh|bin/fm-model-usage.mjs)
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\

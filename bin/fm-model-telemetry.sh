@@ -6,6 +6,7 @@
 #   fm-model-telemetry.sh terminal --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
 #   fm-model-telemetry.sh terminal-facts --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
 #   fm-model-telemetry.sh seal-or-incomplete --state <dir> --task <id> [--attempt <mra_uuid>] [--terminal-payload <json>]
+#   fm-model-telemetry.sh usage --attempt <mra_uuid> --worktree <absolute-path>
 #   fm-model-telemetry.sh sheet [--format json|csv|md]
 #
 # The ledger is FM_DATA_OVERRIDE/data/routing-outcomes.jsonl when that override
@@ -42,9 +43,19 @@
 # ledger itself (restore the intake row or the malformed line from a backup and
 # its regular-file form), confirm with
 # `fm-model-telemetry.sh sheet --format json`, then re-run the caller.
-# terminal-facts accepts only observable gate facts, outcome identity, and
-# directly reported usage. It derives classification, first-pass acceptance,
-# correction count, end time, and wall time at the immutable terminal seal.
+# terminal-facts accepts only observable gate facts, outcome identity, directly
+# reported usage, and optional session-observed wall time. It derives
+# classification, first-pass acceptance, correction count, and end time at the
+# immutable terminal seal, and preserves the observed wall time without
+# substituting intake-to-seal elapsed time.
+# The read-only usage command derives the harness and attempt start from the
+# immutable intake, then returns token totals and active wall time from durable
+# harness sessions whose recorded cwd and start time identify that exact attempt.
+# Its result is {usage:{inputTokens,outputTokens,cost,currency},wallSeconds}.
+# Codex, Claude, Pi/pi-signed, and OpenCode have verified local sources; every
+# other harness or missing exact match returns null facts. FM_CODEX_SESSIONS_OVERRIDE,
+# FM_CLAUDE_PROJECTS_OVERRIDE, FM_PI_SESSIONS_OVERRIDE, and
+# FM_OPENCODE_DB_OVERRIDE replace those source roots for hermetic verification.
 # gate.stepReruns is how many delivery-gate steps ran a round beyond their
 # first, counted once per extra round of a step. It is NOT a count of
 # correction cycles: one review fix whose follow-up also re-runs `document` is
@@ -58,6 +69,10 @@
 # null correctionCount rather than being downgraded to incomplete; the sheet
 # reports that, and any accepted row with no gate-sourced count, as
 # accepted-step-reruns-unknown.
+# A green delivery gate is itself the acceptance oracle: exact local-main
+# ancestry, a forge-confirmed merge, or a completed scout report gate. The
+# derived oracle evidence therefore mirrors green/failed while tests and
+# reviewer evidence stay unknown unless no-mistakes supplied those facts.
 # Usage cost is only ever a spend figure the harness itself reports as billed.
 # No verified harness reports one today: every installed harness renders a
 # cost computed from its own token counts and price catalog, which is the
@@ -270,7 +285,7 @@ validate_terminal_facts() {
     def keys_are($a): (keys|sort)==($a|sort);
     def oneof($a): . as $v | ($a|index($v))!=null;
     def safeid: type=="string" and length>=1 and length<=160;
-    keys_are(["gate","outcomeLink","usage"]) and
+    (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"])) and
     (.gate|keys_are(["source","result","stepReruns"]) and
       (.source|oneof(["no-mistakes","delivery"])) and
       (.result|oneof(["green","failed","cancelled","incomplete"])) and
@@ -280,7 +295,8 @@ validate_terminal_facts() {
       (.id==null or (.id|safeid))) and
     (.usage|keys_are(["inputTokens","outputTokens","cost","currency"]) and
       all([.inputTokens,.outputTokens,.cost][]; .==null or (type=="number" and .>=0)) and
-      (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$"))))
+      (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")))) and
+    (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0))
   ' >/dev/null || die "terminal facts payload violates the whitelist"
 }
 
@@ -595,7 +611,7 @@ terminal_command() {
 }
 
 terminal_facts_command() {
-  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts intake started ended wall terminal status
+  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts ended wall terminal status
   require_safe_task_id "$task"
   facts=$(canonical_json "$payload")
   validate_terminal_facts "$facts"
@@ -606,10 +622,9 @@ terminal_facts_command() {
   if find_terminal "$attempt" >/dev/null 2>&1; then
     status=duplicate
   else
-    intake=$(find_intake "$attempt") || die "terminal facts have no intake row"
-    started=$(printf '%s' "$intake" | jq -r .intake.startedAt)
+    find_intake "$attempt" >/dev/null || die "terminal facts have no intake row"
     ended=$(now_rfc3339)
-    wall=$(node -e 'const a=Date.parse(process.argv[1]),b=Date.parse(process.argv[2]);if(!Number.isFinite(a)||!Number.isFinite(b)||b<a)process.exit(1);process.stdout.write(String((b-a)/1000));' "$started" "$ended") || die "could not derive wall time from intake and terminal timestamps"
+    wall=$(printf '%s' "$facts" | jq -c '.wallSeconds // null')
     terminal=$(jq -cnS --arg ended "$ended" --argjson wall "$wall" --argjson facts "$facts" '
       ($facts.gate.result) as $result |
       ($facts.gate.stepReruns) as $reruns |
@@ -618,7 +633,7 @@ terminal_facts_command() {
        endedAt:$ended,wallSeconds:$wall,
        firstPassAccepted:(if $result=="green" then (if $reruns==null then null else $reruns==0 end) elif $result=="failed" then false else null end),
        correctionCount:$reruns,interventionCount:0,
-       evidence:{tests:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" elif $facts.gate.source=="no-mistakes" and $result=="failed" then "fail" else "unknown" end),reviewer:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" else "unknown" end),oracle:"not-run",refs:[]},
+       evidence:{tests:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" elif $facts.gate.source=="no-mistakes" and $result=="failed" then "fail" else "unknown" end),reviewer:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" else "unknown" end),oracle:(if $result=="green" then "pass" elif $result=="failed" then "fail" else "not-run" end),refs:[]},
        outcomeLink:$facts.outcomeLink,usage:$facts.usage,
        primaryFailureClass:(if $result=="green" then "none" else "unknown" end),
        flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},
@@ -633,10 +648,26 @@ terminal_facts_command() {
   jq -cn --arg status "$status" --arg attempt "$attempt" '{status:$status,attemptId:$attempt}'
 }
 
+usage_command() {
+  local attempt=$1 worktree=$2 intake harness started observation
+  require_opaque_id attempt "$attempt"
+  case "$worktree" in /*) ;; *) die "--worktree must be absolute" ;; esac
+  with_lock_begin
+  validate_private_file "$LEDGER" ledger
+  intake=$(find_intake "$attempt") || die "usage has no intake row for attempt $attempt"
+  harness=$(printf '%s' "$intake" | jq -r .intake.tuple.harness)
+  started=$(printf '%s' "$intake" | jq -r .intake.startedAt)
+  with_lock_end
+  observation=$(NODE_NO_WARNINGS=1 node "$SCRIPT_DIR/fm-model-usage.mjs" "$harness" "$worktree" "$started") ||
+    die "session usage collection failed"
+  validate_terminal_facts "$(jq -cn --argjson observation "$observation" '{gate:{source:"delivery",result:"incomplete",stepReruns:null},outcomeLink:{kind:"none",id:null},usage:$observation.usage,wallSeconds:$observation.wallSeconds}')"
+  printf '%s\n' "$observation"
+}
+
 sheet_json() {
   [ -e "$LEDGER" ] || { printf '[]\n'; return; }
   jq -Rcs --arg v "$SCHEMA_VERSION" '
-    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
+    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,inputTokens:null,outputTokens:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
     split("\n") | map(select(length>0)|fromjson) as $rows |
     ($rows | map(select(.schemaVersion!=$v) | blank(.))) +
     ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-intake")) | map(. as $i |
@@ -648,7 +679,7 @@ sheet_json() {
        exploration:($i.intake.exploration.kind // null),machineLoadAverage1m:($i.intake.exploration.machineCondition.loadAverage1m // null),machineLogicalCpuCount:($i.intake.exploration.machineCondition.logicalCpuCount // null),
        state:(if $t==null then "open" else "terminal" end),classification:$classification,
        quality:(if $t==null then null elif $classification!="accepted" then $classification elif $reruns==null then "accepted-step-reruns-unknown" elif $reruns==0 then "accepted-first-pass" else "accepted-after-step-reruns" end),
-       stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),
+       stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),inputTokens:($t.terminal.usage.inputTokens // null),outputTokens:($t.terminal.usage.outputTokens // null),
        costReported:($cost|type=="number"),cost:$cost,currency:($t.terminal.usage.currency // null),costPerAcceptedDelivery:(if $classification=="accepted" then $cost else null end),legacyRaw:null}))
   ' "$LEDGER"
 }
@@ -660,13 +691,13 @@ sheet_command() {
   case "$format" in
     json) printf '%s\n' "$json" ;;
     csv)
-      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,costReported,cost,currency,costPerAcceptedDelivery,legacyRaw'
-      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.costReported,.cost,.currency,.costPerAcceptedDelivery,(.legacyRaw|if .==null then null else tojson end)] | @csv'
+      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,inputTokens,outputTokens,costReported,cost,currency,costPerAcceptedDelivery,legacyRaw'
+      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.inputTokens,.outputTokens,.costReported,.cost,.currency,.costPerAcceptedDelivery,(.legacyRaw|if .==null then null else tojson end)] | @csv'
       ;;
     md)
-      printf '%s\n' '| type | attempt | root | parent | tuple | exploration | load | state | quality | step reruns | seconds | cost | cost/accepted | failure | legacy |'
-      printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
-      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.recordType|esc) | \(.attemptId|esc) | \(.taskRootId|esc) | \(.parentAttemptId|esc) | \(([.harness,.model,.effort]|map(select(.!=null))|join("/"))|esc) | \(.exploration|esc) | \(([.machineLoadAverage1m,.machineLogicalCpuCount]|map(select(.!=null))|join("/"))|esc) | \(.state|esc) | \(.quality|esc) | \(.stepReruns|esc) | \(.wallSeconds|esc) | \((if .costReported then ((.currency // "")+" "+(.cost|tostring)) else "absent" end)|esc) | \(.costPerAcceptedDelivery|esc) | \(.primaryFailureClass|esc) | \((.legacyRaw|if .==null then "" else tojson end)|esc) |"'
+      printf '%s\n' '| type | attempt | root | parent | tuple | exploration | load | state | quality | step reruns | seconds | tokens in/out | cost | cost/accepted | failure | legacy |'
+      printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.recordType|esc) | \(.attemptId|esc) | \(.taskRootId|esc) | \(.parentAttemptId|esc) | \(([.harness,.model,.effort]|map(select(.!=null))|join("/"))|esc) | \(.exploration|esc) | \(([.machineLoadAverage1m,.machineLogicalCpuCount]|map(select(.!=null))|join("/"))|esc) | \(.state|esc) | \(.quality|esc) | \(.stepReruns|esc) | \(.wallSeconds|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \((if .costReported then ((.currency // "")+" "+(.cost|tostring)) else "absent" end)|esc) | \(.costPerAcceptedDelivery|esc) | \(.primaryFailureClass|esc) | \((.legacyRaw|if .==null then "" else tojson end)|esc) |"'
       ;;
     *) die "sheet format must be json, csv, or md" ;;
   esac
@@ -717,6 +748,31 @@ case "$COMMAND" in
         fi
         ;;
     esac
+    ;;
+  usage)
+    [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    attempt_arg=''
+    worktree=''
+    want=''
+    while [ "$#" -gt 0 ]; do
+      if [ -n "$want" ]; then
+        case "$want" in attempt) attempt_arg=$1 ;; worktree) worktree=$1 ;; esac
+        want=
+      else
+        case "$1" in
+          --attempt) want=attempt ;;
+          --worktree) want=worktree ;;
+          *) die "unknown argument $1" ;;
+        esac
+      fi
+      shift
+    done
+    [ -z "$want" ] || die "--$want requires a value"
+    [ -n "$attempt_arg" ] || die "--attempt is required"
+    [ -n "$worktree" ] || die "--worktree is required"
+    usage_command "$attempt_arg" "$worktree"
     ;;
   sheet)
     [ ! -L "$DATA" ] || die "data directory is a symlink"

@@ -2551,8 +2551,55 @@ test_teardown_derives_quality_and_cost_from_observable_facts() {
   assert_grep "terminal-payload was not recorded" "$stderr" \
     "teardown silently discarded the superseded --terminal-payload"
   sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "mechanical telemetry sheet failed"
-  printf '%s' "$sheet" | jq -e '.[0].quality=="accepted-after-step-reruns" and .[0].stepReruns==2 and .[0].costReported==false and .[0].cost==null and .[0].costPerAcceptedDelivery==null and .[0].wallSeconds>=0' >/dev/null || fail "sheet omitted mechanical quality or speed, or reported an unbacked cost"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="accepted-after-step-reruns" and .[0].stepReruns==2 and .[0].costReported==false and .[0].cost==null and .[0].costPerAcceptedDelivery==null and .[0].wallSeconds==null' >/dev/null || fail "sheet omitted mechanical quality, invented duration without session facts, or reported an unbacked cost"
   pass "teardown seals quality from gate facts, leaves cost absent, and says when a payload was superseded"
+}
+
+test_local_only_delivery_seals_true_outcome_and_usage() {
+  local case_dir ledger wt_head session_dir sheet
+  case_dir=$(make_case telemetry-local-only-delivery)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=codex\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "accepted local delivery"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed local-only delivery telemetry"
+
+  session_dir="$case_dir/codex-sessions/2026/08/02"
+  mkdir -p "$session_dir"
+  cat > "$session_dir/rollout-before-attempt.jsonl" <<EOF
+{"timestamp":"2026-08-01T23:59:59Z","type":"session_meta","payload":{"id":"before-attempt","timestamp":"2026-08-01T23:59:59Z","cwd":"$case_dir/wt"}}
+{"timestamp":"2026-08-02T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900000,"output_tokens":900000}}}}
+EOF
+  cat > "$session_dir/rollout-wrong-worktree.jsonl" <<EOF
+{"timestamp":"2026-08-02T00:00:01Z","type":"session_meta","payload":{"id":"wrong-worktree","timestamp":"2026-08-02T00:00:01Z","cwd":"$case_dir/project"}}
+{"timestamp":"2026-08-02T09:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":800000,"output_tokens":800000}}}}
+EOF
+  cat > "$session_dir/rollout-task.jsonl" <<EOF
+{"timestamp":"2026-08-02T00:00:05Z","type":"session_meta","payload":{"id":"task-session","timestamp":"2026-08-02T00:00:05Z","cwd":"$case_dir/wt"}}
+{"timestamp":"2026-08-02T00:00:25Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":40}}}}
+{"timestamp":"2026-08-02T00:02:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3210,"output_tokens":98}}}}
+EOF
+
+  FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" \
+    FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" >/dev/null || fail "local-only delivery teardown failed"
+
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e --arg head "$wt_head" '
+    select(.eventType=="attempt-terminal") and
+    .terminal.classification=="accepted" and
+    .terminal.evidence.oracle=="pass" and
+    .terminal.gateFacts=={source:"delivery",result:"green",stepReruns:null} and
+    .terminal.wallSeconds==120 and
+    .terminal.usage=={inputTokens:3210,outputTokens:98,cost:null,currency:null} and
+    .terminal.outcomeLink=={kind:"commit",id:$head}
+  ' "$ledger" >/dev/null || fail "a completed local-only task did not record its true accepted outcome, active duration, and exact-session token usage"
+  sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) ||
+    fail "local-only delivery telemetry sheet failed"
+  printf '%s' "$sheet" | jq -e '.[0].classification=="accepted" and .[0].wallSeconds==120 and .[0].inputTokens==3210 and .[0].outputTokens==98' >/dev/null ||
+    fail "the read-only sheet hid the accepted outcome, active duration, or exact-session token totals"
+  pass "a completed local-only task seals accepted with active duration and token usage from only its exact session"
 }
 
 test_teardown_notes_gate_observation_branch_mismatch() {
@@ -2620,7 +2667,7 @@ test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
   write_meta "$case_dir" local-only ship
   seed_teardown_telemetry "$case_dir" || fail "could not seed incomplete teardown telemetry"
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force >/dev/null || fail "teardown incomplete seal failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.endedAt!=null and .terminal.wallSeconds>=0 and .terminal.gateFacts.result=="incomplete" and .terminal.usage.cost==null)' "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "teardown did not record an explicit incomplete result with absent spend"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.endedAt!=null and .terminal.wallSeconds==null and .terminal.gateFacts.result=="incomplete" and .terminal.usage.cost==null)' "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "teardown did not record an explicit incomplete result with absent spend and no invented duration"
 
   case_dir=$(make_case telemetry-safety-refusal)
   write_meta "$case_dir" local-only ship
@@ -2630,7 +2677,7 @@ test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "unlanded work unexpectedly passed teardown"
   [ "$(jq -s 'map(select(.eventType=="attempt-terminal"))|length' "$case_dir/data/routing-outcomes.jsonl")" -eq 0 ] || fail "teardown sealed telemetry before its safety gates passed"
-  pass "teardown seals explicit terminal evidence and otherwise records a timed incomplete before cleanup"
+  pass "teardown seals explicit terminal evidence and otherwise records an incomplete with no invented duration before cleanup"
 }
 
 test_forced_teardown_still_requires_ledger_repair() {
@@ -2654,6 +2701,7 @@ test_forced_teardown_still_requires_ledger_repair() {
   pass "a damaged ledger blocks even a forced teardown and prints its repair-then-re-run route"
 }
 
+test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
