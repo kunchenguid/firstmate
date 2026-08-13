@@ -913,12 +913,16 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   healthy_out="$dir/healthy.out"
   mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_GUARD_GRACE=3 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_GUARD_GRACE=30 FM_ARM_CONFIRM_TIMEOUT=60 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
-  while [ "$i" -lt 80 ]; do
+  # Under host contention the owned child's first fresh beacon can land after
+  # the arm's default 11s confirmation deadline, so poll through the widened
+  # confirm budget and fail fast on a loud typed failure instead.
+  while [ "$i" -lt 650 ]; do
     grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
@@ -991,10 +995,10 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   # A fresh arm in the same primary session must take ownership and surface the
   # accepted downtime episode. No Pi/Herdr process is involved in this fixture.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_GUARD_GRACE=3 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_GUARD_GRACE=30 FM_ARM_CONFIRM_TIMEOUT=60 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$recovery_out" &
   recovery_arm=$!
-  wait_for_exit "$recovery_arm" 80
+  wait_for_exit "$recovery_arm" 140
   status=$?
   expect_code 0 "$status" "same-session recovery arm must surface accepted watcher downtime"
   grep -F 'check: rearm-resurface' "$recovery_out" >/dev/null \
@@ -1009,12 +1013,13 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   # healthy child. Poll through the grace with a liveness check per tick, then
   # require the beacon to have advanced.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_GUARD_GRACE=12 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_GUARD_GRACE=30 FM_ARM_CONFIRM_TIMEOUT=60 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$healthy_out" &
   healthy_arm=$!
   i=0
-  while [ "$i" -lt 80 ]; do
+  while [ "$i" -lt 650 ]; do
     grep -qF 'watcher: started pid=' "$healthy_out" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$healthy_out" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
