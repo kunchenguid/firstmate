@@ -353,20 +353,23 @@ test_park_retains_staged_context_until_loop_count_resets() {
   dir=$(make_primary_dir "$TMP_ROOT/park-staged-ceiling")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  jq -n --arg session_id sess-cursor --arg digest 'STAGED DIGEST AT CEILING' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
-
-  out=$(run_park "$dir" 5 5)
+  FM_HOME="$dir" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    jq -n --arg owner "$$" --arg session_id sess-cursor --arg digest "STAGED DIGEST AT CEILING" \
+      "{contexts:{(\$owner):{session_id:\$session_id,digest:\$digest}}}" \
+      > "$FM_HOME/state/.cursor-pending-context"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":5}" | \
+      FM_CURSOR_TURNEND_LOOP_CEILING=5 "$FM_HOME/bin/fm-turnend-guard-cursor.sh" > "$FM_HOME/state/ceiling-out"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":6}" | \
+      FM_CURSOR_TURNEND_LOOP_CEILING=5 "$FM_HOME/bin/fm-turnend-guard-cursor.sh" > "$FM_HOME/state/above-out"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":0}" | \
+      FM_CURSOR_TURNEND_LOOP_CEILING=5 "$FM_HOME/bin/fm-turnend-guard-cursor.sh" > "$FM_HOME/state/reset-out"
+  ' 2>/dev/null
+  out=$(cat "$dir/state/ceiling-out" 2>/dev/null || true)
   body=$(followup_of "$out")
   case "$body" in *'CEILING REACHED'*) ;; *) fail "staged context bypassed the loop ceiling: $out" ;; esac
-  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
-  [ "$staged" = 'STAGED DIGEST AT CEILING' ] || fail "the loop ceiling discarded staged context"
-
-  out=$(run_park "$dir" 6 5)
-  [ -z "$out" ] || fail "staged context was delivered above the loop ceiling: $out"
-  [ -e "$dir/state/.cursor-pending-context" ] || fail "staged context was consumed above the loop ceiling"
-
-  out=$(run_park "$dir" 0 5)
+  [ ! -s "$dir/state/above-out" ] || fail "staged context was delivered above the loop ceiling"
+  out=$(cat "$dir/state/reset-out" 2>/dev/null || true)
   [ "$(kind_of_followup "$out")" = session-start ] \
     || fail "staged context was not delivered after loop_count reset: $out"
   [ ! -e "$dir/state/.cursor-pending-context" ] || fail "delivered staged context was not consumed"
@@ -376,27 +379,58 @@ test_park_retains_staged_context_until_loop_count_resets() {
 test_park_delivers_staged_compaction_digest_once() {
   local dir out body
   dir=$(make_primary_dir "$TMP_ROOT/park-staged")
-  jq -n --arg session_id sess-cursor --arg digest 'STAGED DIGEST FOR COMPACTION' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
-  out=$(run_park "$dir")
+  FM_HOME="$dir" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    jq -n --arg owner "$$" --arg session_id sess-cursor --arg digest "STAGED DIGEST FOR COMPACTION" \
+      "{contexts:{(\$owner):{session_id:\$session_id,digest:\$digest}}}" \
+      > "$FM_HOME/state/.cursor-pending-context"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":0}" | \
+      "$FM_HOME/bin/fm-turnend-guard-cursor.sh" > "$FM_HOME/state/staged-first-out"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":0}" | \
+      "$FM_HOME/bin/fm-turnend-guard-cursor.sh" > "$FM_HOME/state/staged-second-out"
+  ' 2>/dev/null
+  out=$(cat "$dir/state/staged-first-out" 2>/dev/null || true)
   [ "$(kind_of_followup "$out")" = session-start ] \
     || fail "a staged compaction digest must arrive as a session-start follow-up, got: $out"
   body=$(followup_of "$out")
   case "$body" in *'STAGED DIGEST FOR COMPACTION'*) ;; *) fail "the staged digest body was lost: $body" ;; esac
   [ ! -e "$dir/state/.cursor-pending-context" ] || fail "the staged digest must be consumed, not redelivered"
-  out=$(run_park "$dir")
+  out=$(cat "$dir/state/staged-second-out" 2>/dev/null || true)
   [ -z "$out" ] || fail "the staged digest was delivered twice: $out"
   pass "cursor park: a staged compaction digest is delivered exactly once"
+}
+
+test_park_discards_unrecognized_staged_context() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/park-staged-unrecognized")
+  FM_HOME="$dir" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    jq -n --arg session_id sess-cursor --arg digest "UNRECOGNIZED DIGEST" \
+      "{session_id:\$session_id,digest:\$digest}" > "$FM_HOME/state/.cursor-pending-context"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":0}" | \
+      "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+  ' > "$dir/state/unrecognized-out" 2>/dev/null
+  out=$(cat "$dir/state/unrecognized-out" 2>/dev/null || true)
+  [ -z "$out" ] || fail "an unrecognized stage was delivered: $out"
+  [ ! -e "$dir/state/.cursor-pending-context" ] \
+    || fail "an unrecognized stage was retained for stale redelivery"
+  pass "cursor park: unrecognized staged context is discarded silently"
 }
 
 test_park_does_not_consume_another_sessions_context() {
   local dir out staged
   dir=$(make_primary_dir "$TMP_ROOT/park-staged-other-session")
-  jq -n --arg session_id sess-other --arg digest 'OTHER SESSION CONTEXT' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
-  out=$(run_park "$dir")
+  FM_HOME="$dir" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    jq -n --arg owner "$$" --arg session_id sess-other --arg digest "OTHER SESSION CONTEXT" \
+      "{contexts:{(\$owner):{session_id:\$session_id,digest:\$digest}}}" \
+      > "$FM_HOME/state/.cursor-pending-context"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":0}" | \
+      "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+  ' > "$dir/state/other-session-out" 2>/dev/null
+  out=$(cat "$dir/state/other-session-out" 2>/dev/null || true)
   [ -z "$out" ] || fail "another session received staged context: $out"
-  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged=$(jq -r '[.contexts[]?.digest][0] // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
   [ "$staged" = 'OTHER SESSION CONTEXT' ] || fail "another session consumed the staged context"
   pass "cursor park: staged context remains bound to its originating session"
 }
@@ -524,7 +558,7 @@ test_park_inert_without_session_lock() {
   dir=$(make_primary_dir "$TMP_ROOT/park-nolock")
   : > "$dir/state/task1.meta"
   jq -n --arg session_id sess-cursor --arg digest 'LOCK OWNER CONTEXT' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+    '{contexts:{owner:{session_id:$session_id,digest:$digest}}}' > "$dir/state/.cursor-pending-context"
   write_arm_fixture "$dir" actionable
   out=$(printf '%s' "$CURSOR_PAYLOAD" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>/dev/null)
   [ -z "$out" ] || fail "a session that does not hold the home lock must not arm or wake: $out"
@@ -576,7 +610,7 @@ test_sessionstart_emits_additional_context() {
   dir=$(make_primary_dir "$TMP_ROOT/session-start")
   install_digest_fixture "$dir"
   jq -n --arg session_id old-session --arg digest 'OBSOLETE CONTEXT' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+    '{contexts:{"old-owner":{session_id:$session_id,digest:$digest}}}' > "$dir/state/.cursor-pending-context"
   out=$(run_session "$dir" sessionStart startup)
   ctx=$(printf '%s' "$out" | jq -r '.additional_context // empty' 2>/dev/null)
   case "$ctx" in *'FIRSTMATE DIGEST "quoted" line'*) ;; *) fail "the digest must reach model context verbatim, got: $out" ;; esac
@@ -662,8 +696,6 @@ test_sessionstart_stands_down_after_session_takeover() {
 test_precompact_replacement_cannot_be_deleted_by_consumer() {
   local dir park_pid compact_pid out staged waited
   dir=$(make_primary_dir "$TMP_ROOT/session-compact-race")
-  jq -n --arg session_id sess-cursor --arg digest 'OLD STAGED DIGEST' \
-    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
   cat > "$dir/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'NEW STAGED DIGEST\n'
@@ -679,7 +711,14 @@ fm_operational_input_encode() {
   printf -v "$result_var" '%s%s: %s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body"
 }
 SH
-  ( run_park "$dir" > "$dir/state/context-consume-out" ) &
+  FM_HOME="$dir" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    jq -n --arg owner "$$" --arg session_id sess-cursor --arg digest "OLD STAGED DIGEST" \
+      "{contexts:{(\$owner):{session_id:\$session_id,digest:\$digest}}}" \
+      > "$FM_HOME/state/.cursor-pending-context"
+    printf "%s" "{\"session_id\":\"sess-cursor\",\"loop_count\":0}" | \
+      "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+  ' > "$dir/state/context-consume-out" 2>/dev/null &
   park_pid=$!
   waited=0
   while [ ! -e "$dir/state/context-consume-entered" ]; do
@@ -762,6 +801,7 @@ test_park_nag_budget_resets_after_a_real_wake
 test_park_loop_ceiling_warns_once_then_goes_quiet
 test_park_retains_staged_context_until_loop_count_resets
 test_park_delivers_staged_compaction_digest_once
+test_park_discards_unrecognized_staged_context
 test_park_does_not_consume_another_sessions_context
 test_park_stands_down_when_superseded
 test_park_serializes_supersession_with_followup_commit

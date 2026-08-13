@@ -190,11 +190,16 @@ emit_staged_context() {
     return 0
   fi
   snapshot=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
+  if ! printf '%s' "$snapshot" | jq -e '(.contexts | type) == "object"' >/dev/null 2>&1; then
+    rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
+    return 0
+  fi
   fm_lock_release "$PENDING_CONTEXT_LOCK"
   staged_session=$(printf '%s' "$snapshot" | jq -r --arg owner "$OWNER_ID" \
-    '.contexts[$owner].session_id // .session_id // empty' 2>/dev/null || true)
+    '.contexts[$owner].session_id // empty' 2>/dev/null || true)
   staged=$(printf '%s' "$snapshot" | jq -r --arg owner "$OWNER_ID" \
-    '.contexts[$owner].digest // .digest // empty' 2>/dev/null || true)
+    '.contexts[$owner].digest // empty' 2>/dev/null || true)
   [ "$staged_session" = "$SESSION_ID" ] && [ -n "$staged" ] || return 0
   fm_operational_input_encode session-start "$staged" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
@@ -210,24 +215,20 @@ emit_staged_context() {
     commit_locks_release
     exit 0
   fi
-  if printf '%s' "$current" | jq -e '(.contexts | type) == "object"' >/dev/null 2>&1; then
-    tmp=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
-      fm_lock_release "$PENDING_CONTEXT_LOCK"
-      commit_locks_release
-      exit 0
-    }
-    if printf '%s' "$current" | jq --arg owner "$OWNER_ID" 'del(.contexts[$owner])' > "$tmp" 2>/dev/null; then
-      remaining=$(jq -r '.contexts | length' "$tmp" 2>/dev/null || printf 1)
-      if [ "$remaining" = 0 ]; then
-        rm -f "$PENDING_CONTEXT" 2>/dev/null || true
-      else
-        mv -f "$tmp" "$PENDING_CONTEXT" 2>/dev/null || true
-      fi
+  tmp=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
+    commit_locks_release
+    exit 0
+  }
+  if printf '%s' "$current" | jq --arg owner "$OWNER_ID" 'del(.contexts[$owner])' > "$tmp" 2>/dev/null; then
+    remaining=$(jq -r '.contexts | length' "$tmp" 2>/dev/null || printf 1)
+    if [ "$remaining" = 0 ]; then
+      rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+    else
+      mv -f "$tmp" "$PENDING_CONTEXT" 2>/dev/null || true
     fi
-    rm -f "$tmp" 2>/dev/null || true
-  else
-    rm -f "$PENDING_CONTEXT" 2>/dev/null || true
   fi
+  rm -f "$tmp" 2>/dev/null || true
   fm_lock_release "$PENDING_CONTEXT_LOCK"
   commit_locks_release
   exit 0

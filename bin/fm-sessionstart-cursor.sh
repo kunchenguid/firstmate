@@ -101,11 +101,7 @@ if [ "$EVENT" = preCompact ]; then
     exit 0
   }
   if jq --arg owner "$OWNER_ID" --arg session_id "$SESSION_ID" --arg digest "$DIGEST" '
-    if (.contexts | type) == "object" then .
-    elif type == "object" and ((.session_id // "") != "") and ((.digest // "") != "") then
-      {contexts:{legacy:{session_id:.session_id,digest:.digest}}}
-    else {contexts:{}}
-    end
+    if (.contexts | type) == "object" then . else {contexts:{}} end
     | .contexts[$owner] = {session_id:$session_id,digest:$digest}
   ' "$PENDING_CONTEXT" > "$TMP" 2>/dev/null \
     || jq -n --arg owner "$OWNER_ID" --arg session_id "$SESSION_ID" --arg digest "$DIGEST" \
