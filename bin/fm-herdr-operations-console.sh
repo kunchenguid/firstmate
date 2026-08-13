@@ -420,17 +420,18 @@ NORMALIZED=$(
            | (($task_display[$t.id] // {}).decision // {}) as $decision
            | (obsidian_stem($t.link; ($task_display[$t.id] // {}).link)) as $stem
            | ([$decision.options[]? | select((. | type) == "string")]) as $raw_options
+           | ($raw_options | map(sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; ""))) as $trimmed_options
            | ($raw_options | length) as $raw_option_count
-           | ($raw_options | unique | length) as $distinct_option_count
+           | ($trimmed_options | unique | length) as $distinct_option_count
            | ($raw_option_count - $distinct_option_count) as $duplicate_option_count
-           | ($raw_options
+           | ($trimmed_options
               | to_entries
               | unique_by(.value)
               | sort_by(.key)
               | to_entries
               | map(.key as $slot
                     | .value.value as $raw
-                    | (safe($raw; ""; 34)) as $display
+                    | (safe(($raw | gsub("[[:space:]]{2,}"; " _ ")); ""; 34)) as $display
                     | if $display != "" and ($display | test("^[A-Za-z0-9][A-Za-z0-9 ()/_.,:+-]*$"))
                       then {label:$display, supported:true, slot:$slot}
                       else {label:("<unsupported #" + (($slot + 1) | tostring) + ">"),

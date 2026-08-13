@@ -864,6 +864,37 @@ test_decision_options_are_never_silently_dropped() {
     "duplicate options produced a false unsupported-option notice"
   assert_contains "$text" "1 duplicate" "duplicate options were not disclosed"
 
+  fixture="$TMP_ROOT/options-trailing-space.json"
+  jq '.tasks["multi-option"].decision.options = ["zip ","zip","tarball"]' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 2 and .duplicate_options == 1
+        and .options_retained == 2 and .unsupported_options == 0
+        and .options_complete == true
+        and (.options == [\"zip\",\"tarball\"])" >/dev/null \
+    || fail "options differing only in trailing whitespace were not collapsed as duplicates"
+  text=$("$CONSOLE" --fixture "$fixture" --format decisions --no-color --now 2026-08-13T12:00:00Z)
+  assert_contains "$text" "1 duplicate" "whitespace-variant duplicate was not disclosed"
+  assert_not_contains "$text" "zip #" "whitespace-variant options were suffixed instead of merged"
+
+  fixture="$TMP_ROOT/options-leading-space.json"
+  jq '.tasks["multi-option"].decision.options = ["  tarball","tarball ","zip"]' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 2 and .duplicate_options == 1
+        and (.options == [\"tarball\",\"zip\"])" >/dev/null \
+    || fail "leading-whitespace variants were not normalized before comparison"
+
+  fixture="$TMP_ROOT/options-internal-space.json"
+  jq '.tasks["multi-option"].decision.options = ["zip x","zip  x","tarball"]' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 3 and .duplicate_options == 0
+        and .options_retained == 3
+        and ((.options | length) == (.options | unique | length))
+        and ((.options | map(select(test(\" #[0-9]+\$\"))) | length) == 0)" >/dev/null \
+    || fail "options differing in internal whitespace were wrongly merged or left indistinct"
+
   local long_a long_b
   long_a=$(printf 'a%.0s' $(seq 1 40))XX
   long_b=$(printf 'a%.0s' $(seq 1 40))YY
