@@ -11,9 +11,9 @@
 # drift apart, so the cut and its marker live here.
 #
 # Callers keep their own composite policy: fm-wake-drain.sh still owns the
-# OPEN DECISIONS and UNREAD STATUS global byte caps and their "N more omitted"
-# disclosure, and fm-session-start.sh still owns how many tail lines it prints
-# per task. This file owns only the per-line cut.
+# OPEN DECISIONS global byte cap and its "N more omitted" disclosure, and
+# fm-session-start.sh still owns how many tail lines it prints per task. This
+# file owns only the per-line cut.
 #
 # The cap counts characters, so a plain-ASCII line - what status lines are in
 # practice - is bounded to the same number of bytes, and a multibyte character
