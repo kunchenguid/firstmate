@@ -104,6 +104,40 @@
           "source": "none",
           "observed_at": "2026-08-13T11:59:00Z"
         }
+      },
+      {
+        "id": "review-merge",
+        "kind": "ship",
+        "harness": "codex",
+        "project": "react-library",
+        "backlog": {
+          "title": "React Library"
+        },
+        "current_state": {
+          "state": "parked",
+          "source": "run-step",
+          "observed_at": "2026-08-13T11:59:30Z"
+        },
+        "hints": {
+          "pending_decision": true
+        }
+      },
+      {
+        "id": "multi-option",
+        "kind": "ship",
+        "harness": "codex",
+        "project": "tldraw",
+        "backlog": {
+          "title": "tldraw"
+        },
+        "current_state": {
+          "state": "parked",
+          "source": "run-step",
+          "observed_at": "2026-08-13T11:59:30Z"
+        },
+        "hints": {
+          "pending_decision": true
+        }
       }
     ]
   },
@@ -122,7 +156,12 @@
       "tests": "3 failed",
       "commit": "9f8e7d6",
       "blocker": "Awaiting Captain diagnosis decision",
-      "next_action": "Captain decision needed"
+      "next_action": "Captain decision needed",
+      "decision": {
+        "question": "Run the diagnosis sweep before the next build?",
+        "recommendation": "Run the sweep now",
+        "opened_at": "2026-08-13T11:20:00Z"
+      }
     },
     "done-task": {
       "project": "React Library",
@@ -195,6 +234,45 @@
       "link": {
         "supported": true,
         "file": "Items/Unknown Project.md"
+      }
+    },
+    "review-merge": {
+      "project": "React Library",
+      "task": "Merge release branch",
+      "phase": "Review",
+      "profile_lane": "Company Claude",
+      "model": "Opus",
+      "effort": "review",
+      "link": {
+        "supported": true,
+        "file": "Items/React Library.md"
+      },
+      "decision": {
+        "question": "Merge the release branch into main?",
+        "recommendation": "Hold for Captain review",
+        "opened_at": "2026-08-13T09:00:00Z"
+      }
+    },
+    "multi-option": {
+      "project": "tldraw",
+      "task": "Choose archive format",
+      "phase": "Planning",
+      "profile_lane": "Personal Codex",
+      "model": "Luna Max",
+      "effort": "medium",
+      "link": {
+        "supported": true,
+        "file": "Items/tldraw.md"
+      },
+      "decision": {
+        "question": "Which archive format should the native export use?",
+        "recommendation": "Keep zip for compatibility",
+        "opened_at": "2026-08-13T11:55:00Z",
+        "options": [
+          "zip",
+          "tarball",
+          "native bundle"
+        ]
       }
     }
   },

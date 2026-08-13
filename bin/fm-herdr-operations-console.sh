@@ -2,9 +2,14 @@
 # fm-herdr-operations-console.sh - fixture-first, display-only Herdr operations view.
 #
 # Usage:
-#   fm-herdr-operations-console.sh --fixture PATH [--format all|json|panel|status|activity|network]
+#   fm-herdr-operations-console.sh --fixture PATH
+#       [--format all|json|panel|status|decisions|activity|network]
 #       [--now RFC3339] [--max-events N] [--width N] [--color|--no-color]
-#       [--publish-metadata WORKSPACE_ID]
+#       [--reduced-motion|--motion] [--publish-metadata WORKSPACE_ID]
+#
+# The decision inbox is display-only: it renders open Captain decisions with a
+# stable alias, readable keyboard tokens, and an explicit approval boundary. It
+# never approves, applies, or mutates anything, and offers no click-to-approve.
 #
 # The fixture envelope is an opt-in display adapter around one
 # fm-fleet-snapshot.v1 object. The snapshot remains the only source for current
@@ -45,12 +50,14 @@ Render the fixture-only Herdr Firstmate operations console.
 
 Options:
   --fixture PATH              Required JSON fixture path, or - for stdin.
-  --format FORMAT             all (default), json, panel, status, activity, or network.
+  --format FORMAT             all (default), json, panel, status, decisions, activity, or network.
   --now RFC3339               Observation time override for deterministic tests.
   --max-events N              Activity retention bound; default is fixture value or 80, max 200.
   --width N                    Maximum rendered line width; default is 120.
   --color                      Emit ANSI status/lane colors.
   --no-color                   Disable ANSI colors.
+  --reduced-motion             Report no pulse, transition, or spinner.
+  --motion                     Report bounded motion cues (default).
   --publish-metadata WORKSPACE_ID
                               Publish display-only tokens to one lab workspace.
 
@@ -72,6 +79,7 @@ NOW_ARG=''
 MAX_EVENTS_ARG=''
 WIDTH=120
 COLOR=auto
+REDUCED_MOTION=false
 PUBLISH_WORKSPACE=''
 
 while [ "$#" -gt 0 ]; do
@@ -108,6 +116,8 @@ while [ "$#" -gt 0 ]; do
     --width=*) WIDTH=${1#*=}; shift ;;
     --color) COLOR=on; shift ;;
     --no-color) COLOR=off; shift ;;
+    --reduced-motion) REDUCED_MOTION=true; shift ;;
+    --motion) REDUCED_MOTION=false; shift ;;
     --publish-metadata)
       [ "$#" -ge 2 ] || die '--publish-metadata requires a workspace id'
       PUBLISH_WORKSPACE=$2
@@ -121,7 +131,7 @@ done
 
 [ -n "$FIXTURE" ] || { usage >&2; die '--fixture is required'; }
 case "$FORMAT" in
-  all|json|panel|status|activity|network) ;;
+  all|json|panel|status|decisions|activity|network) ;;
   *) die "unsupported format: $FORMAT" ;;
 esac
 case "$WIDTH" in
@@ -170,6 +180,7 @@ NORMALIZED=$(
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson max_events "$MAX_EVENTS_EFFECTIVE" \
     --argjson width "$WIDTH" \
+    --argjson reduced_motion "$REDUCED_MOTION" \
     '
     def clean($value; $fallback; $limit):
       if ($value | type) != "string" then $fallback
@@ -249,6 +260,20 @@ NORMALIZED=$(
       elif $limit <= 3 then $value[:$limit]
       else $value[:($limit - 3)] + "..."
       end;
+    def obsidian_stem($link; $source_link):
+      if ($link | type) == "object" and ($link.state // "") == "supported"
+         and ($source_link | type) == "object" and ($source_link.file | type) == "string"
+      then ($source_link.file | sub("^Items/"; "") | sub("\\.md$"; "")
+            | safe(.; ""; 40)
+            | if . == "" then null else . end)
+      else null
+      end;
+    def restricted_decision($value):
+      ($value | type) == "string"
+      and ($value | test("(merge|deploy|delete|destroy|drop |force[- ]push|revoke|rotate|production|prod |credential|secret|token|password|uninstall|overwrite|replace .*app|irreversible)"; "i"));
+    def decision_alias($index; $stem):
+      "D" + (($index + 1) | tostring)
+      + (if $stem == null then "" else " · " + $stem end);
     def node_for($id; $tasks):
       if $id == "Captain" then {id:"Captain", label:"Captain", state:null}
       elif $id == "Firstmate" then {id:"Firstmate", label:"Firstmate", state:null}
@@ -372,6 +397,55 @@ NORMALIZED=$(
             end)) as $edge_acc
     | ($edge_acc.valid | unique_by([.from, .to, .relation])) as $edges
     | (freshness($snapshot.generated; $now_epoch; $ttl_seconds)) as $source_freshness
+    | ([$tasks[] | select(.needs_review)]
+       | to_entries
+       | map(
+           .key as $index
+           | .value as $t
+           | (($task_display[$t.id] // {}).decision // {}) as $decision
+           | (obsidian_stem($t.link; ($task_display[$t.id] // {}).link)) as $stem
+           | ([$decision.options[]?
+               | select((. | type) == "string")
+               | safe(.; ""; 40)
+               | select(. != "" and (. | test("^[A-Za-z][A-Za-z0-9 /_-]*$")))]
+              | unique) as $named_options
+           | (safe($decision.question; ""; 120)) as $question
+           | (safe($decision.recommendation; ""; 120)) as $recommendation
+           | ((ts_epoch($decision.opened_at)) as $opened
+              | if $opened == null then null
+                elif $opened > ($now_epoch + 60) then null
+                else (($now_epoch - $opened) / 60 | floor)
+                end) as $age_minutes
+           | (restricted_decision($question)
+              or restricted_decision($recommendation)
+              or restricted_decision($t.blocker)
+              or restricted_decision($t.task)) as $restricted
+           | {
+               alias:decision_alias($index; $stem),
+               task_id:$t.id,
+               project:$t.project,
+               task:$t.task,
+               question:(if $question == "" then "Captain decision needed" else $question end),
+               recommendation:(if $recommendation == "" then "Unknown" else $recommendation end),
+               age_minutes:$age_minutes,
+               age_label:(if $age_minutes == null then "Unknown age"
+                          elif $age_minutes < 60 then (($age_minutes | tostring) + "m open")
+                          else ((($age_minutes / 60) | floor | tostring) + "h open")
+                          end),
+               blocked_task:$t.task,
+               state:$t.state,
+               options:(if ($named_options | length) >= 2 then $named_options else ["Igen", "Nem"] end),
+               binary:(($named_options | length) < 2),
+               keys:(if ($named_options | length) >= 2
+                     then ($named_options | map("[" + (.[0:1] | ascii_upcase) + "] " + .))
+                     else ["[I] Igen", "[N] Nem"] end),
+               shorthand_allowed:($restricted | not),
+               restricted:$restricted,
+               approval_boundary:(if $restricted
+                                  then "explicit confirmation required"
+                                  else "alias shorthand allowed" end),
+               evidence_signature:([$question, $recommendation, ($named_options | join("|"))] | join("¦"))
+             })) as $decisions
     | {
         schema:"fm-herdr-operations-console.v1",
         mode:"fixture",
@@ -384,6 +458,27 @@ NORMALIZED=$(
           inventory:(if $snapshot.main_inventory.valid == false then "invalid" else "valid-or-unknown" end)
         },
         tasks:$tasks,
+        decisions:{
+          cards:$decisions,
+          open:($decisions | length),
+          focused:(if ($decisions | length) == 1 then $decisions[0].alias else null end),
+          selection_required:(($decisions | length) > 1),
+          bare_reply_accepted:(($decisions | length) == 1 and $decisions[0].shorthand_allowed),
+          restricted:([$decisions[] | select(.restricted) | .alias]),
+          click_to_approve:false,
+          asked_in_chat_once:true
+        },
+        motion:{
+          reduced_motion:$reduced_motion,
+          pulse:(if $reduced_motion then "none"
+                 else ([$tasks[] | select(.needs_review and .state == "done")] | length | if . > 0 then "one-pulse" else "none" end) end),
+          transition:(if $reduced_motion then "none" else "one-bounded" end),
+          spinner:(if $reduced_motion then "none"
+                   else ([$tasks[] | select(.state == "working" or .state == "qa")] | length | if . > 0 then "bounded" else "none" end) end),
+          looping_attention:false,
+          steals_focus:false,
+          obscures_text:false
+        },
         activity:{
           events:($retained_events | map(del(.epoch, .dedupe_key))),
           max_events:$max_events,
@@ -558,8 +653,8 @@ if [ "$FORMAT" = activity ] || [ "$FORMAT" = all ]; then
       elif $width <= 3 then $value[:$width]
       else $value[:($width - 3)] + "..."
       end;
-    "ACTIVITY // BOUNDED OPERATIONAL HISTORY",
-    (if (.activity.events | length) == 0 then "(none recorded)"
+    fit("ACTIVITY // BOUNDED OPERATIONAL HISTORY"),
+    (if (.activity.events | length) == 0 then fit("(none recorded)")
      else (.activity.events[] | fit((.at + " | " + .source + " | " + .kind + " | " + (.freshness | ascii_upcase) + " | " + .summary)))
      end),
     (("retained=" + ((.activity.events | length) | tostring) + " max=" + (.activity.max_events | tostring) + " truncated=" + (.activity.truncated | tostring) + " deduplicated=" + (.activity.deduplicated | tostring) + " redacted=" + (.activity.redacted | tostring) + " malformed=" + (.activity.malformed | tostring)) | fit(.))
@@ -594,8 +689,8 @@ if [ "$FORMAT" = status ] || [ "$FORMAT" = all ]; then
       elif $state == "stale" then "[STALE]"
       else "[UNKNOWN]"
       end;
-    "STATUS // HERDR SIDE PANEL // TOKYO NIGHT",
-    (if (.tasks | length) == 0 then "[UNKNOWN] No task records - no current evidence"
+    fit("STATUS // HERDR SIDE PANEL // TOKYO NIGHT"),
+    (if (.tasks | length) == 0 then fit("[UNKNOWN] No task records - no current evidence")
      else (.tasks[] |
        . as $t
        | (state_color($t.state)) as $code
@@ -611,6 +706,43 @@ if [ "$FORMAT" = status ] || [ "$FORMAT" = all ]; then
      )
      end)
   ' || die 'status rendering failed'
+fi
+
+if [ "$FORMAT" = decisions ] || [ "$FORMAT" = all ]; then
+  printf '%s\n' "$NORMALIZED" | jq -r --argjson width "$WIDTH" --arg color "$COLOR" '
+    def fit($value):
+      if ($value | length) <= $width then $value
+      elif $width <= 3 then $value[:$width]
+      else $value[:($width - 3)] + "..."
+      end;
+    def ansi($code; $value):
+      if $color == "on" then ("\u001b[" + $code + "m" + $value + "\u001b[0m") else $value end;
+    fit("DECISIONS // AWAITING CAPTAIN"),
+    (if (.decisions.open) == 0 then fit("(no open decision recorded)")
+     else (.decisions.cards[] |
+       . as $d
+       | (fit("┌ " + $d.alias + " ─ " + $d.age_label) | ansi("1;38;5;223"; .)),
+         fit("│ " + $d.question),
+         fit("│ RECOMMEND " + $d.recommendation),
+         fit("│ BLOCKED   " + $d.blocked_task),
+         fit("│ KEYS      " + ($d.keys | join("  "))),
+         fit("│ APPROVAL  " + $d.approval_boundary),
+         fit("└ " + (if $d.restricted then "explicit confirmation required; shorthand refused"
+                     elif $d.binary then "reply Igen or Nem"
+                     else "reply with an option name" end)),
+         ""
+     )
+     end),
+    fit(if .decisions.selection_required
+        then "Multiple open decisions - select one explicitly; no default is assumed."
+        elif .decisions.bare_reply_accepted
+        then ("Focused: " + (.decisions.focused // "none") + " - bare Igen or Nem accepted.")
+        elif (.decisions.open) > 0
+        then "Focused decision needs explicit confirmation; bare reply refused."
+        else "No decision awaiting Captain."
+        end),
+    fit("Approval by keyboard only; click-to-approve is not available.")
+  ' || die 'decisions rendering failed'
 fi
 
 if [ "$FORMAT" = network ] || [ "$FORMAT" = all ]; then

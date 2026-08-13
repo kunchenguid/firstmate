@@ -214,6 +214,18 @@ The marker is a bracketed word such as `[BLOCKED]` or `[WORKING]`, so an accessi
 Test, commit or version, blocker, and next-action values are displayed only when the fixture records them and otherwise read `Unknown` or `None recorded`.
 Captain chat keeps a plain-language outcome or a single decision question; this panel owns the routine structured detail.
 `ttl_seconds` must be a whole number of seconds between 1 and 86400, so the published display cache always carries a whole-millisecond expiry bound.
+`--format decisions` renders the durable decision inbox for tasks that explicitly need review.
+Each card carries a stable short alias built from the authoritative Obsidian task identity when the link is supported, for example `D3 · React Library`, plus a one-line question, recommendation, age, blocked task, and readable keyboard tokens such as `[I] Igen` and `[N] Nem`.
+A card is keyed to its task, so a later notification updates the same card; `evidence_signature` changes only when the question, recommendation, or options change, which is what lets a repeat notification avoid repeating the full text.
+A single focused binary card accepts the bare Hungarian words `Igen` or `Nem` without repeating the alias.
+When more than one card is open, `selection_required` is true, no card is focused, and the surface asks for an explicit selection rather than guessing.
+Multi-option cards use short understandable option names and never bare `A`/`B`/`C` codes.
+Alias shorthand is refused for any decision whose text implies merge, deploy, delete, force-push, credential, production, or installed-app replacement work; those cards report `explicit confirmation required` and `shorthand_allowed` is false.
+The inbox is display-only: it renders no click-to-approve affordance and approves, applies, and mutates nothing.
+Captain chat still carries only a plain-language outcome or a single concise question; this inbox owns the routine card detail.
+Motion is reduced-motion aware through `--reduced-motion`, which reports no pulse, transition, or spinner.
+With motion enabled the contract stays bounded: one pulse for a newly completed awaiting-decision task, one bounded transition on state change, and a bounded spinner only while a task is actively working, never a looping attention animation for waiting or blocked work, and never focus stealing or text obscuring.
+A future five-horizontal-fractal layout prototype is recorded as a documented requirement only; it is not implemented or activated by this fixture console.
 Activity accepts only an allowlisted source and event kind, redacts private-path or secret-like summaries, deduplicates by explicit key, keeps a configured bound, and marks the retained view scrollable.
 The network view uses only validated fixture edges and normalized task states, and an empty edge set says that no dependency was recorded rather than inventing one.
 Obsidian navigation is supported only for an explicit `AI Project Manager` vault link to a safe relative `Items/*.md` file, with every other link rendered as unsupported.

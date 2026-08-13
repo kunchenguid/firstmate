@@ -11,9 +11,20 @@ FIXTURE="$ROOT/tests/fixtures/herdr-operations-console.json"
 TMP_ROOT=$(fm_test_tmproot fm-herdr-operations-console)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required for width measurement)"; exit 0; }
 
 run_json() {
   "$CONSOLE" --fixture "$FIXTURE" --format json --now 2026-08-13T12:00:00Z
+}
+
+fm_console_overlong_lines() {
+  FM_CONSOLE_WIDTH_LIMIT="$1" python3 -c '
+import os, sys
+limit = int(os.environ["FM_CONSOLE_WIDTH_LIMIT"])
+for line in sys.stdin.read().split("\n"):
+    if len(line) > limit:
+        print("%d chars: %s" % (len(line), line))
+'
 }
 
 test_shared_snapshot_drives_every_surface() {
@@ -24,7 +35,7 @@ test_shared_snapshot_drives_every_surface() {
       and .mode == "fixture"
       and .theme == "tokyo-night"
       and ((.tasks | map(.id)) == .network.task_ids)
-      and (.tasks | length == 6)
+      and (.tasks | length == 8)
       and ((.tasks | map(select(.id == "react-qa"))[0])
         | .task == "Browser QA"
         and .state == "working"
@@ -116,10 +127,17 @@ test_malformed_and_private_identifiers_fail_closed() {
 
 test_narrow_panel_and_ascii_network() {
   local panel network
+  local width over
+  for width in 20 40 76; do
+    panel=$("$CONSOLE" --fixture "$FIXTURE" --format panel --no-color \
+      --now 2026-08-13T12:00:00Z --width "$width")
+    over=$(printf '%s\n' "$panel" | fm_console_overlong_lines "$width")
+    [ -z "$over" ] || fail "panel exceeded --width $width: $over"
+    over=$("$CONSOLE" --fixture "$FIXTURE" --format activity --no-color \
+      --now 2026-08-13T12:00:00Z --width "$width" | fm_console_overlong_lines "$width")
+    [ -z "$over" ] || fail "activity view exceeded --width $width: $over"
+  done
   panel=$("$CONSOLE" --fixture "$FIXTURE" --format panel --no-color --now 2026-08-13T12:00:00Z --width 76)
-  if printf '%s\n' "$panel" | awk 'length($0) > 76 { exit 1 }'; then :; else
-    fail "narrow panel emitted a line wider than 76 columns"
-  fi
   assert_contains "$panel" "TOKYO NIGHT" "panel did not identify the Tokyo Night surface"
   assert_contains "$panel" "display-only: yes" "panel did not disclose display-only behavior"
   assert_contains "$panel" "Stale" "panel omitted the explicit stale state"
@@ -368,13 +386,166 @@ test_status_panel_uses_accessible_markers_and_required_fields() {
   printf '%s' "$plain" | grep -q "$(printf '\033')" \
     && fail "no-color status panel still emitted ANSI escapes"
 
-  local narrow
-  narrow=$("$CONSOLE" --fixture "$FIXTURE" --format status --no-color --now 2026-08-13T12:00:00Z --width 76)
-  if printf '%s\n' "$narrow" | awk 'length($0) > 76 { exit 1 }'; then :; else
-    fail "narrow status panel emitted a line wider than 76 columns"
-  fi
-  assert_not_contains "$plain" "/Users/example" "status panel leaked a private path"
+  local narrow width over
+  for width in 20 30 40 76; do
+    narrow=$("$CONSOLE" --fixture "$FIXTURE" --format status --no-color \
+      --now 2026-08-13T12:00:00Z --width "$width")
+    over=$(printf '%s\n' "$narrow" | fm_console_overlong_lines "$width")
+    [ -z "$over" ] || fail "status panel exceeded --width $width: $over"
+  done
+
+  local private_fixture private_out
+  private_fixture="$TMP_ROOT/status-private.json"
+  jq '.tasks["react-qa"] += {
+        tests:"/Users/bob/private-results.txt",
+        commit:"/Users/bob/repo secret",
+        blocker:"/Users/bob/secret-plan.md is missing",
+        next_action:"open ~/private/notes.md"
+      }' "$FIXTURE" > "$private_fixture"
+  private_out=$("$CONSOLE" --fixture "$private_fixture" --format status --no-color \
+    --now 2026-08-13T12:00:00Z)
+  assert_not_contains "$private_out" "/Users/bob" "status panel leaked a private path"
+  assert_not_contains "$private_out" "private-results.txt" "status panel leaked a private filename"
+  assert_not_contains "$private_out" "secret-plan" "status panel leaked a private blocker path"
+  # shellcheck disable=SC2088 # literal tilde text, not a path to expand
+  assert_not_contains "$private_out" "~/private" "status panel leaked a home-relative private path"
+  task_block=$(printf '%s\n' "$private_out" | grep -A 8 'React Library / Browser QA')
+  case "$task_block" in
+    *"✓ TESTS   Unknown"*) ;;
+    *) fail "redacted test evidence did not fall back to Unknown" ;;
+  esac
+  case "$task_block" in
+    *"⚠ BLOCKER None recorded"*) ;;
+    *) fail "redacted blocker did not fall back to None recorded" ;;
+  esac
+  case "$task_block" in
+    *"NEXT      Unknown"*) ;;
+    *) fail "redacted next action did not fall back to Unknown" ;;
+  esac
   pass "status panel pairs colored state markers with readable labels and honest fields"
+}
+
+test_decision_inbox_is_stable_bounded_and_approval_safe() {
+  local out cards single_fixture single restricted_card
+  out=$(run_json)
+
+  printf '%s' "$out" | jq -e '
+    .decisions.open == 3
+      and .decisions.click_to_approve == false
+      and .decisions.selection_required == true
+      and .decisions.bare_reply_accepted == false
+      and .decisions.focused == null
+      and ([.decisions.cards[].alias] | length) == ([.decisions.cards[].alias] | unique | length)
+      and ([.decisions.cards[].task_id] | length) == ([.decisions.cards[].task_id] | unique | length)
+  ' >/dev/null || fail "decision inbox did not report unique, unselected, click-free cards"
+
+  printf '%s' "$out" | jq -e '
+    ([.decisions.cards[] | select(.task_id == "review-merge")][0]
+      | .alias == "D3 · React Library" and .restricted == true
+        and .shorthand_allowed == false
+        and .approval_boundary == "explicit confirmation required")
+  ' >/dev/null || fail "merge decision did not carry an Obsidian alias and a hard approval boundary"
+
+  printf '%s' "$out" | jq -e '
+    ([.decisions.cards[] | select(.task_id == "multi-option")][0]
+      | .binary == false
+        and (.options | length) == 3
+        and (.options | map(test("^[A-Za-z]") and (length > 1)) | all)
+        and (.options | map(test("^[ABC]$")) | any | not)
+        and (.keys | map(test("^\\[[A-Z]\\] [A-Za-z]")) | all))
+  ' >/dev/null || fail "multi-option decision used bare letter codes instead of option names"
+
+  cards=$(printf '%s' "$out" | jq -c '[.decisions.cards[] | {alias, task_id, evidence_signature}]')
+  [ "$cards" = "$(run_json | jq -c '[.decisions.cards[] | {alias, task_id, evidence_signature}]')" ] \
+    || fail "decision aliases were not stable across runs"
+
+  local signature_query baseline_sig changed_sig same_sig
+  signature_query='[.decisions.cards[] | select(.task_id == "company-blocked")][0].evidence_signature'
+  baseline_sig=$(printf '%s' "$out" | jq -r "$signature_query")
+
+  jq '.tasks["company-blocked"].decision.recommendation = "Defer the sweep"' "$FIXTURE" \
+    > "$TMP_ROOT/decision-changed.json"
+  changed_sig=$("$CONSOLE" --fixture "$TMP_ROOT/decision-changed.json" --format json \
+    --now 2026-08-13T12:00:00Z | jq -r "$signature_query")
+  [ "$baseline_sig" != "$changed_sig" ] \
+    || fail "changed decision evidence did not change the card signature"
+
+  jq '.tasks["company-blocked"].phase = "Diagnosis sweep"' "$FIXTURE" > "$TMP_ROOT/decision-same.json"
+  same_sig=$("$CONSOLE" --fixture "$TMP_ROOT/decision-same.json" --format json \
+    --now 2026-08-13T12:00:00Z | jq -r "$signature_query")
+  [ "$baseline_sig" = "$same_sig" ] \
+    || fail "unchanged decision evidence produced a new card signature"
+
+  single_fixture="$TMP_ROOT/decision-single.json"
+  jq 'del(.tasks["review-merge"]) | del(.tasks["multi-option"])
+      | .snapshot.tasks = [.snapshot.tasks[] | select(.id != "review-merge" and .id != "multi-option")]' \
+    "$FIXTURE" > "$single_fixture"
+  single=$("$CONSOLE" --fixture "$single_fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$single" | jq -e '
+    .decisions.open == 1
+      and .decisions.selection_required == false
+      and .decisions.bare_reply_accepted == true
+      and (.decisions.cards[0].options == ["Igen", "Nem"])
+      and (.decisions.cards[0].keys == ["[I] Igen", "[N] Nem"])
+  ' >/dev/null || fail "a single focused binary card did not accept a bare Hungarian reply"
+
+  local single_text
+  single_text=$("$CONSOLE" --fixture "$single_fixture" --format decisions --no-color \
+    --now 2026-08-13T12:00:00Z)
+  assert_contains "$single_text" "bare Igen or Nem accepted" \
+    "focused binary card did not offer the bare Hungarian reply"
+  assert_contains "$single_text" "click-to-approve is not available" \
+    "decision surface did not refuse click-to-approve"
+
+  restricted_card=$("$CONSOLE" --fixture "$FIXTURE" --format decisions --no-color \
+    --now 2026-08-13T12:00:00Z)
+  assert_contains "$restricted_card" "select one explicitly" \
+    "multiple open decisions did not require explicit selection"
+  assert_contains "$restricted_card" "shorthand refused" \
+    "restricted decision did not refuse alias shorthand"
+  assert_not_contains "$restricted_card" "/Users/" "decision surface leaked a private path"
+
+  if printf '%s' "$restricted_card" | grep -qE '[😀-🿿🚀-🛿✅❌🔴🟢🟡]'; then
+    fail "decision surface used an emoji marker"
+  fi
+  printf '%s' "$restricted_card" | grep -q "$(printf '\033')" \
+    && fail "no-color decision surface emitted ANSI escapes"
+  "$CONSOLE" --fixture "$FIXTURE" --format decisions --color --now 2026-08-13T12:00:00Z \
+    | grep -q "$(printf '\033')\[" \
+    || fail "decision surface emitted no ANSI color when color was requested"
+
+  local width over
+  for width in 20 40 76; do
+    over=$("$CONSOLE" --fixture "$FIXTURE" --format decisions --no-color \
+      --now 2026-08-13T12:00:00Z --width "$width" | fm_console_overlong_lines "$width")
+    [ -z "$over" ] || fail "decision surface exceeded --width $width: $over"
+  done
+  pass "decision inbox keeps stable aliases, explicit selection, and approval boundaries"
+}
+
+test_motion_is_bounded_and_reduced_motion_aware() {
+  local motion reduced
+  motion=$("$CONSOLE" --fixture "$FIXTURE" --format json --now 2026-08-13T12:00:00Z --motion)
+  reduced=$("$CONSOLE" --fixture "$FIXTURE" --format json --now 2026-08-13T12:00:00Z --reduced-motion)
+
+  printf '%s' "$motion" | jq -e '
+    .motion.reduced_motion == false
+      and .motion.looping_attention == false
+      and .motion.steals_focus == false
+      and .motion.obscures_text == false
+      and (.motion.transition == "one-bounded")
+      and (.motion.spinner == "bounded")
+      and (.motion.pulse as $pulse | ["none", "one-pulse"] | index($pulse)) != null
+  ' >/dev/null || fail "motion contract was unbounded or attention-looping"
+
+  printf '%s' "$reduced" | jq -e '
+    .motion.reduced_motion == true
+      and .motion.pulse == "none"
+      and .motion.transition == "none"
+      and .motion.spinner == "none"
+      and .motion.looping_attention == false
+  ' >/dev/null || fail "reduced motion still reported animation"
+  pass "motion stays bounded and honors reduced motion"
 }
 
 test_fleet_snapshot_exposes_recorded_model_and_effort() {
@@ -404,4 +575,6 @@ test_failed_publication_reports_only_its_own_diagnostic
 test_truncated_history_is_surfaced
 test_fractional_ttl_is_refused_before_any_helper_call
 test_status_panel_uses_accessible_markers_and_required_fields
+test_decision_inbox_is_stable_bounded_and_approval_safe
+test_motion_is_bounded_and_reduced_motion_aware
 test_fleet_snapshot_exposes_recorded_model_and_effort
