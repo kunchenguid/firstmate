@@ -78,6 +78,8 @@ test_default_target_compatibility() {
     || fail "default-target: unrelated integration branch moved"
   assert_grep "merged $TASK_BRANCH into local main" "$case_dir/stdout" \
     "default-target: success did not identify the established default target"
+  assert_grep 'local_merge_target=main' "$case_dir/state/$ID.meta" \
+    "default-target: selected landing target was not recorded"
   pass "fm-merge-local preserves default-target fast-forward behavior"
 }
 
@@ -101,6 +103,8 @@ test_explicit_integration_target() {
     || fail "explicit-target: same-named tag moved"
   assert_grep "merged $TASK_BRANCH into local integration" "$case_dir/stdout" \
     "explicit-target: success did not identify the integration target"
+  assert_grep 'local_merge_target=integration' "$case_dir/state/$ID.meta" \
+    "explicit-target: selected landing target was not recorded"
   pass "fm-merge-local fast-forwards an explicit checked-out integration branch only"
 }
 
@@ -162,6 +166,8 @@ test_divergence_refuses() {
   expect_code 1 "$rc" "divergence"
   assert_grep "is not a fast-forward of integration (it has diverged)" "$case_dir/stderr" \
     "divergence: refusal did not explain the non-fast-forward"
+  ! grep -q '^local_merge_target=' "$case_dir/state/$ID.meta" \
+    || fail "divergence: refused landing recorded a target"
   [ "$(ref_sha "$case_dir" integration)" = "$target_before" ] \
     || fail "divergence: target branch moved"
   [ "$(ref_sha "$case_dir" "$TASK_BRANCH")" = "$task_before" ] \
