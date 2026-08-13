@@ -298,6 +298,8 @@ def resource_record(kind, value, power_state=None, tags_override=None):
                 raise ProviderError("worker NIC has a public IP relation")
     if kind in ("os-disk", "task-disk", "account-disk"):
         record["attached_to"] = value.get("managedBy") or properties.get("managedBy")
+    if kind == "state-container":
+        record["last_modified"] = properties.get("lastModified") or value.get("lastModified")
     if kind in ("monitor-extension", "bootstrap-command", "task-command"):
         record["attached_to"] = properties.get("virtualMachineId") or value.get("attached_to")
         record["provisioning_state"] = properties.get("provisioningState") or value.get("provisioningState")
@@ -1542,13 +1544,21 @@ def mutate_reset(controller, action):
         state_container, "reset-action", action["idempotency_key"]
     ):
         raise ProviderError("reset cleanup marker is absent before container deletion")
-    if not state_container.get("etag"):
-        raise ProviderError("state-container ETag is absent; conditional deletion refuses")
+    # The Blob service supports no ETag precondition on container deletion;
+    # If-Unmodified-Since against the freshly-read lastModified is its
+    # strongest supported guard. The marker write above already bumped
+    # lastModified and this record postdates it, so any foreign write in the
+    # remaining window fails the precondition.
+    if not state_container.get("last_modified"):
+        raise ProviderError("state-container modification identity is absent; conditional deletion refuses")
+    # Storage listings stamp lastModified with a +00:00 offset; the CLI's
+    # datetime parser wants the Z form of the same UTC instant.
+    unmodified_since = str(state_container["last_modified"]).replace("+00:00", "Z")
     _, rc, stderr = az(controller, [
         "storage", "container", "delete", "--auth-mode", "login",
         "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
         "--name", expected_names(controller, action["slot"])["state-container"],
-        "--if-match", state_container["etag"],
+        "--if-unmodified-since", unmodified_since,
     ], check=False)
     if rc != 0:
         raise ProviderError("exact worker state-container deletion failed: {}".format(stderr))
