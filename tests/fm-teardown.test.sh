@@ -731,6 +731,32 @@ test_local_only_remote_head_reconciles_pending_target() {
   pass "local-only remotely reachable work reconciles its proven pending target"
 }
 
+test_local_only_failed_pending_target_keeps_completed_target() {
+  local case_dir rc wt_head
+  case_dir=$(make_case failed-pending-target)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "completed integration work"
+  git -C "$case_dir/project" branch integration main
+  git -C "$case_dir/project" branch release main
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/integration "$wt_head"
+  printf '%s\n' 'local_merge_target=integration' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'local_merge_target_pending=release' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "failed-pending-target: teardown should retain the completed integration target"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "failed-pending-target: teardown printed a REFUSED line"
+  assert_grep "tasks-axi done task-x1 --note 'local-target:integration'" "$case_dir/stdout" \
+    "failed-pending-target: failed retry displaced the completed target"
+  pass "local-only failed retry retains its proven completed landing target"
+}
+
 test_local_only_recorded_non_main_default_preserves_legacy_note() {
   local case_dir rc wt_head
   case_dir=$(make_case merged-master-default)
@@ -2700,6 +2726,7 @@ test_local_only_merged_to_local_main_allows
 test_local_only_merged_to_recorded_target_allows
 test_local_only_merged_to_pending_target_allows
 test_local_only_remote_head_reconciles_pending_target
+test_local_only_failed_pending_target_keeps_completed_target
 test_local_only_recorded_non_main_default_preserves_legacy_note
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
