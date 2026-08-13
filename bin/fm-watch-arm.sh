@@ -81,7 +81,8 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
-# Poll interval while attached to an existing healthy watcher.
+# Poll interval while attached to an existing healthy watcher; also the
+# cadence for the owned-child wait loop and the watchdog's stale-beacon recheck.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # Seconds allowed for a stalled owned watcher to retire after TERM before its
 # isolated process group receives KILL. This is deliberately much shorter than
