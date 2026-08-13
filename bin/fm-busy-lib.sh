@@ -31,6 +31,9 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   agy-hook         agy lifecycle hooks (PreInvocation opens, Stop closes),
+#                    delivered by the ONE firstmate-owned global agy plugin
+#                    bin/fm-spawn.sh installs (bin/fm-agy-lib.sh owns its paths)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -68,6 +71,30 @@
 # MUSE_EXPERIMENTAL_PLUGINS). Nothing is armed for muse for the same reason
 # standalone Kimi is not: a seeded record with no writer could never be
 # cleared. See fm_busy_muse_run_state for the fold.
+#
+# The agy source is a PUSH source of claude-hook's exact shape: agy's own
+# lifecycle hooks bracket a turn, with PreInvocation ("before the model is
+# called") opening it and Stop ("when the execution loop terminates") closing
+# it. PostInvocation is deliberately NOT a close: it fires after each tool batch
+# INSIDE a turn, so treating it as one would read idle mid-turn. agy has no
+# UserPromptSubmit, StopFailure, or SessionEnd event at all - those are Claude's
+# - so a turn that opened on one of those names could never close.
+#
+# agy's own durable transcript was evaluated as a PULL source first, the way
+# muse's session log and cursor's transcript are read, and rejected on evidence:
+# a tool-using turn writes SEVERAL `PLANNER_RESPONSE` MODEL rows interleaved
+# with its tool steps, so the trailing row is a completed model response while
+# the turn is still in flight, and folding it would produce a false idle. The
+# transcript also marks an INTERRUPTED turn's response `DONE`, so it cannot
+# report interruption either (verified, agy 1.1.12).
+#
+# Like Claude, agy fires no hook for a manual interrupt (verified: a single
+# Escape cancelled a live turn and printed `Interrupted ·` with no Stop
+# payload), so an interrupted worker stays busy until its next turn closes;
+# bin/fm-control-lib.sh therefore makes no cancellation claim for agy, and
+# supervision's stale detection is what covers an interrupted-and-abandoned
+# pane. agy's rendered `Generating...`/`Working...` spinner is deliberately not
+# a state source: the verb varies between turns of the same version.
 #
 # The cursor pull source works the same way and for the same reason: it folds
 # cursor's own durable per-conversation transcript, which brackets each turn
@@ -192,6 +219,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
+    agy*) adapter=agy-hook ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'

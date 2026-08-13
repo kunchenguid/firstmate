@@ -170,6 +170,11 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
+    # agy ships a single stable binary named `agy`, so it is anchored like kimi
+    # and pi rather than globbed like claude/codex (whose installers produce
+    # version-named executables). An unanchored *agy* would claim an unrelated
+    # sibling such as agy-helper or legagy.
+    agy) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

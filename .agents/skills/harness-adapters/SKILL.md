@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, agy, and muse.
 user-invocable: false
 metadata:
   internal: true
@@ -133,6 +133,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <display-name\|kebab-id>` | none for firstmate's launch | Verified 2026-08-13 on agy 1.1.12. `--model` accepts EITHER spelling `agy models` prints. `--effort low\|medium\|high` exists and is deliberately never emitted: every selectable model already bakes its reasoning class in, and any disagreement exits 1. See the agy section. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -152,6 +153,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
+| agy | Run `agy models`, which prints one `<kebab-id><TAB><Display Name>` row per model available to the current account. `--model` accepts either column. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -173,6 +175,7 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- agy: NONE. agy does NOT discover firstmate's user-level skills - `/no-mistakes` returns `No matches` and `/skills` lists only agy's own customization roots - so use natural language plus the `no-mistakes` CLI's own help rather than a slash command.
 
 ## Submission acknowledgement hazards
 
@@ -544,3 +547,60 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+## agy (VERIFIED CREWMATE/SCOUT 2026-08-13, agy 1.1.12)
+
+Google Antigravity CLI (`agy`), an AI coding agent from Google DeepMind.
+Launch: `agy --dangerously-skip-permissions --add-dir <absolute-task-worktree> --model <model> -i "$(cat <brief>)"`.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `agy` from `PATH`, then `$HOME/.local/bin/agy`; spawning refuses if neither exists (`bin/fm-agy-lib.sh`). |
+| Launch | `-i`/`--prompt-interactive` carries the brief and auto-submits it. `--prompt`/`-p` is NOT that flag: on agy it is an alias for `--print`, a one-shot non-interactive mode that would exit the pane. |
+| Workspace | `--add-dir <absolute-worktree>` is MANDATORY. Launched with only a cwd, agy reports "no active workspace" and runs its tools in `~/.gemini/antigravity-cli/scratch`, which breaks worktree isolation silently. It is also what makes agy load that workspace's own customizations. |
+| Models | `agy models` prints `<kebab-id><TAB><Display Name>`; `--model` accepts EITHER spelling (`gemini-3.1-pro-high` and `Gemini 3.1 Pro (High)` both resolved to the same backing model). An unrecognized model exits 1 and prints the available list. |
+| Busy state | Owned lifecycle hooks: `PreInvocation` opens a turn and `Stop` closes it. `PostInvocation` is NOT a close - it fires after each tool batch inside a turn. agy has no `UserPromptSubmit`, `StopFailure`, or `SessionEnd` event; those are Claude's. Like Claude it fires nothing on a manual interrupt, so an interrupted worker stays busy until its next turn closes. |
+| Exit command | `/exit` (the popup lists `/exit (quit)`); ONE Enter submits it and the pane prints `agy --conversation=<id>`. `Ctrl+D` is the bound `cli.exit` key. |
+| Interrupt | Single Escape (`cli.escape` binds both `esc` and `ctrl+c`). The pane prints `Interrupted · What should Antigravity CLI do instead?` and the composer returns to its bare `>`, so NO clear key is needed. |
+| Skill invocation | NONE. agy does NOT discover firstmate's user-level skills: `/no-mistakes` returns `No matches`, and `/skills` lists only what agy's own customization roots supply. Drive validation through natural language and the `no-mistakes` CLI's own help instead of a slash command. |
+| Autonomy | `--dangerously-skip-permissions`, which also suppresses the workspace-trust gate. agy's `trustedWorkspaces` list was verified UNCHANGED after a spawn, so firstmate never writes to the operator's agy trust store. |
+| Trust dialog | None on a fresh, never-trusted worktree path under that flag. |
+| Env marker | `ANTIGRAVITY_AGENT=1`. See the detection-ordering fact below - this one is NOT safe to test first. |
+| Composer | `separated`: a `>` SHELL glyph row between two `─` rules, with a model/ctx/quota footer OUTSIDE the pair. No idle placeholder or ghost text in any observed state. |
+| Resume | `agy --conversation <id>` (printed on exit) or `agy -c`/`--continue` for the most recent. `--continue` takes NO id argument. |
+| Effort | `--effort low\|medium\|high` exists and is deliberately never emitted; see below. |
+
+**Detection ordering is the reverse of Cursor's, and that is deliberate.**
+`ANTIGRAVITY_AGENT` is exported by the Antigravity IDE's own terminal into EVERY process it starts, not just agy's children, so a claude, codex, or pi worker started from that terminal carries it too.
+Testing it early would misidentify every such worker as agy; this was observed directly, on a real claude session whose own environment carried `ANTIGRAVITY_AGENT=1`.
+`bin/fm-harness.sh` therefore checks it LAST in the marker layer, after every marker whose presence is unambiguous, and `bin/fm-spawn.sh` scrubs `ANTIGRAVITY_AGENT` from every NON-agy launch while scrubbing the foreign markers from agy's own.
+This is the opposite trade from Cursor, whose marker is set only on cursor's own processes and is therefore safe to test first.
+
+**The effort axis is recorded, never emitted.**
+Every model agy offers already bakes its reasoning class into the model itself, as a display-name suffix (`Gemini 3.1 Pro (High)`) or the equivalent kebab id (`gemini-3.1-pro-high`), so a separate effort flag is redundant at best.
+Emitting it can only ever break a launch that would otherwise have succeeded.
+Driving the matrix directly on 1.1.12: a display-name model with ANY `--effort`, a kebab id whose baked level DISAGREES with the flag, and `--effort` with no model at all each exit 1 with `Error: invalid model selection (--model "..." --effort "..."): --effort is not supported for the current model`, while the only accepted combination is a kebab id restating the level it already carries.
+An earlier record described this as a SILENT fallback to agy's default model; that is not what 1.1.12 does - it fails loudly and launches nothing, so the observable symptom is a pane that never starts rather than a quietly wrong model.
+`bin/fm-bootstrap.sh` therefore rejects a configured agy `effort` the same way it rejects one for opencode, kimi, and cursor.
+
+**Turn-end and busy wiring is ONE firstmate-owned GLOBAL plugin.**
+agy discovers customizations from the workspace `.agents/` directory, declared JSON configs, and the global `~/.gemini/config/` root.
+`bin/fm-spawn.sh` installs `~/.gemini/config/plugins/fm-turn-end/` (`bin/fm-agy-lib.sh` owns every path), guarded per task by a `.fm-agy-turnend` worktree pointer and a private registry entry, exactly like grok's and Kimi's global hooks.
+The per-task wiring is deliberately NOT written to `<worktree>/.agents/hooks.json`: that path is this repo's OWN tracked primary hooks file, so an agy crewmate working on firstmate itself would have it overwritten and its teardown blocked, and it would equally clobber any project shipping agy customizations of its own.
+The global root's own `hooks.json` is not firstmate's to take either - on this fleet it is a home-manager symlink into the read-only nix store already carrying the operator's `herdr-session` hook - which is exactly why a plugin is the right surface: a plugin directory under a customization root is discovered automatically and is enabled by default with no entry in the operator's `config.json`.
+agy hands hooks their context as JSON on stdin rather than in the environment, so the guard reads the workspace from `workspacePaths`, and every path emits `{}` on stdout, which agy requires of a hook on every exit including failure.
+
+**Primary-session guard fact (Stop blocks natively).**
+agy is the one verified adapter whose Stop hook blocks IN PROCESS with no resume trick: returning `{"decision":"continue","reason":"..."}` on stdout re-enters the SAME execution loop and injects `reason` as a system message.
+Verified live - a Stop hook returning that object made the model perform the injected instruction, and Stop fired a second time once the hook allowed the stop.
+The Stop payload carries `conversationId`, `workspacePaths`, `transcriptPath`, `artifactDirectoryPath`, `modelName`, `executionNum`, `terminationReason`, `error`, and `fullyIdle`.
+It carries NEITHER `session_id` NOR `stop_hook_active`, so Claude's and Grok's one-block loop guard is unavailable and `bin/fm-turnend-guard-agy.sh` uses a bounded per-conversation block budget instead.
+agy sets no project-directory environment variable for hook processes, so the tracked `.agents/hooks.json` anchors every hook on the hook's own working directory, which agy documents and this repo verified as the directory containing `hooks.json`.
+agy's primary watcher protocol is background-notify around `bin/fm-watch-arm.sh` ([`docs/supervision-protocols/agy.md`](../../../docs/supervision-protocols/agy.md)).
+
+**PreToolUse seatbelt fact.**
+The tracked `.agents/hooks.json` wires `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh`, and `bin/fm-subagent-pretool-check.sh` for the primary session.
+agy's `PreToolUse` payload uses `.toolCall.name` and `.toolCall.args` rather than Claude/Codex's `.tool_name`/`.tool_input` or Grok's `.toolName`/`.toolInput`, so the hooks extract the value with `jq` and pass it through CLI mode (`--command` / `--tool`) rather than modifying the shared scripts.
+agy consumes deny decisions as `{"decision":"deny","reason":"..."}`, the same shape those scripts already emit for Grok.
+All of them are fail-open: an unresolvable root, an empty payload, a missing `jq`, or an absent script exits 0 silently.
+
+[`docs/verification/agy-composer.md`](../../../docs/verification/agy-composer.md) owns the byte-level composer capture.

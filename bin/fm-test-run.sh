@@ -139,6 +139,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-agy-harness.test.sh|fm-cursor-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -152,7 +153,6 @@ family_for_basename() {
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-drain-unread-status.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
       printf '%s\n' watcher-wake-lock
@@ -442,7 +442,6 @@ tests/fm-turnend-guard.test.sh 5986
 tests/fm-update.test.sh 1894
 tests/fm-vendor-auth-probe.test.sh 42796
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 4284
-tests/fm-wake-drain-unread-status.test.sh 4000
 tests/fm-wake-queue.test.sh 22787
 tests/fm-watch-checkpoint.test.sh 3943
 tests/fm-watch-triage.test.sh 113051

@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -254,6 +254,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-agy-lib.sh
+. "$SCRIPT_DIR/fm-agy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -439,7 +441,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1046,7 +1048,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1154,6 +1156,29 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+
+    # agy (Google Antigravity CLI): -i/--prompt-interactive carries the brief and
+    # auto-submits it, keeping the session interactive. --prompt/-p is NOT that
+    # flag on agy - it is an alias for --print, a one-shot non-interactive mode
+    # that would exit the pane.
+    # --add-dir is MANDATORY and is what makes the task worktree agy's workspace.
+    # Launched with only a cwd, agy reports "no active workspace" and runs its
+    # tools in ~/.gemini/antigravity-cli/scratch instead (verified, agy 1.1.12:
+    # a launch from inside a repo answered `pwd` with that scratch path), which
+    # would break worktree isolation silently. It is also what makes agy load the
+    # workspace's own customizations at all.
+    # --dangerously-skip-permissions auto-approves all tool execution (same flag
+    # as claude) AND suppresses the workspace-trust gate: every task gets a fresh
+    # worktree path, and agy's own trustedWorkspaces list was verified UNCHANGED
+    # after a spawn, so firstmate never writes to the operator's agy trust store.
+    # agy's turn-end and busy signals are the ONE firstmate-owned global plugin
+    # installed below, so no launch placeholder is needed here. The template is
+    # identical for ship/scout/secondmate.
+    # The env scrub mirrors cursor's and muse's: fm-harness.sh checks
+    # ANTIGRAVITY_AGENT LAST in its marker layer, so an agy worker spawned from
+    # a Claude, Pi, or Grok firstmate would otherwise inherit that parent's
+    # marker and report the PARENT's harness instead of agy.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --dangerously-skip-permissions --add-dir __WORKTREE__ __MODELFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
     # ships approval prompts AND a filesystem/network sandbox ON by default
@@ -1239,6 +1264,25 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  agy)
+    # Resolve the executable so a missing install is a loud spawn refusal rather
+    # than a pane that dies with command-not-found the supervisor would read as
+    # a wedged worker. The model is validated against the ACCOUNT's own live
+    # catalogue for the same reason: agy exits 1 on an unrecognized model, so an
+    # unchecked typo would present as a dead pane. Both spellings agy accepts -
+    # the kebab id and the display name - are honoured. A catalogue that cannot
+    # be fetched establishes nothing and is deliberately not treated as proof
+    # that a model is absent.
+    AGY_BIN=$(fm_agy_resolve_binary) || exit 1
+    if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+      if AGY_MODELS=$(fm_agy_list_models "$AGY_BIN"); then
+        if ! printf '%s\n' "$AGY_MODELS" | fm_agy_catalog_has_model "$MODEL"; then
+          echo "error: agy model '$MODEL' is not available from '$AGY_BIN models'; choose an id or display name listed by that command or omit --model" >&2
+          exit 1
+        fi
+      fi
+    fi
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -1361,7 +1405,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1414,6 +1458,9 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    # agy DOES expose --effort low|medium|high, and firstmate deliberately never
+    # emits it, so agy joins opencode/kimi/cursor below rather than carrying a
+    # branch here.
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1421,6 +1468,23 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
+    #
+    # agy is the same shape for a stronger reason: EVERY model it offers already
+    # bakes its reasoning class into the model itself, as a display-name suffix
+    # ("Gemini 3.1 Pro (High)") or the equivalent kebab id (gemini-3.1-pro-high),
+    # so a separate effort axis is redundant at best. Emitting it can only ever
+    # break a launch that would otherwise have succeeded. Verified on agy 1.1.12
+    # by driving the matrix directly: a display-name model with ANY --effort, a
+    # kebab id whose baked level DISAGREES with the flag, and --effort with no
+    # model at all each exit 1 with
+    #   Error: invalid model selection (--model "..." --effort "..."): --effort is
+    #   not supported for the current model
+    # while the only accepted combination is a kebab id restating the level it
+    # already carries. An earlier record described this as a SILENT fallback to
+    # agy's default model; that is not what 1.1.12 does - it fails loudly and
+    # launches nothing - and a pane that never starts is what firstmate would
+    # have seen. Either way the axis is recorded in task metadata and never
+    # reaches the launch command.
   esac
 }
 
@@ -2319,7 +2383,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|agy*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2359,6 +2423,108 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
+      ;;
+    agy*)
+      # agy fires real lifecycle hooks, so its turn-end wake AND its semantic
+      # busy source are one firstmate-owned installation (bin/fm-agy-lib.sh owns
+      # every path; bin/fm-busy-lib.sh owns why PreInvocation opens a turn and
+      # only Stop closes it).
+      #
+      # It is a GLOBAL PLUGIN, not a file in the worktree. agy discovers
+      # customizations from the workspace `.agents/` directory, the declared
+      # JSON configs, and the global ~/.gemini/config/ root (verified, agy
+      # 1.1.12). Writing the per-task wiring to <worktree>/.agents/hooks.json
+      # collides head-on with this repo's OWN tracked .agents/hooks.json - the
+      # primary-session hooks below - so an agy crewmate working on firstmate
+      # itself would have that tracked file overwritten and its teardown blocked
+      # by the modified file. It would equally clobber any project that ships
+      # agy customizations of its own. The global root's own hooks.json is not
+      # firstmate's to take either: on this fleet it is a home-manager symlink
+      # into the read-only nix store already carrying the operator's own
+      # herdr-session hook. A plugin directory under that root is discovered
+      # automatically and enabled by default with no entry in the operator's
+      # config.json (verified live: a firstmate-owned plugin fired SessionStart
+      # and Stop for a workspace carrying no .agents/ of its own), so firstmate
+      # adds files of its own and edits none of agy's managed config.
+      #
+      # Like grok's and Kimi's global hooks it is a guarded no-op for every
+      # non-firstmate agy session: it acts only when the payload's own workspace
+      # holds a .fm-agy-turnend pointer naming a private registry entry. agy
+      # hands hooks their context as JSON on stdin rather than in the
+      # environment, so the workspace comes from workspacePaths, and every path
+      # emits `{}` on stdout, which agy requires of a hook on every exit path
+      # including failure.
+      AGY_PLUGIN_DIR=$(fm_agy_plugin_dir)
+      AGY_AUTH_DIR=$(fm_agy_auth_dir)
+      mkdir -p "$AGY_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      {
+        printf 'turnend=%s\n' "$TURNEND"
+        printf 'busy=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
+        printf 'state=%s\n' "$STATE_REAL"
+        printf 'id=%s\n' "$ID"
+        printf 'gen=%s\n' "$BUSY_GEN"
+        printf 'session=%s\n' "$STATE/$ID.agy-session"
+      } > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
+      sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
+      cat > "$AGY_PLUGIN_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+# Installed by firstmate (bin/fm-spawn.sh). Guarded no-op for every agy session
+# whose workspace firstmate did not register.
+set -u
+auth_dir=$sq_agy_auth_dir
+event=\${1:-}
+emit() { printf '{}\n'; exit 0; }
+payload=\$(cat 2>/dev/null) || emit
+ws=\$(printf '%s' "\$payload" | LC_ALL=C sed -n 's/.*"workspacePaths":\[[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+case "\$ws" in /*) : ;; *) emit ;; esac
+p="\$ws/.fm-agy-turnend"
+[ -f "\$p" ] || emit
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || emit
+case "\$first" in token=*) token=\${first#token=} ;; *) emit ;; esac
+case "\$token" in fm.????????????) : ;; *) emit ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) emit ;; esac
+entry="\$auth_dir/\$token"
+[ -f "\$entry" ] || emit
+field() { LC_ALL=C sed -n "s/^\$1=//p" "\$entry" 2>/dev/null | head -1; }
+turnend=\$(field turnend); busy=\$(field busy); state=\$(field state)
+id=\$(field id); gen=\$(field gen); session=\$(field session)
+case "\$event" in
+  SessionStart)
+    case "\$session" in /*) : ;; *) emit ;; esac
+    conv=\$(printf '%s' "\$payload" | LC_ALL=C sed -n 's/.*"conversationId":"\([^"]*\)".*/\1/p' | head -1)
+    model=\$(printf '%s' "\$payload" | LC_ALL=C sed -n 's/.*"modelName":"\([^"]*\)".*/\1/p' | head -1)
+    transcript=\$(printf '%s' "\$payload" | LC_ALL=C sed -n 's/.*"transcriptPath":"\([^"]*\)".*/\1/p' | head -1)
+    { printf 'conversation_id=%s\n' "\$conv"
+      printf 'model_name=%s\n' "\$model"
+      printf 'transcript=%s\n' "\$transcript"
+      printf 'workspace=%s\n' "\$ws"; } > "\$session" 2>/dev/null || true
+    ;;
+  PreInvocation)
+    case "\$busy" in /*) : ;; *) emit ;; esac
+    "\$busy" apply "\$state" "\$id" busy --gen "\$gen" --source agy-hook --event pre-invocation >/dev/null 2>&1 || true
+    ;;
+  Stop)
+    case "\$turnend" in /*.turn-ended) touch "\$turnend" 2>/dev/null || true ;; esac
+    case "\$busy" in /*) : ;; *) emit ;; esac
+    "\$busy" apply "\$state" "\$id" idle --gen "\$gen" --source agy-hook --event stop >/dev/null 2>&1 || true
+    ;;
+esac
+emit
+EOF
+      chmod +x "$AGY_PLUGIN_DIR/fm-turn-end.sh"
+      printf '{"name":"fm-turn-end"}\n' > "$AGY_PLUGIN_DIR/plugin.json"
+      agy_hook_command=$(json_escape "bash $(shell_quote "$AGY_PLUGIN_DIR/fm-turn-end.sh")")
+      cat > "$AGY_PLUGIN_DIR/hooks.json" <<EOF
+{"fm-turn-end":{"SessionStart":[{"type":"command","command":"$agy_hook_command SessionStart","timeout":10}],"PreInvocation":[{"type":"command","command":"$agy_hook_command PreInvocation","timeout":10}],"Stop":[{"type":"command","command":"$agy_hook_command Stop","timeout":10}]}}
+EOF
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-agy-turnend"
+      exclude_path '.fm-agy-turnend'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2725,11 +2891,23 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    ;;
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    # ANTIGRAVITY_AGENT is agy's identity marker (bin/fm-harness.sh), and it is
+    # exported into every shell Antigravity opens. Firstmate is routinely driven
+    # from such a terminal, so without this scrub EVERY non-agy worker inherits
+    # the marker and reports itself as agy - the same inheritance hazard the
+    # CURSOR_* scrub above exists for.
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT $LAUNCH"
+    ;;
+  cursor)
+    LAUNCH="env -u ANTIGRAVITY_AGENT $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

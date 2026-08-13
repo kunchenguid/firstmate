@@ -61,12 +61,24 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done/blocked pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#   separated  - pi and agy: content rows between two solid horizontal `─`
+#                rules, no side border.
+#                pi draws NO glyph, so its region is exactly the strict rule's
+#                unidentifiable blank row and stays provable only with a live
+#                agent identity reporting an idle/done/blocked pi (herdr `agent
+#                get`; the tmux foreground-process probe).
+#                agy 1.1.12 draws a `>` SHELL glyph on its single content row
+#                (verified capture: a truecolor rule pair at RGB(65,72,104)
+#                bracketing `>` at RGB(122,162,247), followed by a
+#                model/ctx/quota footer OUTSIDE the pair). That glyph inside
+#                the pair IS the positive container proof pi's blank region
+#                lacks, so agy needs no identity capability and its rows go
+#                through the shared container classifier, where a contained
+#                shell glyph is legitimately empty - the same rule that already
+#                licenses a `>` inside a bordered box.
+#                That distinction is exactly THE SAFETY RULE: agy's `>` is
+#                proof only because the rule pair contains it, never on a bare
+#                row.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -1243,6 +1255,10 @@ EOF
     if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
        && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
        && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+      if _fm_composer_separated_glyph_row >/dev/null; then
+        _fm_composer_classify_separated_glyph "$screen" "$styled"
+        return 0
+      fi
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       return 0
     fi
@@ -1264,7 +1280,11 @@ EOF
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)
-      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      if _fm_composer_separated_glyph_row >/dev/null; then
+        _fm_composer_classify_separated_glyph "$screen" "$styled"
+      else
+        _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      fi
       ;;
     box)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
@@ -1354,6 +1374,38 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
   fi
+}
+
+# _fm_composer_separated_glyph_row: the row index of a SHELL prompt glyph that
+# sits strictly INSIDE the scanned separated pair, or failure. This is agy's
+# composer, and it is what lets agy be read WITHOUT an identity capability.
+#
+# Requiring identity for agy was considered and rejected: `identity=1` is
+# supplied only by herdr's `agent get` and tmux's pi-specific
+# foreground-process probe, so an identity-gated agy would read `unknown` on
+# tmux - the reference backend and the only one CI exercises - and on cmux,
+# orca, and zellij. The glyph inside a validated rule pair is already the
+# positive container proof the strict blank-row rule asks for.
+#
+# It does not weaken the dead-shell rule. A shell prompt is a pane's LAST row
+# and nothing draws a rule beneath it, so a dead shell's `>` falls outside any
+# pair; the scan records only the LOWEST shell row, so a shell prompt below a
+# stale agy composer keeps that pane unknown as well.
+_fm_composer_separated_glyph_row() {
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] || return 1
+  [ "$FM_COMPOSER_SCAN_SHELL_ROW" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ] || return 1
+  printf '%s' "$FM_COMPOSER_SCAN_SHELL_ROW"
+}
+
+# _fm_composer_classify_separated_glyph: the agy verdict. The rule pair is the
+# container, so its rows are classified exactly like a bordered box's - the
+# glyph alone reads empty and any surviving text reads pending. ambiguous=0
+# because the caller has already validated the pair.
+_fm_composer_classify_separated_glyph() {  # <screen> <styled>
+  _fm_composer_classify_rows "$1" "$2" 0 \
+    "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))"
 }
 
 # The pi separated-shape verdict: identity + structure conjunction (herdr's

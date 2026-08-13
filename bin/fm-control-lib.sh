@@ -14,7 +14,10 @@
 #
 # This file owns three capability tables plus their pure artifact-path tables
 # and nothing else. It has no side effects, runs no backend command, and reads
-# no state, so it can be sourced by a test as a pure contract:
+# no state, so it can be sourced by a test as a pure contract. Its one include
+# is bin/fm-agy-lib.sh, the single owner of agy's global plugin paths, which is
+# itself side-effect-free on source; naming that registry directory a second
+# time here is exactly the drift the one-owner rule exists to prevent:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -42,6 +45,9 @@
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
 
+# shellcheck source=bin/fm-agy-lib.sh
+. "$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-agy-lib.sh"
+
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
   cat <<'EOF'
@@ -63,7 +69,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy|muse) return 0 ;;
   esac
   return 1
 }
@@ -86,6 +92,7 @@ fm_control_harness_family() {  # <recorded-harness>
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
+    agy*) printf 'agy' ;;
     muse*) printf 'muse' ;;
     *) return 1 ;;
   esac
@@ -93,7 +100,9 @@ fm_control_harness_family() {  # <recorded-harness>
 
 # Which task kinds an adapter is verified to run. muse is a crewmate/scout
 # adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
-# refuses a --secondmate launch on it. The control plane
+# refuses a --secondmate launch on it. agy is NOT in that class - it has
+# docs/supervision-protocols/agy.md and a blocking primary Stop guard
+# (bin/fm-turnend-guard-agy.sh), so it runs every kind. The control plane
 # asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -110,7 +119,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|kimi|cursor|agy|muse) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -121,13 +130,17 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
+    claude|codex|pi|pi-signed|grok|kimi|cursor|agy|muse) printf '1' ;;
     *) return 1 ;;
   esac
 }
 
 # The key that must follow the interrupt key to leave the composer empty, or
-# nothing when the adapter needs none. muse is the one verified adapter that
+# nothing when the adapter needs none. agy was checked the same way cursor was
+# and needs none either: a single Escape cancels the turn, prints
+# `Interrupted · What should Antigravity CLI do instead?`, and leaves the
+# composer showing only its bare `>` prompt (verified, agy 1.1.12).
+# muse is the one verified adapter that
 # RESTORES the cancelled prompt into its composer as real bright text, so an
 # interrupt is not complete until Ctrl+U has cleared it; leaving it there would
 # make the next submitted line - a steer, or this plane's own exit command -
@@ -139,7 +152,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) ;;
     *) return 1 ;;
   esac
 }
@@ -147,11 +160,13 @@ fm_control_interrupt_clear_key() {  # <harness>
 fm_control_interrupt_ack_source() {  # <harness>
   case "${1-}" in
     muse) printf 'muse-session-terminal' ;;
+    # agy fires no hook at all for a manual interrupt, so like claude it
+    # publishes no idle event and this plane claims no cancellation.
     # cursor's transcript DOES type an aborted close, but its write latency
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|agy) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -159,7 +174,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|agy|muse) printf '/exit' ;;
     codex|pi|pi-signed) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -224,12 +239,20 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    agy)
+      # agy's turn-end and busy hooks are one firstmate-owned GLOBAL plugin
+      # gated by this worktree pointer and its private registry entry; the
+      # session sidecar records the conversation and the model agy resolved.
+      printf '%s\n' "$wt/.fm-agy-turnend"
+      printf '%s\n' "$state/$id.agy-turnend-token"
+      printf '%s\n' "$state/$id.agy-session"
+      ;;
   esac
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
-# grok and kimi are the two adapters whose turn-end hook is global and gated by
-# a private token file; every other adapter's wiring is fully covered by
+# grok, kimi, and agy are the adapters whose turn-end hook is global and gated
+# by a private token file; every other adapter's wiring is fully covered by
 # fm_control_harness_wiring_paths. Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
@@ -237,6 +260,7 @@ fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   case "$harness" in
     grok) printf '%s\n' "$state/$id.grok-turnend-token" ;;
     kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
+    agy) printf '%s\n' "$state/$id.agy-turnend-token" ;;
   esac
 }
 
@@ -246,6 +270,7 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
+    agy) printf '%s\n' "$(fm_agy_auth_dir)/$token" ;;
     *) return 0 ;;
   esac
 }
