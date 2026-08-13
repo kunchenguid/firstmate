@@ -57,6 +57,8 @@
 # genuinely answered. It never reopens a hold, never clears a dependency edge, and
 # refuses a hold that is still actively held, so an unanswered decision keeps
 # blocking teardown until `resolve` or `decline` closes it with the captain's word.
+# It also refuses an identity that does not carry surviving captain-hold
+# provenance, so an ordinary captain-kind task cannot be repaired into a decision.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -610,7 +612,7 @@ command_decline() {
 }
 
 command_repair() {
-  local origin=${1:-} key=${2:-} decision_file id body show state kind hold_body
+  local origin=${1:-} key=${2:-} decision_file id body show state kind hold_kind hold_body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   decision_file=$(parse_decision_only_flags "$@") || exit 2
@@ -622,6 +624,12 @@ command_repair() {
   show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
   kind=$(show_field "$show" kind)
   [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
+  # tasks-axi keeps hold_kind after a close, so it is the surviving proof that
+  # this identity really was a captain hold rather than an ordinary captain-kind
+  # task that was never held for the captain at all.
+  hold_kind=$(show_field "$show" hold_kind)
+  [ "$hold_kind" = captain ] \
+    || fail "backlog item $id was never held for the captain; repair records a captain decision only on a captain hold"
   state=$(show_field "$show" state)
   hold_body=$(show_field "$show" body)
   if [ "$state" = "done" ] && body_has_resolution_record "$hold_body"; then

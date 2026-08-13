@@ -737,6 +737,21 @@ test_unanswered_decision_still_blocks_completion_and_teardown() {
     fail "repair invented a resolution for a decision that has no hold"
   fi
 
+  tasks_in "$home" add "$id-decision-never-held" "An ordinary captain-kind task" \
+    --kind captain --repo sample >/dev/null \
+    || fail "could not create the never-held captain-kind fixture"
+  tasks_in "$home" "done" "$id-decision-never-held" >/dev/null \
+    || fail "could not close the never-held captain-kind fixture"
+  if run_decisions "$home" repair "$id" never-held --decision-file "$home/invented-decision.txt" \
+    > "$home/never-held-repair.out" 2> "$home/never-held-repair.err"; then
+    fail "repair turned an ordinary captain-kind task into a resolved captain decision"
+  fi
+  assert_grep "never held for the captain" "$home/never-held-repair.err" \
+    "repair must say the identity carries no captain-hold provenance"
+  show=$(tasks_in "$home" show "$id-decision-never-held" --full)
+  assert_not_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "a refused never-held repair wrote a resolution record"
+
   hold=$(run_decisions "$home" hold "$id" open-choice \
     --title "Choose the sample option" --reason "captain option choice pending" --repo sample) \
     || fail "could not register the unanswered hold"
