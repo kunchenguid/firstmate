@@ -185,11 +185,10 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
 }
 
 test_read_failure_never_silently_returns_empty() {
-  local dir state fakebin statusfile cursor out before_cursor after_cursor
+  local dir state reader statusfile cursor out before_cursor after_cursor
   dir=$(make_case cursor-read-failure)
   state="$dir/state"
-  fakebin="$dir/failbin"
-  mkdir -p "$fakebin"
+  reader="$dir/fail-reader"
   statusfile="$state/task4.status"
   cursor="$state/.task4.open-decisions-cursor"
   out="$dir/drain.out"
@@ -203,20 +202,10 @@ test_read_failure_never_silently_returns_empty() {
   before_cursor=$(LC_ALL=C cksum "$cursor")
 
   printf 'working: more routine content\n' >> "$statusfile"
-  # Fail ONLY the byte-offset content read (`tail -c ...`) that status_open_
-  # decisions_incremental uses to pull new appended bytes; pass every other
-  # drain/guard invocation through to the real tail, so this isolates exactly
-  # the one read path under test.
-  cat > "$fakebin/tail" <<SH
-#!/usr/bin/env bash
-for a in "\$@"; do
-  case "\$a" in -c|-c*) exit 1 ;; esac
-done
-exec "$(command -v tail)" "\$@"
-SH
-  chmod +x "$fakebin/tail"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"
+  chmod +x "$reader"
 
-  FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+  FM_STATE_OVERRIDE="$state" FM_STATUS_SPAN_READER="$reader" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of preserving state after the injected read failure"
   grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
     || fail "the failed read silently hid the previously-open decision: $(command cat "$out")"

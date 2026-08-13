@@ -90,9 +90,9 @@ print_unread_status_section() {
   local snapshot=${1:-} unread task line item_bytes=220 shown=0 source
 
   if [ -n "$snapshot" ]; then
-    unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 0
+    unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
   else
-    unread=$(scan_unread_surface_lines "$STATE") || return 0
+    unread=$(scan_unread_surface_lines "$STATE") || return 1
   fi
   [ -n "$unread" ] || return 0
 
@@ -179,10 +179,14 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot
+  local snapshot cursor_snapshot
   snapshot=$(status_presentation_snapshot "$STATE") || return 0
   [ -n "$snapshot" ] || return 0
-  print_unread_status_section "$snapshot"
+  if ! print_unread_status_section "$snapshot"; then
+    cursor_snapshot=$(status_cursor_snapshot "$STATE" "$snapshot") || return 0
+    print_open_decisions_section "$cursor_snapshot"
+    return 0
+  fi
   print_open_decisions_section "$snapshot"
 }
 

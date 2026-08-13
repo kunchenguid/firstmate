@@ -449,6 +449,26 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
+_fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
+  local f=$1 start=$2 length=$3
+  if [ -n "${FM_STATUS_SPAN_READER:-}" ]; then
+    "$FM_STATUS_SPAN_READER" "$f" "$start" "$length"
+    return
+  fi
+  perl -MFcntl=:DEFAULT -e '
+    my ($path, $start, $length) = @ARGV;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    sysseek($file, $start, 0) == $start or exit 1;
+    while ($length > 0) {
+      my $want = $length > 65536 ? 65536 : $length;
+      my $read = sysread($file, my $chunk, $want);
+      defined($read) && $read > 0 or exit 1;
+      print $chunk or exit 1;
+      $length -= $read;
+    }
+  ' "$f" "$start" "$length"
+}
+
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
@@ -524,18 +544,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    perl -MFcntl=:DEFAULT -e '
-      my ($path, $start, $length) = @ARGV;
-      sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
-      sysseek($file, $start, 0) == $start or exit 1;
-      while ($length > 0) {
-        my $want = $length > 65536 ? 65536 : $length;
-        my $read = sysread($file, my $chunk, $want);
-        defined($read) && $read > 0 or exit 1;
-        print $chunk or exit 1;
-        $length -= $read;
-      }
-    ' "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
@@ -605,6 +614,18 @@ status_presentation_snapshot() {  # <state>
     case "$size" in ''|*[!0-9]*) continue ;; esac
     printf '%s\t%s\n' "$task" "$size"
   done
+}
+
+status_cursor_snapshot() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 task endpoint f offset
+  while IFS=$(printf '\t') read -r task endpoint; do
+    [ -n "$task" ] || continue
+    f="$state/$task.status"
+    offset=$(status_open_decisions_cursor_offset "$f") || return 1
+    printf '%s\t%s\n' "$task" "$offset"
+  done <<EOF
+$snapshot
+EOF
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
@@ -719,19 +740,8 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   [ "$offset" -lt "$size" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
-  perl -MFcntl=:DEFAULT -e '
-    my ($path, $start, $length) = @ARGV;
-    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
-    sysseek($file, $start, 0) == $start or exit 1;
-    while ($length > 0) {
-      my $want = $length > 65536 ? 65536 : $length;
-      my $read = sysread($file, my $chunk, $want);
-      defined($read) && $read > 0 or exit 1;
-      print $chunk or exit 1;
-      $length -= $read;
-    }
-  ' "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$chunk_file"; return 0; }
+  _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file"; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       *[![:space:]]*) printf '%s\n' "$line" ;;
@@ -777,7 +787,7 @@ scan_unread_surface_lines() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    lines=$(status_new_lines_since_cursor "$f") || continue
+    lines=$(status_new_lines_since_cursor "$f") || return 1
     [ -n "$lines" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -795,7 +805,7 @@ scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
   while IFS=$(printf '\t') read -r task endpoint; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    lines=$(status_new_lines_since_cursor "$f" "$endpoint") || continue
+    lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
     [ -n "$lines" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
