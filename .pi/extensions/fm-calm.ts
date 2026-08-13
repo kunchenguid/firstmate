@@ -399,7 +399,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
-    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
+    removeTerminalInputHandler = ctx.ui.onTerminalInput((data): { consume?: boolean; data?: string } | undefined => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return;
 
       const input = ctx.ui.getEditorText().trim();
