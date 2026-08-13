@@ -298,11 +298,12 @@ against a throwaway target, end to end on the merged code:
    captain-private and out of scope for me to edit, but it is the source the code
    comments cited and it is wrong for 1.1.12.
 3. **`tests/fm-wake-queue.test.sh` fails on `main` itself**, not because of this
-   work: "the oversized unread status line was truncated or omitted". Verified by
-   checking out `origin/main` into this worktree and running that test alone - it
-   fails identically there and passes nowhere. It belongs to main's newer unread
-   status-annotation feature, so it is reported rather than absorbed into an agy
-   branch, where a fix would mix concerns and could collide with that feature's
-   owner.
+   work: "the oversized unread status line was truncated or omitted". Verified in
+   a SEPARATE scratch clone checked out at clean `main` (`9823ff8`, zero files
+   differing from `origin/main`), where that test alone still exits 1 with the
+   same assertion. It belongs to main's newer unread status-annotation feature,
+   so on the captain's call it is recorded here and deliberately NOT fixed on
+   this branch, where it would mix concerns and could collide with that
+   feature's owner.
 4. **`fork/fix/agy-effort-dedup`** is superseded - its one commit is the effort
    change A already absorbed as `e556d61`, which this consolidation then replaced.
