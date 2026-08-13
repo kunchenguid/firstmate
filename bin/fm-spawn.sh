@@ -2101,7 +2101,7 @@ spawn_pid_descendants() {  # <root-pid>; bounded depth, root excluded
       [ -z "$child" ] || next="$next $child"
     done
     queue=$next
-    [ -z "$queue" ] || printf '%s\n' $queue
+    [ -z "$queue" ] || printf '%s\n' "$queue"
     depth=$((depth + 1))
   done
 }
