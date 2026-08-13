@@ -95,7 +95,7 @@
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
 #
-# On a Pi primary, the supervision-block step also checks whether Pi's two
+# On a Pi primary, the supervision-block step also checks whether Pi's three
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
 # reminder line when one is missing.
 #
@@ -734,13 +734,16 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_ROUTER_EXT="$FM_ROOT/.pi/extensions/fm-primary-captain-message-router.ts"
   PI_WATCH_MARKER="$STATE/.pi-watch-extension-loaded"
   PI_TURNEND_MARKER="$STATE/.pi-turnend-extension-loaded"
+  PI_ROUTER_MARKER="$STATE/.pi-captain-router-extension-loaded"
   PI_LOCK="$STATE/.lock"
   PI_RESTART_COMMAND=$PRIMARY_HARNESS
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
   PI_WATCH_VERSION=$(fm_pi_extension_version "$PI_EXT" || printf '')
   PI_TURNEND_VERSION=$(fm_pi_extension_version "$PI_TURNEND_EXT" || printf '')
+  PI_ROUTER_VERSION=$(fm_pi_extension_version "$PI_ROUTER_EXT" || printf '')
   if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
-    || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
+    || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK" \
+    || ! fm_pi_extension_loaded "$PI_ROUTER_MARKER" "$PI_ROUTER_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s, %s, and %s auto-load for captain routing, turn-end guard, and background wake coverage; use -e %s -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_ROUTER_EXT" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_ROUTER_EXT"
   fi
 fi

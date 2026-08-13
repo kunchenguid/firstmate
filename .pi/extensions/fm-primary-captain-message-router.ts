@@ -1,5 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,13 +42,8 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const router = `${root}/bin/fm-captain-message-router.sh`;
 const hookLogDir = `${state}/captain-router`;
 const hookLog = `${hookLogDir}/hook.log`;
-
-// Last assistant turn text, captured on agent_end and consumed on agent_settled.
-let lastAssistantText = "";
-// Bounded recent-transcript excerpt, captured on agent_end and handed to the
-// bash owner on the next submit so the router model sees the live conversation.
-// Bash re-bounds and redacts it; these caps only keep the handoff small.
-let recentChatHistory = "";
+const marker = `${state}/.pi-captain-router-extension-loaded`;
+const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const HISTORY_MAX_TURNS = 12;
 const HISTORY_MAX_CHARS = 6000;
 
@@ -56,6 +59,51 @@ function rememberHookNote(note: string): void {
 function sessionArgs(sessionId: string | undefined): string[] {
 	if (!sessionId || !/^[A-Za-z0-9._-]+$/.test(sessionId)) return [];
 	return ["--session-id", sessionId];
+}
+
+type LockOwnership = "owned" | "missing" | "other";
+
+function parentPid(pid: string): string {
+	const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], {
+		encoding: "utf8",
+	});
+	if (result.status !== 0) return "";
+	return String(result.stdout ?? "").trim();
+}
+
+function pidAlive(pid: string): boolean {
+	try {
+		process.kill(Number(pid), 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function lockOwnership(): LockOwnership {
+	let lockPid = "";
+	try {
+		lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+	} catch {
+		return "missing";
+	}
+	if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+	let pid = String(process.pid);
+	for (let i = 0; i < 8; i += 1) {
+		if (pid === lockPid) return "owned";
+		pid = parentPid(pid);
+		if (!pid || pid === "1") break;
+	}
+	return pidAlive(lockPid) ? "other" : "missing";
+}
+
+function markLoaded(): void {
+	try {
+		if (!existsSync(state) || lockOwnership() === "other") return;
+		writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+	} catch {
+		return;
+	}
 }
 
 // Fire-and-forget settle path (anchors + brief refresh). stdout discarded.
@@ -74,7 +122,11 @@ function runRouterSettle(text: string, sessionId?: string): void {
 }
 
 // Synchronous submit path: capture the one verdict line. Always fail-open.
-function runRouterSubmit(text: string, sessionId?: string): string {
+function runRouterSubmit(
+	text: string,
+	sessionId: string | undefined,
+	recentChatHistory: string,
+): string {
 	if (!text.trim()) return "";
 	let historyFile = "";
 	try {
@@ -235,13 +287,35 @@ function newestAssistantText(event: AgentEndEvent): string {
 }
 
 export default function (pi: ExtensionAPI) {
+	let activeSessionId: string | undefined;
+	let sessionBound = false;
+	let lastAssistantText = "";
+	let recentChatHistory = "";
+
+	function bindSession(context: unknown): string | undefined {
+		const sessionId = contextSessionId(context);
+		if (!sessionBound || sessionId !== activeSessionId) {
+			activeSessionId = sessionId;
+			lastAssistantText = "";
+			recentChatHistory = "";
+			sessionBound = true;
+		}
+		return sessionId;
+	}
+
+	pi.on?.("session_start", (_event, context) => {
+		bindSession(context);
+		markLoaded();
+	});
+
 	// Submit side: the raw captain prompt, after expansion, before the agent loop.
 	// Firstmate's own operational injections are not captain messages.
 	pi.on("before_agent_start", (event, context) => {
+		const sessionId = bindSession(context);
 		const prompt = String((event as { prompt?: unknown }).prompt ?? "");
 		if (!prompt.trim()) return;
 		if (classifyFirstmateOperationalText(prompt) !== undefined) return;
-		const stdout = runRouterSubmit(prompt, contextSessionId(context));
+		const stdout = runRouterSubmit(prompt, sessionId, recentChatHistory);
 		const parsed = parseVerdict(stdout);
 		if (!parsed) {
 			if (stdout)
@@ -253,14 +327,18 @@ export default function (pi: ExtensionAPI) {
 		surfaceHandoff(parsed.verdict, parsed.target, parsed.confidence);
 	});
 
-	pi.on("agent_end", (event) => {
+	pi.on("agent_end", (event, context) => {
+		bindSession(context);
 		lastAssistantText = newestAssistantText(event as AgentEndEvent);
 		recentChatHistory = recentTranscript(event as AgentEndEvent);
 	});
 
 	pi.on("agent_settled", (_event, context) => {
+		const sessionId = bindSession(context);
 		const text = lastAssistantText;
 		lastAssistantText = "";
-		runRouterSettle(text, contextSessionId(context));
+		runRouterSettle(text, sessionId);
 	});
+
+	markLoaded();
 }

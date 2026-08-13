@@ -529,10 +529,11 @@ import { mock } from "node:test";
 const ownerCalls = [];
 mock.module("node:child_process", { namedExports: {
   spawn(command, args, options) {
-    ownerCalls.push({ kind: "settle", command, args, options });
+    const call = { kind: "settle", command, args, options, input: "" };
+    ownerCalls.push(call);
     return {
       on() {},
-      stdin: { on() {}, end() {} },
+      stdin: { on() {}, end(input) { call.input = input; } },
     };
   },
   spawnSync(command, args, options) {
@@ -555,27 +556,56 @@ await handlers.get("before_agent_start")(
   { type: "before_agent_start", prompt: "first captain message", sessionId: "wrong-event-id" },
   context("session-alpha"),
 );
-await handlers.get("agent_end")({
-  type: "agent_end",
-  messages: [{ role: "assistant", content: [{ type: "text", text: "Ready?" }] }],
-});
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "alpha ready" }] }],
+  },
+  context("session-alpha"),
+);
 await handlers.get("agent_settled")(
   { type: "agent_settled", sessionId: "wrong-event-id" },
+  context("session-alpha"),
+);
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "stranded alpha" }] }],
+  },
+  context("session-alpha"),
+);
+await handlers.get("agent_settled")(
+  { type: "agent_settled" },
+  context("session-beta"),
+);
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "beta ready" }] }],
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_settled")(
+  { type: "agent_settled" },
   context("session-beta"),
 );
 await handlers.get("before_agent_start")(
   { type: "before_agent_start", prompt: "second captain message" },
   context("session-beta"),
 );
-const calls = ownerCalls.map(({ kind, args, options }) => ({ kind, args, timeout: options?.timeout }));
+const calls = ownerCalls.map(({ kind, args, input, options }) => ({ kind, args, input: input || options?.input, timeout: options?.timeout }));
 console.log(JSON.stringify(calls));
 JS
 	) || status=$?
 	expect_code 0 "$status" "hook context session test exit ($out)"
 	assert_contains "$out" '"args":["--on-submit","--session-id","session-alpha"]' \
 		"the first context session id reaches the submit owner call"
+	assert_contains "$out" '"args":["--on-settle","--session-id","session-alpha"]' \
+		"the first context session id reaches the settle owner call"
 	assert_contains "$out" '"args":["--on-settle","--session-id","session-beta"]' \
-		"the second context session id reaches the settle owner call"
+		"the second context session id reaches its own settle owner call"
+	assert_not_contains "$out" "stranded alpha" \
+		"assistant text captured for one session is not settled as another session"
 	assert_contains "$out" '"args":["--on-submit","--session-id","session-beta","--chat-history-file"' \
 		"distinct context session ids remain distinct across submit calls"
 	assert_not_contains "$out" "wrong-event-id" "event payload session ids are ignored"
@@ -623,6 +653,10 @@ printf '%s\n' "$@" >>"$FM_STATE_OVERRIDE/hook-argv.txt"
 cat >/dev/null
 while [ "$#" -gt 0 ]; do
 	if [ "$1" = --chat-history-file ]; then
+		{
+			printf '%s\n' '--- history ---'
+			cat "$2"
+		} >>"$FM_STATE_OVERRIDE/hook-history-log.txt"
 		cat "$2" >"$FM_STATE_OVERRIDE/hook-history.txt"
 		break
 	fi
@@ -641,20 +675,43 @@ const extension = await import(pathToFileURL(process.env.EXT).href);
 const handlers = new Map();
 extension.default({ on: (event, handler) => handlers.set(event, handler) });
 const say = (role, text) => ({ role, content: [{ type: "text", text }] });
-await handlers.get("agent_end")({
-  type: "agent_end",
-  messages: [
-    say("user", "older captain turn about the exporter"),
-    say("assistant", "assistant reply about the exporter"),
-    say("user", "\u2063FIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now"),
-    say("assistant", "newest assistant question?"),
-  ],
-});
-await handlers.get("before_agent_start")({
-  type: "before_agent_start",
-  prompt: "the captain reply that must be classified",
-  sessionId: "primary",
-});
+const context = (id) => ({ sessionManager: { getSessionId: () => id } });
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [
+      say("user", "session alpha captain history"),
+      say("assistant", "session alpha assistant history"),
+    ],
+  },
+  context("session-alpha"),
+);
+await handlers.get("before_agent_start")(
+  {
+    type: "before_agent_start",
+    prompt: "first session beta captain turn",
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [
+      say("user", "older captain turn about the exporter"),
+      say("assistant", "assistant reply about the exporter"),
+      say("user", "\u2063FIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now"),
+      say("assistant", "newest assistant question?"),
+    ],
+  },
+  context("session-beta"),
+);
+await handlers.get("before_agent_start")(
+  {
+    type: "before_agent_start",
+    prompt: "second session beta captain turn",
+  },
+  context("session-beta"),
+);
 console.log("hook-ok");
 JS
 	) || status=$?
@@ -667,9 +724,17 @@ JS
 		"the excerpt carries the recent captain turns"
 	assert_grep "assistant reply about the exporter" "$fixture/state/hook-history.txt" \
 		"the excerpt carries the recent assistant turns"
+	assert_no_grep "session alpha" "$fixture/state/hook-history.txt" \
+		"a replacement session never receives the previous session transcript"
+	assert_no_grep "session alpha" "$fixture/state/hook-history-log.txt" \
+		"no owner call for a replacement session receives the previous transcript"
 	assert_no_grep "FIRSTMATE_OP" "$fixture/state/hook-history.txt" \
 		"the hook drops Firstmate operational injections from the excerpt"
-	pass "router: the Pi hook threads a bounded, injection-free transcript to the owner"
+	assert_present "$fixture/state/.pi-captain-router-extension-loaded" \
+		"the router extension writes its versioned loaded marker"
+	assert_grep "sha256:" "$fixture/state/.pi-captain-router-extension-loaded" \
+		"the router loaded marker carries the extension version"
+	pass "router: the Pi hook keeps bounded history within its context session"
 }
 
 test_inert_in_child_worktree() {
