@@ -250,24 +250,34 @@ retire_exact() { # <sidecar> <task-id> [<metadata-present>]
   sidecar_snapshot "$sidecar" "$id" && rm -f -- "$sidecar"
 }
 
-retire() { # <task-id>
-  local id=$1 sidecar="$STATE/$1$FM_HERDR_NM_OBSERVER_SUFFIX" task_lock session_lock meta_present=0
+retire() { # <task-id> [<held-task-lock-pid> <held-task-lock-identity>]
+  local id=$1 sidecar="$STATE/$1$FM_HERDR_NM_OBSERVER_SUFFIX" task_lock session_lock meta_present=0 lock_pid=${2:-} lock_identity=${3:-} acquired_task_lock=0
   fm_task_id_creation_valid "$id" || return 0
   [ -f "$sidecar" ] && [ ! -L "$sidecar" ] || return 0
   sidecar_snapshot "$sidecar" "$id" || { warn "$id sidecar is unreadable; preserving it"; return 0; }
   task_lock="$STATE/.spawn-$id.lock"
-  fm_lock_try_acquire "$task_lock" || return 0
+  if [ -n "$lock_pid$lock_identity" ]; then
+    case "$lock_pid" in ''|*[!0-9]*) return 0 ;; esac
+    [ -n "$lock_identity" ] \
+      && [ "$(cat "$task_lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+      && [ "$(cat "$task_lock/pid-identity" 2>/dev/null || true)" = "$lock_identity" ] \
+      && [ "$(fm_pid_identity "$lock_pid" 2>/dev/null || true)" = "$lock_identity" ] \
+      || return 0
+  else
+    fm_lock_try_acquire "$task_lock" || return 0
+    acquired_task_lock=1
+  fi
   session_lock=$(fm_backend_herdr_presentation_session_lock_path "$OBS_SESSION" 2>/dev/null) || {
-    fm_lock_release "$task_lock" || true; return 0;
+    [ "$acquired_task_lock" = 1 ] && fm_lock_release "$task_lock" || true; return 0;
   }
   if ! fm_lock_try_acquire "$session_lock"; then
-    fm_lock_release "$task_lock" || true
+    [ "$acquired_task_lock" = 1 ] && fm_lock_release "$task_lock" || true
     return 0
   fi
   [ -f "$STATE/$id.meta" ] && meta_present=1
   retire_exact "$sidecar" "$id" "$meta_present"
   fm_lock_release "$session_lock" || true
-  fm_lock_release "$task_lock" || true
+  [ "$acquired_task_lock" = 1 ] && fm_lock_release "$task_lock" || true
 }
 
 reconcile() { # <task-id>
@@ -285,6 +295,10 @@ reconcile() { # <task-id>
     # Metadata disappearance may be part of normal cleanup.  The sidecar alone
     # is enough to identify its observer, but never to close a malformed one.
     [ -e "$sidecar" ] || [ -L "$sidecar" ] || return 0
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      warn "$id task metadata is unreadable or conflicting; preserving sidecar"
+      return 0
+    fi
     sidecar_snapshot "$sidecar" "$id" || { warn "$id sidecar is unreadable; preserving it"; return 0; }
     session_lock=$(fm_backend_herdr_presentation_session_lock_path "$OBS_SESSION" 2>/dev/null) || return 0
     fm_lock_try_acquire "$session_lock" || return 0
@@ -340,5 +354,6 @@ reconcile() { # <task-id>
 case "${1:-}" in
   reconcile) [ -n "${2:-}" ] || { usage; exit 2; }; reconcile "$2" ;;
   retire)    [ -n "${2:-}" ] || { usage; exit 2; }; retire "$2" ;;
+  retire-locked) [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || { usage; exit 2; }; retire "$2" "$3" "$4" ;;
   *) usage; exit 2 ;;
 esac

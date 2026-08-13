@@ -127,6 +127,13 @@ run_observer reconcile task || fail 'repeat observer reconcile failed'
 [ "$(pane_count)" = 2 ] || fail 'repeat ensure created a duplicate observer'
 pass 'observer creation is idempotent for the complete live binding'
 
+sed -i.bak 's/^backend=.*/backend=tmux/' "$STATE/task.meta" && rm -f "$STATE/task.meta.bak"
+run_observer reconcile task || fail 'conflicting metadata observer reconcile failed'
+[ "$(pane_count)" = 2 ] || fail 'conflicting metadata authorized observer closure'
+[ -f "$sidecar" ] || fail 'conflicting metadata retired the observer sidecar'
+sed -i.bak 's/^backend=.*/backend=herdr/' "$STATE/task.meta" && rm -f "$STATE/task.meta.bak"
+pass 'conflicting metadata preserves the exact observer sidecar and pane'
+
 sed -i.bak 's/^run_id=.*/run_id=old-run/' "$sidecar" && rm -f "$sidecar.bak"
 run_observer reconcile task || fail 'stale observer reconcile failed'
 [ "$(pane_count)" = 2 ] || fail 'stale sidecar authorized a duplicate observer'

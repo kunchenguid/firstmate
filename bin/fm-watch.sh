@@ -264,6 +264,13 @@ recorded_windows() {
   done
 }
 
+reconcile_no_mistakes_observer() {  # <task-id>
+  local task=$1 observer_bin
+  [ -n "$task" ] || return 0
+  observer_bin=${FM_HERDR_NM_OBSERVER_BIN:-$SCRIPT_DIR/fm-herdr-no-mistakes-observer.sh}
+  [ -x "$observer_bin" ] && "$observer_bin" reconcile "$task" >/dev/null 2>&1 || true
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -1007,6 +1014,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    reconcile_no_mistakes_observer "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
