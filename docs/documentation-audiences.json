@@ -109,6 +109,26 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/afk-app/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk-jira-research/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk-obsidian-projects/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk-research/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk-session-review/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -118,6 +138,10 @@
     },
     {
       "path": ".agents/skills/ask-user-authority/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/autonomous-run-engine/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -215,6 +239,10 @@
     {
       "path": "docs/arm-pretool-check.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/autonomous-runs.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/calm-mode-feasibility.md",

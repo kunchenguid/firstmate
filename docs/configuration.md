@@ -126,6 +126,23 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Autonomous-run lanes and quota policy (config/run-lanes.conf / config/run-governor.conf)
+
+The `/afk-*` autonomous modes run behind one engine whose contract is owned by [`autonomous-runs.md`](autonomous-runs.md); `bin/fm-run.sh` and `bin/fm-run-governor.sh` own their exact commands and flags.
+Both configuration files are local, gitignored, and read fresh on every command.
+
+`config/run-lanes.conf` registers account lanes, one record per line: `<lane> <personal|company> <config-root>`, with `#` starting a comment.
+A lane is never derived from a model, harness, or path name, so an unregistered lane is a preflight blocker naming the missing registration rather than a guess.
+`company-claude` and `personal-claude` carry built-in defaults pointing at `~/.claude` and `~/.claude-personal`; every other lane, including the Codex lanes, must be registered before a run may use it.
+A run refuses any read into another registered lane's configuration root, which is the mechanical half of keeping each account's material on its own lane.
+
+`config/run-governor.conf` sets per-lane quota policy, one record per line: `<lane> <provider> [scope=<scope>] [floor=<percent>] [day-budget=<percentage-points>]`.
+Built-in defaults cover the four named lanes, giving `company-codex` the stricter 65% remaining floor and both company lanes the 15 percentage-point per-local-day consumption budget that applies from 2026-08-14 in Europe/Budapest.
+`FM_GOV_NO_NEW_LARGE`, `FM_GOV_CHECKPOINT_ONLY`, `FM_GOV_EMERGENCY`, `FM_GOV_HYSTERESIS`, `FM_GOV_DAY_BUDGET_FROM`, and `FM_GOV_TZ` override the compiled defaults for a retuned policy or a test.
+Day baselines, the last reading, the previous class used for the dead-band, and per-day overrides live under `state/run-governor/`.
+
+Run records live under `data/runs/<run-id>/`, holding the frozen manifest and its freeze-time hash, the engine and custody state, the append-only receipt log, the run's evidence directory, and its checkpoints.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
