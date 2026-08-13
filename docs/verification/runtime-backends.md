@@ -233,7 +233,8 @@ So a returned pool slot kept a retired secondmate's identity, and the next ship 
 The residue is created by the home lifecycle, so it is cleared by the home lifecycle: `bin/fm-home-return-lib.sh` stages those artifacts aside after every ownership and safety check has passed and while the lease is still held, returns the checkout, and deletes the staging only once the return succeeded.
 Both lifecycle paths that hand a leased home back call it - retirement in `bin/fm-teardown.sh` and failed-seed rollback in `bin/fm-home-seed.sh` - so neither can return a marked slot.
 What counts as a retirable home is one boundary shared by the pooled and the standalone path, `validate_firstmate_operational_dirs_for_removal`, and the pooled path adds no rule of its own.
-It stages exactly what removing the home outright would have removed: every link entry, plus an operational directory's resolved target whenever that target lives inside the home, folded into whichever owned path already contains it.
+It stages exactly what removing the home outright would have removed: every link entry, plus that link's resolved target whenever the target lives inside the home, folded into whichever owned path already contains it.
+That covers an identity file's target as much as an operational directory's, and a target outside the home is never followed, which is also what removing the home would have left alone.
 A target that escapes the home, dangles, resolves nowhere, or is the home itself is refused on both paths by that one validator, and a refusal on the pooled path never releases the lease, so nothing is handed back half cleared.
 
 ```sh
@@ -261,7 +262,8 @@ The next-lease case caps that pool at one tree and compares the leased path, and
 The two seed cases drive the real seeder against the real pool and fail it at a command it reaches only after both markers are on disk, which is the sibling path that returns a leased home without retiring it; the successful one was run against the unfixed rollback first, where the marker survived and went back to the pool.
 The failed-return cases on both paths drive a treehouse whose `return` fails and assert that the home gets its identity, its contents, and its registration back, matching the existing contract that a home whose lease cannot be released is preserved rather than half cleared.
 The two parity cases drive each layout through the pooled path and through the standalone path where the home is a plain directory, so neither can quietly hold a different opinion about which homes are retirable.
-Symlinked operational directories, a target nested under another owned path, and a symlinked identity marker retire on both; an escaping target, a dangling link, a link that resolves nowhere, and a target that is the home itself refuse on both with the same reason.
+Symlinked operational directories, a target nested under another owned path, a target whose name carries a space and a glob character, and a symlinked identity marker retire on both, and each retired case asserts the resolved target came off the returned checkout rather than only the link that named it.
+An escaping target, a dangling link, a link that resolves nowhere, and a target that is the home itself refuse on both with the same reason.
 
 ## Composer classification matrix
 

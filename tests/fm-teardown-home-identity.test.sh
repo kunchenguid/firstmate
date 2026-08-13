@@ -132,8 +132,12 @@ make_pool_case() {
   printf 'throwaway firstmate home material\n' > "$CASE_REPO/AGENTS.md"
   printf '#!/usr/bin/env bash\n' > "$CASE_REPO/bin/placeholder.sh"
   # A real firstmate checkout gitignores exactly these, which is why the pool's
-  # clean-and-reset cannot remove them and retirement has to.
+  # clean-and-reset cannot remove them and retirement has to. The parity layouts'
+  # symlink targets are ignored for the same reason: an untracked target would be
+  # swept by the pool's own clean, and then a case asserting the target came off
+  # the returned checkout would pass whether or not staging ever took it.
   printf '%s\n' 'data/' 'state/' 'config/' 'projects/' "$MARKER" "$PARENT_MARKER" 'treehouse.toml' \
+    'internal-data' 'internal-config' 'internal-projects' 'identity-store' 'my store*co' \
     > "$CASE_REPO/.gitignore"
   # The pool sits inside this case's throwaway tree but OUTSIDE the repository,
   # which is where a real fleet keeps it: a home under FM_ROOT is refused as a
@@ -380,8 +384,12 @@ test_failed_return_restores_the_home() {
 # plain-directory path removes without complaint.
 #
 # build_parity_home <home> <id> <layout>: a seeded home wearing one layout.
+# PARITY_TARGETS collects the home-relative paths that layout owns beyond the
+# fixed artifact names, so a retired case can prove the resolved targets came off
+# the returned checkout rather than only the links that pointed at them.
 build_parity_home() {
   local home=$1 id=$2 layout=$3 opdir
+  PARITY_TARGETS=""
   seed_pool_home "$home" "$id"
   case "$layout" in
     internal-symlink)
@@ -390,6 +398,8 @@ build_parity_home() {
         mkdir -p "$home/internal-$opdir"
         printf 'owned %s\n' "$opdir" > "$home/internal-$opdir/keep.md"
         ln -s "$home/internal-$opdir" "$home/$opdir"
+        PARITY_TARGETS="$PARITY_TARGETS
+internal-$opdir"
       done
       ;;
     nested-owned-target)
@@ -397,11 +407,28 @@ build_parity_home() {
       mkdir -p "$home/data/projects-store"
       printf 'nested under another owned path\n' > "$home/data/projects-store/keep.md"
       ln -s "$home/data/projects-store" "$home/projects"
+      PARITY_TARGETS="
+data/projects-store"
+      ;;
+    # A resolved target whose name carries a space and a glob character. Nothing
+    # about the layout is unusual to the removable-home contract, but an
+    # inventory that word-split or glob-expanded its own entries would invent a
+    # path that does not exist, fail staging, and strand the lease on the pooled
+    # path while the standalone path removed the same home without complaint.
+    shell-hostile-target)
+      rm -rf "${home:?}/projects"
+      mkdir -p "$home/my store*co"
+      printf 'owned through an awkward name\n' > "$home/my store*co/keep.md"
+      ln -s "$home/my store*co" "$home/projects"
+      PARITY_TARGETS="
+my store*co"
       ;;
     symlinked-marker)
       rm -f "${home:?}/$MARKER"
       printf '%s\n' "$id" > "$home/identity-store"
       ln -s "$home/identity-store" "$home/$MARKER"
+      PARITY_TARGETS="
+identity-store"
       ;;
     escaping-target)
       rm -rf "${home:?}/data"
@@ -428,7 +455,7 @@ build_parity_home() {
 # run_parity_layout <layout> retired|refused [<shared-refusal-reason>]
 run_parity_layout() {
   local layout=$1 expect=$2 reason=${3:-}
-  local pooled_id standalone_id pooled standalone out status
+  local pooled_id standalone_id pooled standalone out status target pooled_targets
   make_pool_case "parity-$layout" 2
   pooled_id="parity-pooled-$layout"
   standalone_id="parity-alone-$layout"
@@ -436,6 +463,7 @@ run_parity_layout() {
   standalone="$CASE_DIR/standalone-home"
   mkdir -p "$standalone"
   build_parity_home "$pooled" "$pooled_id" "$layout"
+  pooled_targets=$PARITY_TARGETS
   build_parity_home "$standalone" "$standalone_id" "$layout"
 
   register_secondmate "$pooled_id" "$pooled"
@@ -444,6 +472,17 @@ run_parity_layout() {
   if [ "$expect" = retired ]; then
     expect_code 0 "$status" "the pooled path refused the $layout layout"$'\n'"--- output ---"$'\n'"$out"
     assert_home_identity_cleared "$pooled" "the pooled $layout retirement left identity on the returned checkout"
+    # The links coming off is only half of it: whatever they resolved to inside
+    # the home has to come off too, or the next lease inherits the retired
+    # secondmate's own content under another name.
+    while IFS= read -r target; do
+      [ -n "$target" ] || continue
+      if [ -e "$pooled/$target" ] || [ -L "$pooled/$target" ]; then
+        fail "the pooled $layout retirement left the resolved target $target on the returned checkout"
+      fi
+    done <<EOF
+$pooled_targets
+EOF
     assert_no_identity_staging "the pooled $layout retirement left its staging behind"
   else
     [ "$status" -ne 0 ] || fail "the pooled path retired the $layout layout"$'\n'"--- output ---"$'\n'"$out"
@@ -465,13 +504,16 @@ run_parity_layout() {
   fi
 }
 
-# The supported layouts: both paths retire them. An operational directory
-# symlinked inside the home, including a target nested under another owned path,
-# and an identity marker that is a link to a regular file, which the standalone
-# gate accepts because its test follows links.
+# The supported layouts: both paths retire them, and the pooled path takes each
+# resolved in-home target with the link that named it. An operational directory
+# symlinked inside the home, a target nested under another owned path, a target
+# whose name is hostile to shell splitting, and an identity marker that is a link
+# to a regular file, which the standalone gate accepts because its test follows
+# links.
 test_supported_layouts_retire_on_both_paths() {
   run_parity_layout internal-symlink retired
   run_parity_layout nested-owned-target retired
+  run_parity_layout shell-hostile-target retired
   run_parity_layout symlinked-marker retired
   pass "supported home layouts retire through the pooled and the standalone path alike"
 }

@@ -106,59 +106,99 @@ fm_home_identity_artifacts() {
   printf '%s\n' "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER" data state config projects
 }
 
-# Every path inside <home> this retirement owns, one home-relative path per line.
+# The physically resolved target of a symlink, following its chain without
+# guessing: a directory target resolves through `cd -P`, a file target through
+# its own parent directory, and a chain that will not terminate within a bounded
+# number of hops is an ambiguous resolution reported as failure rather than
+# followed further.
+fm_home_resolved_link_target() {  # <link-path>
+  local path=$1 hops=0 link dir
+  while [ -L "$path" ]; do
+    hops=$(( hops + 1 ))
+    [ "$hops" -le 32 ] || return 1
+    link=$(readlink "$path") || return 1
+    case "$link" in
+      /*) path=$link ;;
+      *) path="$(dirname "$path")/$link" ;;
+    esac
+  done
+  if [ -d "$path" ]; then
+    ( cd "$path" 2>/dev/null && pwd -P ) || return 1
+    return 0
+  fi
+  [ -e "$path" ] || return 1
+  dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$path")"
+}
+
+# Every path inside <home> this retirement owns, one home-relative path per line,
+# which is the format fm_home_identity_stage and fm_home_identity_restore consume.
 # The rule is exactly what removing the home directory outright would have taken,
-# so a pooled home and a standalone one answer the same question the same way:
-# a link entry itself always counts, and an operational directory's resolved
-# target counts too whenever it lives inside the home, since removing the home
-# would have taken that target with it.
+# so a pooled home and a standalone one answer the same question the same way: a
+# link entry itself always counts, and a resolved target counts too whenever it
+# lives inside the home, since removing the home would have taken that target
+# with it. That holds for an identity file's target as much as an operational
+# directory's; a target outside the home is never followed, which is also what
+# removing the home would have done to it.
 # A symlinked operational directory is therefore staged THROUGH its resolved
 # target rather than refused, which is the layout
-# validate_firstmate_operational_dirs_for_removal already approves. A resolved
-# target that escapes the home, dangles, cannot be resolved (a cycle resolves
-# nowhere), or is the home itself is refused by that same validator before this
-# runs, and refused again here because an unresolvable target cannot be staged.
-# Targets that nest inside another owned path are folded into it rather than
-# staged twice, so an internal layout is never rejected merely for being spelled
-# as a link, and an identity FILE is staged as the link it is: following it to
-# decide what else to delete is the ambiguity this refuses to guess at, and
-# removing the home would not have followed it either.
+# validate_firstmate_operational_dirs_for_removal already approves. Such a target
+# that escapes the home, dangles, resolves nowhere, or is the home itself is
+# refused by that same validator before this runs, and refused again here because
+# an unresolvable target cannot be staged. Targets that nest inside another owned
+# path are folded into it rather than staged twice, so an internal layout is
+# never rejected merely for being spelled as a link.
 fm_home_identity_inventory() {  # <abs-home> <label>
-  local home=$1 label=$2 name path target rel owned="" printed="" entry keep
-  for name in $(fm_home_identity_artifacts); do
+  local home=$1 label=$2 name path target rel owned="" printed="" entry keep identity
+  local nl='
+'
+  printed="$nl"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
     path="$home/$name"
     { [ -e "$path" ] || [ -L "$path" ]; } || continue
-    owned="$owned $name"
+    owned="$owned$name$nl"
     [ -L "$path" ] || continue
+    identity=0
     case "$name" in
-      "$SUB_HOME_MARKER"|"$SUB_HOME_PARENT_MARKER") continue ;;
+      "$SUB_HOME_MARKER"|"$SUB_HOME_PARENT_MARKER") identity=1 ;;
     esac
-    target=$(cd "$path" 2>/dev/null && pwd -P) || {
+    if ! target=$(fm_home_resolved_link_target "$path"); then
+      [ "$identity" -eq 0 ] || continue
       echo "REFUSED: $label operational path $path could not be resolved, so retirement cannot tell what clearing it would remove" >&2
       return 1
-    }
+    fi
     if [ "$target" = "$home" ] || ! path_is_ancestor_of "$home" "$target"; then
+      [ "$identity" -eq 0 ] || continue
       echo "REFUSED: $label operational path $path resolves to $target, which is not inside the secondmate home" >&2
       return 1
     fi
-    owned="$owned ${target#"$home"/}"
-  done
-  for rel in $owned; do
+    owned="$owned${target#"$home"/}$nl"
+  done <<EOF
+$(fm_home_identity_artifacts)
+EOF
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
     keep=1
-    for entry in $owned; do
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
       [ "$entry" != "$rel" ] || continue
       if path_is_ancestor_of "$entry" "$rel"; then
         keep=0
         break
       fi
-    done
+    done <<EOF
+$owned
+EOF
     [ "$keep" -eq 1 ] || continue
-    case " $printed " in
-      *" $rel "*) continue ;;
+    case "$printed" in
+      *"$nl$rel$nl"*) continue ;;
     esac
-    printed="$printed $rel"
+    printed="$printed$rel$nl"
     printf '%s\n' "$rel"
-  done
+  done <<EOF
+$owned
+EOF
 }
 
 # Move the owned paths aside into a private staging directory, echoing that
