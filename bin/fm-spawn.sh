@@ -1279,7 +1279,7 @@ raw_launch_uses_omp_fallback() {
 }
 
 raw_launch_needs_policy_runtime() {
-  local launch=$1 word first= canonical token i n
+  local launch=$1 word first= canonical wrapper token target i n
   for word in $launch; do
     case "$word" in
       [A-Za-z_]*=*) continue ;;
@@ -1290,6 +1290,7 @@ raw_launch_needs_policy_runtime() {
     omp) return 0 ;;
   esac
   canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
+  wrapper="$(dirname "$canonical")/start-omp.sh"
   local -a words=()
   read -r -a words <<< "$launch"
   n=${#words[@]}
@@ -1327,6 +1328,25 @@ raw_launch_needs_policy_runtime() {
         done
         continue
       ;;
+      bash|*/bash|sh|*/sh|zsh|*/zsh)
+        target=
+        if [ "${words[$((i + 1))]:-}" = '<' ]; then
+          target=${words[$((i + 2))]:-}
+        elif [ "${words[$((i + 1))]:-}" = '--' ]; then
+          target=${words[$((i + 2))]:-}
+        else
+          target=${words[$((i + 1))]:-}
+        fi
+        if [ "$target" = "$wrapper" ] && [ -f "$wrapper" ] && [ -x "$wrapper" ]; then
+          return 0
+        fi
+        ;;
+      source|.)
+        target=${words[$((i + 1))]:-}
+        if [ "$target" = "$wrapper" ] && [ -f "$wrapper" ] && [ -x "$wrapper" ]; then
+          return 0
+        fi
+        ;;
     esac
     case "$token" in
       "$canonical"|omp|./omp|start-omp.sh) return 0 ;;
@@ -3035,26 +3055,40 @@ const adoptCurrentRun = () => {
     runToken = "";
     return "";
   }
+  let durableForMemory: any = null;
   if (runToken) {
-    if (!runRecords.some((record) => record.active && record.token === runToken)) return runToken;
-    const persisted = persistedRuns();
-    if (!persisted || "blocked" in persisted || persisted.token !== runToken ||
-        persisted.finalizing.length > 0 ||
-        !persisted.pending.some((record: any) => record.token === runToken)) {
+    const inMemoryRecord = runRecords.find((record) => record.token === runToken);
+    durableForMemory = persistedRuns();
+    if (durableForMemory && "blocked" in durableForMemory) {
       recoveryBlocked = true;
       runToken = "";
       return "";
     }
-    try {
-      applyPersistedState(persisted);
-    } catch {
+    if (inMemoryRecord?.active) {
+      if (!durableForMemory || durableForMemory.token !== runToken ||
+          durableForMemory.finalizing.length > 0 ||
+          !durableForMemory.pending.some((record: any) => record.token === runToken)) {
+        recoveryBlocked = true;
+        runToken = "";
+        return "";
+      }
+      try {
+        applyPersistedState(durableForMemory);
+      } catch {
+        recoveryBlocked = true;
+        runToken = "";
+        return "";
+      }
+      return runToken;
+    }
+    if (durableForMemory?.token === runToken && durableForMemory.pending.length > 0) {
       recoveryBlocked = true;
       runToken = "";
       return "";
     }
-    return runToken;
+    runToken = "";
   }
-  const persisted = persistedRuns();
+  const persisted = durableForMemory || persistedRuns();
   if (!persisted) return "";
   if ("blocked" in persisted) {
     recoveryBlocked = true;

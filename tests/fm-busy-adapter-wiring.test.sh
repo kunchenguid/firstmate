@@ -298,6 +298,21 @@ switch (process.env.MODE) {
     if (!busyState().includes("state=busy")) throw new Error("malformed durable state did not remain busy");
     break;
   }
+  case "persistent-inactive-durable-state-validation": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    const turnEndPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".turn-ended";
+    await fire("agent_start");
+    await fire("agent_end");
+    writeFileSync(runPath, "malformed-run-token\n");
+    removeMarker(turnEndPath);
+    await fire("agent_start");
+    if (readFileSync(runPath, "utf8").trim() !== "malformed-run-token") {
+      throw new Error("an inactive in-memory run bypassed malformed durable state");
+    }
+    if (markerPresent(turnEndPath)) throw new Error("malformed durable state after settlement published turn-end evidence");
+    if (!busyState().includes("state=idle")) throw new Error("malformed durable state after settlement did not remain idle");
+    break;
+  }
   case "agent-end": await fire("agent_end"); break;
   case "agent-end-continuation":
     await fire("agent_start");
@@ -1193,6 +1208,22 @@ test_omp_extension_validates_durable_state_before_in_memory_rotation() {
   pass "omp validates durable state before an in-memory token can rotate"
 }
 
+test_omp_extension_validates_inactive_durable_state_before_rotation() {
+  local rec id=busy-omp-inactive-recovery-blocked out state ext
+  rec=$(make_spawn_case omp-inactive-recovery-blocked omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp inactive recovery-blocked spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" persistent-inactive-durable-state-validation "$state" "$id") \
+    || fail "inactive durable-state validation drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] \
+    || fail "inactive durable corruption changed the settled state, got '$out'"
+  pass "omp validates durable state before reusing an inactive in-memory run"
+}
+
 test_omp_extension_rejects_state_marker_symlinks() {
   local rec id=busy-omp-state-symlinks out state ext
   rec=$(make_spawn_case omp-state-symlinks omp "$id")
@@ -1514,6 +1545,7 @@ test_omp_extension_retires_busy_finalizing_before_new_run
 test_omp_extension_repairs_stopped_pointer_before_pending_run
 test_omp_extension_blocks_rotation_after_rejected_durable_state
 test_omp_extension_validates_durable_state_before_in_memory_rotation
+test_omp_extension_validates_inactive_durable_state_before_rotation
 test_omp_extension_rejects_state_marker_symlinks
 test_omp_extension_uses_incarnation_unique_marker_temps
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps

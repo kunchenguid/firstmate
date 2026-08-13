@@ -942,6 +942,7 @@ SH
 test_raw_launch_marker_covers_process_tree_forms() {
   local rec id out status launch raw_omp script sub probe command expected_harness raw_owner
   local direct_id wrapped_id nested_id script_id stdin_id env_id cwd_id no_node_id no_node_env_id
+  local no_node_shell_id no_node_redirect_id no_node_source_id canonical_wrapper
   direct_id=profile-raw-marker-direct-z8h
   wrapped_id=profile-raw-marker-wrapped-z8i
   nested_id=profile-raw-marker-nested-z8j
@@ -951,7 +952,10 @@ test_raw_launch_marker_covers_process_tree_forms() {
   cwd_id=profile-raw-marker-cwd-z8n
   no_node_id=profile-raw-marker-no-node-z8o
   no_node_env_id=profile-raw-marker-no-node-env-z8p
-  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id" "$no_node_env_id")
+  no_node_shell_id=profile-raw-marker-no-node-shell-z8q
+  no_node_redirect_id=profile-raw-marker-no-node-redirect-z8r
+  no_node_source_id=profile-raw-marker-no-node-source-z8s
+  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id" "$no_node_env_id" "$no_node_shell_id" "$no_node_redirect_id" "$no_node_source_id")
   read_case_record "$rec"
   raw_omp="$FAKEBIN_DIR/omp"
   script="$CASE_DIR/start-omp.sh"
@@ -964,6 +968,9 @@ test_raw_launch_marker_covers_process_tree_forms() {
 printf '%s|%s\n' "\${FM_HARNESS_UNVERIFIED:-unset}" "\${FM_RAW_LAUNCH_OWNER:-unset}" > "$probe"
 SH
   chmod +x "$raw_omp"
+  canonical_wrapper="$FAKEBIN_DIR/start-omp.sh"
+  printf '%s\n' '#!/usr/bin/env bash' "exec $raw_omp --raw-flag" > "$canonical_wrapper"
+  chmod +x "$canonical_wrapper"
   printf '%s\n' '#!/usr/bin/env bash' "exec $raw_omp --raw-flag" > "$script"
   chmod +x "$script"
 
@@ -1003,7 +1010,21 @@ SH
   expect_code 1 "$?" "a dispatcher-based raw OMP launch must not pretend ownership without Node.js"
   assert_contains "$out" "requires Node.js" "runtime-free dispatcher refusal did not identify the missing policy runtime"
   assert_absent "$HOME_DIR/state/$no_node_env_id.meta" "runtime-free dispatcher refusal wrote task metadata"
-  pass "raw launch ownership remains conservative when dispatcher validation lacks Node.js"
+  for spec in \
+    "bash $canonical_wrapper|$no_node_shell_id" \
+    "bash < $canonical_wrapper|$no_node_redirect_id" \
+    "source $canonical_wrapper|$no_node_source_id"; do
+    IFS='|' read -r command id <<< "$spec"
+    PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn \
+      "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    expect_code 1 "$?" "shell-dispatched OMP '$command' must require policy validation without Node.js"
+    assert_contains "$out" "requires Node.js" \
+      "shell-dispatched OMP refusal did not identify the missing policy runtime"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "shell-dispatched OMP wrote task metadata without policy validation"
+  done
+  pass "raw launch ownership remains conservative when dispatcher or shell validation lacks Node.js"
 }
 
 test_no_node_rejects_bare_omp_decoy() {

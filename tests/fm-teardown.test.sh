@@ -1341,7 +1341,7 @@ test_teardown_removes_per_task_adapter_extensions() {
   printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
     > "$case_dir/state/task-x1.omp-session-evidence.owner"
   mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
-  printf 'g1.test 1 1 0\n' > "$case_dir/state/task-x1.omp-session-evidence/g1.test"
+  printf 'g1.123.1000.1 1000 1000 0\n' > "$case_dir/state/task-x1.omp-session-evidence/g1.123.1000.1"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1383,6 +1383,29 @@ test_teardown_preserves_foreign_omp_evidence_collision() {
   assert_present "$case_dir/wt" \
     "omp-evidence-collision: teardown removed the worktree before validating evidence"
   pass "teardown refuses and preserves foreign OMP evidence collisions"
+}
+
+test_teardown_preserves_unrecognized_owned_omp_evidence() {
+  local case_dir rc
+  case_dir=$(make_case omp-unrecognized-evidence)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
+  printf 'foreign\n' > "$case_dir/state/task-x1.omp-session-evidence/foreign"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "omp-unrecognized-evidence: teardown must refuse malformed owned evidence"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "omp-unrecognized-evidence: teardown removed task metadata after refusing evidence"
+  assert_present "$case_dir/state/task-x1.omp-session-evidence/foreign" \
+    "omp-unrecognized-evidence: teardown removed malformed evidence"
+  pass "teardown refuses and preserves unrecognized owned OMP evidence"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2661,6 +2684,7 @@ test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_teardown_removes_per_task_adapter_extensions
 test_teardown_preserves_foreign_omp_evidence_collision
+test_teardown_preserves_unrecognized_owned_omp_evidence
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
