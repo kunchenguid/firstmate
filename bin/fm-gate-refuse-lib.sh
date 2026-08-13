@@ -62,6 +62,7 @@
 # fm-report-retention.sh, fm-report-stack.mjs, fm-review-diff.sh, fm-send.sh,
 # fm-session-start.sh, fm-spawn.sh, fm-supervise-daemon.sh,
 # fm-task-file-append.mjs, fm-teardown.sh, fm-update.sh, fm-wake-drain.sh,
+# fm-worker-lifecycle.sh,
 # fm-watch-arm.sh, fm-watch-checkpoint.sh, fm-watch.sh, fm-x-dismiss.sh,
 # fm-x-followup.sh, fm-x-link.sh, fm-x-poll.sh, and fm-x-reply.sh.
 # The Node entrypoints (fm-report-stack.mjs and fm-task-file-append.mjs)

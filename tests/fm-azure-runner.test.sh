@@ -86,9 +86,11 @@ assert "protectedParameters" not in host
 assert "generate-sas" not in host
 assert "controller_identity_client_id" in host
 assert "If-Match=" in host and "runner-cost-reservation" in host
-assert host.index("lease.renew_and_assert()", host.index("def dispatch_prepared")) < host.index("create_vm(env, state)", host.index("def dispatch_prepared"))
-cleanup=host[host.index("def cleanup(env, state):"):host.index("def dispatch_prepared")]
-assert cleanup.index('"run-command-execute"') < cleanup.index('if "vm" in by_key') < cleanup.index('"ttl-schedule" in by_key')
+start=host.index("def dispatch_prepared")
+assert host.index("shared_capacity_reserve(env, state, cost)", start) < host.index("create_vm(env, state)", start)
+assert host.index("lease.renew_and_assert()", start) < host.index("create_vm(env, state)", start)
+cleanup=host[host.index("def cleanup(env, state):"):start]
+assert cleanup.index('"run-command-execute"') < cleanup.index('if "vm" in by_key') < cleanup.index('"ttl-schedule" in by_key') < cleanup.index("shared_capacity_release(env, state)")
 PY
   pass "private controller has exact UAMI, no public ingress/SAS, isolated command, trusted post-command uploader, and safe cleanup order"
 }
@@ -430,6 +432,48 @@ PY
   pass "mixed pool serializes eight stale callers, caps two per family, admits 16, refuses 17, and avoids active double-count"
 }
 
+shared_allocator_bridge_unit() {
+  python3 - "$HOST" <<'PY' || fail "shared allocator runner bridge failed"
+import importlib.util, json, pathlib, subprocess, tempfile, sys
+spec=importlib.util.spec_from_file_location("runner_shared",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env={"subscription":"sub","resource_group":"rg","prefix":"prefix","budget_limit":1500,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
+limits={**m.RESOURCE_CLASSES["behavior-heavy"],"sku":"Standard_D4as_v7","sku_family":"StandardDasv7Family"}
+state={"schema":m.SCHEMA,"invocation":"azr-aaaaaaaaaaaa","resources":{},"request":{"fence":"sha256:"+"a"*64,"resource_class":"behavior-heavy","limits":limits}}
+m.save_state=lambda *_a,**_k:None
+calls=[]
+def completed(value):
+    return subprocess.CompletedProcess(["python"],0,stdout=json.dumps(value),stderr="")
+def allocator_run(command,**kwargs):
+    assert kwargs["env"]["FM_HOME"]==str(m.ROOT)
+    assert kwargs["env"]["FM_AZURE_WORKER_STATE_DIR"]==str(m.ROOT/"state"/"azure-workers")
+    calls.append(command)
+    return completed({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":100.0,"forecast_usd":200.0,"admission_limit_usd":1500.0})
+m.run=allocator_run
+cost={"max_increment":25.0}
+result=m.shared_capacity_reserve(env,state,cost)
+assert result["actual"]==100.0 and result["forecast"]==200.0
+assert "capacity-reserve" in calls[-1] and calls[-1][calls[-1].index("--sku-family")+1]=="StandardDasv7Family"
+assert state["shared_capacity_reservation"]["status"]=="reserved"
+# Queue, unreadable telemetry, and shared actual/forecast pressure each refuse before compute.
+for payload,text in (
+    ({"reservation_id":"azr-aaaaaaaaaaaa","status":"queued","reason":"family full","actual_usd":100.0,"forecast_usd":200.0,"admission_limit_usd":1500.0},"queued"),
+    ({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":None,"forecast_usd":200.0,"admission_limit_usd":1500.0},"readable"),
+    ({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":100.0,"forecast_usd":1490.0,"admission_limit_usd":1500.0},"pressure"),
+):
+    m.run=lambda *_a,payload=payload,**_k:completed(payload)
+    try:m.shared_capacity_reserve(env,state,{"max_increment":25.0})
+    except m.RunnerError as exc:assert text in str(exc)
+    else:raise AssertionError("shared allocator failure was bypassed: "+text)
+# Release is sent only from the post-cleanup bridge with one digest-bound receipt.
+m.run=lambda command,**_kwargs:calls.append(command) or completed({})
+state["shared_capacity_reservation"]={"status":"reserved"}
+m.shared_capacity_release(env,state)
+assert "capacity-release" in calls[-1] and len(calls[-1][calls[-1].index("--cleanup-receipt")+1])==64
+assert state["shared_capacity_reservation"]["status"]=="released"
+PY
+  pass "runner queues behind the shared allocator and requires actual/forecast evidence before compute"
+}
+
 commissioning_admission_unit() {
   python3 - "$HOST" <<'PY' || fail "commissioning admission adversaries failed"
 import importlib.util, math, pathlib, tempfile, sys
@@ -519,7 +563,7 @@ try: m.dispatch_prepared(strict_env,minimal,"sub",m.COMMISSIONING_COST_ADMISSION
 except m.RunnerError as exc: assert "accepted only" in str(exc)
 else: raise AssertionError("strict mode accepted commissioning confirmation")
 PY
-  pass "strict remains authoritative while commissioning admits the sixteenth, refuses the seventeenth, and records itemized reservations"
+  pass "runner-local strict and commissioning defenses retain exact slot, budget-alert, and itemized reservation controls"
 }
 
 static_private_controller_contract
@@ -533,6 +577,7 @@ cost_retry_unit
 retail_rate_unit
 commissioning_inventory_role_overlap_unit
 mixed_pool_capacity_unit
+shared_allocator_bridge_unit
 commissioning_admission_unit
 
 echo "# fm-azure-runner.test.sh: all assertions passed"

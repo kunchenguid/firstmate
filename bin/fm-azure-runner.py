@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "docs" / "azure-runner" / "invocation.json"
 GUEST = ROOT / "bin" / "fm-azure-runner-guest.sh"
 EXECUTOR = ROOT / "bin" / "fm-azure-runner-exec.py"
+WORKER_LIFECYCLE = ROOT / "bin" / "fm-worker-lifecycle.py"
 CONTAINER = "validation-shards"
 CONTROL_CONTAINER = "runner-control"
 SCHEMA = "fm.azure-command/v1"
@@ -1860,6 +1861,103 @@ def commissioning_cost_gate(env, state, limits):
 
 
 
+def shared_capacity_role(state):
+    resource_class = state["request"].get("resource_class")
+    if resource_class == "crosscheck-tool":
+        return "crosscheck"
+    return "validation"
+
+
+def shared_capacity_environment(env):
+    command_env = dict(os.environ)
+    command_env["FM_HOME"] = str(ROOT)
+    command_env["FM_AZURE_WORKER_STATE_DIR"] = str(
+        Path(os.environ.get("FM_AZURE_SHARED_CAPACITY_STATE_DIR", str(ROOT / "state" / "azure-workers"))).resolve()
+    )
+    if env["budget_limit"] == 1500:
+        command_env["FM_AZURE_WORKER_POLICY_PHASE"] = "commissioning"
+        command_env["FM_AZURE_WORKER_COMMISSIONING_CEILING_USD"] = "1500"
+    else:
+        command_env["FM_AZURE_WORKER_POLICY_PHASE"] = "steady"
+        command_env["FM_AZURE_WORKER_STEADY_TARGET_USD"] = str(env["budget_limit"])
+    return command_env
+
+
+def shared_capacity_reserve(env, state, cost):
+    request = state["request"]
+    limits = request["limits"]
+    fence = request["fence"].split(":", 1)[1]
+    command = [
+        sys.executable, str(WORKER_LIFECYCLE), "capacity-reserve",
+        "--reservation-id", state["invocation"],
+        "--fence-binding", fence,
+        "--role", shared_capacity_role(state),
+        "--sku", limits["sku"],
+        "--sku-family", limits["sku_family"],
+        "--vcpus", str(SKU_VCPUS[limits["sku"]]),
+        "--amount-usd", str(cost["max_increment"]),
+        "--confirm-subscription", env["subscription"],
+    ]
+    result = run(command, env=shared_capacity_environment(env))
+    try:
+        reservation = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        raise RunnerError("shared allocator returned a malformed capacity reservation")
+    if (
+        not isinstance(reservation, dict)
+        or reservation.get("reservation_id") != state["invocation"]
+        or reservation.get("status") not in ("queued", "reserved")
+    ):
+        raise RunnerError("shared allocator returned a reservation with the wrong identity")
+    state["shared_capacity_reservation"] = {
+        "reservation_id": state["invocation"],
+        "fence_binding": fence,
+        "status": reservation["status"],
+        "amount_usd": cost["max_increment"],
+        "sku": limits["sku"],
+        "sku_family": limits["sku_family"],
+        "actual_usd": reservation.get("actual_usd"),
+        "forecast_usd": reservation.get("forecast_usd"),
+        "admission_limit_usd": reservation.get("admission_limit_usd"),
+    }
+    save_state(env, state)
+    if reservation["status"] != "reserved":
+        raise RunnerError("shared allocator queued disposable-runner demand: {}".format(
+            str(reservation.get("reason") or "capacity unavailable")[:500]
+        ))
+    cost["actual"] = reservation.get("actual_usd")
+    cost["forecast"] = reservation.get("forecast_usd")
+    cost["shared_admission_limit"] = reservation.get("admission_limit_usd")
+    if not isinstance(cost["actual"], (int, float)) or not isinstance(cost["forecast"], (int, float)):
+        raise RunnerError("shared allocator omitted readable actual or forecast spend evidence")
+    if max(float(cost["actual"]), float(cost["forecast"])) + float(cost["max_increment"]) >= env["budget_limit"]:
+        raise RunnerError("shared actual/forecast cost pressure reaches the runner admission limit")
+    return cost
+
+
+def shared_capacity_release(env, state):
+    reservation = state.get("shared_capacity_reservation")
+    if not reservation or reservation.get("status") == "released":
+        return
+    fence = state["request"]["fence"].split(":", 1)[1]
+    receipt = sha256_bytes(canonical_bytes({
+        "invocation": state["invocation"],
+        "fence": state["request"]["fence"],
+        "resources": state.get("resources"),
+        "compute_absent_phase": state.get("phase"),
+    }))
+    run([
+        sys.executable, str(WORKER_LIFECYCLE), "capacity-release",
+        "--reservation-id", state["invocation"],
+        "--fence-binding", fence,
+        "--cleanup-receipt", receipt,
+        "--confirm-subscription", env["subscription"],
+    ], env=shared_capacity_environment(env))
+    reservation["status"] = "released"
+    reservation["cleanup_receipt"] = receipt
+    save_state(env, state)
+
+
 def runner_control_id(env):
     return (
         "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Storage/storageAccounts/{}"
@@ -2768,6 +2866,11 @@ def cleanup(env, state):
         except RunnerError:
             transition(env, state, "cleanup-retained", "cost reservation reconciliation marker is ambiguous")
             raise
+    try:
+        shared_capacity_release(env, state)
+    except RunnerError:
+        transition(env, state, "cleanup-retained", "shared capacity reservation release is ambiguous")
+        raise
     transition(env, state, "complete", "verified bounded result retained locally; private result archive retained; invocation compute is zero")
 
 
@@ -2805,9 +2908,10 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
             else budget_gate(env, limits)
         )
         foundation_gate(env)
+        cost = shared_capacity_reserve(env, state, cost)
         transition(
             env, state, "admission-checked",
-            "scope, quota, SKU, exact foundation, and {} cost admission gates passed".format(mode),
+            "scope, SKU, exact foundation, and shared regional/family/actual-forecast cost admission passed",
             cost=cost,
         )
         with ManagementAdmissionLease(env, state) as lease:
@@ -2898,6 +3002,7 @@ def resume(env, state):
         transition(env, state, "absent-fenced", "VM absence proven; same invocation will never be rerun", old_lease_absent=True)
         if state.get("reservation_recorded"):
             mark_management_reservation_cleanup_verified(env, state)
+        shared_capacity_release(env, state)
         raise RunnerError("runner VM is absent without a verified result; retry requires a new fenced attempt")
     raise RunnerError("invocation phase {} cannot be resumed automatically".format(phase))
 

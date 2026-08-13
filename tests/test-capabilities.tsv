@@ -97,6 +97,8 @@ fm-watch-checkpoint.test.sh	hermetic
 fm-watch-pause-absorb.test.sh	hermetic
 fm-watch-triage.test.sh	hermetic
 fm-watcher-lock.test.sh	hermetic
+fm-worker-lifecycle.test.sh	hermetic
+fm-worker-supervisor.test.sh	hermetic
 fm-x-mode.test.sh	hermetic
 lavish-repair.test.sh	hermetic
 lavish.test.sh	hermetic

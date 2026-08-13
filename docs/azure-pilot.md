@@ -244,7 +244,7 @@ Its reviewed validation SKU seam defaults to the live-verified 4-vCPU/16-GiB `St
 The runner owns snapshot upload, command/result protocol, no-mistakes command integration, fencing, sandboxing, restart-safe collection, and exact cleanup.
 The intended first real use is parallel heavy test, lint, and behavior commands while the local primary remains responsive.
 
-The queued fleet lifecycle implementation owns budget/forecast admission, zero-warm-idle scheduling, landing-capacity reservation, provider-session revocation, and application health; it must preserve the role topology above.
+The queued fleet lifecycle implementation is specified in [`docs/azure-workers.md`](azure-workers.md) and owns budget/forecast admission, zero-warm-idle scheduling, landing-capacity reservation, provider-session revocation, and application health while preserving the role topology above.
 
 ## Acceptance and immediate use
 
