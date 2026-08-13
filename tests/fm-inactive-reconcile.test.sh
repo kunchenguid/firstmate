@@ -334,6 +334,36 @@ test_run_step_blocked_quota_kill_is_terminal() {
   pass "a run-step-sourced blocked quota kill stays a terminal outcome"
 }
 
+# The parent's status stream is a decision ledger, not a log: a `blocked` verb
+# there OPENS a durable keyed decision, and nothing on this path ever emits its
+# resolution. So the blocked classification stays local while the upward report
+# carries a terminal verb the fold never opens - with the state and the quota
+# detail still in the line so the parent can see why the child failed.
+test_blocked_parent_report_opens_no_decision() {
+  local record open
+  make_world quota-parent; bind_secondmate local
+  write_child "$MATE" child 'working: validating'
+  FM_FAKE_CREW_STATE='blocked' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL='provider quota limit hit during test: resets 7:40pm (Europe/Paris) - run failed, needs re-run when quota returns' \
+    run_reconcile "$MATE" --startup
+
+  grep -Fq 'inactive terminal child=child' "$MAIN/state/mate.status" \
+    || fail "quota-killed child was never reported upward"
+  open=$(FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_open_decisions "$2"' _ "$ROOT" "$MAIN/state/mate.status")
+  [ -z "$open" ] || fail "upward quota-kill report opened a decision nothing can close: $open"
+
+  grep -Fq 'state=blocked' "$MAIN/state/mate.status" \
+    || fail "parent report dropped the blocked classification from its text"
+  grep -Fq 'detail=provider quota limit hit during test' "$MAIN/state/mate.status" \
+    || fail "parent report dropped the quota detail"
+  record=$(find "$MATE/state/terminal-outcomes" -type f -name '*.reported' | head -1)
+  [ -n "$record" ] || fail "quota-killed child produced no durable receipt"
+  grep -Fxq 'state=blocked' "$record" || fail "local record lost the blocked classification"
+  pass "an upward quota-kill report opens no decision and keeps its state and detail"
+}
+
 test_nonterminal_and_captain_held_states_do_not_report() {
   local state
   for state in working paused parked unknown blocked; do
@@ -471,6 +501,7 @@ test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_run_step_blocked_quota_kill_is_terminal
+test_blocked_parent_report_opens_no_decision
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses

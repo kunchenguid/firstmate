@@ -823,7 +823,22 @@ test_quota_reset_phrase_is_bounded() {
   detail=${out#*" · source: run-step · "}
   [ "${#detail}" -le 140 ] || fail "quota detail was unbounded (${#detail} chars)"
   assert_not_contains "$detail" "kept writing" "unbounded provider prose reached the state detail"
-  pass "the reset phrase is bounded and cannot forge a field in the state line"
+
+  # The cap counts BYTES under LC_ALL=C, which bin/fm-inactive-reconcile.sh
+  # exports before invoking this script through env. This phrase puts a two-byte
+  # character exactly across the 48-byte cap, so a byte-wise truncation would
+  # emit a partial UTF-8 sequence into the line fm-fleet-snapshot.sh hands to jq.
+  local straddle
+  straddle="$(printf '%047d' 0 | tr '0' 'x')$(printf '\303\251')more trailing prose"
+  FM_FAKE_STEP_LOGS="$(quota_killed_step_log "$straddle")"
+  out=$(LC_ALL=C run_crew_state "$d" feat-bound)
+  assert_contains "$out" "state: blocked" "a non-ASCII reset phrase is still a quota kill"
+  detail=${out#*" · source: run-step · "}
+  [ "${#detail}" -le 160 ] || fail "non-ASCII quota detail was unbounded (${#detail} chars)"
+  if printf '%s' "$detail" | LC_ALL=C grep -q '[^ -~]'; then
+    fail "non-ASCII provider output reached the state detail: $detail"
+  fi
+  pass "the reset phrase is bounded, printable ASCII, and cannot forge a field in the state line"
 }
 
 # The steps table is third-party output. The sibling gate-row matcher already

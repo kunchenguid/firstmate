@@ -367,11 +367,16 @@ NM_QUOTA_RESET_MAX=48
 # crew_state_json, fm-bearings-snapshot.sh), and the provider concatenates its
 # banner into the middle of an existing output line, so whatever trails the
 # banner would otherwise land in the detail verbatim: cut at the first
-# separator, drop newlines/control characters and any remaining middle dot, and
-# cap the length.
+# separator, then keep only printable ASCII and cap the length.
+# Printable ASCII is what makes the cap honest: `${#phrase}` and the substring
+# cap count bytes under LC_ALL=C (bin/fm-inactive-reconcile.sh exports it and
+# invokes this script through env), so a multi-byte character straddling the cap
+# would otherwise emit a partial UTF-8 sequence. Restricting the charset first
+# also removes every middle dot, so no field separator can survive into the
+# detail whatever the provider wrote.
 nm_bounded_phrase() {  # <phrase>
   local phrase=${1%%"$SEP"*}
-  phrase=$(printf '%s' "$phrase" | tr -d '\000-\037\177' | sed 's/·/ /g')
+  phrase=$(printf '%s' "$phrase" | LC_ALL=C tr -cd ' -~')
   phrase=$(trim "$phrase")
   [ "${#phrase}" -le "$NM_QUOTA_RESET_MAX" ] || phrase="${phrase:0:$NM_QUOTA_RESET_MAX}..."
   printf '%s' "$phrase"
