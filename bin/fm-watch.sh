@@ -815,6 +815,7 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   touch "$STATE/.last-watcher-beat"
   handling_wait=0
   while [ "$handling_wait" -lt 600 ]; do
+    touch "$STATE/.last-watcher-beat"
     fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
     case "$FM_RECOVERY_MARKER_TOKEN" in
       pending:downtime:*) ;;

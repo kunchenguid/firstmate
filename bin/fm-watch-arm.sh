@@ -540,9 +540,12 @@ stop_owned_watchdog() {
   watchdog_pid=
 }
 
-# Keep the arm itself in a raw wait so an actionable child close propagates
-# immediately. A separate arm-owned watchdog performs only the stale-beacon
-# check and retires the isolated watcher group when the shared grace expires.
+# Keep the arm following the child through a short poll so an actionable child
+# close still propagates promptly, and once the watchdog has retired the
+# stalled group the same poll is bounded by the retire deadline below instead
+# of hanging on a child KILL cannot make waitable. A separate arm-owned
+# watchdog performs only the stale-beacon check and retires the isolated
+# watcher group when the shared grace expires.
 start_owned_watchdog() {
   watchdog_status="$child_out.liveness"
   rm -f "$watchdog_status" 2>/dev/null || true
@@ -676,10 +679,23 @@ owned_child_finished() {
 # could never observe an alive-but-stalled watcher, so Pi/OpenCode kept an arm
 # claim forever and every repair call became an ownership no-op.
 wait_owned_child() {
-  local stalled_pid age rc
+  local stalled_pid age rc retire_deadline
   stalled_pid=$child
   start_owned_watchdog
-  if wait "$child" 2>/dev/null; then
+  rc=124
+  retire_deadline=
+  while watch_child_running; do
+    if [ -z "$retire_deadline" ] && [ -s "$watchdog_status" ]; then
+      retire_deadline=$(( $(date +%s) + STALL_RETIRE_TIMEOUT + 3 ))
+    fi
+    if [ -n "$retire_deadline" ] && [ "$(date +%s)" -ge "$retire_deadline" ]; then
+      break
+    fi
+    sleep "$ATTACH_POLL"
+  done
+  if watch_child_running; then
+    WATCH_CHILD_RC=124
+  elif wait "$child" 2>/dev/null; then
     rc=0
   else
     rc=$?
