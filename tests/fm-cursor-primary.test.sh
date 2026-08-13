@@ -315,6 +315,31 @@ test_park_loop_ceiling_warns_once_then_goes_quiet() {
   pass "cursor park: the loop_count ceiling warns exactly once, then stops the loop"
 }
 
+test_park_retains_staged_context_until_loop_count_resets() {
+  local dir out body staged
+  dir=$(make_primary_dir "$TMP_ROOT/park-staged-ceiling")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  jq -n --arg session_id sess-cursor --arg digest 'STAGED DIGEST AT CEILING' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+
+  out=$(run_park "$dir" 5 5)
+  body=$(followup_of "$out")
+  case "$body" in *'CEILING REACHED'*) ;; *) fail "staged context bypassed the loop ceiling: $out" ;; esac
+  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  [ "$staged" = 'STAGED DIGEST AT CEILING' ] || fail "the loop ceiling discarded staged context"
+
+  out=$(run_park "$dir" 6 5)
+  [ -z "$out" ] || fail "staged context was delivered above the loop ceiling: $out"
+  [ -e "$dir/state/.cursor-pending-context" ] || fail "staged context was consumed above the loop ceiling"
+
+  out=$(run_park "$dir" 0 5)
+  [ "$(kind_of_followup "$out")" = session-start ] \
+    || fail "staged context was not delivered after loop_count reset: $out"
+  [ ! -e "$dir/state/.cursor-pending-context" ] || fail "delivered staged context was not consumed"
+  pass "cursor park: loop ceiling retains staged context until captain reset"
+}
+
 test_park_delivers_staged_compaction_digest_once() {
   local dir out body
   dir=$(make_primary_dir "$TMP_ROOT/park-staged")
@@ -587,6 +612,7 @@ test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_nag_budget_resets_after_a_real_wake
 test_park_loop_ceiling_warns_once_then_goes_quiet
+test_park_retains_staged_context_until_loop_count_resets
 test_park_delivers_staged_compaction_digest_once
 test_park_does_not_consume_another_sessions_context
 test_park_stands_down_when_superseded

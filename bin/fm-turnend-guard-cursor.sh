@@ -254,13 +254,6 @@ fi
 PARK_SEQ=
 claim_park || exit 0
 
-# --- staged compaction digest ------------------------------------------------
-# Cursor's preCompact step accepts only user_message, never additional_context
-# (index.js @ 4814884 lists sessionStart, beforeSubmitPrompt, preToolUse,
-# postToolUse, postToolUseFailure), so the re-emit digest is staged there and
-# delivered here at the first turn boundary after the compaction.
-emit_staged_context
-
 # Cursor's own loop_limit is the outer ceiling; this inner one bites first so the
 # session is told once, loudly, instead of supervision going quiet unannounced.
 if [ "$LOOP_COUNT" -ge "$LOOP_CEILING" ]; then
@@ -268,6 +261,13 @@ if [ "$LOOP_COUNT" -ge "$LOOP_CEILING" ]; then
   fm_supervision_needed "$STATE" "$GRACE" || exit 0
   emit_followup turn-end-guard "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $LOOP_COUNT consecutive hook-driven turns without a captain message, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the captain's next message."
 fi
+
+# --- staged compaction digest ------------------------------------------------
+# Cursor's preCompact step accepts only user_message, never additional_context
+# (index.js @ 4814884 lists sessionStart, beforeSubmitPrompt, preToolUse,
+# postToolUse, postToolUseFailure), so the re-emit digest is staged there and
+# delivered here at the first turn boundary after the compaction.
+emit_staged_context
 
 # Away mode owns the watcher and its own triage; never park and never wake.
 [ -e "$STATE/.afk" ] && exit 0
