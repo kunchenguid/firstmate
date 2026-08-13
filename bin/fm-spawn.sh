@@ -1436,6 +1436,27 @@ model_flag_for_harness() {
   esac
 }
 
+CODEX_MAX_EFFORT_VERSION=
+codex_max_effort_supported() {
+  local output parts major minor patch extra
+  local floor=0.146.1 floor_major floor_minor floor_patch floor_extra
+
+  CODEX_MAX_EFFORT_VERSION=unverified
+  command -v codex >/dev/null 2>&1 || return 1
+  output=$(codex --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
+  IFS=' ' read -r major minor patch extra <<< "$parts" || return 1
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  IFS='.' read -r floor_major floor_minor floor_patch floor_extra <<< "$floor" || return 1
+  [ -n "$floor_major" ] && [ -n "$floor_minor" ] && [ -n "$floor_patch" ] && [ -z "$floor_extra" ] || return 1
+  CODEX_MAX_EFFORT_VERSION="$major.$minor.$patch"
+  [ "$major" -gt "$floor_major" ] && return 0
+  [ "$major" -eq "$floor_major" ] || return 1
+  [ "$minor" -gt "$floor_minor" ] && return 0
+  [ "$minor" -eq "$floor_minor" ] || return 1
+  [ "$patch" -ge "$floor_patch" ]
+}
+
 effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
@@ -1446,12 +1467,19 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # Verified with codex-cli 0.146.0 on 2026-08-05: the server accepts
+      # Verified with codex-cli 0.146.1: the server accepts
       # none|minimal|low|medium|high|xhigh|max through model_reasoning_effort.
       # Firstmate threads its shared low|medium|high|xhigh|max vocabulary here;
       # none and minimal remain outside the shared profile axis.
       case "$effort" in
-        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          if codex_max_effort_supported; then
+            printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
+          else
+            echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: low, medium, high, xhigh; Codex CLI '${CODEX_MAX_EFFORT_VERSION:-unverified}' does not meet verified max-capability floor 0.146.1; omitting effort flag" >&2
+          fi
+          ;;
       esac
       ;;
     grok)
@@ -2720,7 +2748,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort profile_delivery delivered_model delivered_effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)

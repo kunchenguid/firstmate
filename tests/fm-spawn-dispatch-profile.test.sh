@@ -30,6 +30,18 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+make_spawn_codex_probe() {
+  local fakebin=$1
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'codex-cli %s\n' "${FM_FAKE_CODEX_VERSION:-0.146.1}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -76,6 +88,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_codex_probe "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -126,6 +139,7 @@ invoke_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CODEX_VERSION="${FM_TEST_CODEX_VERSION:-0.146.1}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -495,6 +509,33 @@ test_codex_threads_max_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch dropped max reasoning effort while metadata recorded it"
   pass "codex threads max reasoning effort so launch and metadata agree"
+}
+
+test_codex_omits_max_effort_below_verified_floor() {
+  local rec id out status launch stderr_log err
+  id=profile-codex-max-old-z4b
+  rec=$(make_spawn_case profile-codex-max-old codex "$id")
+  read_case_record "$rec"
+  stderr_log="$CASE_DIR/spawn.stderr"
+
+  FM_TEST_CODEX_VERSION=0.142.1 \
+    out=$(run_ship_spawn_with_stderr "$stderr_log" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  status=$?
+  expect_code 0 "$status" "codex max effort below the verified floor should omit the effort setting"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  assert_grep 'profile_delivery=fm-spawn.v1' "$HOME_DIR/state/$id.meta" \
+    "old Codex metadata omitted delivered-profile provenance"
+  assert_grep 'delivered_effort=default' "$HOME_DIR/state/$id.meta" \
+    "old Codex metadata claimed the unsupported max setting was delivered"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" 'model_reasoning_effort' \
+    "old Codex launch carried an unsupported max setting"
+  err=$(cat "$stderr_log")
+  assert_contains "$err" "warning: harness 'codex' cannot thread requested effort 'max'; accepted effort values: low, medium, high, xhigh; Codex CLI '0.142.1' does not meet verified max-capability floor 0.146.1; omitting effort flag" \
+    "old Codex max omission was not diagnosed on stderr"
+  assert_not_contains "$out" 'cannot thread requested effort' \
+    "old Codex max omission warning leaked onto stdout"
+  pass "codex loudly omits max below its verified capability floor"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -885,6 +926,7 @@ test_raw_codex_refuses_unthreaded_effort
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort
+test_codex_omits_max_effort_below_verified_floor
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
