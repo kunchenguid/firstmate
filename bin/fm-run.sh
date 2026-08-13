@@ -257,12 +257,16 @@ json_array() {  # reads lines on stdin
 # plain dotted path and nothing else. Anything richer - a pipe, a second
 # assignment, a function call - would let one call change fields the receipt
 # never names, and the receipt is the audit trail prove-no-write rests on.
+#
+# A hyphen is excluded because jq reads `.a-b` as subtraction rather than a field
+# name: allowing it here would trade this guard's named refusal for a jq compile
+# error that says nothing about what the caller did wrong.
 require_field_path() {  # <path>
   case "$1" in
     ''|.*|*..*|*.) return 1 ;;
   esac
   case "$1" in
-    *[!A-Za-z0-9._-]*) return 1 ;;
+    *[!A-Za-z0-9._]*) return 1 ;;
   esac
   return 0
 }
@@ -416,15 +420,17 @@ command_set() {
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
   require_field_path "$path" \
-    || fail "not a plain manifest field path: $path (letters, digits, dot, underscore and hyphen only)"
+    || fail "not a plain manifest field path: $path (letters, digits, dot and underscore only)"
   hold_run_lock "$run_id"
   require_unfrozen "$run_id"
   manifest=$(fm_run_manifest_path "$run_id")
   tmp="$manifest.tmp.$$"
   if [ "$as_json" = 1 ]; then
-    jq --argjson v "$value" ".$path = \$v" "$manifest" > "$tmp" || fail "invalid JSON value for .$path"
+    jq --argjson v "$value" ".$path = \$v" "$manifest" > "$tmp" \
+      || { rm -f "$tmp"; fail "invalid JSON value for .$path"; }
   else
-    jq --arg v "$value" ".$path = \$v" "$manifest" > "$tmp" || fail "could not set .$path"
+    jq --arg v "$value" ".$path = \$v" "$manifest" > "$tmp" \
+      || { rm -f "$tmp"; fail "could not set .$path"; }
   fi
   mv -f "$tmp" "$manifest"
   fm_run_receipt_append "$run_id" manifest ".$path" set "$value"
@@ -436,13 +442,13 @@ command_add() {
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
   require_field_path "$path" \
-    || fail "not a plain manifest field path: $path (letters, digits, dot, underscore and hyphen only)"
+    || fail "not a plain manifest field path: $path (letters, digits, dot and underscore only)"
   hold_run_lock "$run_id"
   require_unfrozen "$run_id"
   manifest=$(fm_run_manifest_path "$run_id")
   tmp="$manifest.tmp.$$"
   jq --arg v "$value" ".$path = ((.$path // []) + [\$v])" "$manifest" > "$tmp" \
-    || fail "could not append to .$path"
+    || { rm -f "$tmp"; fail "could not append to .$path"; }
   mv -f "$tmp" "$manifest"
   fm_run_receipt_append "$run_id" manifest ".$path" add "$value"
 }

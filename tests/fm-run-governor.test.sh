@@ -336,9 +336,23 @@ test_concurrent_classifications_keep_one_day_baseline() {
   pass "concurrent classifications preserve one day baseline per lane"
 }
 
-# The hysteresis record is the same read-modify-write as the day record, and a
-# reader that catches it mid-write silently loses the dead-band.
-test_concurrent_classifications_keep_one_readable_class_record() {
+# What this test does NOT establish: that the class record is written atomically
+# or that its read-decide-write is serialized. Neither is observable through this
+# CLI. The record is three short lines emitted by one printf, so a direct
+# truncating redirect is already effectively atomic on a local filesystem, and
+# every contender in a race derives its class from the same settled previous
+# value, so an unserialized version computes the same answer. Both properties
+# were confirmed by mutation: reverting the lock, the atomic rename, or both
+# leaves every assertion below green. Those two properties rest on `mv` being
+# atomic and on the lock bracketing the read and the write - read the code, not
+# this test, for them.
+#
+# What it does establish, and what a regression would break: contention leaves
+# exactly one well-formed record that the NEXT classification can still read, and
+# the dead-band that record carries survives it. A writer that appended instead
+# of replacing, left the file empty or partial, or leaked its lock directory
+# would fail here.
+test_a_contended_class_record_stays_readable_for_the_next_classification() {
   local out stored dupes
   reset_state
   quota_doc "$TMP_ROOT/cls24.json" codex 24
@@ -351,27 +365,28 @@ test_concurrent_classifications_keep_one_readable_class_record() {
   done
   wait
 
-  # Whoever wrote last, the record is one whole record rather than a torn one.
   dupes=$(grep -c '^class=' "$stored")
   [ "$dupes" = 1 ] || fail "the class record has $dupes class lines, expected 1"
   [ "$(grep -c '^percent=' "$stored")" = 1 ] || fail "the class record has a duplicated percent"
   [ -n "$(sed -n 's/^class=//p' "$stored")" ] || fail "the class record was left with an empty class"
   [ -z "$(find "$(dirname "$stored")" -name '*.class.lock' -print -quit)" ] \
     || fail "a class-state lock was left behind"
+  [ -z "$(find "$(dirname "$stored")" -name '*.class.tmp.*' -print -quit)" ] \
+    || fail "a class-state temp file was left behind"
 
-  # The dead-band still holds after the contention: a readable previous class is
-  # exactly what keeps 26% from flapping back to normal.
+  # The record is still usable: 26% holds inside the dead-band rather than
+  # flapping back to normal, which only works if `previous` was readable.
   out=$(classify personal-codex "$TMP_ROOT/cls26.json")
   [ "$(field "$out" class)" = no-new-large ] \
     || fail "26% flapped to $(field "$out" class) after concurrent classification"
   assert_contains "$out" 'hysteresis:' "the dead-band was lost after concurrent classification"
-  pass "concurrent classifications leave one readable class record and keep the dead-band"
+  pass "a contended class record stays readable and keeps its dead-band for the next classification"
 }
 
 test_threshold_boundaries
 test_hysteresis_dead_band
 test_concurrent_classifications_keep_one_day_baseline
-test_concurrent_classifications_keep_one_readable_class_record
+test_a_contended_class_record_stays_readable_for_the_next_classification
 test_unknown_and_stale_quota_are_never_available
 test_projected_runway_bounds_a_healthy_percentage
 test_company_codex_floor

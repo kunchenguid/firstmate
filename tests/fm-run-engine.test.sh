@@ -354,10 +354,44 @@ test_a_manifest_edit_cannot_change_fields_its_receipt_never_names() {
   capture add path-case 'source.readRoots) | .writes.allowedPaths += (["/etc"]' /tmp
   expect_code 1 "$RC" "an add path carrying a second assignment"
 
+  # jq reads `.a-b` as subtraction, so the guard names the problem itself rather
+  # than letting the caller get a compile error about an undefined function.
+  capture set path-case a-b 1 --json; out=$OUT
+  expect_code 1 "$RC" "a hyphenated field path"
+  assert_contains "$out" 'not a plain manifest field path' "a hyphenated path reached jq"
+
   # A legitimate dotted path still works, so the guard bounds the shape and not the feature.
   capture set path-case budgets.wallSeconds 120 --json
   expect_code 0 "$RC" "a plain dotted field path"
   pass "a manifest edit is confined to the single field its receipt names"
+}
+
+# The run root is the durable record an operator reads after a restart, so a
+# refused edit must not leave half-written manifests sitting next to the real one.
+test_a_refused_manifest_edit_leaves_no_residue_in_the_run_root() {
+  local strays
+  "$RUN" new residue-case --mode afk-research --lane test-personal --grant read-only >/dev/null
+
+  capture set residue-case budgets.wallSeconds not-json --json
+  expect_code 1 "$RC" "a set carrying an unparseable JSON value"
+  capture set residue-case budgets.wallSeconds also-bad --json
+  expect_code 1 "$RC" "a second failing set"
+  capture add residue-case source.readRoots.deep not-an-array
+  expect_code 1 "$RC" "an add against a non-array field"
+
+  strays=$(find "$HOME_DIR/data/runs/residue-case" -name 'manifest.json.tmp.*' | wc -l | tr -d ' ')
+  [ "$strays" = 0 ] || fail "$strays orphan manifest temp files were left in the run root"
+
+  # The refusals changed nothing, so the run still freezes and starts normally.
+  jq -e . "$HOME_DIR/data/runs/residue-case/manifest.json" >/dev/null \
+    || fail "the manifest is no longer valid JSON after the refused edits"
+  "$RUN" set residue-case account.isolationAsserted true --json
+  "$RUN" add residue-case source.readRoots "$SOURCES"
+  "$RUN" freeze residue-case >/dev/null
+  "$RUN" claim residue-case >/dev/null
+  capture preflight residue-case
+  expect_code 0 "$RC" "preflight after refused edits"
+  pass "a refused manifest edit leaves no temp file behind and does not disturb the run"
 }
 
 test_one_mutable_owner_and_idempotent_resume() {
@@ -779,6 +813,7 @@ test_read_only_run_cannot_declare_write_paths
 test_fix_known_writes_only_inside_its_granted_worktree
 test_the_protected_floor_survives_a_manifest_that_drops_it
 test_a_manifest_edit_cannot_change_fields_its_receipt_never_names
+test_a_refused_manifest_edit_leaves_no_residue_in_the_run_root
 test_one_mutable_owner_and_idempotent_resume
 test_concurrent_claims_leave_exactly_one_owner
 test_a_symlinked_write_target_is_refused_but_a_read_follows_it
