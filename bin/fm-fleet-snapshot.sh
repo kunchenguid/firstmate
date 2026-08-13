@@ -281,8 +281,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+local[[:space:]]+[^[:space:]]+$"; "")
-      | sub("[[:space:]]+local[[:space:]]+[^[:space:]]+$"; "")
+      | sub("[[:space:]]+-[[:space:]]+(?:local main|local-target:[^[:space:]]+)$"; "")
+      | sub("[[:space:]]+(?:local main|local-target:[^[:space:]]+)$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
     def clean_title:
       strip_trailing_metadata
@@ -304,7 +304,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         else ($reason | clean_title | if . == "" then null else . end)
         end;
     def local_note($rest):
-      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local[[:space:]]+[^[:space:]]+)$");
+      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main|local-target:[^[:space:]]+)$")
+      | if . == null then null else sub("^local-target:"; "local ") end;
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported

@@ -676,7 +676,7 @@ test_local_only_merged_to_recorded_target_allows() {
   expect_code 0 "$rc" "merged-recorded-target: teardown should accept the recorded integration target"
   ! grep -q REFUSED "$case_dir/stderr" \
     || fail "merged-recorded-target: teardown printed a REFUSED line"
-  assert_grep "tasks-axi done task-x1 --note 'local integration'" "$case_dir/stdout" \
+  assert_grep "tasks-axi done task-x1 --note 'local-target:integration'" "$case_dir/stdout" \
     "merged-recorded-target: completion reminder lost the recorded integration target"
   pass "local-only worktree merged into its recorded integration target is torn down"
 }

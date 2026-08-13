@@ -454,6 +454,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 ## Queued
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
+- [ ] local-prose-title - Improve local development (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
 
@@ -462,7 +463,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
-- [x] done-integration - Done Integration local integration (repo: delta, done 2026-07-13) (kind: ship)
+- [x] done-integration - Done Integration local-target:integration (repo: delta, done 2026-07-13) (kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -501,6 +502,12 @@ EOF
     .backlog.records[] | select(.id == "parenthetical-title")
     | .title == "Refresh sidebar (mobile)" and .repo == "beta"
   ' >/dev/null || fail "title parenthetical was stripped with metadata"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "local-prose-title")
+    | .title == "Improve local development"
+      and .local_note == null
+      and .repo == "beta"
+  ' >/dev/null || fail "ordinary local prose was misclassified as completion metadata"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "blocked-reason")
     | .title == "Blocked Reason"

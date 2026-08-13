@@ -914,7 +914,7 @@ backlog_refresh_reminder() {
           default_target=$(default_branch || true)
           if [ -n "$landing_target" ] \
             && { [ -z "$default_target" ] || [ "$landing_target" != "$default_target" ]; }; then
-            landing_note=$(shell_quote "local $landing_target")
+            landing_note=$(shell_quote "local-target:$landing_target")
             done_cmd="tasks-axi done $ID --note $landing_note"
           else
             done_cmd="tasks-axi done $ID --note \"local main\""
