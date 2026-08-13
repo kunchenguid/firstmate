@@ -132,3 +132,88 @@ day_budget_state=not-applicable
 
 The unreadable lane classifies as `unknown` rather than as available, which starts no new large work and surfaces the attended requirement.
 Refreshing this record means re-running the two commands above after a provider or `quota-axi` change; the synthetic-document regressions in `tests/fm-run-governor.test.sh` cover the policy arithmetic without needing either provider.
+
+## Concurrency, symlink resolution, and resume revalidation
+
+Captured on macOS 26.5.2 arm64, GNU bash 3.2.57, jq 1.8.2, against a scratch `FM_HOME` with two registered lanes.
+
+### Concurrent claims resolve to one owner
+
+Eight primaries claim the same frozen run simultaneously:
+
+```sh
+for i in 1 2 3 4 5 6 7 8; do
+  ( FM_RUN_OWNER="primary-$i" bin/fm-run.sh claim evidence-run ) &
+done; wait
+```
+
+```text
+primary-1 exit=0 claim: evidence-run owner=primary-1 generation=1
+primary-2 exit=3 refused: run evidence-run is owned by primary-1; pass --takeover from a quiesced run to transfer it
+... primary-3 through primary-8 identical
+```
+
+`run.state` records `owner=primary-1 generation=1`.
+Reading the owner, deciding, and writing it happens under the run lock, so the claim is one compare-and-swap.
+Against the same test with the lock removed, all eight claims exit 0 and each believes it holds custody - which is the defect this closes.
+
+### A symlinked write target is refused; a read is judged on its real target
+
+```sh
+ln -s /tmp/ev/lane-c/secret.txt "$EVIDENCE/decoy.txt"
+bin/fm-run.sh write-check evidence-run "$EVIDENCE/decoy.txt"
+```
+
+```text
+refused: .../evidence/decoy.txt is a symlink; a write target must be a real path inside this run's write area
+```
+
+A read follows the link and is judged on what it would actually open, so a link into the frozen read roots is allowed and one pointing at another lane is refused by that lane, not excused by the name it was reached through:
+
+```text
+read-check: /private/tmp/ev/src/paper.md allowed
+refused: /private/tmp/ev/lane-c/secret.txt belongs to lane ev-company, not this run's lane ev-personal
+```
+
+The second refusal names the resolved company-lane path rather than the innocent-looking `innocent.md` it was reached by.
+
+### Stopping writes its own durable checkpoint
+
+```sh
+bin/fm-run.sh stop evidence-run --rule deadline --note "wall-clock budget reached"
+```
+
+```text
+stop: evidence-run rule=deadline checkpoint=1
+```
+
+```json
+{ "index": 1, "state": "preflight", "note": "stop:deadline - wall-clock budget reached" }
+```
+
+Restart safety no longer depends on the operator remembering a separate checkpoint command.
+
+### Resume revalidates the world it left
+
+With the lane registration emptied while the run was stopped:
+
+```text
+fm-run: resume-revalidation failed: lane ev-personal is not registered in config/run-lanes.conf
+```
+
+```json
+{"kind":"resume-revalidation","subject":"assertion","verdict":"failed","note":"lane ev-personal is not registered in config/run-lanes.conf"}
+```
+
+The refusal is recorded under its own phase, so a first-dispatch refusal and one that fired on the way back in stay distinguishable in the receipt log.
+Restoring the registration lets the resume proceed, reporting `revalidated=yes`.
+
+### prove-no-write states its own scope
+
+```text
+prove-no-write: evidence-run no outside write recorded through fm-run gates (refusals recorded: 2)
+prove-no-write: scope: receipts only; a write that never called the write gate leaves no record here
+```
+
+The command reads receipts, so it speaks only for writes routed through the gates.
+It is not a filesystem audit, and its output now says so rather than implying one.

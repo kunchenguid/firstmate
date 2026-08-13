@@ -23,9 +23,9 @@ Five invariants are mechanical:
 
 - **The manifest is frozen.** After `fm-run.sh freeze`, `set` and `add` refuse, and every later command re-checks the manifest against the hash recorded at freeze. An edit from any source stops the run rather than widening it.
 - **Tools come from a closed allowlist.** A tool nobody thought to deny is still refused, because permission comes only from the allowlist. A compiled-in floor no manifest can lower sits underneath it.
-- **Writes reach declared areas only.** A read-only run may write only its own evidence directory. Paths are compared after physical resolution, so a symlinked parent cannot launder a write into the area.
-- **One owner mutates a run.** A second owner may take over only from a quiesced run, so a failed transfer converges to one owner or none.
-- **Every decision leaves a receipt.** Refusals are recorded alongside permitted calls, which is what makes `prove-no-write` meaningful.
+- **Writes reach declared areas only.** A read-only run may write only its own evidence directory. Paths are compared after physical resolution, including the final component, so neither a symlinked parent nor a symlinked leaf can launder a write into the area. A write target that is itself a symlink is refused rather than resolved, because a link checked now can be repointed before the write lands.
+- **One owner mutates a run.** Every state-changing command holds a run-scoped lock, so claiming custody is one compare-and-swap rather than a separate read and write that two contenders can both win. A second owner may take over only from a quiesced run, so a failed transfer converges to one owner or none.
+- **Every decision leaves a receipt.** Refusals are recorded alongside permitted calls, which is what makes `prove-no-write` meaningful. Each receipt is built first and appended in one write, so concurrent gates cannot interleave halves of two records.
 
 ## Run layout
 
@@ -48,11 +48,16 @@ data/runs/<run-id>/checkpoints/       durable checkpoint snapshots
 bin/fm-run.sh list                      # every run in this home, with state and generation
 bin/fm-run.sh summary <run-id>          # frozen identity, state, custody, receipt counts
 bin/fm-run.sh show <run-id> .source     # any part of the frozen manifest
-bin/fm-run.sh prove-no-write <run-id>   # assert a read-only run wrote nothing outside evidence
+bin/fm-run.sh prove-no-write <run-id>   # assert no outside write was RECORDED through the gates
 ```
 
+`prove-no-write` reads the receipt log, so it establishes that nothing was *recorded* as written outside the evidence area.
+It cannot speak for a process that wrote without calling the gate, and its own output says so; it is not a filesystem audit.
+
 A run that stopped records its stop rule and its exact resumption condition in `run.state`.
+Stopping writes a durable checkpoint itself, so restart safety never depends on the operator remembering a second command.
 Resuming is idempotent per ownership generation, so a restart or a terminal close never starts a second loop.
+A resume re-runs every start assertion before re-entering supervision: time passes while a run is stopped, and a lane can be de-registered or an evidence directory moved in the meantime.
 
 ## Account lanes
 
