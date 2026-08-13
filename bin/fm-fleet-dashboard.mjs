@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Render the Firstmate fleet cockpit from live state.
 //
-// The cockpit shows exactly three things, in Pedro's priority order:
+// The default cockpit shows exactly three things, in Pedro's priority order:
 //   1. DECISIONS he must take now.
 //   2. OUR PRS IN REVIEW.
 //   3. REVIEWING - colleague PR relationships recorded by the reviews domain.
+// An explicit building section also shows in-flight tasks that have neither a
+// PR nor an open decision, while the no-selector display remains unchanged.
 // The default is a fixed-measure one-line list; --show and watch selection own
 // full context so titles never compete with status prose during a scan.
 //
@@ -67,9 +69,22 @@ const READABLE_ID_LIMIT = 28;
 const OBSERVATION_STORE_VERSION = 1;
 const DEFAULT_BUCKET_LIMITS = Object.freeze({
   decisions: 2,
+  building: 2,
   "ours-in-review": 2,
   "review-obligations": 2,
   reviewing: 1,
+});
+const DEFAULT_BUCKET_KEYS = Object.freeze([
+  "decisions",
+  "ours-in-review",
+  "review-obligations",
+  "reviewing",
+]);
+const SECTION_BUCKET_KEYS = Object.freeze({
+  building: ["building", "ours-in-review"],
+  approvals: ["decisions", "review-obligations"],
+  reviewing: ["reviewing"],
+  all: ["decisions", "building", "ours-in-review", "review-obligations", "reviewing"],
 });
 const REVIEW_THREADS_QUERY = `
 query FleetDashboardReviewThreads($owner: String!, $name: String!, $number: Int!) {
@@ -96,12 +111,13 @@ const MARKERS = Object.freeze({
 const MARKER_PRIORITY = Object.freeze({ yellow: 0, red: 1, blue: 2, green: 3, unknown: 4 });
 
 function usage(stream = process.stdout) {
-  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--show <row>] [--watch] [--output <path>]
+  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--section <name>] [--show <row>] [--watch] [--output <path>]
 
 Render the fleet cockpit: decisions ranked by importance, our PRs in
 review with actionable status, and the reviews domain's PR relationships.
 --width <columns>  terminal frame width request (minimum 40; output capped at 80)
---all              compatibility flag; the compact default already lists every item
+--all              show deferred rows inside the selected view
+--section <name>   render building, approvals, reviewing, or all; omitted keeps the default
 --show <row|id>    print one row's full context by position or exact stable id;
                    append * to request an unambiguous id-prefix match; expansion
                    marks only that row's current watched values seen
@@ -116,6 +132,7 @@ function parseArguments(argumentsList) {
   let outputPath = null;
   let width = null;
   let showAll = false;
+  let section = null;
   let showRow = null;
   let watch = false;
   for (let index = 0; index < argumentsList.length; index += 1) {
@@ -130,6 +147,15 @@ function parseArguments(argumentsList) {
     }
     if (argument === "--watch") {
       watch = true;
+      continue;
+    }
+    if (argument === "--section") {
+      const supplied = argumentsList[index + 1];
+      if (!Object.hasOwn(SECTION_BUCKET_KEYS, supplied)) {
+        throw new Error(`unknown section ${supplied ?? "(missing)"}; valid sections: ${Object.keys(SECTION_BUCKET_KEYS).join(", ")}`);
+      }
+      section = supplied;
+      index += 1;
       continue;
     }
     if (argument === "--show" && index + 1 < argumentsList.length) {
@@ -164,7 +190,30 @@ function parseArguments(argumentsList) {
   if (watch && (showRow !== null || outputPath !== null)) {
     throw new Error("--watch cannot be combined with --show or --output");
   }
-  return { outputPath, width, showAll, showRow, watch };
+  return { outputPath, width, showAll, section, showRow, watch };
+}
+
+function sectionUsesForge(section) {
+  return section === null || section === "reviewing" || section === "all";
+}
+
+function skippedForgeState() {
+  return {
+    github: null,
+    reviewRequests: {
+      available: false,
+      fetchedAtMs: null,
+      viewer: null,
+      items: [],
+      reason: "not checked for local-only section",
+    },
+    quota: {
+      available: false,
+      fetchedAtMs: null,
+      providers: [],
+      reason: "not checked for local-only section",
+    },
+  };
 }
 
 function pathIsWithin(candidate, parent) {
@@ -1045,7 +1094,7 @@ async function collectEssentialLocalInputsAsync() {
   return { snapshot, telemetryRows: null, telemetryPresent: existsSync(telemetryPath), reviews };
 }
 
-function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github, reviewRequests, quota }) {
+function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github, reviewRequests, quota, forgeSkipped = false }) {
   const observedMilliseconds = Date.parse(snapshot.generated || "");
   const backlogPresent = snapshot.backlog?.present === true;
   const records = Array.isArray(snapshot.backlog?.records) ? snapshot.backlog.records : [];
@@ -1068,6 +1117,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   const blockingDeliveryIds = new Set(records.flatMap((record) => record.unresolved_blocker_ids || []));
 
   const decisions = [];
+  const building = [];
   const ours = [];
   const obligations = [];
   const reviewing = [];
@@ -1193,6 +1243,40 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       ? cleanProse(currentRecord.title).match(/\bPR\s*#?(\d+)\b/i)
       : null;
     const registeredPr = task.pr?.url && task.pr?.source === "meta";
+    if (
+      task.kind !== "secondmate" &&
+      currentRecord?.state === "in_flight" &&
+      !registeredPr &&
+      !stageMatch &&
+      openDecisions.length === 0 &&
+      state !== "blocked"
+    ) {
+      const markerKey = isStuckState(state)
+        ? "red"
+        : isProgressState(state)
+          ? "green"
+          : ["parked", "paused"].includes(state)
+            ? "blue"
+            : "unknown";
+      building.push({
+        ...base,
+        tag: "BUILD",
+        listLabel: `${base.name} | ${state}${detail ? ` | ${detail}` : ""}`,
+        prose: detail || state,
+        note: null,
+        markerKey,
+        markerSource: "local",
+        blocker: isStuckState(state) ? detail || state : null,
+        recommendation: isStuckState(state)
+          ? `Resolve the recorded ${state} state: ${detail || "no detail recorded"}`
+          : isProgressState(state)
+            ? "No action for Pedro; this in-flight task is progressing."
+            : ["parked", "paused"].includes(state)
+              ? "No action for Pedro unless this paused task should resume."
+              : "Reconcile the task's current state before choosing an action.",
+        why: "structured in-flight task has no registered PR and no open decision",
+      });
+    }
     const githubResult = registeredPr ? github?.results?.get(task.pr.url) ?? null : null;
     const completedTerminalPr = completedIds.has(task.id) && registeredPr && githubResult?.terminal;
     if (
@@ -1434,11 +1518,12 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   };
   const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
   decisions.sort((left, right) => importanceTier(left) - importanceTier(right) || oldestFirst(left, right));
+  building.sort(oldestFirst);
   ours.sort(oldestFirst);
   obligations.sort(oldestFirst);
   reviewing.sort((left, right) => (left.age.seconds ?? Number.POSITIVE_INFINITY) - (right.age.seconds ?? Number.POSITIVE_INFINITY));
 
-  for (const items of [decisions, ours, obligations, reviewing]) {
+  for (const items of [decisions, building, ours, obligations, reviewing]) {
     items.sort((left, right) => MARKER_PRIORITY[left.markerKey] - MARKER_PRIORITY[right.markerKey]);
     for (const item of items) {
       item.marker = MARKERS[item.markerKey] ?? MARKERS.unknown;
@@ -1446,7 +1531,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   }
 
   const localAttention = new Map();
-  for (const item of [...decisions, ...ours, ...reviewing]) {
+  for (const item of [...decisions, ...building, ...ours, ...reviewing]) {
     if (
       item.markerSource === "local" &&
       ["yellow", "red"].includes(item.markerKey) &&
@@ -1465,11 +1550,18 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     github,
     reviewRequests,
     quota,
+    forgeSkipped,
     recap: {
       available: backlogPresent,
       needsPedro: [...localAttention.values()].filter((item) => item.markerKey === "yellow"),
       stuck: [...localAttention.values()].filter((item) => item.markerKey === "red"),
       obligations,
+    },
+    localRecap: {
+      available: backlogPresent,
+      needsPedro: [...localAttention.values()].filter((item) => item.markerKey === "yellow"),
+      stuck: [...localAttention.values()].filter((item) => item.markerKey === "red"),
+      obligations: [],
     },
     buckets: [
       {
@@ -1478,6 +1570,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         htmlTitle: "Decisions",
         items: decisions,
         empty: backlogPresent ? "nothing needs a decision" : "backlog absent - captain holds unknown",
+      },
+      {
+        key: "building",
+        name: "BUILDING",
+        htmlTitle: "Building",
+        items: building,
+        empty: "no in-flight task without a PR or open decision",
       },
       {
         key: "ours-in-review",
@@ -1512,6 +1611,8 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
       const decisionUsesKey = bucket.key === "decisions" && item.stableKey && item.stableKey !== item.id;
       const stablePart = bucket.key === "decisions"
         ? decisionUsesKey ? `${item.id}-${item.stableKey}-${item.identityVerb ?? "row"}` : item.id
+        : bucket.key === "building"
+          ? item.id
         : bucket.key === "ours-in-review"
           ? item.prNumber ?? "pr-unknown"
           : bucket.key === "review-obligations"
@@ -1519,6 +1620,8 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
             : String(item.id).replace(/^pr-/, "");
       const prefix = bucket.key === "decisions"
         ? "d"
+        : bucket.key === "building"
+          ? "b"
         : bucket.key === "ours-in-review"
           ? "o"
           : bucket.key === "review-obligations"
@@ -1552,6 +1655,16 @@ function numberModelRows(model) {
     }
   }
   model.totalRows = rowNumber;
+}
+
+function applySectionView(model, section) {
+  const includedKeys = new Set(section === null ? DEFAULT_BUCKET_KEYS : SECTION_BUCKET_KEYS[section]);
+  model.buckets = model.buckets.filter((bucket) => includedKeys.has(bucket.key));
+  if (section !== null) {
+    model.selectedSection = section;
+    model.recap = model.localRecap;
+  }
+  numberModelRows(model);
 }
 
 const ANSI = {
@@ -1620,6 +1733,7 @@ function visibleBucketItems(bucket, showAll) {
 
 function collapsedBucketLabel(bucket, count) {
   if (bucket.key === "decisions") return `${count} deferred decision${count === 1 ? "" : "s"}`;
+  if (bucket.key === "building") return `${count} deferred task${count === 1 ? "" : "s"}`;
   if (bucket.key === "ours-in-review") return `${count} deferred PR${count === 1 ? "" : "s"}`;
   if (bucket.key === "review-obligations") return `${count} review request${count === 1 ? "" : "s"}`;
   if (bucket.key === "reviewing") return `${count} review relationship${count === 1 ? "" : "s"}`;
@@ -1651,7 +1765,17 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
     ),
   );
   lines.push("");
-  if (!model.recap.available) {
+  if (model.selectedSection) {
+    if (!model.recap.available) {
+      lines.push(`${paint("bold", "ATTENTION NOW")} | local attention unknown - backlog source absent`);
+    } else {
+      const counts = [
+        model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
+        model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+      ].filter(Boolean);
+      lines.push(`${paint("bold", "ATTENTION NOW")} | ${counts.length > 0 ? counts.join(" | ") : "nothing needs Pedro"}`);
+    }
+  } else if (!model.recap.available) {
     lines.push(paint("bold", "ATTENTION NOW"));
     lines.push(paint("dim", "  unknown - backlog source absent"));
   } else if (
@@ -1901,19 +2025,22 @@ function sourceValue(label, value) {
 function renderHtml(model) {
   const featured = recapFeaturedItems(model.recap);
   const hiddenRecap = model.recap.needsPedro.length + model.recap.stuck.length + model.recap.obligations.length - featured.length;
+  const recapCounts = [
+    model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
+    model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+    model.recap.obligations.length > 0 ? `${model.recap.obligations.length} review${model.recap.obligations.length === 1 ? "" : "s"} waiting` : null,
+  ].filter(Boolean);
   const recap = !model.recap.available
     ? '<p class="muted">Unknown - backlog source absent.</p>'
     : model.recap.needsPedro.length === 0 && model.recap.stuck.length === 0 && model.recap.obligations.length === 0
       ? "<p>Nothing needs Pedro.</p>"
-      : [
-          `<p><strong>${[
-            model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
-            model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
-            model.recap.obligations.length > 0 ? `${model.recap.obligations.length} review${model.recap.obligations.length === 1 ? "" : "s"} waiting` : null,
-          ].filter(Boolean).join(" | ")}</strong></p>`,
-          ...featured.map((item) => `<p><strong class="marker marker-${escapeHtml(item.markerKey)}">${escapeHtml(item.marker.glyph)}</strong> ${escapeHtml(item.name)}</p>`),
-          hiddenRecap > 0 ? `<p class="muted">+${hiddenRecap} more below</p>` : "",
-        ].filter(Boolean).join("\n    ");
+      : model.selectedSection
+        ? `<p><strong>${recapCounts.join(" | ")}</strong></p>`
+        : [
+            `<p><strong>${recapCounts.join(" | ")}</strong></p>`,
+            ...featured.map((item) => `<p><strong class="marker marker-${escapeHtml(item.markerKey)}">${escapeHtml(item.marker.glyph)}</strong> ${escapeHtml(item.name)}</p>`),
+            hiddenRecap > 0 ? `<p class="muted">+${hiddenRecap} more below</p>` : "",
+          ].filter(Boolean).join("\n    ");
   const sections = model.buckets
     .map((bucket) => {
       const visible = visibleBucketItems(bucket, false);
@@ -2328,6 +2455,11 @@ function applyNewness(model) {
       const watched = watchedValuesForItem(item);
       const revision = observationRevisionForItem(item, model);
       const entry = store.rows[item.identity] ?? null;
+      if (model.forgeSkipped && item.bucketName === "REVIEWING") {
+        item.isNew = entry?.pending === true;
+        item.observationSnapshot = { watched, pending: item.isNew, revision };
+        continue;
+      }
       const newlyMeaningful = firstRun ? false : hasMeaningfulNewness(watched, entry?.watched ?? null);
       const pending = entry?.pending === true || newlyMeaningful;
       item.isNew = pending;
@@ -2411,7 +2543,7 @@ function terminalFrame(body) {
 // survive between redraws; two cadences so forge polling stays slow while
 // local file-derived state stays fresh. The alternate screen buffer keeps
 // scrollback intact and home-then-erase redraws avoid flicker.
-function watchLoop(width, useColor, showAll) {
+function watchLoop(width, useColor, showAll, section) {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     throw new Error("--watch requires a terminal with interactive input");
   }
@@ -2426,9 +2558,9 @@ function watchLoop(width, useColor, showAll) {
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
 
-  let github = null;
-  let reviewRequests = null;
-  let quota = null;
+  const forgeEnabled = sectionUsesForge(section);
+  const initialForge = forgeEnabled ? { github: null, reviewRequests: null, quota: null } : skippedForgeState();
+  let { github, reviewRequests, quota } = initialForge;
   let model = null;
   let selectedIdentity = null;
   let selectedAcknowledged = false;
@@ -2440,7 +2572,7 @@ function watchLoop(width, useColor, showAll) {
   let localRefreshError = null;
   let forgeRefreshInFlight = false;
   let lastForgeRefreshAtMs = null;
-  let firstForgeRefresh = true;
+  let firstForgeRefresh = forgeEnabled;
 
   const draw = () => {
     const frameWidth = width ?? process.stdout.columns ?? 80;
@@ -2480,9 +2612,10 @@ function watchLoop(width, useColor, showAll) {
   };
 
   const rebuildModel = (previewOnly = false) => {
-    model = buildModel({ ...inputs, github, reviewRequests, quota });
+    model = buildModel({ ...inputs, github, reviewRequests, quota, forgeSkipped: !forgeEnabled });
     if (previewOnly) previewNewness(model);
     else applyNewness(model);
+    applySectionView(model, section);
     if (
       selectedIdentity !== null &&
       !model.buckets.flatMap((bucket) => bucket.items).some((item) => item.identity === selectedIdentity)
@@ -2562,7 +2695,7 @@ function watchLoop(width, useColor, showAll) {
       inputs = collected;
       const forgeIsDue = lastForgeRefreshAtMs === null ||
         secondsSince(lastForgeRefreshAtMs, Date.now()) >= WATCH_GITHUB_SECONDS;
-      if (forgeIsDue && !forgeRefreshInFlight) refreshForge();
+      if (forgeEnabled && forgeIsDue && !forgeRefreshInFlight) refreshForge();
       else rebuildModel(firstForgeRefresh);
       return telemetryPromise;
     }).then((telemetry) => {
@@ -2655,17 +2788,19 @@ if (!isMainThread && workerData?.operation === "fetch-forge-state") {
   }
 } else if (isMainThread) {
   try {
-    const { outputPath, width, showAll, showRow, watch } = parseArguments(process.argv.slice(2));
+    const { outputPath, width, showAll, section, showRow, watch } = parseArguments(process.argv.slice(2));
     if (outputPath !== null) {
       assertSafeOutput(outputPath);
     }
     if (watch) {
-      watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
+      watchLoop(width, process.env.NO_COLOR ? false : true, showAll, section);
     } else {
       const inputs = await collectLocalInputs();
-      const { github, reviewRequests, quota } = await fetchForgeState(inputs);
-      const model = buildModel({ ...inputs, github, reviewRequests, quota });
+      const forgeEnabled = sectionUsesForge(section);
+      const forge = forgeEnabled ? await fetchForgeState(inputs) : skippedForgeState();
+      const model = buildModel({ ...inputs, ...forge, forgeSkipped: !forgeEnabled });
       applyNewness(model);
+      applySectionView(model, section);
       if (showRow !== null) {
         process.stdout.write(expandRow(
           model,

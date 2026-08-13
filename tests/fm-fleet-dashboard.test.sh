@@ -62,7 +62,7 @@ if [ -f "$FM_HOME/slow-local-fixture" ] && [ ! -f "$FM_HOME/local-refresh-starte
 fi
 case "${1:-}" in
   list-windows)
-    printf '%s\n' fm-decision-task fm-review-task fm-stuck-pr fm-mm-alpha fm-zz-zulu
+    printf '%s\n' fm-decision-task fm-review-task fm-stuck-pr fm-build-task fm-mm-alpha fm-zz-zulu
     ;;
   display-message)
     case "$*" in
@@ -781,6 +781,141 @@ test_html_page_renders_minimal_sections_with_reachable_detail() {
   assert_not_contains "$html" "truncated, 90 chars" "CLI truncation artifact leaked into the page"
   assert_not_contains "$html" "https://cdn" "dashboard depends on a CDN"
   pass "HTML page renders minimal sections with gh status and reachable detail"
+}
+
+test_section_selector_renders_intention_views_and_rejects_unknown() {
+  local home fakebin default explicit_all building approvals reviewing output html error rc default_id building_id build_id build_shown tracked_before tracked_after
+  home=$(make_home section-selector)
+  write_live_fixture "$home"
+  awk '/^## In flight$/ { print; print "- [ ] build-task - Build the fleet cockpit section views (repo: firstmate) (kind: ship) (since 2026-08-02)"; next } { print }' \
+    "$home/data/backlog.md" > "$home/data/backlog.md.updated"
+  mv "$home/data/backlog.md.updated" "$home/data/backlog.md"
+  mkdir -p "$home/projects/build-task"
+  fm_write_meta "$home/state/build-task.meta" \
+    "window=firstmate:fm-build-task" "worktree=$home/projects/build-task" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
+  printf 'working: implementing section-scoped cockpit views\n' > "$home/state/build-task.status"
+  "$ROOT/bin/fm-busy-event.sh" arm "$home/state" build-task >/dev/null
+  mkdir -p "$home/data/decision-task"
+  cat > "$home/data/decision-task/report.md" <<'EOF'
+# Decision task report
+
+## Manual test script
+
+1. Log in with captain@example.test / section-view-secret.
+EOF
+  fakebin=$(make_fakebin "$home")
+
+  default=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "default section render failed"
+  assert_not_contains "$default" "BUILDING" "no-selector default changed to include the new section"
+  tracked_before=$(jq '[.rows | keys[] | select(startswith("d:") or startswith("v:"))] | length' \
+    "$home/state/fleet-dashboard-observations.json")
+
+  mv "$fakebin/gh" "$fakebin/gh-enabled"
+  mv "$fakebin/quota-axi" "$fakebin/quota-axi-enabled"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_HOME/github-called"
+echo "unexpected GitHub call in local-only section" >&2
+exit 97
+SH
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_HOME/quota-called"
+echo "unexpected quota call in local-only section" >&2
+exit 98
+SH
+  chmod +x "$fakebin/gh" "$fakebin/quota-axi"
+
+  building=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all --section building) \
+    || fail "building section made a forge call"
+  approvals=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all --section approvals) \
+    || fail "approvals section made a forge call"
+  [ ! -e "$home/github-called" ] || fail "local-only section invoked GitHub"
+  [ ! -e "$home/quota-called" ] || fail "local-only section invoked quota"
+  tracked_after=$(jq '[.rows | keys[] | select(startswith("d:") or startswith("v:"))] | length' \
+    "$home/state/fleet-dashboard-observations.json")
+  [ "$tracked_after" = "$tracked_before" ] \
+    || fail "section rendering retired another section's NEW-tracking rows"
+
+  mv "$fakebin/gh-enabled" "$fakebin/gh"
+  mv "$fakebin/quota-axi-enabled" "$fakebin/quota-axi"
+  explicit_all=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all --section all) \
+    || fail "explicit all-section render failed"
+  assert_contains "$explicit_all" "BUILDING (1)" "all view omitted in-progress local work"
+  assert_contains "$explicit_all" "DECISIONS (6)" "all view omitted decisions"
+  assert_contains "$explicit_all" "OUR PRS IN REVIEW (4)" "all view omitted our PRs"
+  assert_contains "$explicit_all" "REVIEWS WAITING ON PEDRO (2)" "all view omitted requested reviews"
+  assert_contains "$explicit_all" "REVIEWING (3)" "all view omitted colleague review work"
+  assert_contains "$explicit_all" "ATTENTION NOW | 3 need Pedro | 1 stuck" \
+    "all view omitted the local-only one-line recap"
+  assert_not_contains "$explicit_all" "2 reviews waiting" "all view recap included forge-derived counts"
+
+  assert_contains "$building" "BUILDING (1)" "building view omitted in-progress local work"
+  assert_contains "$building" "Build the fleet cockpit section views" "building view omitted the active task"
+  assert_contains "$building" "OUR PRS IN REVIEW (4)" "building view omitted our PRs"
+  assert_contains "$building" "ATTENTION NOW | 3 need Pedro | 1 stuck" \
+    "building view omitted the local-only one-line recap"
+  assert_not_contains "$building" "reviews waiting" "building recap included forge-derived counts"
+  assert_not_contains "$building" "DECISIONS" "building view included approvals"
+  assert_not_contains "$building" "REVIEWS WAITING ON PEDRO" "building view included review approvals"
+  assert_not_contains "$building" "REVIEWING" "building view included colleague review work"
+  default_id=$(printf '%s\n' "$default" | rg -F "PR 4001 |" | tail -1 | awk '{print $2}')
+  building_id=$(printf '%s\n' "$building" | rg -F "PR 4001 |" | tail -1 | awk '{print $2}')
+  [ "$building_id" = "$default_id" ] || fail "building view changed the stable row id"
+  build_id=$(printf '%s\n' "$building" | rg -F "Build the fleet cockpit section views" | awk '{print $2}')
+  case "$build_id" in
+    b:build-task*) ;;
+    *) fail "building row lacks a readable stable id: $build_id" ;;
+  esac
+  build_shown=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section building --show "$build_id") \
+    || fail "building row did not expand by stable id"
+  assert_contains "$build_shown" "implementing section-scoped cockpit views" \
+    "building detail omitted the local current-state detail"
+
+  assert_contains "$approvals" "DECISIONS (6)" "approvals view omitted decisions"
+  assert_contains "$approvals" "REVIEWS WAITING ON PEDRO (0)" "approvals view omitted requested-review availability"
+  assert_contains "$approvals" "review requests unknown - not checked for local-only section" \
+    "approvals view implied locally unavailable review requests were checked"
+  assert_contains "$approvals" "ATTENTION NOW | 3 need Pedro | 1 stuck" \
+    "approvals view omitted the local-only one-line recap"
+  assert_not_contains "$approvals" "reviews waiting" "approvals recap included forge-derived counts"
+  assert_not_contains "$approvals" "OUR PRS IN REVIEW" "approvals view included building work"
+  assert_not_contains "$approvals" "REVIEWING" "approvals view included colleague review work"
+
+  reviewing=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all --section reviewing) \
+    || fail "reviewing section render failed"
+  assert_contains "$reviewing" "REVIEWING (3)" "reviewing view omitted colleague review work"
+  assert_contains "$reviewing" "ATTENTION NOW | 3 need Pedro | 1 stuck" \
+    "reviewing view omitted the local-only one-line recap"
+  assert_not_contains "$reviewing" "reviews waiting" "reviewing recap included forge-derived counts"
+  assert_not_contains "$reviewing" "DECISIONS" "reviewing view included approvals"
+  assert_not_contains "$reviewing" "OUR PRS IN REVIEW" "reviewing view included building work"
+  assert_not_contains "$reviewing" "REVIEWS WAITING ON PEDRO" "reviewing view included review approvals"
+
+  output="$home/approvals.html"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" --section approvals --output "$output" >/dev/null \
+    || fail "approvals HTML render failed"
+  html=$(<"$output")
+  assert_contains "$html" 'id="decisions"' "approvals HTML omitted decisions"
+  assert_contains "$html" 'id="review-obligations"' "approvals HTML omitted requested reviews"
+  assert_not_contains "$html" 'id="ours-in-review"' "approvals HTML included building work"
+  assert_not_contains "$html" 'id="reviewing"' "approvals HTML included colleague review work"
+  assert_contains "$html" "Attention now" "approvals HTML omitted the local-only recap"
+  assert_contains "$html" "3 need Pedro | 1 stuck" "approvals HTML omitted local recap counts"
+  assert_not_contains "$html" "reviews waiting" "approvals HTML recap included forge-derived counts"
+  assert_not_contains "$html" "section-view-secret" "section HTML leaked a recorded credential"
+
+  set +e
+  error=$(render_terminal "$home" "$fakebin" --section unknown 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unknown section name rendered the full fleet"
+  assert_contains "$error" "valid sections: building, approvals, reviewing, all" \
+    "unknown section error omitted the valid names"
+  pass "section selector renders intentional views and rejects unknown names"
 }
 
 test_help_describes_the_fixed_terminal_measure() {
@@ -2267,6 +2402,7 @@ test_expansion_includes_evidence_derived_recommendation
 test_show_expands_rows_with_full_context
 test_absent_sources_and_unreachable_reviews_stay_honest
 test_html_page_renders_minimal_sections_with_reachable_detail
+test_section_selector_renders_intention_views_and_rejects_unknown
 test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
 test_watch_paints_and_accepts_input_during_forge_refresh
