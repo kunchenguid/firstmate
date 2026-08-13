@@ -1925,6 +1925,66 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- periodic reconciliation must not be starved by actionable signals -------
+# wake() exits the cycle and the watcher re-arms into the same loop, so a scan
+# placed after the signal scan never runs while a chatty fleet keeps producing
+# actionable signals - exactly when a stalled worker hides among active
+# siblings. The watcher resolves its own directory for sibling scripts, so a
+# fixture bin/ carrying the real fm-watch.sh plus an instrumented
+# fm-inactive-reconcile.sh proves whether the scan is actually invoked.
+make_reconcile_probe_case() { # <name> <reconcile-body>
+  local dir bin_dir
+  dir=$(make_case "$1")
+  bin_dir="$dir/bin"
+  cp -R "$ROOT/bin" "$bin_dir"
+  cat > "$bin_dir/fm-inactive-reconcile.sh" <<SH
+#!/usr/bin/env bash
+printf 'ran\n' >> "$dir/reconcile.log"
+$2
+SH
+  chmod +x "$bin_dir/fm-inactive-reconcile.sh"
+  : > "$dir/reconcile.log"
+  printf '%s\n' "$dir"
+}
+
+reconcile_runs() { # <dir>
+  grep -c '^ran$' "$1/reconcile.log" 2>/dev/null || printf '0\n'
+}
+
+test_reconcile_runs_before_actionable_signal_wake() {
+  local dir state fakebin out pid
+  dir=$(make_reconcile_probe_case reconcile-not-starved 'exit 0')
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$dir/bin/fm-watch.sh" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher never surfaced the actionable turn-end signal"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null \
+    || fail "immediate actionable wake priority was lost: $(cat "$out")"
+  [ "$(reconcile_runs "$dir")" -ge 1 ] \
+    || fail "periodic direct-report reconciliation was starved by the actionable signal cycle"
+  pass "an actionable signal cycle still runs periodic direct-report reconciliation first"
+}
+
+test_reconcile_suspicion_wake_reason_is_routed() {
+  local dir state fakebin out pid
+  dir=$(make_reconcile_probe_case reconcile-suspicion \
+    'printf "child: targeted read-only progress inspection required\n"; exit 0')
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · busy'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$dir/bin/fm-watch.sh" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher never woke for a reported progress suspicion"
+  grep -F 'check: progress-suspicion' "$out" >/dev/null \
+    || fail "progress suspicion did not surface as its own wake reason: $(cat "$out")"
+  pass "a reported progress suspicion wakes with the targeted-inspection reason"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1974,3 +2034,5 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_reconcile_runs_before_actionable_signal_wake
+test_reconcile_suspicion_wake_reason_is_routed

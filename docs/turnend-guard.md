@@ -14,6 +14,10 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
 When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+The same shared hook also evaluates `bin/fm-continuation-check.sh` when the current primary session owns the home lock, but acts on it only after the supervision predicate below has resolved.
+One bounded follow-up is required when `tasks-axi ready` exposes accepted dispatchable work or an ordinary In flight backlog item lacks a matching worker whose canonical current state is `working`.
+Structured dependency, date, external-resource, load, parked, future, and Captain-decision holds remain non-dispatchable because `tasks-axi ready` owns that eligibility decision.
+The checker is read-only and never launches a worker, changes a hold, or treats speculative work as accepted.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
@@ -27,6 +31,7 @@ That check keeps crewmate and scout linked worktrees inert because their git dir
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
+Before that supervision predicate, it checks accepted-work continuation only when `fm-session-lock-lib.sh` proves the current harness ancestry owns `state/.lock`; a competing or lock-refused session stays inert.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
@@ -60,6 +65,8 @@ Both payloads carry `stop_hook_active`.
 In the default Codex mode, a true value lets the second stop finish after one forced continuation.
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
+That exception applies only to watcher recovery; accepted-work continuation honors `stop_hook_active` so it remains bounded to one forced follow-up like every other primary integration.
+Watcher recovery strictly outranks accepted-work continuation: the supervision predicate resolves first, and the continuation prompt is emitted only on a path that has already proven supervision healthy or not needed, so a continuation can never preempt or suppress a blind-turn block.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
 The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
@@ -111,6 +118,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-continuation-check.test.sh` covers dispatchable accepted work, structured blockers and holds, completed work, orphan and inactive In flight claims, additive Captain messages, lock ownership, and the shared hook boundary.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.

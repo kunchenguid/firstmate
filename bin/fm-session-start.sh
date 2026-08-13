@@ -36,7 +36,8 @@
 #                       X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
+#   3. direct-report reconciliation + wake-drain - runs the local bounded
+#      progress and inactive-outcome scan
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
 #   4. supervision-instructions - the one emitted operating block for the
@@ -706,10 +707,10 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. inactive outcomes + wake-drain -----------------------------------
-# The existing locked session-start path runs the same local inactive-outcome
-# reconciliation as the watcher poll before it presents the resulting durable
-# wake, without adding a daemon or external-network call.
+# --- 3. direct-report reconciliation + wake-drain -------------------------
+# The existing locked session-start path runs the same local progress and
+# inactive-outcome reconciliation as the watcher poll before it presents the
+# resulting durable wake, without adding a daemon or external-network call.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
 # remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
@@ -731,7 +732,7 @@ else
   INACTIVE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_OUT=
   if [ -n "$INACTIVE_OUT" ]; then
-    printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
+    printf 'direct-report reconciliation: %s\n' "$INACTIVE_OUT"
   fi
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then

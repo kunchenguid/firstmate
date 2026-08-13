@@ -32,7 +32,7 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+printf 'state: %s · source: fake%s\n' "${FM_FAKE_CREW_STATE:-unknown}" "${FM_FAKE_CREW_DETAIL:+ · $FM_FAKE_CREW_DETAIL}"
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -105,11 +105,17 @@ run_reconcile() { # <home> [--startup]
 }
 
 wake_count() { # <home> <key prefix>
-  grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  local count
+  count=$(grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true)
+  printf '%s\n' "${count:-0}"
 }
 
 outcome_count() { # <home> <suffix>
   find "$1/state/terminal-outcomes" -type f -name "*.$2" 2>/dev/null | wc -l | tr -d ' '
+}
+
+progress_count() { # <home>
+  find "$1/state/progress-observations" -type f -name '*.record' 2>/dev/null | wc -l | tr -d ' '
 }
 
 prime_seen() { # <state> <status>
@@ -332,7 +338,9 @@ test_nonterminal_and_captain_held_states_do_not_report() {
 # exempt from wedge escalation and emits no false wake.
 test_watcher_hook_and_idle_secondmate_exemption() {
   local out pid i
-  make_world watcher; write_child "$MAIN" child 'done: green'; prime_seen "$MAIN/state" "$MAIN/state/child.status"
+  make_world watcher; write_child "$MAIN" child 'done: green'
+  prime_seen "$MAIN/state" "$MAIN/state/child.status"
+  prime_seen "$MAIN/state" "$MAIN/state/child.turn-ended"
   out="$WORLD/watch.out"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
@@ -347,7 +355,8 @@ test_watcher_hook_and_idle_secondmate_exemption() {
     i=$((i + 1))
   done
   wait "$pid" 2>/dev/null || true
-  grep -Fq 'check: inactive-outcome' "$out" || fail "watcher did not surface its reconciliation result"
+  grep -Fq 'check: inactive-outcome' "$out" \
+    || fail "watcher did not surface its reconciliation result: output=$(cat "$out" 2>/dev/null) queue=$(cat "$MAIN/state/.wake-queue" 2>/dev/null)"
 
   make_world idle-secondmate; bind_secondmate local; write_mate_meta; prime_seen "$MAIN/state" "$MAIN/state/mate.status"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -380,7 +389,7 @@ SH
   [ "$elapsed" -le 3 ] || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
 
   write_child "$MAIN" b 'done: green'
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=2 run_reconcile "$MAIN" --startup
   grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
     || fail "next bounded scan did not resume with the following child"
   pass "stalled state reads are bounded without starving later children"
@@ -441,6 +450,165 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+test_watcher_periodically_observes_every_ordinary_report_quietly() {
+  local out pid i
+  make_world progress-watcher
+  write_child "$MAIN" alpha 'working: implementation active'
+  write_child "$MAIN" beta 'working: tests active'
+  prime_seen "$MAIN/state" "$MAIN/state/alpha.status"
+  prime_seen "$MAIN/state" "$MAIN/state/alpha.turn-ended"
+  prime_seen "$MAIN/state" "$MAIN/state/beta.status"
+  prime_seen "$MAIN/state" "$MAIN/state/beta.turn-ended"
+  out="$WORLD/progress-watch.out"
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_FAKE_CREW_STATE='working' "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ "$(progress_count "$MAIN")" -lt 2 ]; do sleep 0.1; i=$((i + 1)); done
+  [ "$(progress_count "$MAIN")" -eq 2 ] || { reap "$pid"; fail "watcher did not observe every ordinary direct report"; }
+  kill -0 "$pid" 2>/dev/null || fail "healthy progress observation stopped the watcher"
+  reap "$pid"
+  [ ! -s "$MAIN/state/.wake-queue" ] || fail "healthy progress observation emitted a wake"
+  ! grep -F 'check: progress-suspicion' "$out" >/dev/null \
+    || fail "healthy progress observation produced a supervisor message"
+  pass "watcher periodically observes every ordinary direct report without Captain input or healthy-worker noise"
+}
+
+test_live_nonprogress_becomes_suspicious_and_restart_safe() {
+  local out record now
+  make_world nonprogress; write_child "$MAIN" child 'working: implementation active'
+  now=$(date +%s)
+  FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup >/dev/null
+  out=$(FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'targeted read-only progress inspection required: child=child' \
+    "live nonprogress did not trigger targeted inspection"
+  [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+    || fail "live nonprogress did not queue exactly one suspicion"
+  record="$MAIN/state/progress-observations/child.record"
+  grep -Fxq 'suspicious=1' "$record" || fail "suspicious episode was not persisted"
+
+  FM_INACTIVE_RECONCILE_NOW=$((now + 122)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup >/dev/null
+  [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+    || fail "restart/reload duplicated an unchanged suspicious episode"
+  pass "live-but-nonprogressing work becomes suspicious once and survives restart without duplicate checks"
+}
+
+test_live_turn_activity_without_progress_becomes_suspicious() {
+  local out now turn
+  make_world activity-without-progress; write_child "$MAIN" child 'working: implementation active'
+  now=$(date +%s)
+  turn="$MAIN/state/child.turn-ended"
+  FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=3600 FM_PROGRESS_LONG_PHASE_SECS=7200 \
+    FM_PROGRESS_ACTIVITY_SCANS=2 FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup >/dev/null
+  set_mtime $((now + 1)) "$turn"
+  FM_INACTIVE_RECONCILE_NOW=$((now + 60)) FM_PROGRESS_STALL_SECS=3600 FM_PROGRESS_LONG_PHASE_SECS=7200 \
+    FM_PROGRESS_ACTIVITY_SCANS=2 FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup >/dev/null
+  set_mtime $((now + 2)) "$turn"
+  out=$(FM_INACTIVE_RECONCILE_NOW=$((now + 120)) FM_PROGRESS_STALL_SECS=3600 FM_PROGRESS_LONG_PHASE_SECS=7200 \
+    FM_PROGRESS_ACTIVITY_SCANS=2 FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'reason=live-activity-without-progress:2' \
+    "repeated live turn activity without progress did not trigger targeted inspection"
+  pass "contradictory live activity without meaningful progress triggers targeted inspection"
+}
+
+test_genuine_progress_resets_suspicion() {
+  local record now
+  make_world progress-reset; write_child "$MAIN" child 'working: implementation active'
+  now=$(date +%s)
+  FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup >/dev/null
+  FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup >/dev/null
+  printf 'working: tests started\n' >> "$MAIN/state/child.status"
+  FM_INACTIVE_RECONCILE_NOW=$((now + 62)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL='tests running' run_reconcile "$MAIN" --startup >/dev/null
+  record="$MAIN/state/progress-observations/child.record"
+  grep -Fxq 'suspicious=0' "$record" || fail "genuine phase progress did not clear suspicion"
+  grep -Fxq 'notice_emitted=0' "$record" || fail "genuine progress did not reset the episode notice"
+  grep -Fxq "progress_epoch=$((now + 62))" "$record" || fail "progress epoch did not advance"
+  pass "genuine phase or durable-status progress resets suspicion"
+}
+
+test_long_validation_phase_uses_longer_bound() {
+  local now
+  make_world long-phase; write_child "$MAIN" child 'working: CI tests active'
+  now=$(date +%s)
+  FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL='ci tests running' run_reconcile "$MAIN" --startup >/dev/null
+  FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL='ci tests running' run_reconcile "$MAIN" --startup >/dev/null
+  [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 0 ] \
+    || fail "long validation phase was penalized by the ordinary timeout"
+  FM_INACTIVE_RECONCILE_NOW=$((now + 121)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+    FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL='ci tests running' run_reconcile "$MAIN" --startup >/dev/null
+  [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+    || fail "long validation phase never became suspicious at its own bound"
+  pass "test, build, CI, render, and deploy phases use a longer no-progress bound"
+}
+
+# Worker-authored status prose that merely contains the letters of a phase word
+# ("decision", "specification", "precision") must not buy the long validation
+# allowance, or a genuinely stalled worker goes unreconciled three times longer
+# than intended.
+test_ordinary_prose_does_not_claim_long_phase_bound() {
+  local now detail
+  for detail in 'awaiting a decision on the API shape' 'implementing the specification' 'needs more precision here'; do
+    make_world "prose-$(printf '%s' "$detail" | tr -cd '[:alnum:]' | cut -c1-12)"
+    write_child "$MAIN" child 'working: drafting'
+    now=$(date +%s)
+    FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+      || fail "ordinary prose '$detail' wrongly claimed the long validation-phase bound"
+  done
+  pass "ordinary status prose containing phase-word letters keeps the ordinary stall bound"
+}
+
+# The true-positive side of the same boundary: a real validation phase named as
+# its own word still gets the longer allowance.
+test_named_validation_phase_keeps_long_bound() {
+  local now detail
+  for detail in 'running the build' 'deploy in progress' 'waiting on CI'; do
+    make_world "phase-$(printf '%s' "$detail" | tr -cd '[:alnum:]' | cut -c1-12)"
+    write_child "$MAIN" child 'working: validating'
+    now=$(date +%s)
+    FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    FM_INACTIVE_RECONCILE_NOW=$((now + 61)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 0 ] \
+      || fail "named validation phase '$detail' was penalized by the ordinary timeout"
+    FM_INACTIVE_RECONCILE_NOW=$((now + 121)) FM_PROGRESS_STALL_SECS=60 FM_PROGRESS_LONG_PHASE_SECS=120 \
+      FM_FAKE_CREW_STATE='working' FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup >/dev/null
+    [ "$(wake_count "$MAIN" 'progress-suspicion:child:')" = 1 ] \
+      || fail "named validation phase '$detail' never became suspicious at its own bound"
+  done
+  pass "named build, deploy, and CI phases still use the longer no-progress bound"
+}
+
+test_repeated_same_theme_rounds_are_suspicious() {
+  local out now
+  make_world repeated-rounds; write_child "$MAIN" child 'working: validation active'
+  cat > "$MAIN/state/child.status" <<'EOF'
+blocked [key=round-1]: lint correction round 1
+blocked [key=round-2]: lint correction round 2
+blocked [key=round-3]: lint correction round 3
+EOF
+  now=$(date +%s)
+  out=$(FM_INACTIVE_RECONCILE_NOW="$now" FM_PROGRESS_STALL_SECS=3600 FM_PROGRESS_LONG_PHASE_SECS=7200 \
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'reason=repeated-same-theme-rounds:3' \
+    "repeated same-theme correction rounds were not detected"
+  pass "repeated same-theme review or fix rounds trigger targeted inspection"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
@@ -457,5 +625,13 @@ test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_reconciliation_never_calls_forge
+test_watcher_periodically_observes_every_ordinary_report_quietly
+test_live_nonprogress_becomes_suspicious_and_restart_safe
+test_live_turn_activity_without_progress_becomes_suspicious
+test_genuine_progress_resets_suspicion
+test_long_validation_phase_uses_longer_bound
+test_ordinary_prose_does_not_claim_long_phase_bound
+test_named_validation_phase_keeps_long_bound
+test_repeated_same_theme_rounds_are_suspicious
 
 echo "all inactive reconciliation tests passed"
