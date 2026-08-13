@@ -441,7 +441,7 @@ test_decision_inbox_is_stable_bounded_and_approval_safe() {
 
   printf '%s' "$out" | jq -e '
     ([.decisions.cards[] | select(.task_id == "review-merge")][0]
-      | (.alias | test("^D[0-9]+ · React Library$")) and .restricted == true
+      | (.alias | test("^D-[a-z0-9-]+ · React Library$")) and .restricted == true
         and .shorthand_allowed == false
         and .approval_boundary == "explicit confirmation required")
   ' >/dev/null || fail "merge decision did not carry an Obsidian alias and a hard approval boundary"
@@ -568,6 +568,88 @@ test_decision_inbox_is_stable_bounded_and_approval_safe() {
   pass "decision inbox keeps stable aliases, explicit selection, and approval boundaries"
 }
 
+write_collision_fixture() {
+  local target=$1 drop=$2
+  jq --arg drop "$drop" '
+      .snapshot.tasks = [.snapshot.tasks[] | select(.id | startswith("task-") | not)]
+      | .tasks = (.tasks | with_entries(select(.key | startswith("task-") | not)))
+      | .snapshot.tasks += [
+          {id:"task-230", kind:"ship", harness:"codex", project:"p", backlog:{title:"P"},
+           current_state:{state:"parked", source:"run-step", observed_at:"2026-08-13T11:59:30Z"},
+           hints:{pending_decision:true}},
+          {id:"task-311", kind:"ship", harness:"codex", project:"q", backlog:{title:"Q"},
+           current_state:{state:"parked", source:"run-step", observed_at:"2026-08-13T11:59:30Z"},
+           hints:{pending_decision:true}}]
+      | .tasks["task-230"] = {project:"P", task:"Safe cleanup", phase:"Review",
+          profile_lane:"Personal Codex",
+          decision:{question:"Archive the old notes?", recommendation:"Archive",
+                    opened_at:"2026-08-13T11:50:00Z"}}
+      | .tasks["task-311"] = {project:"Q", task:"Release", phase:"Review",
+          profile_lane:"Personal Codex",
+          decision:{question:"Merge the release branch into main?", recommendation:"Hold",
+                    opened_at:"2026-08-13T11:50:00Z"}}
+      | if $drop == "" then .
+        else (del(.tasks[$drop])
+              | .snapshot.tasks = [.snapshot.tasks[] | select(.id != $drop)])
+        end' "$FIXTURE" > "$target"
+}
+
+test_alias_is_pure_identity_under_collision() {
+  local both only_311 only_230 alias_230_both alias_311_both alias_311_alone alias_230_alone
+
+  write_collision_fixture "$TMP_ROOT/collide-both.json" ""
+  write_collision_fixture "$TMP_ROOT/collide-311.json" "task-230"
+  write_collision_fixture "$TMP_ROOT/collide-230.json" "task-311"
+
+  both=$("$CONSOLE" --fixture "$TMP_ROOT/collide-both.json" --format json --now 2026-08-13T12:00:00Z)
+  only_311=$("$CONSOLE" --fixture "$TMP_ROOT/collide-311.json" --format json --now 2026-08-13T12:00:00Z)
+  only_230=$("$CONSOLE" --fixture "$TMP_ROOT/collide-230.json" --format json --now 2026-08-13T12:00:00Z)
+
+  alias_230_both=$(printf '%s' "$both" | jq -r '[.decisions.cards[] | select(.task_id == "task-230")][0].alias')
+  alias_311_both=$(printf '%s' "$both" | jq -r '[.decisions.cards[] | select(.task_id == "task-311")][0].alias')
+  alias_311_alone=$(printf '%s' "$only_311" | jq -r '[.decisions.cards[] | select(.task_id == "task-311")][0].alias')
+  alias_230_alone=$(printf '%s' "$only_230" | jq -r '[.decisions.cards[] | select(.task_id == "task-230")][0].alias')
+
+  [ "$alias_230_both" != "$alias_311_both" ] \
+    || fail "two open decisions shared the alias $alias_230_both"
+  [ "$alias_311_both" = "$alias_311_alone" ] \
+    || fail "resolving the other card changed task-311's alias: $alias_311_both -> $alias_311_alone"
+  [ "$alias_230_both" = "$alias_230_alone" ] \
+    || fail "resolving the other card changed task-230's alias: $alias_230_both -> $alias_230_alone"
+  [ "$alias_230_both" != "$alias_311_alone" ] \
+    || fail "the restricted card inherited the unrestricted card's alias $alias_230_both"
+
+  printf '%s' "$both" | jq -e '
+    ([.decisions.cards[] | select(.task_id == "task-230")][0].restricted == false)
+      and ([.decisions.cards[] | select(.task_id == "task-311")][0].restricted == true)
+  ' >/dev/null || fail "collision fixture lost its restricted/unrestricted split"
+  printf '%s' "$only_311" | jq -e '
+    [.decisions.cards[] | select(.task_id == "task-311")][0]
+      | .restricted == true and .shorthand_allowed == false
+  ' >/dev/null || fail "surviving merge card lost its approval boundary"
+
+  local variant_fixture
+  variant_fixture="$TMP_ROOT/alias-variants.json"
+  jq '.snapshot.tasks = [.snapshot.tasks[] | select(.id | startswith("variant") | not)]
+      | .tasks = (.tasks | with_entries(select(.key | startswith("variant") | not)))
+      | reduce ["variant-a1", "variant_a1", "varianta1", "VARIANT-A1"][] as $id (.;
+          .snapshot.tasks += [{id:$id, kind:"ship", harness:"codex", project:"v",
+            backlog:{title:"V"},
+            current_state:{state:"parked", source:"run-step", observed_at:"2026-08-13T11:59:30Z"},
+            hints:{pending_decision:true}}]
+          | .tasks[$id] = {project:"V", task:"Variant", phase:"Review",
+              profile_lane:"Personal Codex",
+              decision:{question:"Continue?", recommendation:"Continue",
+                        opened_at:"2026-08-13T11:50:00Z"}})' "$FIXTURE" > "$variant_fixture"
+  "$CONSOLE" --fixture "$variant_fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e '
+      [.decisions.cards[] | select(.task_id | startswith("variant") or startswith("VARIANT"))] as $v
+      | ($v | length) == 4
+        and (($v | map(.alias) | length) == ($v | map(.alias) | unique | length))
+    ' >/dev/null || fail "task ids differing only in punctuation or case shared an alias"
+  pass "decision aliases stay identity-pure when short forms collide"
+}
+
 test_restriction_survives_truncation_redaction_and_options() {
   local fixture long_question restricted_query
   restricted_query='[.decisions.cards[] | select(.task_id == "multi-option")][0]'
@@ -608,6 +690,29 @@ test_restriction_survives_truncation_redaction_and_options() {
   "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
     | jq -e "$restricted_query | .restricted == true" >/dev/null \
     || fail "a restricted blocker was not classified from raw evidence"
+
+  local field
+  for field in next_action review; do
+    fixture="$TMP_ROOT/restrict-$field.json"
+    jq --arg f "$field" '.tasks["multi-option"].task = "Routine step"
+        | .tasks["multi-option"][$f] = "deploy to production and merge the branch"
+        | .tasks["multi-option"].decision = {question:"Continue?", recommendation:"Continue",
+            opened_at:"2026-08-13T11:55:00Z"}' "$FIXTURE" > "$fixture"
+    "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -e "$restricted_query | .restricted == true and .shorthand_allowed == false" >/dev/null \
+      || fail "a restricted $field was shorthand-approvable"
+  done
+
+  for field in next_action review; do
+    fixture="$TMP_ROOT/restrict-$field-redacted.json"
+    jq --arg f "$field" '.tasks["multi-option"].task = "Routine step"
+        | .tasks["multi-option"][$f] = "/Users/bob/deploy-to-production.sh"
+        | .tasks["multi-option"].decision = {question:"Continue?", recommendation:"Continue",
+            opened_at:"2026-08-13T11:55:00Z"}' "$FIXTURE" > "$fixture"
+    "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -e "$restricted_query | .restricted == true" >/dev/null \
+      || fail "a redacted $field lost its restriction before classification"
+  done
   pass "restriction classification reads raw evidence before truncation and redaction"
 }
 
@@ -623,6 +728,20 @@ test_option_key_tokens_are_unique_and_readable() {
            == (map(capture("^\\[(?<k>[^]]+)\\]").k) | unique | length))
       and (map(test("^\\[[A-Z0-9]\\] [A-Za-z]")) | all)
   ' >/dev/null || fail "colliding option initials produced duplicate key tokens: $keys"
+
+  local set
+  for set in '["a","aa","aaa"]' '["ab","ba","ab ba"]' '["zip","zip x","zap"]' '["x","x","xx","xxx","xxxx"]'; do
+    fixture="$TMP_ROOT/option-keys-exhaust.json"
+    jq --argjson opts "$set" '.tasks["multi-option"].decision.options = $opts' "$FIXTURE" > "$fixture"
+    keys=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -c '[.decisions.cards[] | select(.task_id == "multi-option")][0].keys')
+    printf '%s' "$keys" | jq -e '
+      (map(capture("^\\[(?<k>[^]]+)\\] (?<label>.+)$"))) as $parsed
+      | ($parsed | length) > 0
+        and (($parsed | map(.k) | length) == ($parsed | map(.k) | unique | length))
+        and ($parsed | map(.label | length > 0) | all)
+    ' >/dev/null || fail "option set $set produced duplicate or unlabeled key tokens: $keys"
+  done
 
   "$CONSOLE" --fixture "$FIXTURE" --format json --now 2026-08-13T12:00:00Z \
     | jq -e '
@@ -764,6 +883,7 @@ test_truncated_history_is_surfaced
 test_fractional_ttl_is_refused_before_any_helper_call
 test_status_panel_uses_accessible_markers_and_required_fields
 test_decision_inbox_is_stable_bounded_and_approval_safe
+test_alias_is_pure_identity_under_collision
 test_restriction_survives_truncation_redaction_and_options
 test_option_key_tokens_are_unique_and_readable
 test_chat_visibility_is_reported_honestly

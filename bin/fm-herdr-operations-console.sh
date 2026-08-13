@@ -272,10 +272,16 @@ NORMALIZED=$(
     def restricted_decision($value):
       ($value | type) == "string"
       and ($value | test("(merge|deploy|delete|destroy|drop |force[- ]push|revoke|rotate|production|prod |credential|secret|token|password|uninstall|overwrite|replace .*app|irreversible)"; "i"));
-    def identity_ordinal($task_id):
-      ($task_id | explode | reduce .[] as $c (7; ((. * 31) + $c) % 900)) + 10;
+    def identity_token($task_id):
+      ($task_id | ascii_downcase | gsub("[^a-z0-9]"; "-")) as $slug
+      | (if ($slug | test("^[a-z0-9]")) and $slug == $task_id
+         then $slug
+         else $slug + "-" + ($task_id | explode
+                             | reduce .[] as $c (17; ((. * 131) + $c) % 100000) | tostring)
+         end)
+      | if length == 0 then "task" else . end;
     def decision_alias($task_id; $stem):
-      "D" + (identity_ordinal($task_id) | tostring)
+      "D-" + identity_token($task_id)
       + (if $stem == null then "" else " · " + $stem end);
     def node_for($id; $tasks):
       if $id == "Captain" then {id:"Captain", label:"Captain", state:null}
@@ -422,6 +428,8 @@ NORMALIZED=$(
            | ([$decision.question, $decision.recommendation,
                ($decision.options[]? | select((. | type) == "string")),
                ($task_display[$t.id] // {}).blocker,
+               ($task_display[$t.id] // {}).next_action,
+               ($task_display[$t.id] // {}).review,
                ($task_display[$t.id] // {}).task,
                ($task_display[$t.id] // {}).project,
                $t.blocker, $t.task]
@@ -445,14 +453,20 @@ NORMALIZED=$(
                keys:(if ($named_options | length) >= 2
                      then ($named_options
                            | reduce .[] as $option
-                               ({used:[], keys:[]};
+                               ({used:[], keys:[], seq:0};
                                 . as $state
-                                | ([range(0; ($option | length))
-                                    | $option[.:(. + 1)] | ascii_upcase
-                                    | select(test("[A-Z0-9]"))]) as $candidates
-                                | (first($candidates[] | select(. as $c | ($state.used | index($c)) == null))
-                                   // ($candidates[0] // "?")) as $picked
+                                | ([($option | split(" ")[] | select(length > 0) | .[0:1]),
+                                    (range(0; ($option | length)) | $option[.:(. + 1)])]
+                                   | map(ascii_upcase | select(test("^[A-Z0-9]$")))) as $candidates
+                                | $state.used as $used
+                                | ([$candidates[] | select(. as $c | ($used | index($c)) == null)][0]) as $mnemonic
+                                | (if $mnemonic != null then $mnemonic
+                                   else ([range($state.seq + 1; $state.seq + 200)
+                                          | tostring
+                                          | select(. as $n | ($used | index($n)) == null)][0] // "?")
+                                   end) as $picked
                                 | {used:($state.used + [$picked]),
+                                   seq:($state.seq + 1),
                                    keys:($state.keys + ["[" + $picked + "] " + $option])})
                            | .keys)
                      else ["[I] Igen", "[N] Nem"] end),
@@ -463,15 +477,7 @@ NORMALIZED=$(
                                   else "alias shorthand allowed" end),
                evidence_signature:([$question, $recommendation, ($named_options | join("|"))] | join("¦"))
              })
-       | sort_by(.task_id)
-       | reduce .[] as $card
-           ({used:[], cards:[]};
-            . as $state
-            | (if ($state.used | index($card.alias)) == null then $card.alias
-               else ($card.alias + "#" + $card.task_id) end) as $unique_alias
-            | {used:($state.used + [$unique_alias]),
-               cards:($state.cards + [$card + {alias:$unique_alias}])})
-       | .cards) as $decisions
+       | sort_by(.task_id)) as $decisions
     | {
         schema:"fm-herdr-operations-console.v1",
         mode:"fixture",

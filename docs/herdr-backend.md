@@ -215,15 +215,16 @@ Test, commit or version, blocker, and next-action values are displayed only when
 Captain chat keeps a plain-language outcome or a single decision question; this panel owns the routine structured detail.
 `ttl_seconds` must be a whole number of seconds between 1 and 86400, so the published display cache always carries a whole-millisecond expiry bound.
 `--format decisions` renders the durable decision inbox for tasks that explicitly need review.
-Each card carries a stable short alias built from the task identity plus the authoritative Obsidian stem when the link is supported, for example `D317 · React Library`, together with a one-line question, recommendation, age, blocked task, and readable keyboard tokens such as `[I] Igen` and `[N] Nem`.
-The numeric part is derived from the task id rather than the card's position, so resolving one decision never renumbers the survivors and a resolved card never donates its alias to a different task; if two ids ever produced the same alias the task id is appended to keep aliases unique.
-Option key tokens advance to the first distinguishing character, so options such as `zip` and `zstd` never advertise the same keystroke.
+Each card carries a stable alias built from the task identity plus the authoritative Obsidian stem when the link is supported, for example `D-review-merge · React Library`, together with a one-line question, recommendation, age, blocked task, and readable keyboard tokens such as `[I] Igen` and `[N] Nem`.
+The alias is a pure function of the task id: it never uses the card's position, a bounded ordinal, or a suffix that appears only while another card happens to be open, so resolving, adding, or reordering decisions cannot renumber a survivor or move an alias onto a different task.
+Task ids that differ only in punctuation keep distinct aliases because the sanitized slug carries an identity-derived discriminator whenever sanitisation changed the id.
+Option key tokens prefer the initial of a word, fall back to the first unused character, and finally to a numeric token, so every option advertises a distinct keystroke even when the option names share all their letters.
 A card is keyed to its task, so a later notification updates the same card; `evidence_signature` changes only when the question, recommendation, or options change, which is what lets a repeat notification avoid repeating the full text.
 A single focused binary card accepts the bare Hungarian words `Igen` or `Nem` without repeating the alias.
 When more than one card is open, `selection_required` is true, no card is focused, and the surface asks for an explicit selection rather than guessing.
 Multi-option cards use short understandable option names and never bare `A`/`B`/`C` codes.
 Alias shorthand is refused for any decision whose text implies merge, deploy, delete, force-push, credential, production, or installed-app replacement work; those cards report `explicit confirmation required` and `shorthand_allowed` is false.
-That classification reads the raw question, recommendation, option names, blocker, task, and project values before truncation or private-path redaction, so a long or redacted merge question can never be downgraded to shorthand-approvable; the check errs toward demanding explicit confirmation.
+That classification reads the raw question, recommendation, option names, blocker, next action, review, task, and project values before truncation or private-path redaction, so a long or redacted merge question can never be downgraded to shorthand-approvable; the check errs toward demanding explicit confirmation.
 The console cannot see Captain chat, so it reports `chat_visibility` as `unsupported` and `chat_ask_state` as `unknown` rather than asserting that a decision was already asked.
 
 `--format selector` renders a display-only mock of the three-step Profile, Model, Effort keyboard flow.
