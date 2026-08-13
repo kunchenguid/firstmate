@@ -560,9 +560,222 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# A captain who declines a held decision leaves no follow-up work to route, so the
+# routed close path cannot express the answer. The unrouted close path must record
+# that answer durably while still refusing to release work the hold blocks.
+test_declined_decision_closes_without_routed_work() {
+  local home id hold routed_hold json show
+  home=$(make_home declined-decision)
+  id=sample-benchmark-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample benchmarks" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create declined-decision origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample benchmark review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" half-run \
+    --title "Choose the sample half run" --reason "captain half-run choice pending" --repo sample) \
+    || fail "could not register the declinable hold"
+  run_decisions "$home" complete "$id" half-run >/dev/null \
+    || fail "completion failed for the declinable hold"
+
+  printf '' > "$home/empty-decision.txt"
+  if run_decisions "$home" decline "$id" half-run --decision-file "$home/empty-decision.txt" \
+    > "$home/empty-decline.out" 2> "$home/empty-decline.err"; then
+    fail "decline accepted an empty captain decision"
+  fi
+  if run_decisions "$home" decline "$id" half-run > "$home/bare-decline.out" 2> "$home/bare-decline.err"; then
+    fail "decline accepted a close with no captain decision file at all"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "a refused decline closed the hold"
+  assert_contains "$show" "held: yes" "a refused decline released the hold"
+
+  printf 'Declined: do not run the sample half benchmark.\n' > "$home/half-run-decision.txt"
+  run_decisions "$home" decline "$id" half-run --decision-file "$home/half-run-decision.txt" >/dev/null \
+    || fail "decline could not close a hold that routes no work"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "declined hold did not close"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" "declined hold lost the decision record"
+  assert_contains "$show" "Resolution mode: declined" "declined hold did not record its close path"
+  assert_contains "$show" "Declined: do not run the sample half benchmark." \
+    "declined hold did not record the captain decision text"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "a declined decision did not satisfy the completion gate"
+  run_decisions "$home" decline "$id" half-run --decision-file "$home/half-run-decision.txt" >/dev/null \
+    || fail "identical decline retry was not idempotent"
+  printf 'Declined for a different reason.\n' > "$home/drifted-decision.txt"
+  if run_decisions "$home" decline "$id" half-run --decision-file "$home/drifted-decision.txt" \
+    > "$home/drifted-decline.out" 2> "$home/drifted-decline.err"; then
+    fail "decline retry accepted a different captain decision"
+  fi
+  json=$(run_bearings "$home") || fail "Bearings failed after a declined decision"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    (.decisions_open | any(.id == $hold) | not)
+  ' >/dev/null || fail "a declined decision remained an open Captain's Call: $json"
+
+  routed_hold=$(run_decisions "$home" hold "$id" upstream \
+    --title "Choose the sample upstream target" --reason "captain upstream choice pending" --repo sample) \
+    || fail "could not register the routed-work hold"
+  tasks_in "$home" add sample-upstream-work "Apply the sample upstream choice" \
+    --kind ship --repo sample --blocked-by "$routed_hold" >/dev/null \
+    || fail "could not route work behind the second hold"
+  if run_decisions "$home" decline "$id" upstream --decision-file "$home/half-run-decision.txt" \
+    > "$home/routed-decline.out" 2> "$home/routed-decline.err"; then
+    fail "decline released work that was still routed behind the hold"
+  fi
+  assert_grep "still blocks routed work" "$home/routed-decline.err" \
+    "decline must name the routed work it refuses to release"
+  show=$(tasks_in "$home" show "$routed_hold" --full)
+  assert_contains "$show" "state: queued" "refused routed decline closed the hold"
+  show=$(tasks_in "$home" show sample-upstream-work --full)
+  assert_contains "$show" "blocked: yes" "refused routed decline released dependent work"
+  if run_decisions "$home" resolve "$id" upstream --decision-file "$home/half-run-decision.txt" \
+    > "$home/unrouted-resolve.out" 2> "$home/unrouted-resolve.err"; then
+    fail "the routed close path accepted a resolution with no routed work"
+  fi
+  pass "a declined decision closes with a recorded answer and no routed work"
+}
+
+# The exact incident: two declined captain decisions were closed with a direct
+# tasks-axi done, so the durable resolution attestation this gate reads was never
+# written and the investigation could no longer be cleaned up.
+test_out_of_band_close_is_repairable_before_teardown() {
+  local home id hold show
+  home=$(make_home out-of-band-close)
+  id=sample-fullrun-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample full run" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create out-of-band-close origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample full run review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" submission \
+    --title "Choose the sample submission" --reason "captain submission choice pending" --repo sample) \
+    || fail "could not register the out-of-band hold"
+  run_decisions "$home" complete "$id" submission >/dev/null \
+    || fail "completion failed before the out-of-band close"
+
+  tasks_in "$home" "done" "$hold" >/dev/null || fail "could not reproduce the direct out-of-band close"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "the out-of-band close shape was not reproduced"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/backlog.md" \
+    "the out-of-band close must leave no durable resolution record"
+  if run_decisions "$home" verify "$id" > "$home/broken-verify.out" 2> "$home/broken-verify.err"; then
+    fail "verification passed a captain decision closed with no recorded answer"
+  fi
+  if run_teardown "$home" "$id" > "$home/broken-teardown.out" 2> "$home/broken-teardown.err"; then
+    fail "teardown proceeded while a captain decision had no recorded answer"
+  fi
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+
+  if run_decisions "$home" repair "$id" submission > "$home/bare-repair.out" 2> "$home/bare-repair.err"; then
+    fail "repair recorded a resolution with no captain decision file"
+  fi
+  printf '' > "$home/empty-repair.txt"
+  if run_decisions "$home" repair "$id" submission --decision-file "$home/empty-repair.txt" \
+    > "$home/empty-repair.out" 2> "$home/empty-repair.err"; then
+    fail "repair recorded a resolution from an empty captain decision file"
+  fi
+  if run_decisions "$home" verify "$id" > "$home/still-broken.out" 2> "$home/still-broken.err"; then
+    fail "a refused repair still satisfied the completion gate"
+  fi
+
+  printf 'Declined: do not submit the sample full run upstream.\n' > "$home/submission-decision.txt"
+  run_decisions "$home" repair "$id" submission --decision-file "$home/submission-decision.txt" >/dev/null \
+    || fail "repair could not record the missing durable resolution"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "repair reopened a closed captain decision"
+  assert_contains "$show" "Resolution mode: repaired" "repair did not record its close path"
+  assert_contains "$show" "Declined: do not submit the sample full run upstream." \
+    "repair did not record the captain decision text"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the repaired decision did not satisfy the completion gate"
+  run_decisions "$home" repair "$id" submission --decision-file "$home/submission-decision.txt" >/dev/null \
+    || fail "identical repair retry was not idempotent"
+  printf 'A different answer entirely.\n' > "$home/drifted-repair.txt"
+  if run_decisions "$home" repair "$id" submission --decision-file "$home/drifted-repair.txt" \
+    > "$home/drifted-repair.out" 2> "$home/drifted-repair.err"; then
+    fail "repair retry overwrote the recorded captain decision"
+  fi
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "teardown still refused after the decision was repaired: $(cat "$home/teardown.err")"
+  pass "a decision closed outside the script is repairable and then clears teardown"
+}
+
+# The unrouted close paths must not become a way past the gate. An unanswered
+# decision keeps blocking cleanup, and neither new path can manufacture an answer.
+test_unanswered_decision_still_blocks_completion_and_teardown() {
+  local home id hold show
+  home=$(make_home unanswered-decision)
+  id=sample-open-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate an open sample choice" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create unanswered-decision origin"
+  write_origin_meta "$home" "$id"
+  printf 'needs-decision [key=open-choice]: choose sample option A or option B\n' \
+    > "$home/state/$id.status"
+  printf '# Sample open review\n\nThe captain has not chosen yet.\n' > "$home/data/$id/report.md"
+  printf 'An answer the captain never gave.\n' > "$home/invented-decision.txt"
+
+  if run_decisions "$home" complete "$id" open-choice > "$home/open-complete.out" 2> "$home/open-complete.err"; then
+    fail "completion accepted an unresolved decision with no captain hold"
+  fi
+  if run_decisions "$home" verify "$id" > "$home/open-verify.out" 2> "$home/open-verify.err"; then
+    fail "verification accepted an unresolved decision with no captain hold"
+  fi
+  if run_teardown "$home" "$id" > "$home/open-teardown.out" 2> "$home/open-teardown.err"; then
+    fail "teardown erased an investigation whose decision was never inventoried"
+  fi
+  assert_grep "REFUSED" "$home/open-teardown.err" "teardown refusal must be explicit"
+  if run_decisions "$home" decline "$id" open-choice --decision-file "$home/invented-decision.txt" \
+    > "$home/absent-decline.out" 2> "$home/absent-decline.err"; then
+    fail "decline invented a resolution for a decision that has no hold"
+  fi
+  if run_decisions "$home" repair "$id" open-choice --decision-file "$home/invented-decision.txt" \
+    > "$home/absent-repair.out" 2> "$home/absent-repair.err"; then
+    fail "repair invented a resolution for a decision that has no hold"
+  fi
+
+  tasks_in "$home" add "$id-decision-never-held" "An ordinary captain-kind task" \
+    --kind captain --repo sample >/dev/null \
+    || fail "could not create the never-held captain-kind fixture"
+  tasks_in "$home" "done" "$id-decision-never-held" >/dev/null \
+    || fail "could not close the never-held captain-kind fixture"
+  if run_decisions "$home" repair "$id" never-held --decision-file "$home/invented-decision.txt" \
+    > "$home/never-held-repair.out" 2> "$home/never-held-repair.err"; then
+    fail "repair turned an ordinary captain-kind task into a resolved captain decision"
+  fi
+  assert_grep "never held for the captain" "$home/never-held-repair.err" \
+    "repair must say the identity carries no captain-hold provenance"
+  show=$(tasks_in "$home" show "$id-decision-never-held" --full)
+  assert_not_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "a refused never-held repair wrote a resolution record"
+
+  hold=$(run_decisions "$home" hold "$id" open-choice \
+    --title "Choose the sample option" --reason "captain option choice pending" --repo sample) \
+    || fail "could not register the unanswered hold"
+  if run_decisions "$home" repair "$id" open-choice --decision-file "$home/invented-decision.txt" \
+    > "$home/held-repair.out" 2> "$home/held-repair.err"; then
+    fail "repair closed a decision that is still actively held and unanswered"
+  fi
+  assert_grep "still open" "$home/held-repair.err" "repair must say the hold is still open"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "a refused repair closed the live hold"
+  assert_contains "$show" "held: yes" "a refused repair released the live hold"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/backlog.md" \
+    "a refused repair wrote a resolution record"
+  run_decisions "$home" complete "$id" open-choice >/dev/null \
+    || fail "an inventoried unanswered decision could not complete its review"
+  pass "an unanswered decision still blocks completion and resists both unrouted close paths"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
+test_declined_decision_closes_without_routed_work
+test_out_of_band_close_is_repairable_before_teardown
+test_unanswered_decision_still_blocks_completion_and_teardown
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
