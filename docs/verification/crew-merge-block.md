@@ -8,9 +8,11 @@ Those tests are hermetic and never invoke `claude`, so this record holds the liv
 
 ## Conditions
 
-Verified on 2026-07-25 with Claude Code 2.1.220 (native, commit `4073f59596e2`, darwin-arm64) and `gh` authenticated.
-The two `claude doctor` sections below were re-run on 2026-08-13 with Claude Code 2.1.231 (native, commit `bbff368ec698`, darwin-arm64) after the settings document grew the semantic busy-state hooks, so the loads-clean evidence matches the document the library emits today.
-The `--dangerously-skip-permissions` session table was not re-run: it exercises the rule patterns, and those are byte-for-byte unchanged by the hook addition.
+First verified on 2026-07-25 with Claude Code 2.1.220 (native, commit `4073f59596e2`, darwin-arm64) and `gh` authenticated.
+The evidence below was not all captured in that one session, so each section names the run it came from and no claim here rests on a run other than the one printed beside it.
+
+The two `claude doctor` sections were re-run on 2026-08-13 with Claude Code 2.1.231 (native, commit `bbff368ec698`, darwin-arm64) after the settings document grew the semantic busy-state hooks, so the loads-clean evidence matches the document the library emits today.
+The `--dangerously-skip-permissions` session table was itself re-run when `Bash(gh-axi pr merge:*)` and `Bash(gh api graphql*mergePullRequest*)` were added to the rule list, because neither rule existed in the first session; its commands and its refusal wording therefore differ from the `permissions.deny` matching run that preceded it, and both runs are kept because neither covers the other's patterns.
 
 ## Rule syntax is validated, and an invalid rule is skipped
 
@@ -53,6 +55,8 @@ The negative control was re-run in the same session: a directory carrying the ma
 
 ## `permissions.ask` stops a crewmate that runs under `--dangerously-skip-permissions`
 
+Captured after `Bash(gh-axi pr merge:*)` and `Bash(gh api graphql*mergePullRequest*)` joined the rule list, against the seven-rule document quoted above.
+
 This is the load-bearing premise of the whole guard, so it was exercised against the live permission engine rather than argued from documentation.
 A session was launched with exactly the flag `bin/fm-spawn.sh` uses, in a directory holding the generated file above, and asked to run each command and report whether the tool call executed:
 
@@ -87,10 +91,28 @@ Either outcome satisfies the guard - the crewmate does not land its own work - b
 ## The rules match the merge verbs and nothing else
 
 The same run is the negative evidence too: `gh --version` and `gh api repos/cli/cli/pulls/1/files` both executed without a prompt.
-Ordinary `gh api` reads a crewmate needs stay ungated, while `gh`, `gh-axi`, the two REST merge endpoints, and the inline GraphQL merge mutation are all covered.
+Ordinary `gh api` reads a crewmate needs stay ungated, while `gh pr merge`, `gh-axi pr merge`, and the inline GraphQL merge mutation are blocked.
+That table carries no `gh api ... /merge` row, so it is not evidence for `Bash(gh api *pulls/*/merge*)` or `Bash(gh api *repos/*/merges*)`; those two patterns are covered by the separate matching run below.
 
 Per-executable rules are required, not redundant: a rule is a prefix match on the literal `argv[0]` token, so `Bash(gh pr merge:*)` does not match `gh-axi pr merge` - the command the briefs hand a crewmate and the one `bin/fm-pr-merge.sh` lands PRs with.
 The separate blocks for `gh pr merge --help` and `gh-axi pr merge --help` in the table above are what demonstrate that.
+
+### The two REST merge endpoint patterns match
+
+Captured in the first 2026-07-25 session, before the `gh-axi` and GraphQL rules existed; the two `gh api` patterns it exercises are byte-for-byte the ones the library emits today.
+
+Matching was exercised against the live permission engine with the same patterns placed under `permissions.deny`, so a non-match would execute and return an HTTP error instead of being refused.
+Commands targeted a nonexistent repository, so a permitted call could only reach a 404.
+
+| Command | Result |
+|---|---|
+| `gh api --method PUT repos/<none>/nope/pulls/1/merge` | refused by the permission engine |
+| `gh api --method POST repos/<none>/nope/merges` | refused by the permission engine |
+| `gh api repos/<none>/nope/pulls/1/files` | permitted, reached the API and returned 404 |
+
+The refusal surfaced as `Permission to use Bash with command gh api --method PUT repos/<none>/nope/pulls/1/merge has been denied.`
+
+`deny` is what this run measured; production ships `ask`. What transfers is the pattern match, which is the same rule engine either way - the section above is what establishes that an unanswerable `ask` is a stop under `--dangerously-skip-permissions`, and the wording difference between the two refusal messages is exactly that difference in mode, not a disagreement between the runs.
 
 ### Known residual
 
