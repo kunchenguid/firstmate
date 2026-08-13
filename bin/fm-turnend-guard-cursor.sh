@@ -218,7 +218,7 @@ ARM_OUT=
 ARM_PID=
 ACTIONABLE=0
 HEALTHY=0
-SUPERSEDED=0
+STAND_DOWN=0
 
 # Never leave an arm child or its capture file behind, on any exit path.
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
@@ -234,13 +234,15 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   fi
   ARM_PID=$!
   while kill -0 "$ARM_PID" 2>/dev/null; do
+    # Stand down for either reason: a newer stop claimed the baton, or away mode
+    # started and its daemon now owns the watcher and all triage.
     if ! park_still_ours || [ -e "$STATE/.afk" ]; then
-      SUPERSEDED=1
+      STAND_DOWN=1
       break
     fi
     sleep "$POLL"
   done
-  if [ "$SUPERSEDED" -eq 1 ]; then
+  if [ "$STAND_DOWN" -eq 1 ]; then
     kill "$ARM_PID" 2>/dev/null
     ARM_PID=
     exit 0
