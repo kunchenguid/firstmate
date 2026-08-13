@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Antigravity CLI (`agy`) executable resolution, model catalogue, and the paths
 # of the ONE firstmate-owned global agy plugin.
-# Sourced by bin/fm-spawn.sh and bin/fm-teardown.sh. This file is sourced by
-# scripts and has no side effects on source.
+# Sourced by bin/fm-spawn.sh and by bin/fm-control-lib.sh (which is what reaches
+# bin/fm-teardown.sh). This file is sourced by scripts and has no side effects
+# on source.
 #
 # Why one owner: agy's turn-end and busy wiring is a GLOBAL customization, so
 # its directory layout is shared by every firstmate home on the machine and by
@@ -81,13 +82,36 @@ fm_agy_resolve_binary() {
   return 1
 }
 
+# FM_AGY_PROBE_TIMEOUT: the wall-clock ceiling on the ONE agy subprocess this
+# library runs. `agy models` is a NETWORK call, and bin/fm-spawn.sh runs it
+# while holding the per-task spawn lock and the task-set lock, so an unbounded
+# probe would wedge the whole spawn path - and every later spawn behind those
+# locks - on a slow or black-holed connection. This is the same ceiling
+# bin/fm-cursor-lib.sh puts on its own catalogue probe, for the same reason.
+FM_AGY_PROBE_TIMEOUT=${FM_AGY_PROBE_TIMEOUT:-20}
+
+# fm_agy_bounded_output: run an agy subcommand under a hard wall-clock bound, or
+# refuse. Refusing when no timeout utility exists is deliberate and is what
+# makes this fail-safe rather than fail-slow: the caller's contract is that an
+# unreachable catalogue establishes NOTHING, so declining to probe degrades to
+# "not validated" instead of blocking a lock-holding spawn indefinitely.
+fm_agy_bounded_output() {  # <agy-binary> <args...>
+  local path=$1 runner=
+  shift
+  [ -n "$path" ] && [ -x "$path" ] || return 1
+  if command -v timeout >/dev/null 2>&1; then runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  fi
+  [ -n "$runner" ] || return 1
+  "$runner" "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
+}
+
 # fm_agy_list_models: the account's own live catalogue, one
-# "<id><TAB><Display Name>" row per model. Bounded because it is a network
-# call. A caller that cannot reach it must treat the result as unknown rather
-# than as proof a model is unsupported.
+# "<id><TAB><Display Name>" row per model. A caller that cannot reach it must
+# treat the result as unknown rather than as proof a model is unsupported.
 fm_agy_list_models() {  # <agy-binary>
   local out
-  out=$("$1" models 2>/dev/null) || return 1
+  out=$(fm_agy_bounded_output "$1" models) || return 1
   printf '%s\n' "$out" | LC_ALL=C grep -v '^Fetching' | LC_ALL=C grep -e '	'
 }
 

@@ -220,6 +220,60 @@ all three resolved as unions, with cursor fully intact:
 - `bin/fm-supervision-instructions.sh` - both adapters added a protocol name to
   the same list; unioned.
 
+## A defect found and fixed during live validation
+
+A live launch was killed after stalling for ten minutes while holding both the
+per-task spawn lock and the task-set lock. That prompted an audit of every
+unbounded wait the agy path introduces, and found one: `fm_agy_list_models` ran
+`agy models` - a **network** call - with no time limit, from inside
+`bin/fm-spawn.sh` while both of those locks are held. A slow or black-holed
+connection would therefore have wedged that spawn and every later spawn queued
+behind those locks, with no upper bound.
+
+Fixed by giving the probe the same hard ceiling `bin/fm-cursor-lib.sh` already
+puts on its own catalogue probe, including the same deliberate refusal to run at
+all when no `timeout`/`gtimeout` utility exists - degrading to "catalogue not
+reachable, so nothing is established" rather than to an unbounded wait. Covered
+by `test_catalogue_probe_cannot_block_indefinitely`, which drives a stalled
+`agy` stand-in and asserts the probe returns non-zero well inside the ceiling.
+
+Honest scope note: this fix is the defect **class** the stall belongs to, but it
+is not confirmed to be that stall's cause. The stall did not reproduce - the
+same spawn under trace completed in 4-6s across repeated runs, and `agy models`
+under command substitution returns in ~2s. The most likely explanation for that
+one occurrence is contamination I introduced myself: an earlier failed attempt
+had left a treehouse pool behind and I removed it with `rm -rf` rather than
+through treehouse, so the next acquire ran against a pool directory treehouse
+still believed it owned. That is a fixture mistake, not an adapter defect, and
+it is recorded here rather than quietly dropped.
+
+## Live validation
+
+One supervised crewmate launched through `bin/fm-spawn.sh --harness agy --model
+'Gemini 3.1 Pro (High)' --scout --backend herdr`, in an isolated Herdr lab
+against a throwaway target, end to end on the merged code:
+
+- Spawned with `harness=agy model=Gemini 3.1 Pro (High) effort=default` - the
+  display name threaded through and the effort axis recorded but never emitted.
+- Observed `busy fm-spawn` (the launch seed), then `busy agy-hook` (the
+  `PreInvocation` hook firing live), then `idle agy-hook` on `Stop`.
+- The worker did the work and reported itself: `FINDINGS.md` written with the
+  requested content, and `done: adapter smoke complete` appended to its own
+  status file by the worker.
+- `state/<id>.turn-ended` touched, so the watcher wake works.
+- **Model confirmed, not assumed.** The `SessionStart` hook records the model
+  agy itself resolved into `state/<id>.agy-session`: `model_name=gemini-pro-agent`
+  for the requested `Gemini 3.1 Pro (High)`, matching what the same model
+  reported in the print-mode matrix. This is agy's own report of what it is
+  running, not the model's self-description, which is what makes it proof.
+- `bin/fm-control.sh <id> interrupt` returned
+  `interrupt-delivered ... verified=agent-alive cancel=unconfirmed`, and the pane
+  showed `Interrupted ·` with the composer back to its bare `>` - confirming the
+  documented "no clear key needed".
+- `bin/fm-control.sh <id> exit` returned `stopped ...` and the pane fell back to
+  a shell prompt.
+- The lab's default-session tripwire was identical before and after.
+
 ## Open questions for the captain
 
 1. **Primary supervision is repaired but not end-to-end verified.** The hooks now

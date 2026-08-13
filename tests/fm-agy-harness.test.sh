@@ -19,8 +19,9 @@
 #      separated region - the same rule pair with no glyph - still needs one.
 #   4. The dead-shell rule survives: a `>` prompt with no rule beneath it is
 #      never `empty`, on any capability shape.
-#   5. Both model spellings agy accepts resolve against its catalogue, and a
-#      model absent from the catalogue is refused.
+#   5. Both model spellings agy accepts resolve against its catalogue, a model
+#      absent from it is refused, and the probe - a network call made while the
+#      spawn holds two locks - can never block indefinitely.
 #   6. agy runs every task kind, because it has a supervision protocol and a
 #      blocking primary Stop guard; muse still refuses a secondmate.
 set -u
@@ -217,6 +218,37 @@ test_catalogue_accepts_both_spellings_agy_accepts() {
   pass "fm-agy-lib: both accepted model spellings resolve and near-misses do not"
 }
 
+# The catalogue probe is a NETWORK call that bin/fm-spawn.sh makes while holding
+# the per-task spawn lock and the task-set lock, so it must never be able to
+# block indefinitely: an unbounded probe would wedge that spawn and every later
+# one queued behind those locks. A stalled agy must therefore come back as "not
+# validated" well inside the ceiling, never as a hang.
+test_catalogue_probe_cannot_block_indefinitely() {
+  local dir start elapsed rc=0
+  dir="$TMP_ROOT/probe"
+  mkdir -p "$dir"
+  printf '#!/bin/sh\nsleep 600\n' > "$dir/agy"
+  chmod +x "$dir/agy"
+
+  if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    start=$(date +%s)
+    FM_AGY_PROBE_TIMEOUT=2 fm_agy_list_models "$dir/agy" >/dev/null 2>&1 || rc=$?
+    elapsed=$(( $(date +%s) - start ))
+    [ "$rc" -ne 0 ] || fail "a stalled agy must not report a usable catalogue"
+    [ "$elapsed" -lt 30 ] \
+      || fail "the catalogue probe must return inside its ceiling, took ${elapsed}s"
+  else
+    # With no timeout utility the probe must REFUSE rather than run unbounded.
+    start=$(date +%s)
+    PATH="$dir" fm_agy_list_models "$dir/agy" >/dev/null 2>&1 || rc=$?
+    elapsed=$(( $(date +%s) - start ))
+    [ "$rc" -ne 0 ] || fail "an unboundable probe must refuse, not report a catalogue"
+    [ "$elapsed" -lt 30 ] \
+      || fail "an unboundable probe must refuse immediately, took ${elapsed}s"
+  fi
+  pass "fm-agy-lib: the catalogue probe is bounded and never blocks a lock-holding spawn"
+}
+
 test_resolve_binary_refuses_when_absent() {
   local out rc=0
   out=$(PATH="$TMP_ROOT/empty-path" HOME="$TMP_ROOT/empty-home" fm_agy_resolve_binary 2>&1) || rc=$?
@@ -305,6 +337,7 @@ test_pi_blank_separated_region_still_requires_identity
 test_dead_shell_prompt_is_never_empty
 test_catalogue_accepts_both_spellings_agy_accepts
 test_resolve_binary_refuses_when_absent
+test_catalogue_probe_cannot_block_indefinitely
 test_agy_runs_every_task_kind
 test_agy_lifecycle_mechanics_are_the_verified_ones
 test_agy_busy_source_trust_is_scoped
