@@ -691,8 +691,9 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 }
 
 # The status-protocol text must show the keyed form with the key BEFORE the
-# colon (the shape bin/fm-classify-lib.sh parses) and warn against the broken
-# key-after-colon form, in every scaffold variant that carries the protocol.
+# colon (the documented shape bin/fm-classify-lib.sh parses) and describe the
+# note-head token as an equivalent accepted fallback, in every scaffold
+# variant that carries the protocol.
 test_keyed_status_form_in_all_scaffolds() {
   local home kind id brief
   home="$TMP_ROOT/keyed-form-home"
@@ -720,12 +721,13 @@ test_keyed_status_form_in_all_scaffolds() {
       "$kind brief did not state that the key tag goes before the colon"
     # shellcheck disable=SC2016 # Literal backticks and brackets must remain unexpanded.
     assert_grep '`needs-decision: [key=slug] ...`' "$brief" \
-      "$kind brief did not warn against the key-after-colon form"
-    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
-    assert_grep '`default`' "$brief" \
-      "$kind brief did not explain that a key after the colon files under the default key"
+      "$kind brief did not show the note-head fallback form"
+    assert_grep 'equivalent fallback since #2202' "$brief" \
+      "$kind brief did not describe the note-head token as an accepted fallback"
+    assert_grep 'before-colon token winning when both are present' "$brief" \
+      "$kind brief did not state that the before-colon token wins when both are present"
   done
-  pass "fm-brief.sh: every status-protocol scaffold shows the keyed form and warns against key-after-colon"
+  pass "fm-brief.sh: every status-protocol scaffold shows the keyed form and its note-head fallback"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
