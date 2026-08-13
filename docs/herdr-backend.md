@@ -318,7 +318,7 @@ It cannot start, restart, cancel, answer, approve, fix, or otherwise drive the p
 The helper writes an atomic private sidecar binding task id, run id, session, task pane, observer pane, and worktree.
 A sidecar is reusable only while its complete live binding agrees.
 A missing, unreadable, stale, or conflicting sidecar refuses both duplicate creation and pane closure.
-When the run is terminal, the task pane has disappeared, or normal task cleanup begins, the helper closes only its exact verified observer pane after confirming it differs from the task pane and is not the captain's active tab.
+When the run is terminal, the task pane has disappeared, or normal task cleanup begins, the helper closes only its exact verified observer pane after confirming it differs from the task pane and is not the captain's active pane.
 It retires the sidecar only after structured pane absence confirms that close.
 The observer never contributes endpoint authority, recovery, delivery, or presentation-journal behavior.
 It is disabled by default, local to one home, and unsupported on non-Herdr backends.
