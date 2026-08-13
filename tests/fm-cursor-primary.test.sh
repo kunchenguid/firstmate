@@ -399,6 +399,41 @@ SH
   pass "cursor park: ownership claim and follow-up commit are serialized"
 }
 
+test_superseded_park_does_not_consume_nag_budget() {
+  local dir first_pid second_out waited budget_count
+  dir=$(make_primary_dir "$TMP_ROOT/park-nag-supersede")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" failed
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+if ( set -C; : > "$FM_HOME/state/first-guard-entered" ) 2>/dev/null; then
+  while [ ! -e "$FM_HOME/state/first-guard-release" ]; do sleep 0.05; done
+fi
+printf 'fixture supervision failure\n' >&2
+exit 2
+SH
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  ( run_park "$dir" > "$dir/state/first-nag-out" ) &
+  first_pid=$!
+  waited=0
+  while [ ! -e "$dir/state/first-guard-entered" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || fail "the first park never reached the guard decision"
+  done
+  second_out=$(run_park "$dir")
+  : > "$dir/state/first-guard-release"
+  wait "$first_pid" 2>/dev/null || true
+  [ "$(kind_of_followup "$second_out")" = turn-end-guard ] \
+    || fail "the current park did not deliver its repair nag: $second_out"
+  [ ! -s "$dir/state/first-nag-out" ] \
+    || fail "the superseded park delivered a stale repair nag"
+  budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-cursor-blocks" 2>/dev/null || true)
+  [ "$budget_count" = 1 ] \
+    || fail "the superseded park consumed the current park's nag budget: $budget_count"
+  pass "cursor park: a superseded park cannot consume repair budget"
+}
+
 test_park_inert_when_afk() {
   local dir out
   dir=$(make_primary_dir "$TMP_ROOT/park-afk")
@@ -556,6 +591,7 @@ test_park_delivers_staged_compaction_digest_once
 test_park_does_not_consume_another_sessions_context
 test_park_stands_down_when_superseded
 test_park_serializes_supersession_with_followup_commit
+test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
 test_park_inert_without_session_lock
 test_park_inert_in_child_worktree

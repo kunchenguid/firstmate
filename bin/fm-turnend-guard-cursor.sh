@@ -107,19 +107,20 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
 # embedded quote, newline, or the U+2063 prefix cannot corrupt the response.
-emit_followup() {  # <kind> <body>
-  local kind=$1 body=$2 encoded response
+emit_followup() {  # <kind> <body> [reset-budget]
+  local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_lock_try_acquire "$OWNER_LOCK" || exit 0
   if ! park_still_ours; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
   if ! fm_operational_input_encode "$kind" "$body" encoded \
-    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null); then
+    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
+    || ! printf '%s\n' "$response"; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
-  printf '%s\n' "$response"
+  [ "$reset_budget" = reset-budget ] && budget_reset
   fm_lock_release "$OWNER_LOCK"
   exit 0
 }
@@ -144,6 +145,72 @@ budget_write() {  # <count>
 
 budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null || true
+}
+
+budget_reset_if_ours() {
+  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  if ! park_still_ours; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  budget_reset
+  fm_lock_release "$OWNER_LOCK"
+}
+
+emit_staged_context() {
+  local staged_session staged encoded response
+  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  if ! park_still_ours; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  if [ ! -s "$PENDING_CONTEXT" ] || [ -L "$PENDING_CONTEXT" ] || [ "$SESSION_ID" = unknown ]; then
+    fm_lock_release "$OWNER_LOCK"
+    return 0
+  fi
+  staged_session=$(jq -r '.session_id // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
+  staged=$(jq -r '.digest // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
+  if [ "$staged_session" != "$SESSION_ID" ] || [ -z "$staged" ]; then
+    fm_lock_release "$OWNER_LOCK"
+    return 0
+  fi
+  if ! fm_operational_input_encode session-start "$staged" encoded \
+    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
+    || ! printf '%s\n' "$response"; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+  fm_lock_release "$OWNER_LOCK"
+  exit 0
+}
+
+emit_repair_followup() {  # <reason> <arm-tail> <attempt>
+  local reason=$1 arm_tail=$2 attempt_count=$3 count body encoded response
+  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  if ! park_still_ours; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  budget_read
+  [ "$BUDGET_COUNT" -lt "$BLOCK_BUDGET" ] || {
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  }
+  count=$((BUDGET_COUNT + 1))
+  body="TURN WOULD END BLIND - supervision is off. The hook-owned watcher park could not establish a live cycle after $attempt_count bounded attempts (nag $count of $BLOCK_BUDGET).
+$arm_tail
+
+$reason"
+  if ! fm_operational_input_encode turn-end-guard "$body" encoded \
+    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
+    || ! printf '%s\n' "$response"; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  budget_write "$count"
+  fm_lock_release "$OWNER_LOCK"
+  exit 0
 }
 
 # --- park ownership ----------------------------------------------------------
@@ -192,14 +259,7 @@ claim_park || exit 0
 # (index.js @ 4814884 lists sessionStart, beforeSubmitPrompt, preToolUse,
 # postToolUse, postToolUseFailure), so the re-emit digest is staged there and
 # delivered here at the first turn boundary after the compaction.
-if [ -s "$PENDING_CONTEXT" ] && [ ! -L "$PENDING_CONTEXT" ] && [ "$SESSION_ID" != unknown ]; then
-  STAGED_SESSION=$(jq -r '.session_id // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
-  if [ "$STAGED_SESSION" = "$SESSION_ID" ]; then
-    STAGED=$(jq -r '.digest // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
-    rm -f "$PENDING_CONTEXT" 2>/dev/null || true
-    [ -n "$STAGED" ] && emit_followup session-start "$STAGED"
-  fi
-fi
+emit_staged_context
 
 # Cursor's own loop_limit is the outer ceiling; this inner one bites first so the
 # session is told once, loudly, instead of supervision going quiet unannounced.
@@ -213,7 +273,7 @@ fi
 [ -e "$STATE/.afk" ] && exit 0
 
 if ! fm_supervision_needed "$STATE" "$GRACE"; then
-  budget_reset
+  budget_reset_if_ours
   exit 0
 fi
 
@@ -286,23 +346,22 @@ done
 # The need may have vanished while parked - the fleet was torn down, or Relay
 # was opted out. Nothing left to supervise, so end the turn quietly.
 if ! fm_supervision_needed "$STATE" "$GRACE"; then
-  budget_reset
+  budget_reset_if_ours
   exit 0
 fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
-  budget_reset
   WAKE=$(grep -E '^(signal:|stale:|check:|heartbeat)' "$ARM_OUT" 2>/dev/null | head -8)
   emit_followup watcher "firstmate watcher wake - one supervision event needs a handling turn now.
 $WAKE
 
-Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This stop hook owns watcher continuity: when the handling turn ends, the next needed cycle parks automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake."
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This stop hook owns watcher continuity: when the handling turn ends, the next needed cycle parks automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake." reset-budget
 fi
 
 # A verified live cycle with a fresh beacon is positive recovery even though this
 # park closed without a wake of its own: the next turn end parks again.
 if [ "$HEALTHY" -eq 1 ]; then
-  budget_reset
+  budget_reset_if_ours
   exit 0
 fi
 
@@ -320,15 +379,7 @@ rm -f "$GUARD_ERR" 2>/dev/null || true
 
 # Bounded so a persistent failure nags a few times and then stops, instead of
 # turning every turn end into another unproductive continuation.
-budget_read
-BUDGET_COUNT=$((BUDGET_COUNT + 1))
-budget_write "$BUDGET_COUNT"
-[ "$BUDGET_COUNT" -le "$BLOCK_BUDGET" ] || exit 0
-
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 ARM_TAIL=
 [ -n "$ARM_OUT" ] && ARM_TAIL=$(grep -E '^watcher:' "$ARM_OUT" 2>/dev/null | head -4)
-emit_followup turn-end-guard "TURN WOULD END BLIND - supervision is off. The hook-owned watcher park could not establish a live cycle after $attempt bounded attempts (nag $BUDGET_COUNT of $BLOCK_BUDGET).
-$ARM_TAIL
-
-$REASON"
+emit_repair_followup "$REASON" "$ARM_TAIL" "$attempt"
