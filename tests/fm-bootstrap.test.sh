@@ -798,6 +798,132 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
+make_firstmate_fork_fixture() {
+  local case_dir=$1 repo remote fakebin
+  repo="$case_dir/repo"
+  remote="$case_dir/origin.git"
+  mkdir -p "$repo/config"
+  printf '%s\n' manual > "$repo/config/backlog-backend"
+  fm_git_identity
+  git -C "$repo" init -q -b main
+  printf '%s\n' initial > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm initial
+  fm_git_add_origin "$repo" "$remote"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  printf '%s|%s|%s\n' "$repo" "$remote" "$fakebin"
+}
+
+run_firstmate_fork_report() {
+  local repo=$1 fakebin=$2 verbose=${3:-0}
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_VERBOSE_FACTS="$verbose" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_firstmate_fork_stalled_remote_is_bounded() {
+  local case_dir fixture repo remote fakebin stall marker output pid tries status monitor_was_on out
+  case_dir="$TMP_ROOT/firstmate-fork-stalled"
+  fixture=$(make_firstmate_fork_fixture "$case_dir")
+  repo=${fixture%%|*}
+  fixture=${fixture#*|}
+  remote=${fixture%%|*}
+  fakebin=${fixture#*|}
+  stall="$case_dir/stall-ssh.sh"
+  marker="$case_dir/stall-started"
+  output="$case_dir/bootstrap.out"
+  cat > "$stall" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_STALL_STARTED"
+sleep 300
+SH
+  chmod +x "$stall"
+  git -C "$repo" remote set-url origin ssh://stall.invalid/firstmate.git
+
+  monitor_was_on=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  (
+    GIT_SSH_COMMAND="$stall" FM_TEST_STALL_STARTED="$marker" \
+      FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 run_firstmate_fork_report "$repo" "$fakebin"
+  ) > "$output" 2>&1 &
+  pid=$!
+  tries=0
+  while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 50 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+    [ -e "$marker" ] || fail "stalled-remote fixture never entered the hanging SSH transport"
+    fail "bootstrap remained hung for 5s after the stalled SSH transport started"
+  fi
+  wait "$pid"
+  status=$?
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  [ -e "$marker" ] || fail "bounded stalled-remote case never entered the SSH transport"
+  [ "$status" -eq 0 ] || fail "bounded stalled-remote bootstrap exited $status"
+  out=$(cat "$output")
+  [ "$out" = "FLEET_SYNC: firstmate: could not check main against origin/main (remote unreachable or authentication failed)" ] \
+    || fail "bounded stalled-remote report mismatch, got: $out"
+  pass "bootstrap bounds a stalled firstmate fork probe and reports could-not-check"
+}
+
+test_firstmate_fork_sync_report() {
+  local case_dir fixture repo remote fakebin out
+
+  case_dir="$TMP_ROOT/firstmate-fork-ahead"
+  fixture=$(make_firstmate_fork_fixture "$case_dir")
+  repo=${fixture%%|*}
+  fixture=${fixture#*|}
+  remote=${fixture%%|*}
+  fakebin=${fixture#*|}
+  printf '%s\n' local >> "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm local
+  out=$(run_firstmate_fork_report "$repo" "$fakebin")
+  [ "$out" = "FLEET_SYNC: firstmate: main is ahead of origin/main by 1 commit(s)" ] \
+    || fail "ahead firstmate fork report mismatch, got: $out"
+
+  case_dir="$TMP_ROOT/firstmate-fork-synced"
+  fixture=$(make_firstmate_fork_fixture "$case_dir")
+  repo=${fixture%%|*}
+  fixture=${fixture#*|}
+  remote=${fixture%%|*}
+  fakebin=${fixture#*|}
+  out=$(run_firstmate_fork_report "$repo" "$fakebin" 1)
+  [ "$out" = "BOOTSTRAP_INFO: firstmate: main is in sync with origin/main" ] \
+    || fail "in-sync firstmate fork report mismatch, got: $out"
+
+  case_dir="$TMP_ROOT/firstmate-fork-unreachable"
+  fixture=$(make_firstmate_fork_fixture "$case_dir")
+  repo=${fixture%%|*}
+  fixture=${fixture#*|}
+  remote=${fixture%%|*}
+  fakebin=${fixture#*|}
+  mv "$remote" "$remote.unreachable"
+  git -C "$repo" ls-remote --exit-code origin refs/heads/main >/dev/null 2>&1 \
+    && fail "unreachable fixture unexpectedly contacted origin"
+  out=$(run_firstmate_fork_report "$repo" "$fakebin")
+  [ "$out" = "FLEET_SYNC: firstmate: could not check main against origin/main (remote unreachable or authentication failed)" ] \
+    || fail "could-not-check firstmate fork report mismatch, got: $out"
+
+  case_dir="$TMP_ROOT/firstmate-fork-unconfigured"
+  fixture=$(make_firstmate_fork_fixture "$case_dir")
+  repo=${fixture%%|*}
+  fixture=${fixture#*|}
+  remote=${fixture%%|*}
+  fakebin=${fixture#*|}
+  git -C "$repo" remote remove origin
+  out=$(run_firstmate_fork_report "$repo" "$fakebin")
+  [ -z "$out" ] || fail "unconfigured firstmate fork should stay silent, got: $out"
+
+  pass "bootstrap reports firstmate fork ahead, in-sync, and could-not-check states while no-origin stays silent"
+}
+
 make_routine_bootstrap_fixture() {
   local case_dir=$1 fakebin root home sm c1
   root="$case_dir/root"
@@ -949,6 +1075,8 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_firstmate_fork_stalled_remote_is_bounded
+test_firstmate_fork_sync_report
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version

@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "FLEET_SYNC: firstmate: <fork-sync state>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -173,16 +174,17 @@ fleet_sync_relay_all_output() {
   done < "$tmp"
 }
 
-fleet_sync() {
-  [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
-
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+fleet_sync_run_bounded() {
+  local output=$1 timeout monitor_was_on pid start elapsed status
+  shift
   timeout=$(fleet_sync_bootstrap_timeout)
+  FM_FLEET_SYNC_BOUNDED_TIMED_OUT=0
+  FM_FLEET_SYNC_BOUNDED_TIMEOUT=$timeout
+  FM_FLEET_SYNC_BOUNDED_ELAPSED=0
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  "$@" >"$output" 2>/dev/null &
   pid=$!
 
   start=$SECONDS
@@ -192,18 +194,78 @@ fleet_sync() {
       kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-      fleet_sync_relay_all_output "$tmp"
-      echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=${elapsed}s)"
-      rm -f "$tmp"
-      return 0
+      FM_FLEET_SYNC_BOUNDED_TIMED_OUT=1
+      FM_FLEET_SYNC_BOUNDED_ELAPSED=$elapsed
+      return 124
     fi
     sleep 1
   done
-  wait "$pid" 2>/dev/null || true
+  wait "$pid"
+  status=$?
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  return "$status"
+}
+
+fleet_sync() {
+  [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
+  [ -d "$PROJECTS" ] || return 0
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+  fleet_sync_run_bounded "$tmp" "$FM_ROOT/bin/fm-fleet-sync.sh" || true
+  if [ "$FM_FLEET_SYNC_BOUNDED_TIMED_OUT" -eq 1 ]; then
+    fleet_sync_relay_all_output "$tmp"
+    echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${FM_FLEET_SYNC_BOUNDED_TIMEOUT}s elapsed=${FM_FLEET_SYNC_BOUNDED_ELAPSED}s)"
+    rm -f "$tmp"
+    return 0
+  fi
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
+}
+
+firstmate_fork_sync_report() {
+  local default remote_line remote_status remote_sha counts behind ahead tmp
+  git -C "$FM_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  if ! default=$(fm_default_branch "$FM_ROOT"); then
+    echo "FLEET_SYNC: firstmate: could not check fork sync because no local default branch was found"
+    return 0
+  fi
+  if ! git -C "$FM_ROOT" remote get-url origin >/dev/null 2>&1; then
+    return 0
+  fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-firstmate-fork-sync.XXXXXX" 2>/dev/null) || {
+    echo "FLEET_SYNC: firstmate: could not check $default against origin/$default (temporary output unavailable)"
+    return 0
+  }
+  fleet_sync_run_bounded "$tmp" env GIT_TERMINAL_PROMPT=0 git -C "$FM_ROOT" \
+    ls-remote --exit-code origin "refs/heads/$default"
+  remote_status=$?
+  remote_line=$(cat "$tmp")
+  rm -f "$tmp"
+  if [ "$remote_status" -eq 2 ]; then
+    echo "FLEET_SYNC: firstmate: could not check $default because origin/$default does not exist"
+    return 0
+  elif [ "$remote_status" -ne 0 ]; then
+    echo "FLEET_SYNC: firstmate: could not check $default against origin/$default (remote unreachable or authentication failed)"
+    return 0
+  fi
+  remote_sha=${remote_line%%[[:space:]]*}
+  if ! counts=$(git -C "$FM_ROOT" rev-list --left-right --count \
+    "$remote_sha...refs/heads/$default" 2>/dev/null); then
+    echo "FLEET_SYNC: firstmate: could not compare $default with origin/$default because the remote tip is not available locally"
+    return 0
+  fi
+  read -r behind ahead <<< "$counts"
+  if [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ]; then
+    [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
+      || echo "BOOTSTRAP_INFO: firstmate: $default is in sync with origin/$default"
+  elif [ "$behind" -eq 0 ]; then
+    echo "FLEET_SYNC: firstmate: $default is ahead of origin/$default by $ahead commit(s)"
+  elif [ "$ahead" -eq 0 ]; then
+    echo "FLEET_SYNC: firstmate: $default is behind origin/$default by $behind commit(s)"
+  else
+    echo "FLEET_SYNC: firstmate: $default has diverged from origin/$default (ahead=$ahead behind=$behind)"
+  fi
 }
 
 secondmate_sync() {
@@ -1063,6 +1125,7 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+firstmate_fork_sync_report
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
