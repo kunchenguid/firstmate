@@ -218,6 +218,56 @@ test_refuses_symlinks_without_touching_them() {
   pass "fm_claude_pretrust_worktree: refuses valid and broken symlinks without touching them"
 }
 
+test_external_writer_changes_retry_and_fail_bounded() {
+  local dir json fakebin real_cksum real_jq original_path out status
+  dir="$TMP_ROOT/external-race"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  CLAUDE_CONFIG_DIR="$dir/config"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  json="$CLAUDE_CONFIG_DIR/.claude.json"
+  jq -n '{"projects": {}, "externalWrites": []}' > "$json"
+  real_cksum=$(command -v cksum)
+  real_jq=$(command -v jq)
+  original_path=$PATH
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'count=$(cat "$FM_RACE_COUNT" 2>/dev/null || echo 0)' \
+    'count=$((count + 1))' \
+    'printf "%s\n" "$count" > "$FM_RACE_COUNT"' \
+    'if [ $((count % 2)) -eq 0 ] && { [ "$FM_RACE_MODE" = always ] || [ ! -e "$FM_RACE_DISABLED" ]; }; then' \
+    '  "$FM_RACE_JQ" --argjson count "$count" ".externalWrites += [\$count]" "$FM_RACE_JSON" > "$FM_RACE_NEXT" || exit 1' \
+    '  mv -f "$FM_RACE_NEXT" "$FM_RACE_JSON" || exit 1' \
+    '  [ "$FM_RACE_MODE" = always ] || : > "$FM_RACE_DISABLED"' \
+    'fi' \
+    'exec "$FM_REAL_CKSUM" "$@"' > "$fakebin/cksum"
+  chmod +x "$fakebin/cksum"
+  export FM_RACE_COUNT="$dir/count" FM_RACE_DISABLED="$dir/disabled"
+  export FM_RACE_JSON="$json" FM_RACE_NEXT="$dir/next.json"
+  export FM_RACE_JQ="$real_jq" FM_REAL_CKSUM="$real_cksum" FM_RACE_MODE=once
+  PATH="$fakebin:$PATH"
+
+  with_lock fm_claude_pretrust_worktree "$dir/wt" || fail "pretrust did not retry a detected external write"
+  [ "$(jq -r '.externalWrites[0]' "$json")" = 2 ] || fail "pretrust lost the external write detected during composition"
+  [ "$(jq -r --arg p "$dir/wt" '.projects[$p].hasTrustDialogAccepted' "$json")" = true ] \
+    || fail "pretrust retry did not install the trust entry"
+
+  rm -f "$FM_RACE_COUNT" "$FM_RACE_DISABLED"
+  jq -n '{"projects": {}, "externalWrites": []}' > "$json"
+  FM_RACE_MODE=always
+  export FM_RACE_MODE
+  out=$(with_lock fm_claude_pretrust_worktree "$dir/never-installed" 2>&1); status=$?
+  PATH=$original_path
+  [ "$status" -ne 0 ] || fail "pretrust should fail when every bounded attempt races"
+  assert_contains "$out" "kept changing during update" "bounded race failure was not explicit"
+  [ "$(jq -r '.externalWrites | length' "$json")" = 5 ] || fail "pretrust did not stop after five raced attempts"
+  [ "$(jq -r --arg p "$dir/never-installed" '.projects[$p] // "missing"' "$json")" = missing ] \
+    || fail "pretrust installed stale output after exhausting race retries"
+  ls "$CLAUDE_CONFIG_DIR"/.claude.json.fm-spawn-tmp.* >/dev/null 2>&1 \
+    && fail "bounded race failure left a temp file behind"
+  pass "fm_claude_pretrust_worktree: retries external changes and fails closed after five races"
+}
+
 test_concurrent_writers_serialize_without_corruption_or_loss() {
   local dir json n pids=() i wt out
   dir="$TMP_ROOT/concurrency"
@@ -288,6 +338,7 @@ test_ensure_dir_creates_a_not_yet_existing_config_dir
 test_idempotent_and_preserves_unrelated_content
 test_refuses_malformed_json_without_touching_it
 test_refuses_symlinks_without_touching_them
+test_external_writer_changes_retry_and_fail_bounded
 test_concurrent_writers_serialize_without_corruption_or_loss
 test_missing_jq_refuses_loudly
 

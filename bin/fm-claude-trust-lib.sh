@@ -15,13 +15,14 @@
 #
 # Concurrency: multiple crews spawn claude workers in parallel, and every
 # running claude process itself reads and rewrites this same file. This
-# library only serializes firstmate's OWN writers against each other, at a
-# lock path the caller acquires with fm_claude_trust_lock_acquire
-# (sourced separately; not sourced here to avoid a second copy of that lock
-# owner). Every write is read-modify-write to a temp file in the same
-# directory followed by an atomic rename, so a firstmate write can never
-# leave a half-written file, and every key besides the one project entry's
-# hasTrustDialogAccepted passes through untouched.
+# library serializes firstmate's own writers against each other at a lock path
+# the caller acquires with fm_claude_trust_lock_acquire (sourced separately;
+# not sourced here to avoid a second copy of that lock owner). A bounded
+# compare-and-retry detects a live claude process changing the file during
+# composition and retries from its new content. Claude's internal lock is not
+# available here, so this shrinks but cannot eliminate the final race window
+# between the last identity check and atomic rename. Atomic rename still keeps
+# every installed file complete.
 #
 # Usage: . bin/fm-claude-trust-lib.sh   (no FM_* setup required)
 
@@ -69,11 +70,18 @@ fm_claude_trust_file_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
 }
 
+fm_claude_trust_file_identity() {
+  cksum "$1"
+}
+
 # fm_claude_pretrust_worktree <abs-worktree-path>: idempotently ensures
 # <config-dir>/.claude.json marks <abs-worktree-path> as trusted, creating the
 # file or the project entry only when missing. The caller must have already
 # run fm_claude_trust_ensure_dir and must hold the lock from
 # fm_claude_trust_lock_path for the duration of this call.
+# Firstmate writers are serialized by that lock. A bounded content-identity
+# compare retries external changes, but cannot coordinate with Claude's
+# internal writer across the final identity-check-to-rename window.
 #
 # Fails loudly (non-zero, message on stderr) instead of silently skipping,
 # including when jq is missing or the existing file fails to parse as JSON: a
@@ -81,76 +89,108 @@ fm_claude_trust_file_mode() {
 # prevent, and rewriting a file this cannot parse risks losing content a
 # structural merge can't see.
 fm_claude_pretrust_worktree() {
-  local wt=$1 json_path tmp status mode=
+  local wt=$1 json_path tmp status mode identity live_identity attempt=0
   [ -n "$wt" ] || { echo "fm-claude-trust: no worktree path given" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || {
     echo "fm-claude-trust: jq is required to pre-trust '$wt' for claude; install jq" >&2
     return 1
   }
   json_path=$(fm_claude_trust_json_path)
-  if [ -L "$json_path" ]; then
-    echo "fm-claude-trust: $json_path is a symlink; refusing to replace it" >&2
-    return 1
-  fi
-  tmp=$(umask 077; mktemp "$json_path.fm-spawn-tmp.XXXXXX") || {
-    echo "fm-claude-trust: failed to create a private temporary file beside $json_path" >&2
-    return 1
-  }
-  if [ -e "$json_path" ]; then
-    if ! jq -e . "$json_path" >/dev/null 2>&1; then
-      rm -f "$tmp"
-      echo "fm-claude-trust: $json_path is not valid JSON; refusing to touch it" >&2
+  while [ "$attempt" -lt 5 ]; do
+    attempt=$((attempt + 1))
+    mode=
+    if [ -L "$json_path" ]; then
+      echo "fm-claude-trust: $json_path is a symlink; refusing to replace it" >&2
       return 1
     fi
-    mode=$(fm_claude_trust_file_mode "$json_path") || {
-      rm -f "$tmp"
-      echo "fm-claude-trust: could not read permissions from $json_path; refusing to replace it" >&2
+    tmp=$(umask 077; mktemp "$json_path.fm-spawn-tmp.XXXXXX") || {
+      echo "fm-claude-trust: failed to create a private temporary file beside $json_path" >&2
       return 1
     }
-    jq --arg path "$wt" '
-      .projects //= {} |
-      .projects[$path] //= {
-        "allowedTools": [],
-        "mcpContextUris": [],
-        "mcpServers": {},
-        "enabledMcpjsonServers": [],
-        "disabledMcpjsonServers": [],
-        "hasTrustDialogAccepted": false,
-        "projectOnboardingSeenCount": 0,
-        "hasClaudeMdExternalIncludesApproved": false,
-        "hasClaudeMdExternalIncludesWarningShown": false
-      } |
-      .projects[$path].hasTrustDialogAccepted = true
-    ' "$json_path" > "$tmp"
-  else
-    jq -n --arg path "$wt" '
-      {"projects": {($path): {
-        "allowedTools": [],
-        "mcpContextUris": [],
-        "mcpServers": {},
-        "enabledMcpjsonServers": [],
-        "disabledMcpjsonServers": [],
-        "hasTrustDialogAccepted": true,
-        "projectOnboardingSeenCount": 0,
-        "hasClaudeMdExternalIncludesApproved": false,
-        "hasClaudeMdExternalIncludesWarningShown": false
-      }}}
-    ' > "$tmp"
-  fi
-  status=$?
-  if [ "$status" -ne 0 ] || [ ! -s "$tmp" ]; then
-    rm -f "$tmp"
-    echo "fm-claude-trust: failed to compose updated $json_path" >&2
-    return 1
-  fi
-  if [ -n "$mode" ] && { ! chmod "$mode" "$tmp" || ! chmod go-rwx "$tmp"; }; then
-    rm -f "$tmp"
-    echo "fm-claude-trust: could not preserve private permissions for $json_path" >&2
-    return 1
-  fi
-  if ! mv -f "$tmp" "$json_path"; then
-    rm -f "$tmp"
-    echo "fm-claude-trust: failed to install updated $json_path" >&2
-    return 1
-  fi
+    if [ -e "$json_path" ]; then
+      identity=$(fm_claude_trust_file_identity "$json_path") || {
+        rm -f "$tmp"
+        echo "fm-claude-trust: could not identify $json_path; refusing to replace it" >&2
+        return 1
+      }
+      if ! jq -e . "$json_path" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        echo "fm-claude-trust: $json_path is not valid JSON; refusing to touch it" >&2
+        return 1
+      fi
+      mode=$(fm_claude_trust_file_mode "$json_path") || {
+        rm -f "$tmp"
+        echo "fm-claude-trust: could not read permissions from $json_path; refusing to replace it" >&2
+        return 1
+      }
+      jq --arg path "$wt" '
+        .projects //= {} |
+        .projects[$path] //= {
+          "allowedTools": [],
+          "mcpContextUris": [],
+          "mcpServers": {},
+          "enabledMcpjsonServers": [],
+          "disabledMcpjsonServers": [],
+          "hasTrustDialogAccepted": false,
+          "projectOnboardingSeenCount": 0,
+          "hasClaudeMdExternalIncludesApproved": false,
+          "hasClaudeMdExternalIncludesWarningShown": false
+        } |
+        .projects[$path].hasTrustDialogAccepted = true
+      ' "$json_path" > "$tmp"
+    else
+      identity=absent
+      jq -n --arg path "$wt" '
+        {"projects": {($path): {
+          "allowedTools": [],
+          "mcpContextUris": [],
+          "mcpServers": {},
+          "enabledMcpjsonServers": [],
+          "disabledMcpjsonServers": [],
+          "hasTrustDialogAccepted": true,
+          "projectOnboardingSeenCount": 0,
+          "hasClaudeMdExternalIncludesApproved": false,
+          "hasClaudeMdExternalIncludesWarningShown": false
+        }}}
+      ' > "$tmp"
+    fi
+    status=$?
+    if [ "$status" -ne 0 ] || [ ! -s "$tmp" ]; then
+      rm -f "$tmp"
+      echo "fm-claude-trust: failed to compose updated $json_path" >&2
+      return 1
+    fi
+    if [ -n "$mode" ] && { ! chmod "$mode" "$tmp" || ! chmod go-rwx "$tmp"; }; then
+      rm -f "$tmp"
+      echo "fm-claude-trust: could not preserve private permissions for $json_path" >&2
+      return 1
+    fi
+    if [ "$identity" = absent ]; then
+      if [ -e "$json_path" ] || [ -L "$json_path" ]; then
+        rm -f "$tmp"
+        continue
+      fi
+    else
+      if [ ! -e "$json_path" ] || [ -L "$json_path" ]; then
+        rm -f "$tmp"
+        continue
+      fi
+      live_identity=$(fm_claude_trust_file_identity "$json_path") || {
+        rm -f "$tmp"
+        continue
+      }
+      if [ "$live_identity" != "$identity" ]; then
+        rm -f "$tmp"
+        continue
+      fi
+    fi
+    if ! mv -f "$tmp" "$json_path"; then
+      rm -f "$tmp"
+      echo "fm-claude-trust: failed to install updated $json_path" >&2
+      return 1
+    fi
+    return 0
+  done
+  echo "fm-claude-trust: $json_path kept changing during update; refusing to clobber external writes" >&2
+  return 1
 }
