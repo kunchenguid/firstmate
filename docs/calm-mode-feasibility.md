@@ -200,7 +200,7 @@ Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden o
 The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
 The test fixture enumerates every class below through the centralized policy, and the interactive fixture exercises the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
 
-| Policy class | Pi transcript path | Calm result (verified on Pi 0.81.1 through 0.82.0) |
+| Policy class | Pi transcript path | Calm result (baseline verified on Pi 0.81.1 through 0.82.0; newer evidence noted per row) |
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
