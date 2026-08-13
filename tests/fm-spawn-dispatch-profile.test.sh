@@ -558,7 +558,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok loudly omits unsupported xhigh reasoning effort"
 }
 
-test_cursor_threads_model_workspace_and_omits_effort_axis() {
+test_cursor_threads_model_workspace_and_loudly_omits_effort_axis() {
   local rec id out status launch
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
@@ -589,7 +589,11 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
   assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
-  pass "cursor receives its model-qualified reasoning class and exact task workspace"
+  assert_grep 'delivered_effort=default' "$HOME_DIR/state/$id.meta" \
+    "cursor profile metadata did not record the omitted effort axis honestly"
+  assert_contains "$out" "warning: harness 'cursor' cannot thread requested effort 'high'; accepted effort values: no separate supported values; select a model-qualified reasoning class; omitting effort flag" \
+    "cursor effort-axis omission was silent"
+  pass "cursor receives its model-qualified reasoning class and loudly omits a separate effort axis"
 }
 
 test_cursor_refuses_model_absent_from_live_catalog() {
@@ -884,7 +888,7 @@ test_codex_threads_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
-test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_threads_model_workspace_and_loudly_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_warns_for_ignored_effort_axis
