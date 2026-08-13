@@ -58,6 +58,7 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TELEMETRY="$ROOT/bin/fm-model-telemetry.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -554,6 +555,14 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+run_local_merge() {
+  local case_dir=$1
+  FM_HOME="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+    "$MERGE_LOCAL" task-x1
 }
 
 # Build the teardown test's executable search path without lsof, regardless of
@@ -2536,6 +2545,15 @@ record_task_base() {
   printf 'base_commit=%s\n' "$base" >> "$case_dir/state/task-x1.meta"
 }
 
+reuse_lane_after_landed_prior_task() {
+  local case_dir=$1 prior_head
+  git -C "$case_dir/wt" branch -m fm/prior-task
+  wt_commit_file "$case_dir" prior.txt prior-task "prior lane task"
+  prior_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" merge -q --ff-only "$prior_head"
+  git -C "$case_dir/wt" checkout -q -B fm/task-x1 main
+}
+
 test_teardown_derives_quality_and_cost_from_observable_facts() {
   local case_dir terminal ledger head sheet stderr
   case_dir=$(make_case telemetry-mechanical-scoreboard)
@@ -2562,18 +2580,33 @@ test_teardown_derives_quality_and_cost_from_observable_facts() {
 }
 
 test_local_only_delivery_seals_true_outcome_and_usage() {
-  local case_dir ledger task_base wt_head session_dir sheet
+  local case_dir ledger task_base advanced_main wt_head session_dir sheet
   case_dir=$(make_case telemetry-local-only-delivery)
+  reuse_lane_after_landed_prior_task "$case_dir"
   write_meta "$case_dir" local-only ship
   printf 'harness=codex\n' >> "$case_dir/state/task-x1.meta"
   record_task_base "$case_dir" || fail "could not record the local delivery task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed local-only delivery telemetry"
   task_base=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  printf 'another task\n' > "$case_dir/project/other.txt"
+  git -C "$case_dir/project" add other.txt
+  git -C "$case_dir/project" commit -q -m "advance main before task delivery"
+  advanced_main=$(git -C "$case_dir/project" rev-parse HEAD)
+  git -C "$case_dir/wt" merge -q --ff-only main
   wt_commit_file "$case_dir" delivered.txt real-delivery "accepted local delivery"
   git -C "$case_dir/wt" diff --quiet "$task_base" HEAD -- &&
     fail "local delivery fixture produced no content"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
-  seed_teardown_telemetry "$case_dir" || fail "could not seed local-only delivery telemetry"
+  run_local_merge "$case_dir" > "$case_dir/local-merge.stdout" 2> "$case_dir/local-merge.stderr" ||
+    fail "could not land the local delivery through its production merge gate: $(cat "$case_dir/local-merge.stderr")"
+  assert_grep "local_delivery_base=$advanced_main" "$case_dir/state/task-x1.meta" \
+    "local merge attributed another task's synced commit to this task"
+  assert_grep "local_delivery_head=$wt_head" "$case_dir/state/task-x1.meta" \
+    "local merge did not bind the exact task-authored delivery head"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "idempotent local merge retry failed"
+  assert_grep "local_delivery_base=$advanced_main" "$case_dir/state/task-x1.meta" \
+    "idempotent local merge retry discarded task authorship"
 
   session_dir="$case_dir/codex-sessions/2026/08/02"
   mkdir -p "$session_dir"
@@ -2613,23 +2646,22 @@ EOF
 }
 
 test_local_only_zero_work_does_not_seal_accepted() {
-  local case_dir previous_head task_base lane_base stale_count
+  local case_dir task_base lane_base stale_count
   case_dir=$(make_case telemetry-local-only-zero-work)
-  git -C "$case_dir/wt" branch -m fm/prior-task
-  wt_commit_file "$case_dir" prior.txt prior-task "prior lane task"
-  previous_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/project" update-ref refs/heads/main "$previous_head"
-  git -C "$case_dir/wt" checkout -q -B fm/task-x1 main
+  reuse_lane_after_landed_prior_task "$case_dir"
 
   write_meta "$case_dir" local-only ship
   record_task_base "$case_dir" || fail "could not record the reused-lane task base"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed zero-work telemetry"
   task_base=$(git -C "$case_dir/wt" rev-parse HEAD)
   lane_base=$(git -C "$case_dir/wt" reflog show --format=%H HEAD | tail -1)
   stale_count=$(git -C "$case_dir/wt" rev-list --count "$lane_base..HEAD")
   [ "$stale_count" -gt 0 ] || fail "zero-work fixture did not retain prior lane reflog history"
   [ "$(git -C "$case_dir/wt" rev-list --count "$task_base..HEAD")" -eq 0 ] ||
     fail "zero-work fixture accidentally created a current-task commit"
-  seed_teardown_telemetry "$case_dir" || fail "could not seed zero-work telemetry"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "zero-work production merge gate failed"
+  assert_no_grep '^local_delivery_' "$case_dir/state/task-x1.meta" \
+    "zero-work merge recorded a task-authored delivery interval"
 
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
     run_teardown "$case_dir" >/dev/null || fail "zero-work local-only teardown failed"
@@ -2644,15 +2676,70 @@ test_local_only_zero_work_does_not_seal_accepted() {
   pass "a reused-lane zero-work task seals classification=incomplete oracle=not-run gate=delivery/incomplete"
 }
 
+test_local_only_sync_to_advanced_main_does_not_seal_accepted() {
+  local case_dir task_base advanced_main
+  case_dir=$(make_case telemetry-local-only-sync-only)
+  reuse_lane_after_landed_prior_task "$case_dir"
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the sync-only task base"
+  task_base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_teardown_telemetry "$case_dir" || fail "could not seed sync-only telemetry"
+
+  printf 'another task\n' > "$case_dir/project/other.txt"
+  git -C "$case_dir/project" add other.txt
+  git -C "$case_dir/project" commit -q -m "advance main from another task"
+  advanced_main=$(git -C "$case_dir/project" rev-parse HEAD)
+  git -C "$case_dir/wt" merge -q --ff-only main
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$advanced_main" ] ||
+    fail "sync-only fixture did not advance the task branch to current main"
+  [ "$(git -C "$case_dir/wt" rev-list --count "$task_base..HEAD")" -gt 0 ] ||
+    fail "sync-only fixture did not carry another task's commit into the lane"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "sync-only production merge gate failed"
+  assert_no_grep '^local_delivery_' "$case_dir/state/task-x1.meta" \
+    "sync-only merge recorded another task's commits as this task's delivery"
+
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" >/dev/null || fail "sync-only local teardown failed"
+
+  jq -e '
+    select(.eventType=="attempt-terminal") and
+    .terminal.classification=="incomplete" and
+    .terminal.evidence.oracle=="not-run" and
+    .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
+  ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
+    fail "a task that authored nothing falsely accepted another task's synced commits"
+  pass "a reused-lane task that only syncs advanced main seals incomplete"
+}
+
+test_local_only_missing_task_base_is_diagnosed() {
+  local case_dir rc
+  case_dir=$(make_case telemetry-local-only-legacy-meta)
+  write_meta "$case_dir" local-only ship
+  seed_teardown_telemetry "$case_dir" || fail "could not seed legacy-meta telemetry"
+
+  rc=0
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "legacy local-only metadata should fail closed without blocking teardown"
+  assert_grep 'teardown: local-only gate facts unavailable for task-x1: missing or invalid task base commit' \
+    "$case_dir/stderr" "legacy local-only metadata became incomplete without a diagnostic"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete")' \
+    "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
+    fail "legacy local-only metadata did not fail closed to incomplete"
+  pass "legacy local-only metadata seals incomplete with a missing-base diagnostic"
+}
+
 test_local_only_empty_commit_does_not_seal_accepted() {
-  local case_dir wt_head
+  local case_dir
   case_dir=$(make_case telemetry-local-only-empty-commit)
   write_meta "$case_dir" local-only ship
   record_task_base "$case_dir" || fail "could not record the empty-commit task base"
-  wt_commit "$case_dir" "empty task checkpoint"
-  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   seed_teardown_telemetry "$case_dir" || fail "could not seed empty-commit telemetry"
+  wt_commit "$case_dir" "empty task checkpoint"
+  run_local_merge "$case_dir" >/dev/null 2>&1 || fail "empty-commit production merge gate failed"
+  assert_no_grep '^local_delivery_' "$case_dir/state/task-x1.meta" \
+    "content-less commit recorded a task-authored delivery interval"
 
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
     run_teardown "$case_dir" >/dev/null || fail "empty-commit local-only teardown failed"
@@ -2767,6 +2854,8 @@ test_forced_teardown_still_requires_ledger_repair() {
 }
 
 test_local_only_zero_work_does_not_seal_accepted
+test_local_only_sync_to_advanced_main_does_not_seal_accepted
+test_local_only_missing_task_base_is_diagnosed
 test_local_only_empty_commit_does_not_seal_accepted
 test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows

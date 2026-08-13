@@ -402,6 +402,8 @@ T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 BASE_COMMIT=$(fm_meta_get "$META" base_commit)
+LOCAL_DELIVERY_BASE=$(fm_meta_get "$META" local_delivery_base)
+LOCAL_DELIVERY_HEAD=$(fm_meta_get "$META" local_delivery_head)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -1297,8 +1299,9 @@ observe_telemetry_gate_facts() {  # <worktree>
   fi
 
   # Delivery acceptance is a property, not a status-file wording check. A
-  # local-only ship is accepted only after it made a content-changing commit
-  # beyond its recorded task base and its exact HEAD reached local main;
+  # local-only ship is accepted only when the merge gate recorded a non-empty
+  # commit interval unique to this task at landing time and its exact HEAD
+  # reached local main;
   # a PR ship is accepted only when the forge proves that exact work merged;
   # and a scout is accepted only after the report and decision gates above.
   if [ "$FORCE" != --force ]; then
@@ -1307,16 +1310,27 @@ observe_telemetry_gate_facts() {  # <worktree>
       return 0
     fi
     if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
-      local default_name task_commits
+      local default_name delivered_commits worktree_head
       if default_name=$(default_branch) \
+        && worktree_head=$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
         && [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        && [[ "$LOCAL_DELIVERY_BASE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        && [[ "$LOCAL_DELIVERY_HEAD" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        && [ "$LOCAL_DELIVERY_HEAD" = "$worktree_head" ] \
         && git -C "$wt" cat-file -e "$BASE_COMMIT^{commit}" 2>/dev/null \
-        && task_commits=$(git -C "$wt" rev-list --count "$BASE_COMMIT..HEAD" 2>/dev/null) \
-        && [ "$task_commits" -gt 0 ] \
-        && ! git -C "$wt" diff --quiet "$BASE_COMMIT" HEAD -- \
-        && git -C "$wt" merge-base --is-ancestor HEAD "refs/heads/$default_name" 2>/dev/null; then
+        && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_BASE^{commit}" 2>/dev/null \
+        && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_HEAD^{commit}" 2>/dev/null \
+        && git -C "$wt" merge-base --is-ancestor "$BASE_COMMIT" "$LOCAL_DELIVERY_BASE" 2>/dev/null \
+        && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" 2>/dev/null \
+        && delivered_commits=$(git -C "$wt" rev-list --count "$LOCAL_DELIVERY_BASE..$LOCAL_DELIVERY_HEAD" 2>/dev/null) \
+        && [ "$delivered_commits" -gt 0 ] \
+        && ! git -C "$wt" diff --quiet "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" -- \
+        && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_HEAD" "refs/heads/$default_name" 2>/dev/null; then
         TELEMETRY_GATE_RESULT=green
         return 0
+      fi
+      if ! [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+        TELEMETRY_GATE_REFUSAL='missing or invalid task base commit'
       fi
     elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ -d "$wt" ] && pr_is_merged; then
       TELEMETRY_GATE_RESULT=green
@@ -1326,6 +1340,8 @@ observe_telemetry_gate_facts() {  # <worktree>
 
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     echo "teardown: no-mistakes gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
+  elif [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -n "$TELEMETRY_GATE_REFUSAL" ]; then
+    echo "teardown: local-only gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
   fi
 }
 
