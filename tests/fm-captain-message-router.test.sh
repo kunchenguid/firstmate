@@ -5,7 +5,7 @@
 # (role + bounded redacted chat history + every session brief + the message),
 # the verdict/target/explanation contract, explanation recording without
 # forwarding, target validation, session briefs, pending handoffs, verdict
-# logging, config-driven role resolution, primary scoping, gate inertness, and
+# logging, primary scoping, gate inertness, and
 # every fail-open error path. The router agent is mocked through
 # FM_CAPTAIN_ROUTER_AGENT_CMD or a fake Cursor CLI; no real model calls.
 set -u
@@ -400,6 +400,68 @@ test_builtin_default_uses_cursor_cli_read_only() {
 	pass "router: Cursor Agent CLI with Grok 4.6 Low is the built-in continuity default"
 }
 
+test_submit_prompt_rides_the_file_not_argv() {
+	local root="$TMP_ROOT/argv-privacy" out status=0 argv promptseen fakebin hist
+	make_primary "$root"
+	printf 'Do you want me to start the SENTINEL-BRIEF-TOPIC work now?' |
+		run "$root" --on-settle --session-id primary >/dev/null
+	hist="$root/history.txt"
+	printf 'user: SENTINEL-HISTORY-LINE about the exporter\n' >"$hist"
+	argv="$root/probe-argv.txt"
+	promptseen="$root/probe-promptfile.txt"
+	fakebin=$(fm_fakebin "$root")
+	# Like spawn_probe, but also snapshots the prompt file the argv instruction
+	# points at, proving the full context rides the file rather than the argv.
+	cat >"$fakebin/cursor-agent" <<EOF
+#!/usr/bin/env bash
+set -u
+printf '%s\\n' "\$@" >"$argv"
+cat "$root/state/captain-router"/prompt.* >"$promptseen" 2>/dev/null || true
+printf 'verdict=same\\ntarget=-\\nexplanation=probe.\\n'
+EOF
+	chmod +x "$fakebin/cursor-agent"
+	out=$(printf 'SENTINEL-CAPTAIN-MESSAGE body' | run_with_probe "$root" "$fakebin" \
+		--on-submit --session-id primary --chat-history-file "$hist") || status=$?
+	expect_code 0 "$status" "argv-privacy submit exit"
+	assert_contains "$out" "confidence=model" "the file-instruction spawn still routes through the model"
+	assert_present "$argv" "the probe recorded the spawn argv"
+	assert_no_grep "SENTINEL-CAPTAIN-MESSAGE" "$argv" "the captain message never rides the process list"
+	assert_no_grep "SENTINEL-HISTORY-LINE" "$argv" "chat history never rides the process list"
+	assert_no_grep "SENTINEL-BRIEF-TOPIC" "$argv" "session briefs never ride the process list"
+	assert_grep "Read the prompt file at" "$argv" "argv carries only the short read-this-file instruction"
+	assert_grep "state/captain-router/prompt." "$argv" "the instruction names the prompt file path"
+	assert_present "$promptseen" "the prompt file exists while the agent runs"
+	assert_grep "SENTINEL-CAPTAIN-MESSAGE" "$promptseen" "the prompt file carries the captain message"
+	assert_grep "SENTINEL-HISTORY-LINE" "$promptseen" "the prompt file carries the redacted history"
+	assert_grep "SENTINEL-BRIEF-TOPIC" "$promptseen" "the prompt file carries the session briefs"
+	pass "router: the full prompt rides the temp file, argv only the short instruction"
+}
+
+test_submit_dependency_free_timeout_terminates_hung_spawn() {
+	local root="$TMP_ROOT/submit-bash-timeout" out status=0 fakebin marker
+	make_primary "$root"
+	printf 'Do you want me to proceed?' | run "$root" --on-settle --session-id primary >/dev/null
+	marker="$root/hang-started.txt"
+	fakebin=$(fm_fakebin "$root")
+	# A hung model on a host with no timeout/gtimeout/perl: the fm-timeout-lib
+	# dependency-free fallback must still kill the whole spawn group at the bound.
+	cat >"$fakebin/cursor-agent" <<EOF
+#!/usr/bin/env bash
+set -u
+: >"$marker"
+sleep 300
+EOF
+	chmod +x "$fakebin/cursor-agent"
+	out=$(printf 'anything' | FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_CAPTAIN_ROUTER_TIMEOUT_SECS=1 \
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "forced dependency-free timeout exit"
+	assert_present "$marker" "the hanging fake agent actually started"
+	assert_contains "$out" "verdict=same" "a hung model fails open into the current primary"
+	assert_contains "$out" "confidence=det" "the timeout path stays labelled det"
+	assert_grep "timed out after 1s" "$(failures_log "$root")" "failures.log names the timeout"
+	pass "router: the dependency-free timeout bound terminates a hung spawn"
+}
+
 test_verdict_is_logged() {
 	local root="$TMP_ROOT/verdict-log" log
 	make_primary "$root"
@@ -563,6 +625,8 @@ test_submit_reroute_target_is_validated
 test_submit_new_and_same_targets_are_normalized
 test_model_override_keeps_cursor_cli_read_only
 test_builtin_default_uses_cursor_cli_read_only
+test_submit_prompt_rides_the_file_not_argv
+test_submit_dependency_free_timeout_terminates_hung_spawn
 test_verdict_is_logged
 test_pi_hook_threads_bounded_redacted_history
 test_inert_in_child_worktree

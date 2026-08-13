@@ -68,8 +68,9 @@
 # Router agent override (tests): FM_CAPTAIN_ROUTER_AGENT_CMD, when set, is
 # executed instead of the configured CLI. The command receives the prompt on stdin and must
 # print a parseable verdict block on stdout. No real model calls in unit tests.
-# FM_CAPTAIN_ROUTER_TIMEOUT_SECS (default 90) bounds the spawn when a `timeout`
-# or `gtimeout` binary is available.
+# FM_CAPTAIN_ROUTER_TIMEOUT_SECS (default 90) hard-bounds the Cursor spawn
+# through bin/fm-timeout-lib.sh (whole process group, exit 124 on the bound,
+# dependency-free fallback included), so the bound holds on stock macOS too.
 #
 # Scope: a genuine firstmate PRIMARY home only (main home or a marked secondmate
 # home), exactly like bin/fm-sessionstart-nudge.sh. It is inert (silent exit 0) in
@@ -108,6 +109,8 @@ ROUTER_TIMEOUT_SECS=${FM_CAPTAIN_ROUTER_TIMEOUT_SECS:-90}
 case "$ROUTER_TIMEOUT_SECS" in
 '' | *[!0-9]*) ROUTER_TIMEOUT_SECS=90 ;;
 esac
+# A zero bound is not a bound (fm-timeout-lib.sh contract): never pass it on.
+[ "$ROUTER_TIMEOUT_SECS" -gt 0 ] || ROUTER_TIMEOUT_SECS=90
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -115,6 +118,8 @@ esac
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 usage() {
 	awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
@@ -332,20 +337,19 @@ build_router_prompt() { # <current-id> <message-file> [history-file]
 
 # Spawn the ephemeral router agent. Prompt on stdin of the agent command.
 # Prints agent stdout. Returns 0 on spawn success (even if verdict is bad).
-# Bounded by FM_CAPTAIN_ROUTER_TIMEOUT_SECS when a timeout binary exists, so a
-# hung model cannot stall the captain's turn; a timeout is a fail-open failure.
+# The Cursor spawn is hard-bounded by FM_CAPTAIN_ROUTER_TIMEOUT_SECS through
+# fm_run_timed (whole process group, exit 124 on the bound), so a hung model
+# cannot stall the captain's turn; a timeout is a fail-open failure. The full
+# prompt stays in the mode-0600 temp file: argv carries only a short instruction
+# naming that file, so no history, brief, or message text ever rides the process
+# list and no kernel argument-size limit applies.
 spawn_router_agent() { # prompt on stdin
-	local prompt_file out status=0 cmd bound=
+	local prompt_file out status=0 cmd
 	prompt_file=$(mktemp "$ROUTER_DIR/prompt.XXXXXX" 2>/dev/null) || return 1
 	cat >"$prompt_file" || {
 		rm -f "$prompt_file"
 		return 1
 	}
-	if command -v timeout >/dev/null 2>&1; then
-		bound=timeout
-	elif command -v gtimeout >/dev/null 2>&1; then
-		bound=gtimeout
-	fi
 	if [ -n "${FM_CAPTAIN_ROUTER_AGENT_CMD-}" ]; then
 		# shellcheck disable=SC2086 # intentional word-split of override command
 		out=$(eval "$FM_CAPTAIN_ROUTER_AGENT_CMD" <"$prompt_file" 2>/dev/null) || status=$?
@@ -359,16 +363,11 @@ spawn_router_agent() { # prompt on stdin
 			record_failure "Cursor Agent CLI not found"
 			return 1
 		fi
-		if [ -n "$bound" ]; then
-			out=$("$bound" "$ROUTER_TIMEOUT_SECS" env \
-				-u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS \
-				"$cmd" --print --output-format text --mode ask --trust \
-				--workspace "$FM_HOME" --model "$ROUTER_MODEL" "$(cat "$prompt_file")" 2>/dev/null) || status=$?
-		else
-			out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS \
-				"$cmd" --print --output-format text --mode ask --trust \
-				--workspace "$FM_HOME" --model "$ROUTER_MODEL" "$(cat "$prompt_file")" 2>/dev/null) || status=$?
-		fi
+		out=$(fm_run_timed "$ROUTER_TIMEOUT_SECS" env \
+			-u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS \
+			"$cmd" --print --output-format text --mode ask --trust \
+			--workspace "$FM_HOME" --model "$ROUTER_MODEL" \
+			"Read the prompt file at $prompt_file and follow its instructions exactly. It carries your role, the conversation context, and the captain message to classify. Reply with ONLY the three-line verdict block it specifies (verdict=/target=/explanation=) and nothing else." 2>/dev/null) || status=$?
 	fi
 	rm -f "$prompt_file"
 	if [ "$status" -ne 0 ]; then

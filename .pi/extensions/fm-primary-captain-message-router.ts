@@ -220,22 +220,14 @@ function recentTranscript(event: AgentEndEvent): string {
 		? joined.slice(joined.length - HISTORY_MAX_CHARS)
 		: joined;
 }
-// Concatenate the text blocks of the newest assistant message in an agent_end
-// payload. Returns "" when there is no assistant text (e.g. a tool-only turn).
+// Text of the newest assistant message in an agent_end payload. Returns ""
+// when there is no assistant text (e.g. a tool-only turn).
 function newestAssistantText(event: AgentEndEvent): string {
 	const messages = event.messages ?? [];
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
-		const message = messages[i] as { role?: unknown; content?: unknown };
+		const message = messages[i] as { role?: unknown };
 		if (message?.role !== "assistant") continue;
-		const content = Array.isArray(message.content) ? message.content : [];
-		return content
-			.flatMap((block) => {
-				const typed = block as { type?: unknown; text?: unknown };
-				return typed?.type === "text" && typeof typed.text === "string"
-					? [typed.text]
-					: [];
-			})
-			.join("\n");
+		return messageText(messages[i]);
 	}
 	return "";
 }

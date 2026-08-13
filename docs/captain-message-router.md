@@ -100,6 +100,9 @@ The hook caps the excerpt at the newest 12 user/assistant turns and 6000 charact
 Redaction drops any line carrying a Firstmate operational injection and masks secret-shaped tokens and `token`/`secret`/`password`/`api_key` values.
 With no history file the model still gets the briefs and the message.
 
+The full prompt is handed to Cursor through a private (mode 0600) temp file under `state/captain-router/`; the spawn argv carries only a short instruction naming that file.
+No history, brief, or message text ever appears in the process list, and no kernel argument-size limit applies to large captain pastes.
+
 ### What the model returns
 
 ```text
@@ -118,7 +121,7 @@ It exists so the captain can audit why a verdict was chosen and dial the prompt 
 
 ### Fail-open fallback
 
-A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s when a `timeout`/`gtimeout` binary exists), an unparseable reply, or a `reroute` naming a session with no brief all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
+A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, or a `reroute` naming a session with no brief all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
 The captain is never locked out by a broken or slow router.
 
 ### Configuration
