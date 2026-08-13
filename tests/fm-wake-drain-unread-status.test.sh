@@ -154,6 +154,58 @@ test_pending_reply_resolution_surfaces_once() {
   pass "a pending-reply resolution buried under a later note surfaces once and closes OPEN DECISIONS"
 }
 
+test_unread_output_over_cap_remains_recoverable() {
+  local dir state out status i payload
+  dir=$(make_case unread-over-cap)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-cap.status"
+  prime_cursor "$state" "$status"
+  payload=$(printf '%0180d' 0)
+  i=1
+  while [ "$i" -le 30 ]; do
+    printf 'note: overflow-%02d %s\n' "$i" "$payload" >> "$status"
+    i=$((i + 1))
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed for unread output over the former cap"
+  grep -F 'task-cap note: overflow-01' "$out" >/dev/null \
+    || fail "the first over-cap note was not surfaced"
+  grep -F 'task-cap note: overflow-30' "$out" >/dev/null \
+    || fail "a later note vanished behind the unread byte cap: $(cat "$out")"
+  if grep -F 'more omitted' "$out" >/dev/null; then
+    fail "the unread section still omitted complete lines: $(cat "$out")"
+  fi
+  pass "unread status over the former byte cap preserves every line"
+}
+
+test_snapshot_does_not_ack_a_later_append() {
+  local dir state status first second
+  dir=$(make_case snapshot-append)
+  state="$dir/state"
+  status="$state/task-race.status"
+  prime_cursor "$state" "$status"
+  printf 'note: included in presentation snapshot\n' >> "$status"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    set -u
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    snapshot=$(status_presentation_snapshot "$STATE")
+    scan_unread_surface_snapshot "$STATE" "$snapshot" > "$2"
+    printf "note: appended after presentation snapshot\n" >> "$STATE/task-race.status"
+    scan_open_decisions_snapshot "$STATE" "$snapshot" >/dev/null
+    scan_unread_surface_lines "$STATE" > "$3"
+  ' _ "$ROOT" "$dir/first" "$dir/second" || fail "snapshot race exercise failed"
+  first=$(cat "$dir/first")
+  second=$(cat "$dir/second")
+  case "$first" in *'included in presentation snapshot'*) ;; *) fail "snapshot omitted the line it captured: $first" ;; esac
+  case "$first" in *'appended after presentation snapshot'*) fail "snapshot read beyond its endpoint: $first" ;; esac
+  case "$second" in *'appended after presentation snapshot'*) ;; *) fail "fold advancement swallowed a post-snapshot append: $second" ;; esac
+  case "$second" in *'included in presentation snapshot'*) fail "the next scan replayed a presented line: $second" ;; esac
+  pass "presentation cursor advances only through its captured endpoint"
+}
+
 test_open_decisions_fold_is_unchanged() {
   local dir state out
   dir=$(make_case open-decisions-regression)
@@ -208,5 +260,7 @@ test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
+test_unread_output_over_cap_remains_recoverable
+test_snapshot_does_not_ack_a_later_append
 test_open_decisions_fold_is_unchanged
 test_routine_working_lines_stay_silent_on_the_empty_queue

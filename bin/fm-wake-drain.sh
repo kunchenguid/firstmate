@@ -87,37 +87,34 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
 # when the fold later advances the cursor. Prints nothing when nothing is
 # unread, which is the common case.
 print_unread_status_section() {
-  local unread task line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local snapshot=${1:-} unread task line item_bytes=220 shown=0 source
 
-  unread=$(scan_unread_surface_lines "$STATE") || return 0
+  if [ -n "$snapshot" ]; then
+    unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 0
+  else
+    unread=$(scan_unread_surface_lines "$STATE") || return 0
+  fi
   [ -n "$unread" ] || return 0
 
   while IFS=$(printf '\t') read -r task line; do
     [ -n "$task" ] || continue
     [ -n "$line" ] || continue
+    source="$STATE/$task.status"
     line="$task $line"
-    fm_cap_line_var "$line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ $((used + bytes)) -gt "$global_bytes" ]; then
-      omitted=$((omitted + 1))
-      continue
+    if [ "${#line}" -gt $((item_bytes - 1)) ]; then
+      fm_cap_line_var "$line" $((item_bytes - 1))
+      line="$FM_LINE_CAP_LINE (full line: $source)"
     fi
-    output="$output$line
-"
-    used=$((used + bytes))
+    if [ "$shown" -eq 0 ]; then
+      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n'
+    fi
+    printf '%s\n' "$line"
     shown=$((shown + 1))
   done <<EOF
 $unread
 EOF
 
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n'
-  printf '%s' "$output"
-  if [ "$omitted" -gt 0 ]; then
-    printf 'UNREAD STATUS: %d more omitted (byte cap)\n' "$omitted"
-  fi
+  [ "$shown" -gt 0 ] || return 0
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
@@ -135,10 +132,14 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
-  open=$(scan_open_decisions_incremental "$STATE") || return 0
+  if [ -n "$snapshot" ]; then
+    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 0
+  else
+    open=$(scan_open_decisions_incremental "$STATE") || return 0
+  fi
   [ -n "$open" ] || return 0
 
   while IFS=$(printf '\t') read -r task key verb note; do
@@ -175,6 +176,14 @@ EOF
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+}
+
+print_status_sections() {
+  local snapshot
+  snapshot=$(status_presentation_snapshot "$STATE") || return 0
+  [ -n "$snapshot" ] || return 0
+  print_unread_status_section "$snapshot"
+  print_open_decisions_section "$snapshot"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -260,8 +269,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_unread_status_section) || true
-  (print_open_decisions_section) || true
+  (print_status_sections) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -314,7 +322,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (fm_wake_print_annotations "$RAW_ROWS") || true
-(print_unread_status_section) || true
-(print_open_decisions_section) || true
+(print_status_sections) || true
 assert_watcher_liveness
 exit 0

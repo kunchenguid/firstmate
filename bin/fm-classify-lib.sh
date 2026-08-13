@@ -449,9 +449,9 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
-status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
@@ -501,12 +501,21 @@ status_open_decisions_incremental() {  # <status-file>
   # silent invalidation that would wipe it.
   cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
   [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) \
+  actual_size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) \
     || { printf '%s' "$trusted_open"; return 0; }
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  actual_size=${actual_size//[[:space:]]/}
+  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  if [ -n "$captured_end" ]; then
+    case "$captured_end" in
+      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+    esac
+    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    size=$captured_end
+  else
+    size=$actual_size
+  fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
     trusted_open=''
@@ -515,7 +524,18 @@ status_open_decisions_incremental() {  # <status-file>
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null \
+    perl -MFcntl=:DEFAULT -e '
+      my ($path, $start, $length) = @ARGV;
+      sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      sysseek($file, $start, 0) == $start or exit 1;
+      while ($length > 0) {
+        my $want = $length > 65536 ? 65536 : $length;
+        my $read = sysread($file, my $chunk, $want);
+        defined($read) && $read > 0 or exit 1;
+        print $chunk or exit 1;
+        $length -= $read;
+      }
+    ' "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
@@ -573,6 +593,36 @@ $open
 EOF
   done
   return 0
+}
+
+status_presentation_snapshot() {  # <state>
+  local state=$1 f task size
+  for f in "$state"/*.status; do
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || continue
+    size=${size//[[:space:]]/}
+    case "$size" in ''|*[!0-9]*) continue ;; esac
+    printf '%s\t%s\n' "$task" "$size"
+  done
+}
+
+scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 task endpoint f open line
+  while IFS=$(printf '\t') read -r task endpoint; do
+    [ -n "$task" ] || continue
+    f="$state/$task.status"
+    open=$(status_open_decisions_incremental "$f" "$endpoint") || continue
+    [ -n "$open" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$open
+EOF
+  done <<EOF
+$snapshot
+EOF
 }
 
 # --- unread status lines since the open-decisions cursor --------------------
@@ -651,18 +701,37 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # Print every non-blank status line whose bytes begin at or after the persisted
 # cursor offset. Does not write the cursor. A missing or invalid cursor prints
 # the whole current file (offset 0). Symlinks and unreadable files print nothing.
-status_new_lines_since_cursor() {  # <status-file>
-  local f=$1 cf offset size chunk_file line
+status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   offset=$(status_open_decisions_cursor_offset "$f")
   case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
-  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 0
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  actual_size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 0
+  actual_size=${actual_size//[[:space:]]/}
+  case "$actual_size" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -n "$captured_end" ]; then
+    case "$captured_end" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$captured_end" -le "$actual_size" ] || return 0
+    size=$captured_end
+  else
+    size=$actual_size
+  fi
   [ "$offset" -lt "$size" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
-  tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null || { rm -f "$chunk_file"; return 0; }
+  perl -MFcntl=:DEFAULT -e '
+    my ($path, $start, $length) = @ARGV;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    sysseek($file, $start, 0) == $start or exit 1;
+    while ($length > 0) {
+      my $want = $length > 65536 ? 65536 : $length;
+      my $read = sysread($file, my $chunk, $want);
+      defined($read) && $read > 0 or exit 1;
+      print $chunk or exit 1;
+      $length -= $read;
+    }
+  ' "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file"; return 0; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       *[![:space:]]*) printf '%s\n' "$line" ;;
@@ -719,6 +788,25 @@ $lines
 EOF
   done
   return 0
+}
+
+scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 task endpoint f lines line
+  while IFS=$(printf '\t') read -r task endpoint; do
+    [ -n "$task" ] || continue
+    f="$state/$task.status"
+    lines=$(status_new_lines_since_cursor "$f" "$endpoint") || continue
+    [ -n "$lines" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      status_line_is_unread_surface "$line" || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$lines
+EOF
+  done <<EOF
+$snapshot
+EOF
 }
 
 # Fold material routed-work phases in the same keyed event stream.
