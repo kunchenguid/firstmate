@@ -297,6 +297,28 @@ test_mid_line_mention_with_unrelated_terminal_bracket_stays_default() {
   pass "a mid-line [key=x] mention plus an unrelated terminal ']' still folds as default"
 }
 
+test_glued_trailing_bracket_group_is_prose_not_a_stated_key() {
+  local dir
+  dir=$(case_dir glued-trailing)
+  # A terminal bracket group glued to prose (no whitespace before its "[") is
+  # part of the summary, not a stated token: it must not open a key, and the
+  # note must keep it verbatim.
+  printf 'needs-decision: fixed the lookup in cfg[key=env]\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tfixed the lookup in cfg[key=env]\n')" \
+    "glued trailing bracket group opens default"
+
+  # Nor may a glued group on a resolution close an unrelated keyed decision:
+  # this resolved line is keyless, so it closes only "default", leaving the
+  # real "env" decision open.
+  printf 'needs-decision [key=env]: which env layout\n' >> "$dir/t.status"
+  printf 'resolved: fixed the lookup in cfg[key=env]\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'env\tneeds-decision\twhich env layout\n')" \
+    "glued trailing bracket group on resolved stays keyless"
+  pass "prose glued to a line-terminal [key=x] group never opens or closes x"
+}
+
 test_canonical_position_wins_over_disagreeing_trailing_token() {
   local dir
   dir=$(case_dir canonical-wins)
@@ -348,5 +370,6 @@ test_trailing_key_position_is_honored
 test_trailing_key_matches_across_open_and_close_positions
 test_mid_line_bracket_is_not_a_trailing_key
 test_mid_line_mention_with_unrelated_terminal_bracket_stays_default
+test_glued_trailing_bracket_group_is_prose_not_a_stated_key
 test_canonical_position_wins_over_disagreeing_trailing_token
 test_incremental_agrees_with_full_fold_across_appends

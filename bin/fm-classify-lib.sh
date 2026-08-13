@@ -226,9 +226,12 @@ _fm_key_at_note_head() {  # <status-line> -> raw slug
 # last "[key=" must run bracket-free to the closing "]" for the line-terminal
 # bracket group to count as one complete stated token; that is what keeps a
 # summary merely mentioning "[key=x]" mid-line from being read as a stated
-# key.
+# key. The token must also stand alone as its own word - whitespace (or
+# nothing) immediately before its "[" - so prose glued to a terminal bracket
+# group (a summary ending in "cfg[key=env]") stays prose rather than opening
+# or closing the key "env".
 _fm_key_trailing() {  # <status-line> -> raw slug
-  local line=$1 tail
+  local line=$1 tail head
   line=${line%"${line##*[![:space:]]}"}
   case "$line" in
     *\[key=*\]) ;;
@@ -238,6 +241,11 @@ _fm_key_trailing() {  # <status-line> -> raw slug
   tail=${tail%\]}
   case "$tail" in
     *\[*|*\]*) return 1 ;;
+  esac
+  head=${line%"[key=$tail]"}
+  case "$head" in
+    ''|*[[:space:]]) ;;
+    *) return 1 ;;
   esac
   printf '%s' "$tail"
 }
@@ -475,7 +483,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
