@@ -1128,7 +1128,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_harness_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1298,7 +1298,7 @@ fi
 
 case "$HARNESS" in
   pi|pi-signed)
-    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+    PI_BIN=$(resolve_harness_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
@@ -1347,6 +1347,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+CODEX_BIN=
+if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
+  CODEX_BIN=$(resolve_harness_executable codex) || true
 fi
 
 secondmate_registry_value() {
@@ -1438,12 +1443,12 @@ model_flag_for_harness() {
 
 CODEX_MAX_EFFORT_VERSION=
 codex_max_effort_supported() {
-  local output parts major minor patch extra
+  local executable=$1 output parts major minor patch extra
   local floor=0.146.1 floor_major floor_minor floor_patch floor_extra
 
   CODEX_MAX_EFFORT_VERSION=unverified
-  command -v codex >/dev/null 2>&1 || return 1
-  output=$(codex --version 2>/dev/null) || return 1
+  [ -n "$executable" ] && [ -x "$executable" ] || return 1
+  output=$("$executable" --version 2>/dev/null) || return 1
   parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
   IFS=' ' read -r major minor patch extra <<< "$parts" || return 1
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
@@ -1474,7 +1479,7 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
         max)
-          if codex_max_effort_supported; then
+          if codex_max_effort_supported "$CODEX_BIN"; then
             printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
           else
             echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: low, medium, high, xhigh; Codex CLI '${CODEX_MAX_EFFORT_VERSION:-unverified}' does not meet verified max-capability floor 0.146.1; omitting effort flag" >&2
@@ -2839,6 +2844,11 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  codex)
+    if [ -n "$CODEX_BIN" ]; then
+      LAUNCH=${LAUNCH/#codex/"$(shell_quote "$CODEX_BIN")"}
+    fi
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in

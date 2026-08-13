@@ -506,8 +506,10 @@ test_codex_threads_max_effort() {
   assert_grep 'delivered_effort=max' "$HOME_DIR/state/$id.meta" \
     "codex max metadata omitted the delivered effort"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch dropped max reasoning effort while metadata recorded it"
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex' --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex max launch did not use the executable whose capability was probed"
+  assert_not_contains "$launch" "codex --model 'gpt-5'" \
+    "codex max launch must not re-resolve a bare executable in the pane"
   pass "codex threads max reasoning effort so launch and metadata agree"
 }
 
