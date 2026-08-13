@@ -138,7 +138,11 @@ cmd_launch() {
 
   validate_id "$id"
   validate_home "$id"
-  case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
+  case "$harness" in
+    cursor) die "cursor is a verified crewmate/scout adapter only and cannot run a remote secondmate; no primary supervision protocol has been verified for Cursor Agent CLI" ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    *) die "unverified remote secondmate harness: $harness" ;;
+  esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that

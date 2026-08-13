@@ -638,7 +638,7 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # pane is healthy and it runs no supervised turn sequence of its own. This
 # observation exists only to notice a busy-then-idle transition around one
 # delivered request, so it is a delivery-confirmation signal in the same
-# category as the submit acknowledgement in bin/fm-tmux-lib.sh - never task
+# category as the submit acknowledgement matcher in bin/fm-composer-lib.sh - never task
 # state, and never a source consumers can confuse with semantic state.
 #
 # It stays harness-scoped (fm_busy_lines_match with the recorded harness, no

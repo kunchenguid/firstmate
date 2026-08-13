@@ -57,7 +57,7 @@ set -u
 # ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
 # ambient markers so what this suite asserts does not depend on which harness it
 # was launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -98,6 +98,27 @@ crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
 ROWS
   pass "A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged"
+}
+
+test_cursor_marker_detection() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cursor-marker"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'ppid='*) printf '%s\n' 1 ;;
+  *) printf '%s\n' bash ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" CURSOR_INVOKED_AS=cursor-agent "$ROOT/bin/fm-harness.sh")
+  [ "$got" = cursor ] || fail "Cursor's exact launcher marker resolved '$got', expected cursor"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" CURSOR_INVOKED_AS=cursor "$ROOT/bin/fm-harness.sh")
+  [ "$got" != cursor ] || fail "an inexact Cursor marker value was accepted as Cursor Agent CLI"
+  pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
 
 # ===========================================================================
@@ -560,6 +581,32 @@ test_spawn_unverified_secondmate_harness_refused() {
     "unverified: error names the secondmate-harness source"
   [ -e "$w/home/state/sm.meta" ] && fail "unverified: a meta was written despite the abort"
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
+}
+
+test_spawn_cursor_secondmate_refused() {
+  local w sm fakebin err rc
+  w="$TMP_ROOT/spawn-cursor-secondmate"
+  sm="$w/sm"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux")
+  err="$w/spawn.err"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "cursor secondmate spawn should have failed"
+  assert_contains "$(cat "$err")" "verified crewmate/scout adapter only" \
+    "cursor secondmate refusal did not explain the verified boundary"
+  assert_contains "$(cat "$err")" "no primary supervision protocol" \
+    "cursor secondmate refusal did not name the missing safety contract"
+  [ -e "$w/home/state/sm.meta" ] && fail "cursor secondmate refusal still wrote task metadata"
+  pass "Cursor is accepted for workers but refused for secondmates"
 }
 
 # ===========================================================================
@@ -2465,6 +2512,7 @@ SH
 }
 
 test_harness_resolution
+test_cursor_marker_detection
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
@@ -2474,6 +2522,7 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
+test_spawn_cursor_secondmate_refused
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
