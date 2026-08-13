@@ -597,7 +597,6 @@ cleanup_child() {
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
-  retire_watch_child || true
   cycle_log_append "$rc" "$signal" arm-interrupted none
   cleanup_child
   exit "$rc"
