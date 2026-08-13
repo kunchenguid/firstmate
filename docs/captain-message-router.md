@@ -10,7 +10,8 @@ It routes an incoming captain chat message relative to primary-session open asks
 - The Firstmate primary agent never runs continuity.
 
 Primary homes only (main home or a marked secondmate home).
-Child crew/scout worktrees and no-mistakes gate agents are inert.
+Only the Pi session holding that home's Firstmate session lock invokes the owner.
+Read-only competing sessions, child crew/scout worktrees, and no-mistakes gate agents are inert.
 
 ## Router model runner
 
@@ -112,7 +113,8 @@ explanation=<up to 3 sentences: why this verdict / what context this belongs to>
 ```
 
 `verdict` and `target` drive routing.
-Targets are normalized and validated by the owner, never trusted raw: `new` forces `target=-`, `same` resolves to the current session id, and `reroute` must name a session that has a brief on disk.
+Targets are normalized and validated by the owner, never trusted raw: `new` forces `target=-`, `same` resolves to the current session id, and `reroute` must name a different session that has a brief on disk.
+A model self-reroute is recorded and normalized to deterministic `same` without publishing a pending route.
 
 `explanation` is **audit-only**.
 It is appended to `explanations.log` keyed by the same message digest as `verdicts.log`, and written as an `explanation=` header field in the staged `pending/*.route`.
@@ -121,7 +123,7 @@ It exists so the captain can audit why a verdict was chosen and dial the prompt 
 
 ### Fail-open fallback
 
-A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, a `reroute` naming a session with no brief, or a pending-route publication failure all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
+A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, a `reroute` naming the current session or a session with no brief, or a pending-route publication failure all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
 The captain is never locked out by a broken or slow router.
 
 ### Configuration
@@ -137,6 +139,8 @@ No real model calls in unit tests; `tests/fm-captain-router-live-e2e.test.sh` is
 
 - Settle: fire-and-forget.
 - Submit: synchronous so bash can stage pending routes before the primary turn proceeds.
+- Both paths run only while this Pi process owns the Firstmate session lock.
+- A run participates only when its `before_agent_start` prompt is eligible captain input; Firstmate operational runs neither settle anchors nor replace recent captain history.
 - The hook captures a bounded transcript excerpt on `agent_end` and hands it to the owner on the next submit through `--chat-history-file`, dropping Firstmate's own operational injections first.
 - `same`: allow.
 - `reroute` / `new`: record hook-side `last-handoff.txt`; do not inject continuity into primary context.

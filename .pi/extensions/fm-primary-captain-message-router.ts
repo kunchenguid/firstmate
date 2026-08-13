@@ -40,6 +40,7 @@ const root = resolve(dirname(extensionFile), "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const router = `${root}/bin/fm-captain-message-router.sh`;
+const sessionLockLib = `${root}/bin/fm-session-lock-lib.sh`;
 const hookLogDir = `${state}/captain-router`;
 const hookLog = `${hookLogDir}/hook.log`;
 const marker = `${state}/.pi-captain-router-extension-loaded`;
@@ -103,6 +104,25 @@ function markLoaded(): void {
 		writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 	} catch {
 		return;
+	}
+}
+
+function sessionLockOwned(): boolean {
+	try {
+		const result = spawnSync(
+			"bash",
+			[
+				"-c",
+				'. "$1"; fm_session_lock_owned_by_self "$2"',
+				"fm-captain-router-lock-check",
+				sessionLockLib,
+				state,
+			],
+			{ stdio: "ignore" },
+		);
+		return result.status === 0;
+	} catch {
+		return false;
 	}
 }
 
@@ -289,6 +309,7 @@ function newestAssistantText(event: AgentEndEvent): string {
 export default function (pi: ExtensionAPI) {
 	let activeSessionId: string | undefined;
 	let sessionBound = false;
+	let currentRunEligible = false;
 	let lastAssistantText = "";
 	let recentChatHistory = "";
 
@@ -296,6 +317,7 @@ export default function (pi: ExtensionAPI) {
 		const sessionId = contextSessionId(context);
 		if (!sessionBound || sessionId !== activeSessionId) {
 			activeSessionId = sessionId;
+			currentRunEligible = false;
 			lastAssistantText = "";
 			recentChatHistory = "";
 			sessionBound = true;
@@ -312,9 +334,13 @@ export default function (pi: ExtensionAPI) {
 	// Firstmate's own operational injections are not captain messages.
 	pi.on("before_agent_start", (event, context) => {
 		const sessionId = bindSession(context);
+		currentRunEligible = false;
+		lastAssistantText = "";
 		const prompt = String((event as { prompt?: unknown }).prompt ?? "");
 		if (!prompt.trim()) return;
 		if (classifyFirstmateOperationalText(prompt) !== undefined) return;
+		if (!sessionLockOwned()) return;
+		currentRunEligible = true;
 		const stdout = runRouterSubmit(prompt, sessionId, recentChatHistory);
 		const parsed = parseVerdict(stdout);
 		if (!parsed) {
@@ -329,14 +355,23 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_end", (event, context) => {
 		bindSession(context);
+		if (!currentRunEligible) return;
+		if (!sessionLockOwned()) {
+			currentRunEligible = false;
+			lastAssistantText = "";
+			return;
+		}
 		lastAssistantText = newestAssistantText(event as AgentEndEvent);
 		recentChatHistory = recentTranscript(event as AgentEndEvent);
 	});
 
 	pi.on("agent_settled", (_event, context) => {
 		const sessionId = bindSession(context);
+		const eligible = currentRunEligible;
 		const text = lastAssistantText;
+		currentRunEligible = false;
 		lastAssistantText = "";
+		if (!eligible || !sessionLockOwned()) return;
 		runRouterSettle(text, sessionId);
 	});
 

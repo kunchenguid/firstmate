@@ -263,11 +263,11 @@ stage_pending_route() { # <verdict> <target> <confidence> <explanation> ; messag
 		rm -f "$path" 2>/dev/null || true
 		return 1
 	}
-	printf '%s\n' "$rel" >"$latest_tmp" 2>/dev/null &&
-		mv -f "$latest_tmp" "$PENDING_DIR/LATEST" 2>/dev/null || {
+	if ! printf '%s\n' "$rel" >"$latest_tmp" 2>/dev/null ||
+		! mv -f "$latest_tmp" "$PENDING_DIR/LATEST" 2>/dev/null; then
 		rm -f "$latest_tmp" "$path" 2>/dev/null || true
 		return 1
-	}
+	fi
 	return 0
 }
 
@@ -405,14 +405,15 @@ spawn_router_agent() { # prompt on stdin
 }
 
 # parse_verdict_block: read the model's reply and set PARSE_VERDICT,
-# PARSE_TARGET, PARSE_EXPLANATION. Accepts the three-line block and, for
-# resilience, a single `verdict=... target=...` line. Returns 0 when a valid,
-# validated verdict was recovered; every other case is a fail-open failure.
+# PARSE_TARGET, PARSE_EXPLANATION, PARSE_CONFIDENCE. Accepts the three-line block
+# and, for resilience, a single `verdict=... target=...` line. Returns 0 when a
+# valid, validated verdict was recovered; every other case is a fail-open failure.
 parse_verdict_block() { # <blob>
 	local blob=$1
 	PARSE_VERDICT=
 	PARSE_TARGET=
 	PARSE_EXPLANATION=
+	PARSE_CONFIDENCE=model
 	PARSE_VERDICT=$(printf '%s\n' "$blob" |
 		sed -n 's/^[[:space:]]*verdict=\([A-Za-z]*\).*/\1/p' | head -n 1)
 	PARSE_TARGET=$(printf '%s\n' "$blob" |
@@ -440,7 +441,15 @@ parse_verdict_block() { # <blob>
 	fi
 	if [ "$PARSE_VERDICT" = reroute ]; then
 		[ "$PARSE_TARGET" != - ] || return 1
-		[ -f "$SESSIONS_DIR/$PARSE_TARGET.brief" ] || return 1
+		if [ "$PARSE_TARGET" = "$(resolve_session_id)" ]; then
+			record_failure "router returned the current session as a reroute target; continuing in the current session"
+			PARSE_VERDICT=same
+			PARSE_TARGET=$(resolve_session_id)
+			PARSE_EXPLANATION="router returned the current session as a reroute target; continuing in the current session"
+			PARSE_CONFIDENCE=det
+		else
+			[ -f "$SESSIONS_DIR/$PARSE_TARGET.brief" ] || return 1
+		fi
 	fi
 	return 0
 }
@@ -579,7 +588,7 @@ if agent_out=$(build_router_prompt "$session_id" "$tmpmsg" "$CHAT_HISTORY_FILE" 
 	rm -f "$tmpmsg"
 	if parse_verdict_block "$agent_out"; then
 		printf '%s' "$msg" |
-			emit_verdict "$PARSE_VERDICT" "$PARSE_TARGET" model "$PARSE_EXPLANATION"
+			emit_verdict "$PARSE_VERDICT" "$PARSE_TARGET" "$PARSE_CONFIDENCE" "$PARSE_EXPLANATION"
 		exit 0
 	fi
 	record_failure "router agent returned unparseable verdict"

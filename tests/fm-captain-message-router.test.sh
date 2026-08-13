@@ -337,14 +337,25 @@ test_submit_reroute_target_is_validated() {
 	expect_code 0 "$status" "invalid reroute target exit"
 	assert_contains "$out" "verdict=same" "a reroute to an unknown session fails open"
 	assert_contains "$out" "confidence=det" "the invalid target uses the fallback label"
-	# A reroute naming a real brief routes.
+	# A reroute naming the current session is not a handoff, even though its brief exists.
+	status=0
+	out=$(printf 'continue this conversation' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=reroute\ntarget=primary\nexplanation=x\n"' \
+		run "$root" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "current-session reroute exit"
+	assert_contains "$out" "verdict=same target=primary confidence=det" \
+		"a self-reroute continues in the current session"
+	assert_grep "current session as a reroute target" "$(failures_log "$root")" \
+		"the invalid self-reroute is recorded"
+	assert_absent "$(pending_dir "$root")/LATEST" \
+		"a self-reroute does not publish pending route state"
+	# A reroute naming a real different brief routes.
 	status=0
 	out=$(printf 'back to the exporter' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=reroute\ntarget=sess-blender\nexplanation=x\n"' \
 		run "$root" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "valid reroute target exit"
 	assert_contains "$out" "verdict=reroute target=sess-blender confidence=model" \
-		"a reroute naming an existing brief routes"
-	pass "router: reroute targets are validated against existing briefs"
+		"a reroute naming a different existing brief routes"
+	pass "router: reroute targets are validated as different existing sessions"
 }
 
 test_submit_new_and_same_targets_are_normalized() {
@@ -517,16 +528,19 @@ test_pending_route_publication_failure_falls_back_to_same() {
 }
 
 test_pi_hook_uses_context_session_ids_without_outer_timeout() {
-	local out status=0
+	local fixture out status=0
 	if ! command -v node >/dev/null 2>&1; then
 		echo "skip: node not found for the Pi hook context test"
 		return 0
 	fi
-	out=$(FM_OPERATIONAL_INPUT_SCRIPT=/probe/fm-operational-input.sh \
+	fixture="$TMP_ROOT/hook-context"
+	mkdir -p "$fixture/state"
+	out=$(FM_STATE_OVERRIDE="$fixture/state" FM_OPERATIONAL_INPUT_SCRIPT=/probe/fm-operational-input.sh \
 		node --experimental-test-module-mocks --experimental-strip-types --no-warnings \
 		--input-type=module 2>&1 <<'JS'
 import { mock } from "node:test";
 const ownerCalls = [];
+let lockOwned = true;
 mock.module("node:child_process", { namedExports: {
   spawn(command, args, options) {
     const call = { kind: "settle", command, args, options, input: "" };
@@ -537,6 +551,9 @@ mock.module("node:child_process", { namedExports: {
     };
   },
   spawnSync(command, args, options) {
+    if (command === "bash" && args?.[3]?.endsWith("fm-session-lock-lib.sh")) {
+      return { status: lockOwned ? 0 : 1, stdout: "", stderr: "" };
+    }
     if (String(command).endsWith("fm-operational-input.sh")) {
       return { status: 1, stdout: "", stderr: "" };
     }
@@ -567,6 +584,10 @@ await handlers.get("agent_settled")(
   { type: "agent_settled", sessionId: "wrong-event-id" },
   context("session-alpha"),
 );
+await handlers.get("before_agent_start")(
+  { type: "before_agent_start", prompt: "stranded alpha prompt" },
+  context("session-alpha"),
+);
 await handlers.get("agent_end")(
   {
     type: "agent_end",
@@ -576,6 +597,10 @@ await handlers.get("agent_end")(
 );
 await handlers.get("agent_settled")(
   { type: "agent_settled" },
+  context("session-beta"),
+);
+await handlers.get("before_agent_start")(
+  { type: "before_agent_start", prompt: "beta captain message" },
   context("session-beta"),
 );
 await handlers.get("agent_end")(
@@ -590,7 +615,23 @@ await handlers.get("agent_settled")(
   context("session-beta"),
 );
 await handlers.get("before_agent_start")(
-  { type: "before_agent_start", prompt: "second captain message" },
+  { type: "before_agent_start", prompt: "second beta captain message" },
+  context("session-beta"),
+);
+lockOwned = false;
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "must not settle after lock loss" }] }],
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_settled")(
+  { type: "agent_settled" },
+  context("session-beta"),
+);
+await handlers.get("before_agent_start")(
+  { type: "before_agent_start", prompt: "unowned captain message" },
   context("session-beta"),
 );
 const calls = ownerCalls.map(({ kind, args, input, options }) => ({ kind, args, input: input || options?.input, timeout: options?.timeout }));
@@ -604,14 +645,18 @@ JS
 		"the first context session id reaches the settle owner call"
 	assert_contains "$out" '"args":["--on-settle","--session-id","session-beta"]' \
 		"the second context session id reaches its own settle owner call"
-	assert_not_contains "$out" "stranded alpha" \
+	assert_not_contains "$out" '"kind":"settle","args":["--on-settle","--session-id","session-beta"],"input":"stranded alpha"' \
 		"assistant text captured for one session is not settled as another session"
 	assert_contains "$out" '"args":["--on-submit","--session-id","session-beta","--chat-history-file"' \
 		"distinct context session ids remain distinct across submit calls"
+	assert_not_contains "$out" "must not settle after lock loss" \
+		"a session that loses lock ownership does not call the settle owner"
+	assert_not_contains "$out" "unowned captain message" \
+		"a session without lock ownership does not call the submit owner"
 	assert_not_contains "$out" "wrong-event-id" "event payload session ids are ignored"
 	assert_not_contains "$out" '"timeout":' \
 		"the hook has no outer timeout that can preempt the shared shell owner"
-	pass "router: the Pi hook uses context session ids and leaves timeout ownership to bash"
+	pass "router: the Pi hook uses context session ids and requires lock ownership"
 }
 
 test_verdict_is_logged() {
@@ -649,8 +694,11 @@ test_pi_hook_threads_bounded_redacted_history() {
 	cat >"$fixture/bin/fm-captain-message-router.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+input=$(cat)
 printf '%s\n' "$@" >>"$FM_STATE_OVERRIDE/hook-argv.txt"
-cat >/dev/null
+if [ "${1-}" = --on-settle ]; then
+	printf '%s\n' "$input" >>"$FM_STATE_OVERRIDE/hook-settle-log.txt"
+fi
 while [ "$#" -gt 0 ]; do
 	if [ "$1" = --chat-history-file ]; then
 		{
@@ -669,13 +717,34 @@ SH
 		FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
 		FM_ROOT_OVERRIDE="$fixture" \
 		FM_OPERATIONAL_INPUT_SCRIPT="$ROOT/bin/fm-operational-input.sh" \
-		node --experimental-strip-types --no-warnings --input-type=module 2>&1 <<'JS'
+		node --experimental-test-module-mocks --experimental-strip-types --no-warnings \
+		--input-type=module 2>&1 <<'JS'
+import { mock } from "node:test";
 import { pathToFileURL } from "node:url";
-const extension = await import(pathToFileURL(process.env.EXT).href);
+const childProcess = await import("node:child_process");
+mock.module("node:child_process", { namedExports: {
+  spawn: childProcess.spawn,
+  spawnSync(command, args, options) {
+    if (command === "bash" && args?.[3]?.endsWith("fm-session-lock-lib.sh")) {
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    return childProcess.spawnSync(command, args, options);
+  },
+} });
+const extensionUrl = pathToFileURL(process.env.EXT);
+extensionUrl.search = `history-test=${Date.now()}`;
+const extension = await import(extensionUrl.href);
 const handlers = new Map();
 extension.default({ on: (event, handler) => handlers.set(event, handler) });
 const say = (role, text) => ({ role, content: [{ type: "text", text }] });
 const context = (id) => ({ sessionManager: { getSessionId: () => id } });
+await handlers.get("before_agent_start")(
+  {
+    type: "before_agent_start",
+    prompt: "session alpha captain turn",
+  },
+  context("session-alpha"),
+);
 await handlers.get("agent_end")(
   {
     type: "agent_end",
@@ -697,14 +766,49 @@ await handlers.get("agent_end")(
   {
     type: "agent_end",
     messages: [
-      say("user", "older captain turn about the exporter"),
-      say("assistant", "assistant reply about the exporter"),
-      say("user", "\u2063FIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now"),
-      say("assistant", "newest assistant question?"),
+      say("user", "initial session beta captain turn"),
+      say("assistant", "initial session beta assistant reply"),
     ],
   },
   context("session-beta"),
 );
+await handlers.get("agent_settled")({}, context("session-beta"));
+await handlers.get("before_agent_start")(
+  {
+    type: "before_agent_start",
+    prompt: "\u2063FIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now",
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [
+      say("user", "\u2063FIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now"),
+      say("assistant", "operational response must not become history"),
+    ],
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_settled")({}, context("session-beta"));
+await handlers.get("before_agent_start")(
+  {
+    type: "before_agent_start",
+    prompt: "first eligible session beta turn",
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_end")(
+  {
+    type: "agent_end",
+    messages: [
+      say("user", "older captain turn about the exporter"),
+      say("assistant", "assistant reply about the exporter"),
+    ],
+  },
+  context("session-beta"),
+);
+await handlers.get("agent_settled")({}, context("session-beta"));
 await handlers.get("before_agent_start")(
   {
     type: "before_agent_start",
@@ -730,6 +834,12 @@ JS
 		"no owner call for a replacement session receives the previous transcript"
 	assert_no_grep "FIRSTMATE_OP" "$fixture/state/hook-history.txt" \
 		"the hook drops Firstmate operational injections from the excerpt"
+	assert_no_grep "operational response must not become history" "$fixture/state/hook-history-log.txt" \
+		"an operational run cannot replace the captain conversation history"
+	assert_no_grep "operational response must not become history" "$fixture/state/hook-settle-log.txt" \
+		"an operational run cannot replace the session anchors"
+	assert_grep "assistant reply about the exporter" "$fixture/state/hook-settle-log.txt" \
+		"the next eligible captain run still refreshes the session brief"
 	assert_present "$fixture/state/.pi-captain-router-extension-loaded" \
 		"the router extension writes its versioned loaded marker"
 	assert_grep "sha256:" "$fixture/state/.pi-captain-router-extension-loaded" \
