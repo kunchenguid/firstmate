@@ -14,11 +14,15 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-claude-trust-lib)
 
+file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
 # with_lock <fn> <worktree>: the caller-held-lock contract fm-spawn.sh follows.
 with_lock() {
   local fn=$1 wt=$2 lock rc=0
   lock=$(fm_claude_trust_lock_path) || return 1
-  fm_lock_acquire_wait "$lock"
+  fm_claude_trust_lock_acquire "$lock" || return 1
   "$fn" "$wt" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -39,6 +43,56 @@ test_creates_file_and_trusts_a_fresh_worktree() {
   pass "fm_claude_pretrust_worktree: creates .claude.json and trusts a brand-new worktree"
 }
 
+test_private_permissions_and_unique_temp_files() {
+  local dir json wt
+  dir="$TMP_ROOT/permissions"
+  CLAUDE_CONFIG_DIR="$dir/config"
+  wt="$dir/wt"
+  fm_claude_trust_ensure_dir || fail "ensure_dir failed for permissions test"
+  with_lock fm_claude_pretrust_worktree "$wt" || fail "pretrust failed for permissions test"
+  json="$CLAUDE_CONFIG_DIR/.claude.json"
+  [ "$(file_mode "$CLAUDE_CONFIG_DIR")" = 700 ] || fail "new config directory is not mode 0700"
+  [ "$(file_mode "$json")" = 600 ] || fail "new trust file is not mode 0600"
+  chmod 0400 "$json"
+  with_lock fm_claude_pretrust_worktree "$dir/second-wt" || fail "pretrust failed for a mode 0400 file"
+  [ "$(file_mode "$json")" = 400 ] || fail "pretrust weakened an existing mode 0400 file"
+  touch "$json.fm-spawn-tmp.preexisting"
+  with_lock fm_claude_pretrust_worktree "$dir/third-wt" || fail "a pre-existing similarly named file blocked pretrust"
+  assert_present "$json.fm-spawn-tmp.preexisting" "pretrust replaced an unrelated similarly named file"
+  pass "fm_claude_pretrust_worktree: uses private unique files and preserves stricter permissions"
+}
+
+test_unusable_paths_fail_without_hanging() {
+  local dir lock out status original_path
+  dir="$TMP_ROOT/unusable"
+  CLAUDE_CONFIG_DIR="$dir/config"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  original_path=$PATH
+  mkdir -p "$dir/fakebin"
+  printf '#!/bin/sh\nexit 1\n' > "$dir/fakebin/mktemp"
+  chmod +x "$dir/fakebin/mktemp"
+  PATH="$dir/fakebin:$PATH"
+  if fm_claude_trust_ensure_dir; then
+    PATH=$original_path
+    fail "ensure_dir accepted a directory where its write probe failed"
+  fi
+  PATH=$original_path
+  lock=$(fm_claude_trust_lock_path) || fail "could not resolve lock path"
+  printf 'not a lock directory\n' > "$lock"
+  sleep() { :; }
+  fm_claude_trust_lock_acquire "$lock" && fail "bounded acquisition accepted an unusable lock path"
+  unset -f sleep
+  out=$(timeout 2 bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-claude-trust-lib.sh"
+    sleep() { :; }
+    fm_claude_trust_lock_acquire "$2"
+  ' _ "$ROOT" "$lock" 2>&1); status=$?
+  [ "$status" -ne 124 ] || fail "trust lock acquisition hung on an unusable lock path"
+  [ "$status" -ne 0 ] || fail "trust lock acquisition accepted an unusable lock path"
+  pass "claude trust setup: unusable config and lock paths fail in bounded time"
+}
+
 test_ensure_dir_creates_a_not_yet_existing_config_dir() {
   # Regression: acquiring the lock before the config dir exists loops forever
   # (fm_lock_try_acquire cd's into the lock's parent to resolve it). This is
@@ -55,7 +109,7 @@ test_ensure_dir_creates_a_not_yet_existing_config_dir() {
     export CLAUDE_CONFIG_DIR="$2"
     fm_claude_trust_ensure_dir || exit 1
     lock=$(fm_claude_trust_lock_path) || exit 1
-    fm_lock_acquire_wait "$lock"
+    fm_claude_trust_lock_acquire "$lock"
     fm_claude_pretrust_worktree "$3"
     status=$?
     fm_lock_release "$lock"
@@ -149,7 +203,7 @@ test_concurrent_writers_serialize_without_corruption_or_loss() {
         . "$1/bin/fm-wake-lib.sh"
         . "$1/bin/fm-claude-trust-lib.sh"
         lock=$(fm_claude_trust_lock_path) || exit 1
-        fm_lock_acquire_wait "$lock"
+        fm_claude_trust_lock_acquire "$lock"
         fm_claude_pretrust_worktree "$2"
         status=$?
         fm_lock_release "$lock"
@@ -198,6 +252,8 @@ test_missing_jq_refuses_loudly() {
 }
 
 test_creates_file_and_trusts_a_fresh_worktree
+test_private_permissions_and_unique_temp_files
+test_unusable_paths_fail_without_hanging
 test_ensure_dir_creates_a_not_yet_existing_config_dir
 test_idempotent_and_preserves_unrelated_content
 test_refuses_malformed_json_without_touching_it

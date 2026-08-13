@@ -2290,7 +2290,7 @@ if [ "$HARNESS" = claude ]; then
     echo "error: could not resolve the claude trust lock path" >&2
     exit 1
   }
-  if ! fm_lock_acquire_wait "$CLAUDE_TRUST_LOCK"; then
+  if ! fm_claude_trust_lock_acquire "$CLAUDE_TRUST_LOCK"; then
     echo "error: could not acquire the claude trust lock for $ID" >&2
     exit 1
   fi
