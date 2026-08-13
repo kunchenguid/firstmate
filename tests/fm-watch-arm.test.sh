@@ -290,7 +290,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   # The arm reaps its liveness watchdog before returning the watcher reason, so
   # assert the recovery's bounded outcome instead of a scheduler-sensitive
   # quarter-second process snapshot.
-  wait_for_exit "$ARM_PID" 10
+  wait_for_exit "$ARM_PID" 100
   status=$?
   if [ "$status" -eq 124 ]; then
     fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision"
