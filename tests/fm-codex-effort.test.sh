@@ -127,6 +127,20 @@ case "${1:-} ${2:-}" in
     ;;
   "pane send-text")
     key=${4:-}
+    case "$key" in
+      "$(printf '\033.')"|"$(printf '\033,')") ;;
+      *)
+        [ -z "${FM_FAKE_TEXT_ENTERED:-}" ] || : > "$FM_FAKE_TEXT_ENTERED"
+        if [ -n "${FM_FAKE_REQUIRE_CLEAR_DONE:-}" ] && [ ! -e "$FM_FAKE_REQUIRE_CLEAR_DONE" ]; then
+          [ -z "${FM_FAKE_EVENT_LOG:-}" ] || printf '%s\n' 'text-before-clear' >> "$FM_FAKE_EVENT_LOG"
+          exit 97
+        fi
+        if [ -n "${FM_FAKE_REQUIRE_BUSY_EVENT_DONE:-}" ] && [ ! -e "$FM_FAKE_REQUIRE_BUSY_EVENT_DONE" ]; then
+          [ -z "${FM_FAKE_EVENT_LOG:-}" ] || printf '%s\n' 'text-before-interrupt-record' >> "$FM_FAKE_EVENT_LOG"
+          exit 98
+        fi
+        ;;
+    esac
     if [ "${FM_FAKE_BLOCK_ORDINARY_SEND:-0}" = 1 ] \
       && [ "$key" != "$(printf '\033.')" ] \
       && [ "$key" != "$(printf '\033,')" ]; then
@@ -160,11 +174,24 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "pane send-keys")
+    key=${4:-}
     if [ "${FM_FAKE_BLOCK_KEY_SEND:-0}" = 1 ]; then
       : > "${FM_FAKE_KEY_ENTERED:?}"
       while [ ! -e "${FM_FAKE_ALLOW_KEY:?}" ]; do sleep 0.01; done
     fi
-    if [ "${4:-}" = enter ] && [ -n "${FM_FAKE_AGENT_STATUS_FILE:-}" ]; then
+    [ -z "${FM_FAKE_SENT_KEYS:-}" ] || printf '%s\n' "$key" >> "$FM_FAKE_SENT_KEYS"
+    if [ "$key" = escape ] && [ -n "${FM_FAKE_COMPOSER_FILE:-}" ]; then
+      printf '%s\n' 'restored prompt' > "$FM_FAKE_COMPOSER_FILE"
+    fi
+    if [ "$key" = ctrl+u ] && [ "${FM_FAKE_BLOCK_CLEAR_SEND:-0}" = 1 ]; then
+      : > "${FM_FAKE_CLEAR_ENTERED:?}"
+      while [ ! -e "${FM_FAKE_ALLOW_CLEAR:?}" ]; do sleep 0.01; done
+    fi
+    if [ "$key" = ctrl+u ] && [ -n "${FM_FAKE_COMPOSER_FILE:-}" ]; then
+      : > "$FM_FAKE_COMPOSER_FILE"
+      [ -z "${FM_FAKE_CLEAR_DONE:-}" ] || : > "$FM_FAKE_CLEAR_DONE"
+    fi
+    if [ "$key" = enter ] && [ -n "${FM_FAKE_AGENT_STATUS_FILE:-}" ]; then
       printf 'working\n' > "$FM_FAKE_AGENT_STATUS_FILE"
     fi
     ;;
@@ -263,7 +290,7 @@ run_case() {  # <dir> <effort>
 
 run_send_case() {  # <dir> <message>
   local dir=$1 message=$2
-  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="${FM_SEND_ROOT_OVERRIDE:-$ROOT}" \
     FM_FAKE_LOG="$dir/runtime.log" FM_FAKE_WORKTREE="${FM_FAKE_WORKTREE:-$dir/worktree}" \
     FM_FAKE_EFFORT_FILE="$dir/effort" \
     FM_FAKE_META="$dir/home/state/effort-task.meta" \
@@ -281,6 +308,7 @@ run_send_case() {  # <dir> <message>
     FM_FAKE_BLOCK_KEY_SEND="${FM_FAKE_BLOCK_KEY_SEND:-0}" \
     FM_FAKE_KEY_ENTERED="${FM_FAKE_KEY_ENTERED:-}" \
     FM_FAKE_ALLOW_KEY="${FM_FAKE_ALLOW_KEY:-}" \
+    FM_FAKE_REAL_MV="$(command -v mv)" \
     FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
     PATH="$dir/fakebin:$PATH" \
     "$SEND" effort-task "$message"
@@ -288,7 +316,7 @@ run_send_case() {  # <dir> <message>
 
 run_key_send_case() {  # <dir> <key>
   local dir=$1 key=$2
-  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="${FM_SEND_ROOT_OVERRIDE:-$ROOT}" \
     FM_FAKE_LOG="$dir/runtime.log" FM_FAKE_WORKTREE="${FM_FAKE_WORKTREE:-$dir/worktree}" \
     FM_FAKE_EFFORT_FILE="$dir/effort" \
     FM_FAKE_META="$dir/home/state/effort-task.meta" \
@@ -306,6 +334,21 @@ run_key_send_case() {  # <dir> <key>
     FM_FAKE_BLOCK_KEY_SEND="${FM_FAKE_BLOCK_KEY_SEND:-0}" \
     FM_FAKE_KEY_ENTERED="${FM_FAKE_KEY_ENTERED:-}" \
     FM_FAKE_ALLOW_KEY="${FM_FAKE_ALLOW_KEY:-}" \
+    FM_FAKE_BLOCK_CLEAR_SEND="${FM_FAKE_BLOCK_CLEAR_SEND:-0}" \
+    FM_FAKE_CLEAR_ENTERED="${FM_FAKE_CLEAR_ENTERED:-}" \
+    FM_FAKE_ALLOW_CLEAR="${FM_FAKE_ALLOW_CLEAR:-}" \
+    FM_FAKE_COMPOSER_FILE="${FM_FAKE_COMPOSER_FILE:-}" \
+    FM_FAKE_SENT_KEYS="${FM_FAKE_SENT_KEYS:-}" \
+    FM_FAKE_CLEAR_DONE="${FM_FAKE_CLEAR_DONE:-}" \
+    FM_FAKE_TEXT_ENTERED="${FM_FAKE_TEXT_ENTERED:-}" \
+    FM_FAKE_REQUIRE_CLEAR_DONE="${FM_FAKE_REQUIRE_CLEAR_DONE:-}" \
+    FM_FAKE_REQUIRE_BUSY_EVENT_DONE="${FM_FAKE_REQUIRE_BUSY_EVENT_DONE:-}" \
+    FM_FAKE_EVENT_LOG="${FM_FAKE_EVENT_LOG:-}" \
+    FM_FAKE_REAL_BUSY_EVENT="${FM_FAKE_REAL_BUSY_EVENT:-}" \
+    FM_FAKE_BUSY_EVENT_ENTERED="${FM_FAKE_BUSY_EVENT_ENTERED:-}" \
+    FM_FAKE_ALLOW_BUSY_EVENT="${FM_FAKE_ALLOW_BUSY_EVENT:-}" \
+    FM_FAKE_BUSY_EVENT_DONE="${FM_FAKE_BUSY_EVENT_DONE:-}" \
+    FM_FAKE_REAL_MV="$(command -v mv)" \
     FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
     PATH="$dir/fakebin:$PATH" \
     "$SEND" effort-task --key "$key"
@@ -602,6 +645,138 @@ test_key_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check() {
   pass "fm-codex-effort: recorded fm-send --key input serializes with chords and receives a fresh semantic idle check"
 }
 
+test_escape_transactions_serialize_clear_and_interrupt_bookkeeping() {
+  local dir key_pid send_pid key_rc send_rc gen waited=0
+
+  dir=$(make_case escape-clear-race)
+  sed -i 's/^harness=codex$/harness=muse/' "$dir/home/state/effort-task.meta"
+  printf 'idle\n' > "$dir/agent-status"
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_BLOCK_CLEAR_SEND=1 \
+  FM_FAKE_CLEAR_ENTERED="$dir/clear-entered" \
+  FM_FAKE_ALLOW_CLEAR="$dir/allow-clear" \
+  FM_FAKE_CLEAR_DONE="$dir/clear-done" \
+  FM_FAKE_COMPOSER_FILE="$dir/composer" \
+  FM_FAKE_SENT_KEYS="$dir/sent-keys" \
+    run_key_send_case "$dir" Escape >"$dir/key.out" 2>"$dir/key.err" &
+  key_pid=$!
+  while [ ! -e "$dir/clear-entered" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$dir/clear-entered" ]; then
+    : > "$dir/allow-clear"
+    wait "$key_pid" || true
+    fail "Muse Escape did not reach its deterministic composer-clear point"
+  fi
+  assert_grep escape "$dir/sent-keys" "Muse Escape did not deliver the interrupt key before its clear"
+  assert_grep 'restored prompt' "$dir/composer" "Muse Escape did not restore the composer fixture before its clear"
+  : > "$dir/event.log"
+
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_TEXT_ENTERED="$dir/text-entered" \
+  FM_FAKE_REQUIRE_CLEAR_DONE="$dir/clear-done" \
+  FM_FAKE_EVENT_LOG="$dir/event.log" \
+  FM_FAKE_SENT_TEXT="$dir/sent-text" \
+    run_send_case "$dir" 'after Muse Escape' >"$dir/send.out" 2>"$dir/send.err" &
+  send_pid=$!
+  waited=0
+  while [ ! -e "$dir/text-entered" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ -e "$dir/text-entered" ]; then
+    : > "$dir/allow-clear"
+    wait "$key_pid" || true
+    wait "$send_pid" || true
+    fail "ordinary input entered before the serialized Muse Escape composer clear completed"
+  fi
+
+  : > "$dir/allow-clear"
+  key_rc=0; wait "$key_pid" || key_rc=$?
+  send_rc=0; wait "$send_pid" || send_rc=$?
+  expect_code 0 "$key_rc" "Muse Escape should complete its composer clear"
+  expect_code 0 "$send_rc" "ordinary input should follow the completed Muse Escape"
+  assert_grep ctrl+u "$dir/sent-keys" "Muse Escape did not clear its restored composer"
+  [ ! -s "$dir/composer" ] || fail "Muse Escape left restored input in the composer"
+  assert_grep 'after Muse Escape' "$dir/sent-text" "ordinary input did not follow the Muse Escape clear"
+  assert_no_grep text-before-clear "$dir/event.log" "ordinary input bypassed the Muse Escape composer-clear transaction"
+
+  dir=$(make_case escape-interrupt-record-race)
+  sed -i 's/^harness=codex$/harness=claude/' "$dir/home/state/effort-task.meta"
+  printf 'idle\n' > "$dir/agent-status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" effort-task)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/effort-task.meta"
+  mkdir -p "$dir/test-root/bin"
+  cat > "$dir/test-root/bin/fm-busy-event.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = apply ]; then
+  : > "${FM_FAKE_BUSY_EVENT_ENTERED:?}"
+  while [ ! -e "${FM_FAKE_ALLOW_BUSY_EVENT:?}" ]; do sleep 0.01; done
+fi
+"${FM_FAKE_REAL_BUSY_EVENT:?}" "$@"
+if [ "${1:-}" = apply ]; then
+  : > "${FM_FAKE_BUSY_EVENT_DONE:?}"
+fi
+SH
+  chmod +x "$dir/test-root/bin/fm-busy-event.sh"
+
+  FM_SEND_ROOT_OVERRIDE="$dir/test-root" \
+  FM_FAKE_REAL_BUSY_EVENT="$ROOT/bin/fm-busy-event.sh" \
+  FM_FAKE_BUSY_EVENT_ENTERED="$dir/busy-event-entered" \
+  FM_FAKE_ALLOW_BUSY_EVENT="$dir/allow-busy-event" \
+  FM_FAKE_BUSY_EVENT_DONE="$dir/busy-event-done" \
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_SENT_KEYS="$dir/sent-keys" \
+    run_key_send_case "$dir" Escape >"$dir/key.out" 2>"$dir/key.err" &
+  key_pid=$!
+  waited=0
+  while [ ! -e "$dir/busy-event-entered" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$dir/busy-event-entered" ]; then
+    : > "$dir/allow-busy-event"
+    wait "$key_pid" || true
+    fail "Claude Escape did not reach its deterministic interrupt-record point"
+  fi
+  assert_grep escape "$dir/sent-keys" "Claude Escape did not deliver the interrupt key before bookkeeping"
+  : > "$dir/event.log"
+
+  FM_SEND_ROOT_OVERRIDE="$dir/test-root" \
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_TEXT_ENTERED="$dir/text-entered" \
+  FM_FAKE_REQUIRE_BUSY_EVENT_DONE="$dir/busy-event-done" \
+  FM_FAKE_EVENT_LOG="$dir/event.log" \
+  FM_FAKE_SENT_TEXT="$dir/sent-text" \
+    run_send_case "$dir" 'after Claude Escape' >"$dir/send.out" 2>"$dir/send.err" &
+  send_pid=$!
+  waited=0
+  while [ ! -e "$dir/text-entered" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ -e "$dir/text-entered" ]; then
+    : > "$dir/allow-busy-event"
+    wait "$key_pid" || true
+    wait "$send_pid" || true
+    fail "ordinary input entered before the serialized Claude Escape interrupt record completed"
+  fi
+
+  : > "$dir/allow-busy-event"
+  key_rc=0; wait "$key_pid" || key_rc=$?
+  send_rc=0; wait "$send_pid" || send_rc=$?
+  expect_code 0 "$key_rc" "Claude Escape should complete its interrupt record"
+  expect_code 0 "$send_rc" "ordinary input should follow the completed Claude Escape"
+  assert_grep 'state=idle source=fm-interrupt event=interrupt' "$dir/home/state/effort-task.busy-state" \
+    "Claude Escape did not record its idle interrupt lifecycle event"
+  assert_grep 'after Claude Escape' "$dir/sent-text" "ordinary input did not follow the Claude Escape record"
+  assert_no_grep text-before-interrupt-record "$dir/event.log" \
+    "ordinary input bypassed the Claude Escape interrupt-record transaction"
+  pass "fm-send: Escape holds endpoint input serialization through Muse clearing and Claude interrupt bookkeeping"
+}
+
 test_post_send_failures_leave_a_durable_recoverable_record() {
   local dir before out rc
   dir=$(make_case recover-multi-step)
@@ -664,5 +839,6 @@ test_footer_requires_the_current_bottom_status_row
 test_captured_real_codex_0147_footers_bind_the_recorded_worktree
 test_ordinary_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check
 test_key_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check
+test_escape_transactions_serialize_clear_and_interrupt_bookkeeping
 test_post_send_failures_leave_a_durable_recoverable_record
 test_unverified_backends_refuse_before_input
