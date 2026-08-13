@@ -496,6 +496,18 @@ except partial_module.ProviderError as exc:
 else:
     raise AssertionError("foreign partial slot was inherited")
 
+# A pre-convergence container has empty metadata; it inherits a same-slot
+# exact-fleet sibling's tags (VM first) instead of classifying as foreign,
+# while a bare orphan container keeps its emptiness and still refuses.
+sibling_tags={"workload":"firstmate","deployment-generation":"dep","cleanup-owner":"owner"}
+partial_workers={1:{"slot":1,"resources":{"nic":{"tags":dict(sibling_tags)}}}}
+assert module.partial_container_metadata({}, 1, partial_workers) == sibling_tags
+vm_workers={1:{"slot":1,"resources":{"nic":{"tags":{"workload":"nic"}},"vm":{"tags":dict(sibling_tags)}}}}
+assert module.partial_container_metadata({}, 1, vm_workers) == sibling_tags
+assert module.partial_container_metadata({}, 2, partial_workers) == {}
+stamped={"workload":"firstmate","deployment-generation":"other","cleanup-owner":"owner"}
+assert module.partial_container_metadata(dict(stamped), 1, partial_workers) == stamped
+
 # Guest marker framing: only marker lines parse, the last one wins, and a
 # malformed payload fails closed.
 assert module.marker_payload("noise\nFM-X:{}\n", "FM-WORKER-RESULT:") is None

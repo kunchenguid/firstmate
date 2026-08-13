@@ -370,6 +370,19 @@ def slot_from_name(name, pattern):
     return slot if 1 <= slot <= 16 else None
 
 
+def partial_container_metadata(metadata, slot, workers):
+    # Container metadata is only stamped at tag convergence, so a create
+    # interrupted before that point leaves an empty-metadata container next to
+    # exact-fleet template siblings. Emptiness inherits a same-slot sibling's
+    # tags (VM first); a bare orphan container stays empty and still
+    # classifies as foreign.
+    if metadata or slot not in workers:
+        return metadata
+    resources = workers[slot]["resources"]
+    donor = resources.get("vm") or next(iter(resources.values()), None)
+    return dict((donor or {}).get("tags") or {})
+
+
 def cost_body(controller, forecast):
     today = dt.datetime.now(dt.timezone.utc).date()
     month_start = today.replace(day=1)
@@ -741,9 +754,9 @@ def inventory(controller, include_metrics=True):
         slot = int(match.group(1))
         if not 1 <= slot <= 16:
             continue
-        metadata = metadata_to_tags(container.get("metadata") or {})
-        if not metadata and slot in workers:
-            metadata = dict((workers[slot]["resources"].get("vm") or {}).get("tags") or {})
+        metadata = partial_container_metadata(
+            metadata_to_tags(container.get("metadata") or {}), slot, workers,
+        )
         container_value = dict(container)
         container_value["id"] = (
             exact_id(controller, "Microsoft.Storage", "storageAccounts", storage)
