@@ -2667,7 +2667,8 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.check.nm" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
-      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
+      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
+      "$sub_state/$child_id.cursor-session"
     rm -f "$sub_state/$child_id.resource" "$sub_state/$child_id.agentpid" \
       "$sub_state/$child_id.postmortem" "$sub_state/$child_id.postmortem.prev" \
       "$sub_state/$child_id.postmortem.logshow"
@@ -2976,7 +2977,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.check.error" "$STATE/$ID.check.fails" "$STATE/$ID.check.nm" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" \
+  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/.$ID.open-decisions-cursor" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
