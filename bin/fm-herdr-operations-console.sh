@@ -451,6 +451,8 @@ herdr_call() {
   "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
 }
 
+PUBLISH_RESULT=''
+
 publish_metadata() {
   local workspace=$1 before after before_focus after_focus metadata_json ttl_ms
   local -a command_args
@@ -485,12 +487,14 @@ publish_metadata() {
   after=$(herdr_call api snapshot 2>/dev/null) || die 'could not read the post-publication lab focus snapshot'
   after_focus=$(focus_signature "$after") || die 'post-publication lab focus snapshot was malformed'
   [ "$before_focus" = "$after_focus" ] || die 'metadata publication changed Herdr focus'
-  jq -n --arg session "$HERDR_LAB_SESSION" --arg workspace "$workspace" \
-    '{attempted:true,session:$session,workspace_id:$workspace,focus_preserved:true,control_actions:false}'
+  PUBLISH_RESULT=$(jq -n --arg session "$HERDR_LAB_SESSION" --arg workspace "$workspace" \
+    '{attempted:true,session:$session,workspace_id:$workspace,focus_preserved:true,control_actions:false}') \
+    || die 'could not record the lab publication result'
+  [ -n "$PUBLISH_RESULT" ] || die 'could not record the lab publication result'
 }
 
 if [ -n "$PUBLISH_WORKSPACE" ]; then
-  PUBLISH_RESULT=$(publish_metadata "$PUBLISH_WORKSPACE")
+  publish_metadata "$PUBLISH_WORKSPACE"
   NORMALIZED=$(printf '%s' "$NORMALIZED" | jq -c --argjson result "$PUBLISH_RESULT" \
     '.herdr.mode = "fixture-lab" | .herdr.publish = $result | .safety.focus_preserved = $result.focus_preserved') \
     || die 'could not attach lab publication result'
@@ -534,7 +538,7 @@ if [ "$FORMAT" = panel ] || [ "$FORMAT" = all ]; then
        | ansi($code; .))
      end)),
     "",
-    (("Activity: " + ((.activity.events | length) | tostring) + "/" + (.activity.max_events | tostring) + " retained | scrollable: " + (.activity.scrollable | tostring) + " | deduped: " + (.activity.deduplicated | tostring)) | fit(.))
+    (("Activity: " + ((.activity.events | length) | tostring) + "/" + (.activity.max_events | tostring) + " retained | scrollable: " + (.activity.scrollable | tostring) + " | deduped: " + (.activity.deduplicated | tostring) + " | " + (if .activity.truncated then "truncated: older events dropped" else "truncated: no" end)) | fit(.))
   ' || die 'panel rendering failed'
 fi
 
@@ -549,7 +553,7 @@ if [ "$FORMAT" = activity ] || [ "$FORMAT" = all ]; then
     (if (.activity.events | length) == 0 then "(none recorded)"
      else (.activity.events[] | fit((.at + " | " + .source + " | " + .kind + " | " + (.freshness | ascii_upcase) + " | " + .summary)))
      end),
-    (("retained=" + ((.activity.events | length) | tostring) + " max=" + (.activity.max_events | tostring) + " deduplicated=" + (.activity.deduplicated | tostring) + " redacted=" + (.activity.redacted | tostring) + " malformed=" + (.activity.malformed | tostring)) | fit(.))
+    (("retained=" + ((.activity.events | length) | tostring) + " max=" + (.activity.max_events | tostring) + " truncated=" + (.activity.truncated | tostring) + " deduplicated=" + (.activity.deduplicated | tostring) + " redacted=" + (.activity.redacted | tostring) + " malformed=" + (.activity.malformed | tostring)) | fit(.))
   ' || die 'activity rendering failed'
 fi
 

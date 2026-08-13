@@ -205,6 +205,86 @@ test_metadata_publication_uses_named_lab_and_preserves_focus() {
   pass "metadata publication is named-lab-only, helper-routed, and focus-preserving"
 }
 
+test_failed_publication_reports_only_its_own_diagnostic() {
+  local helper="$TMP_ROOT/failing-herdr-lab.sh" log="$TMP_ROOT/failing-herdr.log" output rc
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
+case "$3:$4" in
+  api:snapshot)
+    printf '%s\n' '{"result":{"snapshot":{"workspaces":[{"workspace_id":"w1","focused":true}],"tabs":[],"panes":[]}}}'
+    ;;
+  workspace:report-metadata) exit 7 ;;
+  *) exit 99 ;;
+esac
+SH
+  chmod +x "$helper"
+  : > "$log"
+  rc=0
+  output=$(HERDR_LAB_HELPER="$helper" HERDR_LAB_SESSION=fm-lab-console-test \
+    FM_FAKE_HERDR_LOG="$log" "$CONSOLE" --fixture "$FIXTURE" --format json \
+    --now 2026-08-13T12:00:00Z --publish-metadata w1 2>&1) || rc=$?
+  expect_code 1 "$rc" "failed metadata publication must exit non-zero"
+  assert_contains "$output" "lab metadata publication failed" \
+    "failed publication did not report its own diagnostic"
+  assert_not_contains "$output" "invalid JSON text" \
+    "failed publication leaked an unrelated jq parse error"
+  assert_not_contains "$output" "could not attach lab publication result" \
+    "failed publication continued past its own refusal"
+
+  : > "$log"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
+case "$3:$4" in
+  api:snapshot)
+    if [ -f "$FM_FAKE_HERDR_LOG.seen" ]; then
+      printf '%s\n' '{"result":{"snapshot":{"workspaces":[{"workspace_id":"w1","focused":false}],"tabs":[],"panes":[]}}}'
+    else
+      : > "$FM_FAKE_HERDR_LOG.seen"
+      printf '%s\n' '{"result":{"snapshot":{"workspaces":[{"workspace_id":"w1","focused":true}],"tabs":[],"panes":[]}}}'
+    fi
+    ;;
+  workspace:report-metadata) printf '%s\n' '{"result":{"ok":true}}' ;;
+  workspace:get) printf '%s\n' '{"result":{"workspace":{"tokens":{"surface":"fixture"}}}}' ;;
+  *) exit 99 ;;
+esac
+SH
+  chmod +x "$helper"
+  rm -f "$log.seen"
+  rc=0
+  output=$(HERDR_LAB_HELPER="$helper" HERDR_LAB_SESSION=fm-lab-console-test \
+    FM_FAKE_HERDR_LOG="$log" "$CONSOLE" --fixture "$FIXTURE" --format json \
+    --now 2026-08-13T12:00:00Z --publish-metadata w1 2>&1) || rc=$?
+  expect_code 1 "$rc" "focus-changing publication must exit non-zero"
+  assert_contains "$output" "metadata publication changed Herdr focus" \
+    "focus-change refusal did not report its own diagnostic"
+  assert_not_contains "$output" "invalid JSON text" \
+    "focus-change refusal leaked an unrelated jq parse error"
+  pass "publication failures abort with only their own explicit diagnostic"
+}
+
+test_truncated_history_is_surfaced() {
+  local panel activity json
+  json=$(run_json)
+  printf '%s' "$json" | jq -e '.activity.truncated == true' >/dev/null \
+    || fail "fixture no longer exercises the truncated activity path"
+  panel=$("$CONSOLE" --fixture "$FIXTURE" --format panel --no-color --now 2026-08-13T12:00:00Z)
+  activity=$("$CONSOLE" --fixture "$FIXTURE" --format activity --now 2026-08-13T12:00:00Z)
+  assert_contains "$panel" "truncated: older events dropped" \
+    "panel presented a bounded history as complete"
+  assert_contains "$activity" "truncated=true" \
+    "activity footer presented a bounded history as complete"
+
+  local untruncated
+  untruncated=$("$CONSOLE" --fixture "$FIXTURE" --format activity --now 2026-08-13T12:00:00Z --max-events 50)
+  assert_contains "$untruncated" "truncated=false" \
+    "activity footer did not report an untruncated history honestly"
+  pass "dropped activity history is disclosed on every text surface"
+}
+
 test_fleet_snapshot_exposes_recorded_model_and_effort() {
   local home out
   home="$TMP_ROOT/snapshot-model"
@@ -228,4 +308,6 @@ test_ttl_expiry_preserves_honest_state
 test_malformed_and_private_identifiers_fail_closed
 test_narrow_panel_and_ascii_network
 test_metadata_publication_uses_named_lab_and_preserves_focus
+test_failed_publication_reports_only_its_own_diagnostic
+test_truncated_history_is_surfaced
 test_fleet_snapshot_exposes_recorded_model_and_effort
