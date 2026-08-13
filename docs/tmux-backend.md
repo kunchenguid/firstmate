@@ -1,6 +1,6 @@
 # tmux runtime backend
 
-tmux is Firstmate's verified reference runtime backend and the fully supported baseline for secondmate homes.
+tmux is Firstmate's fully supported legacy runtime backend and remains spawn-capable as an explicit opt-in.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
@@ -8,9 +8,8 @@ tmux is Firstmate's verified reference runtime backend and the fully supported b
 Install tmux with `brew install tmux` or your platform package manager.
 The universal harness and toolchain requirements are in [`configuration.md`](configuration.md#toolchain).
 
-tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
 Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
-An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
+When tmux is auto-detected from the current runtime, Firstmate prints a notice naming `config/backend` and `--backend herdr` as opt-outs.
 
 No provisioning is required before the first task.
 
@@ -97,7 +96,7 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 
 ## Limits and regression entry points
 
-- tmux is the reference path and supports secondmate homes.
+- tmux is the legacy verified path and fully supports secondmate homes.
 - The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
 
 ```sh

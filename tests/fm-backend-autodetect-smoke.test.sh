@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# tests/fm-backend-autodetect-smoke.test.sh - real herdr smoke test for runtime
-# backend AUTO-DETECTION (bin/fm-backend.sh's fm_backend_detect, wired into
-# fm_backend_name between config/backend and the tmux default).
+# tests/fm-backend-autodetect-smoke.test.sh - real Herdr smoke test for the
+# no-marker default path in bin/fm-backend.sh's fm_backend_name.
 #
 # Unlike tests/fm-backend-herdr.test.sh (fake herdr CLI) and
 # tests/fm-backend-herdr-smoke.test.sh (real herdr, adapter primitives called
 # directly), this suite drives the REAL bin/fm-spawn.sh and bin/fm-teardown.sh
-# end to end, because auto-detection is a fm-spawn-TIME decision, not an
-# adapter primitive - it has to be proven where fm_backend_name is actually
-# called. The real spawn runs in a helper-provisioned, per-run named Herdr lab
+# end to end because new-spawn default resolution is an fm-spawn-time decision
+# that must be proven where fm_backend_name is actually called.
+# The real spawn runs in a helper-provisioned, per-run named Herdr lab
 # session, with a scratch FM_HOME and scratch local-only project. Concurrent
 # copies therefore never share the default session or a workspace namespace.
 #
@@ -45,10 +44,10 @@ export FM_GATE_REFUSE_BYPASS=1
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
-# This suite asserts that HERDR_ENV=1 alone selects the backend, and it runs
-# against its own isolated lab session. A Herdr pane inherited from the terminal
-# it was launched in must not follow spawn into that session as a cross-session
-# parent identity; the spawn below sets HERDR_ENV explicitly.
+# This suite asserts that no runtime marker or explicit setting selects the
+# Herdr hard default, and it runs against its own isolated lab session.
+# A Herdr pane inherited from the terminal it was launched in must not follow
+# spawn into that session as a cross-session parent identity.
 herdr_forget_inherited_pane
 
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) to keep this
@@ -60,7 +59,7 @@ herdr_forget_inherited_pane
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-default) || {
   rm -rf "$TMP_ROOT"
   fail "could not generate an isolated Herdr lab session name"
 }
@@ -101,28 +100,27 @@ git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.inval
 git clone --quiet --bare "$PROJ" "$PROJ.origin.git"
 git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
 
-# --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
+# --- spawn with no explicit backend config or runtime marker ----------------
 
 OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
-env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
+env -u TMUX -u HERDR_ENV -u CMUX_WORKSPACE_ID -u FM_BACKEND PATH="$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
   FM_SPAWN_NO_GUARD=1 \
   "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" "sh -c 'echo autodetect-smoke-ok'" --mode no-mistakes --yolo off \
   >"$OUT_FILE" 2>"$ERR_FILE"
 status=$?
-[ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed auto-detecting herdr"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
+[ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed on the default Herdr path"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
 
-assert_contains_local "$(cat "$ERR_FILE")" "NOTICE" \
-  "fm-spawn.sh did not print the auto-detect notice to stderr when selecting herdr"
-assert_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL herdr backend" \
-  "fm-spawn.sh's auto-detect notice did not flag herdr as experimental"
-pass "real herdr: fm-spawn.sh auto-detects herdr from HERDR_ENV=1 (no explicit config) and prints the loud notice"
+case "$(cat "$ERR_FILE")" in
+  *NOTICE*) fail "the no-marker default Herdr selection should emit no backend notice"$'\n'"$(cat "$ERR_FILE")" ;;
+esac
+pass "real Herdr: fm-spawn.sh selects Herdr by hard default with no explicit config or runtime marker"
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || fail "fm-spawn.sh did not write a meta file for $ID"
 assert_contains_local "$(cat "$META")" "backend=herdr" \
-  "auto-detected spawn did not record backend=herdr in meta"
+  "default-path spawn did not record backend=herdr in meta"
 assert_contains_local "$(cat "$META")" "herdr_session=$HERDR_LAB_SESSION" \
   "auto-detected spawn did not record the isolated herdr_session in meta"
 
@@ -139,7 +137,7 @@ fi
 
 PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 [ -n "$PANE" ] || fail "auto-detected spawn meta is missing herdr_pane_id"
-pass "real herdr: auto-detected spawn records backend=herdr and herdr_session/workspace/tab/pane fields in meta"
+pass "real Herdr: default-path spawn records backend=herdr and Herdr session/workspace/tab/pane fields in meta"
 
 # --- confirm the trivial launch command actually ran in the herdr pane ------
 
@@ -151,7 +149,7 @@ case "$CAPTURED" in
   *autodetect-smoke-ok*) : ;;
   *) fail "the raw launch command did not run in the auto-detected herdr pane"$'\n'"$CAPTURED" ;;
 esac
-pass "real herdr: the auto-detected spawn's launch command actually ran in the herdr pane"
+pass "real Herdr: the default-path spawn's launch command actually ran in the Herdr pane"
 
 # --- teardown completes the trivial spawn/teardown cycle --------------------
 
@@ -166,11 +164,11 @@ if "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$PANE" >/dev/null 2>&1
   fail "fm-teardown.sh did not close the auto-detected herdr pane"
 fi
 WT=
-pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (meta cleared, pane closed)"
+pass "real Herdr: teardown completes the default-path spawn/teardown cycle (meta cleared, pane closed)"
 
 if ! cleanup_all; then
   trap - EXIT
   fail "isolated Herdr lab teardown failed or the default fleet session changed"
 fi
 trap - EXIT
-pass "real herdr: isolated lab session removed and default fleet session unchanged"
+pass "real Herdr: isolated lab session removed and default fleet session unchanged"

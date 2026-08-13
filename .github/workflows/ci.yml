@@ -103,8 +103,9 @@ jobs:
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
           if-no-files-found: warn
 
-  # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
-  # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  # Required portable serial remainder: watcher, lock, AFK, legacy-tmux,
+  # daemon, ambiguous, and other stateful tests. Real reference-default Herdr
+  # stays in tests-herdr.
   # Split across separate runners so no two of these stateful scripts ever share
   # a machine: each shard is still strictly serial in itself. Shard membership
   # and the shard count both belong to bin/fm-test-run.sh, which refuses a lane
@@ -130,7 +131,7 @@ jobs:
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Require tmux for e2e tests
+      - name: Require legacy tmux for tmux-specific e2e tests
         run: |
           set -eu
           command -v tmux >/dev/null || {
@@ -163,7 +164,8 @@ jobs:
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
           if-no-files-found: warn
 
-  # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
+  # Required reference-default Herdr lane: pinned install, serial
+  # real-herdr-gated family including the no-marker default-spawn path, and a
   # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
   # platform invariant fails (focus, cleanup, default-session tripwire), keep
   # the failure evidence and move the job to macOS rather than skip assertions.

@@ -212,6 +212,28 @@ The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 pro
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
+### Default selection and metadata compatibility
+
+The Herdr hard default was verified on 2026-08-13 against Herdr 0.7.4 protocol 16 on macOS aarch64.
+The portable selection regression separately verified that an absent `backend=` in recorded metadata still resolves to legacy tmux.
+
+```sh
+tests/fm-backend.test.sh
+tests/fm-bootstrap.test.sh
+bin/fm-test-run.sh --family real-herdr-gated --fail-on-gate-skip 'herdr not found' --json /tmp/fm-herdr-default-real.json
+```
+
+Bounded output:
+
+```text
+ok - fm_backend_name: FM_BACKEND env > config/backend > default herdr
+ok - fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux
+ok - bootstrap: the no-marker default requires Herdr + jq + treehouse, not tmux
+ok - real Herdr: fm-spawn.sh selects Herdr by hard default with no explicit config or runtime marker
+ok - real Herdr: default-path spawn records backend=herdr and Herdr session/workspace/tab/pane fields in meta
+FM_TEST_SUMMARY total=12 failed=0 skipped_gate=0
+```
+
 Core read-only probes:
 
 ```sh
@@ -853,7 +875,7 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` o
 
 ### Herdr backend
 
-The tmux run above is the reference; this section is the separate Herdr proof, produced on 2026-08-12 against Herdr 0.8.0 (client and server, protocol 19) and the same signed `cursor-agent` 2026.08.11-e8db854 on macOS 26.5.2 arm64.
+The tmux run above is the legacy-backend proof; this section is the reference Herdr proof, produced on 2026-08-12 against Herdr 0.8.0 (client and server, protocol 19) and the same signed `cursor-agent` 2026.08.11-e8db854 on macOS 26.5.2 arm64.
 Every step ran inside an isolated `fm-lab-` session provisioned by `bin/fm-herdr-lab.sh`, launched from a neutral parent outside any Herdr pane, with the live default session's pane count checked before, during, and after; it stayed at 7 throughout.
 
 **Herdr's native agent state is unusable for Cursor.**

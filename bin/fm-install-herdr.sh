@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# fm-install-herdr.sh - install CI's pinned, verified Herdr build.
+# fm-install-herdr.sh - install Firstmate's pinned, verified default Herdr build.
 #
 # Single owner of the exact Herdr version, official release asset URL, and
-# SHA-256 pin used by the required real-Herdr CI lane. Never installs a
-# floating package-manager latest.
+# SHA-256 pin used by default setup and the required real-Herdr CI lane.
+# Never installs a floating package-manager latest.
 #
 # Usage:
 #   fm-install-herdr.sh <destination-directory>

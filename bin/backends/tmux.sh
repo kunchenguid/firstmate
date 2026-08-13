@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # bin/backends/tmux.sh - the tmux session-provider adapter.
 #
-# Reference backend (AGENTS.md section 8; data/fm-backend-design-d7). P1 moves
+# Fully supported legacy backend (data/fm-backend-design-d7). P1 moves
 # the tmux command sequences that fm-send.sh, fm-peek.sh, fm-watch.sh,
 # fm-spawn.sh, and fm-teardown.sh already ran inline into named functions
 # here, running the EXACT same commands in the EXACT same order, so the
-# default (tmux, `backend=` absent) path stays byte-identical. Sourced only
+# legacy tmux (`backend=` absent) path stays byte-identical. Sourced only
 # through bin/fm-backend.sh's fm_backend_source, never directly.
 #
 # Worktree acquisition (running `treehouse get` inside the pane, and polling

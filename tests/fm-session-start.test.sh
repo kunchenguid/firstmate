@@ -71,7 +71,7 @@ new_world() {
 # test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
 make_fake_toolchain() {
   local fakebin=$1
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_exit0 "$fakebin" tmux herdr node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -1044,12 +1044,12 @@ SH
     if [ "$mode" = configured ]; then
       printf '%s\n' herdr > "$home/config/backend"
       out=$(TMUX='' HERDR_ENV='' BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-      assert_not_contains "$out" "NOTICE: auto-detected herdr runtime" \
-        "an explicit Herdr home should not be reported as auto-detected"
+      assert_not_contains "$out" "NOTICE: auto-detected tmux runtime" \
+        "an explicit Herdr home should not report a tmux auto-detection notice"
     else
       out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-      assert_contains "$out" "NOTICE: auto-detected herdr runtime (HERDR_ENV=1)" \
-        "session start did not preserve the Herdr runtime auto-detection fallback"
+      assert_not_contains "$out" "NOTICE:" \
+        "auto-detected reference-default Herdr should stay silent"
     fi
     assert_contains "$out" "SESSION START - $home" "the real session-start path did not run in the throwaway home"
     assert_not_contains "$out" "MISSING: tmux" "Herdr session start falsely required masked tmux"
