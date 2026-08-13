@@ -105,10 +105,12 @@ SH
 }
 
 # The park's child body: claim the home lock as this fake harness process, then
-# become the adapter, so the real Cursor ancestry path decides lock ownership.
+# run the adapter as its child, so the real Cursor ancestry path decides lock
+# ownership on every platform. Keep the fake harness process alive: Linux
+# changes the process identity when an exec reaches the adapter's shebang.
 PARK_CHILD='
   printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-  exec "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+  "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
 '
 
 # Run the park as a child of the fake cursor harness that holds the home lock.
