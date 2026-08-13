@@ -188,6 +188,36 @@ test_refuses_malformed_json_without_touching_it() {
   pass "fm_claude_pretrust_worktree: refuses malformed JSON and leaves it byte-for-byte untouched"
 }
 
+test_refuses_symlinks_without_touching_them() {
+  local dir json target original
+  dir="$TMP_ROOT/symlink"
+  mkdir -p "$dir/config" "$dir/target"
+  CLAUDE_CONFIG_DIR="$dir/config"
+  json="$CLAUDE_CONFIG_DIR/.claude.json"
+  target="$dir/target/claude.json"
+  jq -n '{"projects": {}, "untouched": true}' > "$target"
+  original=$(cat "$target")
+  ln -s "$target" "$json"
+
+  if with_lock fm_claude_pretrust_worktree "$dir/wt"; then
+    fail "pretrust must refuse a symlinked .claude.json"
+  fi
+  [ -L "$json" ] || fail "a refused pretrust replaced the .claude.json symlink"
+  [ "$(readlink "$json")" = "$target" ] || fail "a refused pretrust changed the symlink target"
+  [ "$(cat "$target")" = "$original" ] || fail "a refused pretrust modified the symlink target"
+
+  rm "$json"
+  ln -s "$dir/target/missing.json" "$json"
+  if with_lock fm_claude_pretrust_worktree "$dir/wt"; then
+    fail "pretrust must refuse a broken .claude.json symlink"
+  fi
+  [ -L "$json" ] || fail "a refused pretrust replaced the broken .claude.json symlink"
+  assert_absent "$dir/target/missing.json" "a refused pretrust created the broken symlink target"
+  ls "$CLAUDE_CONFIG_DIR"/.claude.json.fm-spawn-tmp.* >/dev/null 2>&1 \
+    && fail "a refused symlink pretrust left a temp file behind"
+  pass "fm_claude_pretrust_worktree: refuses valid and broken symlinks without touching them"
+}
+
 test_concurrent_writers_serialize_without_corruption_or_loss() {
   local dir json n pids=() i wt out
   dir="$TMP_ROOT/concurrency"
@@ -257,6 +287,7 @@ test_unusable_paths_fail_without_hanging
 test_ensure_dir_creates_a_not_yet_existing_config_dir
 test_idempotent_and_preserves_unrelated_content
 test_refuses_malformed_json_without_touching_it
+test_refuses_symlinks_without_touching_them
 test_concurrent_writers_serialize_without_corruption_or_loss
 test_missing_jq_refuses_loudly
 

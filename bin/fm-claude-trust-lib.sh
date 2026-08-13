@@ -88,6 +88,10 @@ fm_claude_pretrust_worktree() {
     return 1
   }
   json_path=$(fm_claude_trust_json_path)
+  if [ -L "$json_path" ]; then
+    echo "fm-claude-trust: $json_path is a symlink; refusing to replace it" >&2
+    return 1
+  fi
   tmp=$(umask 077; mktemp "$json_path.fm-spawn-tmp.XXXXXX") || {
     echo "fm-claude-trust: failed to create a private temporary file beside $json_path" >&2
     return 1
