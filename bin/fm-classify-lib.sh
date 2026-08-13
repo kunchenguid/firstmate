@@ -449,6 +449,15 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
+_fm_status_file_size() {  # <status-file>
+  local f=$1
+  if [ -n "${FM_STATUS_SIZE_READER:-}" ]; then
+    "$FM_STATUS_SIZE_READER" "$f"
+    return
+  fi
+  LC_ALL=C wc -c < "$f" 2>/dev/null
+}
+
 _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   local f=$1 start=$2 length=$3
   if [ -n "${FM_STATUS_SPAN_READER:-}" ]; then
@@ -472,12 +481,20 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+  local staged=0 stage_meta target_cursor
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
+  chunk_file="$cf.presentation.$$.${captured_end:-current}"
+  stage_meta="$chunk_file.cursor"
   offset=0
   ident=''
-  if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
-    if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
+  if [ -n "$captured_end" ] && [ -f "$chunk_file" ] && [ -f "$stage_meta" ]; then
+    cursor_data=$(LC_ALL=C command cat "$stage_meta" 2>/dev/null) || return 1
+    staged=1
+  elif [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
+    cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) || cursor_data=''
+  fi
+  if [ -n "${cursor_data:-}" ]; then
       first=${cursor_data%%$'\n'*}
       case "$first" in
         version=*)
@@ -513,26 +530,33 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
           esac
           ;;
       esac
-    fi
   fi
 
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) \
-    || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
-  if [ -n "$captured_end" ]; then
-    case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
-    esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+  if [ "$staged" -eq 1 ]; then
+    cur_ident=$ident
+    actual_size=$captured_end
     size=$captured_end
+    case "$size:$offset:$cur_ident" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+    [ "$offset" -le "$size" ] || return 1
   else
-    size=$actual_size
+    cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
+    [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+    actual_size=$(_fm_status_file_size "$f") \
+      || { printf '%s' "$trusted_open"; return 0; }
+    actual_size=${actual_size//[[:space:]]/}
+    case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+    if [ -n "$captured_end" ]; then
+      case "$captured_end" in
+        ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+      esac
+      [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+      size=$captured_end
+    else
+      size=$actual_size
+    fi
   fi
 
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
@@ -543,15 +567,19 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   fi
 
   if [ "$offset" -lt "$size" ]; then
-    chunk_file="$cf.read.$$"
-    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
-    chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
-    chunk_size=${chunk_size//[[:space:]]/}
-    case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
-    esac
+    if [ "$staged" -eq 1 ]; then
+      chunk_size=$((size - offset))
+    else
+      chunk_file="$cf.read.$$"
+      _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+        || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
+        || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      chunk_size=${chunk_size//[[:space:]]/}
+      case "$chunk_size" in
+        ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      esac
+    fi
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
     # test can assert the incremental path stays bounded by new appends rather
@@ -563,22 +591,26 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     while IFS= read -r line || [ -n "$line" ]; do
       open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
     done < "$chunk_file"
-    rm -f "$chunk_file"
+    [ "$staged" -eq 1 ] || rm -f "$chunk_file"
     offset=$size
     cursor_dirty=1
   fi
   if [ "$cursor_dirty" -eq 1 ]; then
+    target_cursor="$cf.tmp.$$"
+    if [ -n "${FM_DEFER_CURSOR_COMMIT_DIR:-}" ]; then
+      target_cursor="$FM_DEFER_CURSOR_COMMIT_DIR/$(basename "$cf")"
+    fi
     {
       printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
       printf 'offset=%s\n' "$offset"
       printf 'ident=%s\n' "$cur_ident"
-      # An `if` (not `[ -n "$open" ] && printf ...`) so the group's exit status
-      # is always 0 even when open is empty (fully resolved) - a bare `&&`
-      # there would make the whole group fail on that condition, silently
-      # skipping the mv below and leaving the cursor stuck on the OLD offset.
       if [ -n "$open" ]; then printf '%s' "$open"; fi
-    } > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf"
+    } > "$target_cursor" || return 1
+    if [ -z "${FM_DEFER_CURSOR_COMMIT_DIR:-}" ]; then
+      mv -f "$target_cursor" "$cf" || return 1
+    fi
   fi
+  if [ "$staged" -eq 1 ]; then rm -f "$chunk_file" "$stage_meta"; fi
   printf '%s' "$open"
 }
 
@@ -607,12 +639,13 @@ EOF
 status_presentation_snapshot() {  # <state>
   local state=$1 f task size
   for f in "$state"/*.status; do
-    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    [ -e "$f" ] || continue
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
     task=$(basename "$f"); task="${task%.status}"
-    size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || continue
+    size=$(_fm_status_file_size "$f") || return 1
     size=${size//[[:space:]]/}
-    case "$size" in ''|*[!0-9]*) continue ;; esac
-    printf '%s\t%s\n' "$task" "$size"
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\t%s\n' "$task" "$size" || return 1
   done
 }
 
@@ -628,12 +661,29 @@ $snapshot
 EOF
 }
 
+status_commit_deferred_cursors() {  # <state> <deferred-directory>
+  local state=$1 deferred=$2 pending target
+  for pending in "$deferred"/.*; do
+    [ -f "$pending" ] || continue
+    target="$state/$(basename "$pending")"
+    mv -f "$pending" "$target" || return 1
+  done
+}
+
+status_discard_presentation_stages() {  # <state>
+  local state=$1 staged
+  for staged in "$state"/.*.open-decisions-cursor.presentation.$$.*; do
+    [ -e "$staged" ] || continue
+    rm -f "$staged" || return 1
+  done
+}
+
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
   local state=$1 snapshot=$2 task endpoint f open line
   while IFS=$(printf '\t') read -r task endpoint; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    open=$(status_open_decisions_incremental "$f" "$endpoint") || continue
+    open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -671,11 +721,12 @@ EOF
 # incremental fold: fold-version mismatch, ident mismatch, or offset past
 # current size all fall back to 0.
 status_open_decisions_cursor_offset() {  # <status-file>
-  local f=$1 cf offset=0 ident='' version='' cursor_data first rest
+  local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
   local offset_line ident_line cur_ident size
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf '0'; return 0; }
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   cf=$(_fm_open_decisions_cursor_path "$f")
-  if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
+  if [ -e "$cf" ] || [ -L "$cf" ]; then
+    [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
     if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
       first=${cursor_data%%$'\n'*}
       case "$first" in
@@ -696,7 +747,10 @@ status_open_decisions_cursor_offset() {  # <status-file>
                   rest=${rest#*$'\n'}
                   ident_line=${rest%%$'\n'*}
                   case "$ident_line" in
-                    ident=*) ident=${ident_line#ident=} ;;
+                    ident=*)
+                      ident=${ident_line#ident=}
+                      case "$rest" in *$'\n'*) open=${rest#*$'\n'} ;; esac
+                      ;;
                     *) offset=0; version='' ;;
                   esac
                   ;;
@@ -706,15 +760,26 @@ status_open_decisions_cursor_offset() {  # <status-file>
           esac
           ;;
       esac
+    else
+      return 1
     fi
   fi
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '0'; return 0; }
-  [ -n "$cur_ident" ] || { printf '0'; return 0; }
-  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || { printf '0'; return 0; }
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$cur_ident" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
   size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
+    open=''
+  fi
+  if [ -n "${FM_STATUS_CURSOR_SNAPSHOT_FILE:-}" ]; then
+    {
+      printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
+      printf 'offset=%s\n' "$offset"
+      printf 'ident=%s\n' "$cur_ident"
+      if [ -n "$open" ]; then printf '%s' "$open"; fi
+    } > "$FM_STATUS_CURSOR_SNAPSHOT_FILE" || return 1
   fi
   printf '%s' "$offset"
 }
@@ -723,31 +788,37 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # cursor offset. Does not write the cursor. A missing or invalid cursor prints
 # the whole current file (offset 0). Symlinks and unreadable files print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line
+  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line stage_meta
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  offset=$(status_open_decisions_cursor_offset "$f")
-  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
-  actual_size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 0
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  chunk_file="$cf.presentation.$$.${captured_end:-current}"
+  stage_meta="$chunk_file.cursor"
+  offset=$(FM_STATUS_CURSOR_SNAPSHOT_FILE="$stage_meta" status_open_decisions_cursor_offset "$f") \
+    || { rm -f "$stage_meta"; return 1; }
+  case "$offset" in ''|*[!0-9]*) rm -f "$stage_meta"; return 1 ;; esac
+  actual_size=$(_fm_status_file_size "$f") || { rm -f "$stage_meta"; return 1; }
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) return 0 ;; esac
+  case "$actual_size" in ''|*[!0-9]*) rm -f "$stage_meta"; return 1 ;; esac
   if [ -n "$captured_end" ]; then
-    case "$captured_end" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$captured_end" -le "$actual_size" ] || return 0
+    case "$captured_end" in ''|*[!0-9]*) rm -f "$stage_meta"; return 1 ;; esac
+    [ "$captured_end" -le "$actual_size" ] || { rm -f "$stage_meta"; return 1; }
     size=$captured_end
   else
     size=$actual_size
   fi
-  [ "$offset" -lt "$size" ] || return 0
-  cf=$(_fm_open_decisions_cursor_path "$f")
-  chunk_file="$cf.unread.$$"
+  if [ "$offset" -ge "$size" ]; then
+    : > "$chunk_file" || { rm -f "$stage_meta"; return 1; }
+    [ -n "$captured_end" ] || rm -f "$chunk_file" "$stage_meta"
+    return 0
+  fi
   _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$chunk_file"; return 1; }
+    || { rm -f "$chunk_file" "$stage_meta"; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       *[![:space:]]*) printf '%s\n' "$line" ;;
     esac
   done < "$chunk_file"
-  rm -f "$chunk_file"
+  [ -n "$captured_end" ] || rm -f "$chunk_file" "$stage_meta"
   return 0
 }
 

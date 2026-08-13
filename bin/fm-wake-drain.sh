@@ -106,9 +106,9 @@ print_unread_status_section() {
       line="$FM_LINE_CAP_LINE (full line: $source)"
     fi
     if [ "$shown" -eq 0 ]; then
-      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n'
+      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
-    printf '%s\n' "$line"
+    printf '%s\n' "$line" || return 1
     shown=$((shown + 1))
   done <<EOF
 $unread
@@ -136,9 +136,9 @@ print_open_decisions_section() {
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
-    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 0
+    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
   else
-    open=$(scan_open_decisions_incremental "$STATE") || return 0
+    open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
   [ -n "$open" ] || return 0
 
@@ -166,28 +166,48 @@ $open
 EOF
 
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n'
-  printf '%s' "$output"
+  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
+  printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted"
+    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
 }
 
 print_status_sections() {
-  local snapshot cursor_snapshot
-  snapshot=$(status_presentation_snapshot "$STATE") || return 0
-  [ -n "$snapshot" ] || return 0
-  if ! print_unread_status_section "$snapshot"; then
-    cursor_snapshot=$(status_cursor_snapshot "$STATE" "$snapshot") || return 0
-    print_open_decisions_section "$cursor_snapshot"
+  local snapshot deferred cursor_snapshot
+  deferred="$STATE/.status-presentation-commit.$$"
+  rm -rf "$deferred" || return 1
+  mkdir "$deferred" || return 1
+  FM_DEFER_CURSOR_COMMIT_DIR=$deferred
+  export FM_DEFER_CURSOR_COMMIT_DIR
+  snapshot=$(status_presentation_snapshot "$STATE") || {
+    rm -rf "$deferred"
+    return 1
+  }
+  if [ -z "$snapshot" ]; then
+    rm -rf "$deferred"
     return 0
   fi
-  print_open_decisions_section "$snapshot"
+  if ! print_unread_status_section "$snapshot"; then
+    status_discard_presentation_stages "$STATE" || true
+    cursor_snapshot=$(status_cursor_snapshot "$STATE" "$snapshot") || cursor_snapshot=''
+    if [ -n "$cursor_snapshot" ]; then print_open_decisions_section "$cursor_snapshot" || true; fi
+    rm -rf "$deferred"
+    return 1
+  fi
+  if ! print_open_decisions_section "$snapshot" \
+    || ! status_commit_deferred_cursors "$STATE" "$deferred"; then
+    status_discard_presentation_stages "$STATE" || true
+    rm -rf "$deferred"
+    return 1
+  fi
+  status_discard_presentation_stages "$STATE" || true
+  rm -rf "$deferred"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
