@@ -466,7 +466,7 @@ EOF
 }
 
 test_resolve_records_superseded_prior_decision() {
-  local home origin prior_hold replacement_hold pending_hold show help
+  local home origin prior_hold replacement_hold pending_hold show help index
   home=$(make_home superseded-decision)
   help=$(run_decisions "$home" --help)
   assert_contains "$help" "[--supersedes <prior-hold-id>]" \
@@ -490,6 +490,15 @@ test_resolve_records_superseded_prior_decision() {
   run_decisions "$home" resolve "$origin" prior-route \
     --decision-file "$home/prior-decision.txt" --routed-to prior-route-work >/dev/null \
     || fail "could not resolve prior decision"
+  for index in 1 2 3 4 5 6 7 8 9; do
+    tasks_in "$home" add "supersession-pad-$index" "Supersession padding $index" \
+      --kind ship --repo sample >/dev/null || fail "could not create supersession padding $index"
+    tasks_in "$home" "done" "supersession-pad-$index" >/dev/null \
+      || fail "could not close supersession padding $index"
+  done
+  show=$(tasks_in "$home" show "$prior_hold" --full) \
+    || fail "prior decision left the live Done window before the retention boundary"
+  assert_contains "$show" "state: done" "prior decision was not resolved at the retention boundary"
 
   replacement_hold=$(run_decisions "$home" hold "$origin" replacement-route \
     --title "Choose the replacement route" --reason "captain replacement route pending" --repo sample) \
@@ -510,6 +519,19 @@ test_resolve_records_superseded_prior_decision() {
   show=$(tasks_in "$home" show "$replacement_hold" --full)
   assert_contains "$show" "state: queued" "invalid supersession closed the replacement hold"
   assert_contains "$show" "held: yes" "invalid supersession released the replacement hold"
+  if run_decisions "$home" resolve "$origin" replacement-route \
+    --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
+    --supersedes "" > "$home/empty-supersedes.out" 2> "$home/empty-supersedes.err"; then
+    fail "resolve accepted an explicitly empty supersession identity"
+  fi
+  assert_grep "requires a non-empty prior hold id" "$home/empty-supersedes.err" \
+    "explicitly empty supersession did not report a clear error"
+  show=$(tasks_in "$home" show "$replacement_hold" --full)
+  assert_contains "$show" "state: queued" "empty supersession closed the replacement hold"
+  assert_contains "$show" "held: yes" "empty supersession released the replacement hold"
+  show=$(tasks_in "$home" show replacement-route-work --full)
+  assert_contains "$show" "blocked_by: $replacement_hold" \
+    "empty supersession mutated the replacement routing edge"
 
   run_decisions "$home" resolve "$origin" replacement-route \
     --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
@@ -519,8 +541,11 @@ test_resolve_records_superseded_prior_decision() {
   assert_contains "$show" "state: done" "superseding decision did not close"
   assert_contains "$show" "supersedes: $prior_hold" \
     "superseding decision did not retain the prior hold identity"
-  show=$(tasks_in "$home" show "$prior_hold" --full)
-  assert_contains "$show" "state: done" "superseding decision changed the prior decision record"
+  if tasks_in "$home" show "$prior_hold" --full > "$home/archived-prior.out" 2>&1; then
+    fail "oldest prior decision remained in the live Done window after retention pruning"
+  fi
+  assert_grep "$prior_hold" "$home/data/done-archive.md" \
+    "retention pruning did not preserve the prior decision in the archive"
   run_decisions "$home" resolve "$origin" replacement-route \
     --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
     --supersedes "$prior_hold" >/dev/null \

@@ -414,13 +414,13 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' supersedes='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' supersedes='' supersedes_set=0 id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
-      --supersedes) shift; supersedes=${1:-} ;;
+      --supersedes) supersedes_set=1; shift; supersedes=${1:-} ;;
       --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -428,6 +428,8 @@ command_resolve() {
   done
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
+  [ "$supersedes_set" = 0 ] || [ -n "$supersedes" ] \
+    || fail "--supersedes requires a non-empty prior hold id"
   [ -z "$supersedes" ] || validate_slug supersedes "$supersedes"
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
@@ -441,11 +443,7 @@ command_resolve() {
   decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
-  if [ -n "$supersedes" ]; then
-    [ "$supersedes" != "$id" ] || fail "captain hold $id cannot supersede itself"
-    verify_hold_resolved "$supersedes" \
-      || fail "superseded decision $supersedes is not durably resolved"
-  fi
+  [ "$supersedes" != "$id" ] || fail "captain hold $id cannot supersede itself"
   if verify_hold_resolved "$id"; then
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
@@ -462,6 +460,10 @@ command_resolve() {
       resolution_recorded=1
       ;;
   esac
+  if [ -n "$supersedes" ] && [ "$resolution_recorded" = 0 ]; then
+    verify_hold_resolved "$supersedes" \
+      || fail "superseded decision $supersedes is not durably resolved"
+  fi
 
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
