@@ -201,7 +201,7 @@ EOF
   pass "traex spawn assembles a traex-shaped launch with -y, notify turn-end, and effort"
 }
 
-test_spawn_omits_unsupported_max_effort() {
+test_spawn_carries_max_effort() {
   local rec case_dir home proj wt fakebin id status launch launchlog
   rec=$(make_spawn_case maxeffort)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
@@ -210,13 +210,14 @@ EOF
   launchlog="$case_dir/launch.log"
   run_spawn "$home" "$wt" "$fakebin" "$launchlog" "$id" "$proj" traex --effort max >/dev/null 2>&1
   status=$?
-  expect_code 0 "$status" "traex spawn with max effort should still succeed"
+  expect_code 0 "$status" "traex spawn with max effort should succeed"
   launch=$(cat "$launchlog")
-  # traex's own config parser rejects `max` ("unknown variant `max`, expected one
-  # of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`"), which aborts the
-  # launch outright. Omit it rather than pass a known-bad value.
-  assert_not_contains "$launch" 'model_reasoning_effort' "traex must omit the unsupported max effort rather than pass it"
-  pass "traex omits max effort (its own config parser rejects the value)"
+  # traex 0.200.13's config parser rejected `max`, so it was omitted. As of traex
+  # 0.200.19 the parser accepts `max` (a bogus value is rejected with a variant
+  # list that now includes `max`, and `max` itself loads cleanly), so the launch
+  # now carries it like claude and pi (verified 2026-08-13, traex 0.200.19).
+  assert_contains "$launch" 'model_reasoning_effort="max"' "traex must carry the now-supported max effort"
+  pass "traex carries max effort (its config parser accepts it as of 0.200.19)"
 }
 
 # NOTE: the traex SECONDMATE launch shape (no-notify, codex-style) is verified in
@@ -230,4 +231,4 @@ test_coco_shared_session_id_is_not_traex
 test_coco_process_names_are_not_traex
 test_crew_resolution_accepts_traex
 test_spawn_launch_command_is_traex_shaped
-test_spawn_omits_unsupported_max_effort
+test_spawn_carries_max_effort
