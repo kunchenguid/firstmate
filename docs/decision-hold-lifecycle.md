@@ -20,6 +20,11 @@ It verifies every listed identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
+The same `complete` subcommand carries the deployed-website evidence rule.
+Its four deployment flags are accepted only together, the site must be an `https` production domain, and the named screenshot file must exist, so a preview-only or HTTP-status-only completion is refused rather than recorded.
+An accepted attestation is appended to live task metadata as `deployed_site=`, `deployed_revision=`, `deployed_interaction=`, and `deployed_screenshot=`.
+Work that deployed nothing omits the flags and takes the unchanged path.
+
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
@@ -43,6 +48,8 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Deployed-website completion evidence verification date: 2026-08-12.
+Command: `bash tests/fm-decision-hold-lifecycle.test.sh`; the deployed-website case fails when the evidence requirement is removed and passes with it in place.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -62,6 +69,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - deployed website completion requires production-domain revision, interaction, and screenshot proof
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
