@@ -457,14 +457,31 @@ test_state_machine_refuses_an_out_of_order_transition() {
   pass "the state machine refuses skipped transitions and keeps preflight behind its assertions"
 }
 
+test_check_stop_names_what_it_cannot_judge() {
+  local out
+  new_research_run checkstop-case
+  "$RUN" set checkstop-case budgets.wallSeconds 1 --json
+  "$RUN" freeze checkstop-case >/dev/null
+
+  capture check-stop checkstop-case; out=$OUT
+  expect_code 0 "$RC" "checking stop rules"
+  assert_contains "$out" 'rule=deadline' "an elapsed wall-clock budget did not fire the deadline rule"
+  # The clock is the only rule decidable from the run's own record, so the rest
+  # must be named rather than silently reported as not firing.
+  assert_contains "$out" 'unevaluated=' "check-stop did not name the rules it cannot judge"
+  assert_contains "$out" 'reserve-threshold' "the quota reserve rule was not named as unevaluated"
+  assert_not_contains "$out" 'unevaluated=none' "every frozen rule was claimed as evaluated"
+  pass "check-stop decides the wall-clock budget and names every rule it cannot judge itself"
+}
+
 test_frozen_manifest_data_is_readable_for_the_morning_report() {
   local out
   new_research_run report-case
   "$RUN" freeze report-case >/dev/null
   "$RUN" claim report-case >/dev/null
   "$RUN" preflight report-case >/dev/null
-  capture report report-case; out=$OUT
-  expect_code 0 "$RC" "reporting on a live run"
+  capture summary report-case; out=$OUT
+  expect_code 0 "$RC" "summarizing a live run"
   assert_contains "$out" 'mode=afk-research' "the run report lost its mode"
   assert_contains "$out" 'manifest_sha256=' "the run report lost the frozen manifest identity"
   assert_contains "$out" 'receipts_total=' "the run report lost its receipt counts"
@@ -488,4 +505,5 @@ test_multi_lane_session_review_requires_the_privacy_partition
 test_obsidian_run_needs_frozen_tasks_and_a_firstmate_only_writer
 test_self_analysis_stays_on_a_personal_lane
 test_state_machine_refuses_an_out_of_order_transition
+test_check_stop_names_what_it_cannot_judge
 test_frozen_manifest_data_is_readable_for_the_morning_report

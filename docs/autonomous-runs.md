@@ -46,7 +46,7 @@ data/runs/<run-id>/checkpoints/       durable checkpoint snapshots
 
 ```sh
 bin/fm-run.sh list                      # every run in this home, with state and generation
-bin/fm-run.sh report <run-id>           # frozen identity, state, custody, receipt counts
+bin/fm-run.sh summary <run-id>          # frozen identity, state, custody, receipt counts
 bin/fm-run.sh show <run-id> .source     # any part of the frozen manifest
 bin/fm-run.sh prove-no-write <run-id>   # assert a read-only run wrote nothing outside evidence
 ```

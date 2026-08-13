@@ -849,7 +849,7 @@ if [ -d "$DATA/runs" ]; then
     subsection "Autonomous runs not finished (run / state / ownership generation)"
     printf '%s\n' "$RUNS_UNFINISHED"
     printf '\nEach line is a run this home still owns. Read its frozen scope and receipts with\n'
-    printf '%s/bin/fm-run.sh report <run-id>, and load autonomous-run-engine before resuming,\n' "$FM_ROOT"
+    printf '%s/bin/fm-run.sh summary <run-id>, and load autonomous-run-engine before resuming,\n' "$FM_ROOT"
     printf 'stopping, or reporting on one. Resuming is idempotent per ownership generation.\n'
   fi
 fi

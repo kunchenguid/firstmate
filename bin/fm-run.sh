@@ -42,10 +42,10 @@
 #   fm-run.sh receipt <run-id> <kind> <subject> <verdict> [note]
 #   fm-run.sh prove-no-write <run-id>                   assert nothing was written
 #   fm-run.sh checkpoint <run-id> --note <t> [--resume-when <t>]
-#   fm-run.sh check-stop <run-id>                       print the firing stop rule
+#   fm-run.sh check-stop <run-id>                       budget rules, and what it cannot judge
 #   fm-run.sh stop <run-id> --rule <rule> [--note <t>] [--resume-when <t>]
 #   fm-run.sh cancel <run-id> --note <t>
-#   fm-run.sh report <run-id>                           machine-readable summary
+#   fm-run.sh summary <run-id>                          machine-readable run summary
 #   fm-run.sh list
 #
 # Custody: `--owner <token>` (or FM_RUN_OWNER) defaults to the active FM_HOME, so
@@ -1119,8 +1119,13 @@ command_resume() {
   printf 'resume: %s generation=%s state=supervise\n' "$run_id" "$generation"
 }
 
+# Only the wall-clock budget is decidable from the run's own durable record. The
+# other frozen rules need the governor, a baseline, machine health, or a
+# judgement, so they are named as unevaluated rather than silently reported as
+# not firing: "rule=none" from a command that only ever checked the clock would
+# read as a clean bill of health it never established.
 command_check_stop() {
-  local run_id=${1:-} created wall now elapsed
+  local run_id=${1:-} created wall now elapsed rule unevaluated
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   gate_manifest_ready "$run_id"
   created=$(fm_run_manifest_get "$run_id" '.createdAt')
@@ -1131,14 +1136,17 @@ command_check_stop() {
   if created=$(iso_to_epoch "$created" 2>/dev/null); then
     elapsed=$((now - created))
   fi
+  rule=none
   if [ "$wall" -gt 0 ] && [ "$elapsed" -ge "$wall" ]; then
-    printf 'rule=deadline elapsed=%s wall=%s\n' "$elapsed" "$wall"
-    return 0
+    rule=deadline
   fi
-  printf 'rule=none elapsed=%s wall=%s\n' "$elapsed" "$wall"
+  unevaluated=$(fm_run_manifest_get "$run_id" '.stop.rules' \
+    | grep -v '^deadline$' | paste -sd, - | sed 's/^,*//;s/,*$//')
+  printf 'rule=%s elapsed=%s wall=%s\nunevaluated=%s\n' \
+    "$rule" "$elapsed" "$wall" "${unevaluated:-none}"
 }
 
-command_report() {
+command_summary() {
   local run_id=${1:-} file
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   gate_manifest_ready "$run_id"
@@ -1187,7 +1195,7 @@ case "${1:-}" in
   stop) shift; command_stop "$@" ;;
   cancel) shift; command_cancel "$@" ;;
   resume) shift; command_resume "$@" ;;
-  report) shift; command_report "$@" ;;
+  summary) shift; command_summary "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

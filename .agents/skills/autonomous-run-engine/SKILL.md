@@ -148,7 +148,7 @@ If cleanup or evidence preservation cannot be proven, that is itself the `cleanu
 ### 7. Report
 
 ```sh
-bin/fm-run.sh report <run-id>
+bin/fm-run.sh summary <run-id>
 bin/fm-run.sh prove-no-write <run-id>     # read-only runs
 ```
 
