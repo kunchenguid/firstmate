@@ -200,6 +200,17 @@ the injected instruction, and Stop fired a second time when the hook allowed the
 stop. Loop safety, which `stop_hook_active` would have provided, is a bounded
 per-conversation block budget instead.
 
+**A changed the remote doctor without repinning its trusted identity.**
+`bin/fm-remote-entrypoint.sh` carries `DOCTOR_SHA256`, which is how the doctor is
+authorized to bootstrap when git is unavailable on the remote account - the one
+command allowed to run before git can vouch for it. A added `agy` to that
+script's `HARNESS_TOOLS` and left the pin untouched, so the hash no longer
+matched and the doctor was refused with "the doctor does not match the trusted
+bootstrap identity". That is a real remote-bootstrap breakage, not just a red
+test: on a remote host without git, `fm-remote-doctor.sh` would have been the
+one command that could no longer run. Repinned to the new hash, and
+`tests/fm-on.test.sh` passes again.
+
 **A's tmux change was a duplicated, unreachable case line.** A appended a second
 `case` branch instead of editing the first, leaving five unreachable patterns,
 and used an unanchored `*agy*` that contradicts A's own comment in
