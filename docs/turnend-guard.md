@@ -53,6 +53,11 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
+- Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
+  Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
+  That predicate reads the delivered payload's own `cursor_version`, never the environment: Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
+  The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, and both `Stop` entries.
+  Cursor 2026.08.11-e8db854 does not fire the Claude-shaped `Stop` entry at all, but it is guarded anyway because Cursor has no `asyncRewake`: if a later build did fire it, `bin/fm-claude-stop-autoarm.sh` would run synchronously inside Cursor's stop step and hold that turn open for its declared multi-hour timeout, exactly the wedge grok 1.0.0 produced.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` or `GROK_HOOK_EVENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
   Both markers are required because Grok does not inject the same variables into every process kind: grok 0.2.73 set `GROK_AGENT` for child and tool processes, while grok 1.0.0 hook processes carry `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` but no `GROK_AGENT`.
@@ -96,6 +101,28 @@ When both capability spellings are absent, the adapter preserves one pre-native 
 Malformed JSON, a selected field with a non-boolean type, missing `jq`, missing hook prerequisites, or an already-active legacy guard allows the stop without starting either continuation path.
 Grok's project hook requires the checkout to be trusted with `/hooks-trust` or launch-time `--trust`; genuine pre-native builds can run the same tracked hook from an isolated global hook directory.
 
+Cursor cannot block a turn end at all: its blocked-response mapper returns an empty object for the `stop` step, so exit 2 is a silent no-op, verified both statically and live.
+`bin/fm-turnend-guard-cursor.sh` therefore never exits 2 and never writes a banner expecting it to be read; every path exits 0 and its only channel is at most one `followup_message` on stdout.
+Cursor runs that hook synchronously and awaits it, so one script owns both halves of the boundary.
+While supervision is needed it PARKS: it runs `bin/fm-watch-arm.sh` as its own tracked child, holds the boundary open until the watcher closes, and returns an actionable close as one `watcher`-kind follow-up, spending no model tokens while parked.
+This is the same between-turns shape as Claude's Stop auto-arm, so `fm_supervision_model` classifies Cursor as `autoarm` and the mid-turn pull guard accepts a fresh beacon without a live watcher.
+When the park cannot establish a cycle it asks this shared guard with `--cursor` and renders a returned exit 2 as one bounded `turn-end-guard` follow-up, capped by `FM_CURSOR_TURNEND_BLOCK_BUDGET` (default 3) consecutive unproductive nags per session; a delivered wake resets that budget because it is productive work.
+The follow-up loop is bounded TWICE, because either bound alone is insufficient.
+`loop_limit` in `.cursor/hooks.json` is Cursor's own ceiling and the only one that still holds if the adapter is broken or replaced: once `loop_count` reaches it Cursor stops invoking the hook, verified live.
+`FM_CURSOR_TURNEND_LOOP_CEILING` (default 180) bounds the payload's `loop_count` from inside and sits deliberately BELOW the registered `loop_limit`, so firstmate's bound bites first and emits one final loud notice instead of supervision going silently dark at Cursor's ceiling.
+`loop_count` is Cursor's richer analogue of `stop_hook_active`: verified live as 0 on the first stop after a real user message, +1 per follow-up-driven stop, and reset to 0 by the next real user message.
+
+A captain message typed while the hook is parked is accepted and runs its turn immediately, and Cursor does NOT terminate the parked hook.
+The older park remains the recorded owner until that captain turn ends and the next `stop` hook claims the baton, so an actionable watcher close in that window can still be delivered by the older park as one follow-up.
+That delivery is bounded and safe: only one park exists before the next `stop` claim, so it is a real wake and never a stale duplicate of another park's wake, while the durable wake queue makes handling idempotent.
+Each invocation publishes its sequence in `state/.cursor-park-owner` under the short publication and commit lock `state/.cursor-park-owner.lock`.
+The same bounded critical section covers the final owner and away-mode checks, follow-up output, and repair-budget commit, so the next `stop` claim makes an older park that is still running stand down without emitting or changing shared state.
+The lock is never held while the arm is sleeping, while the hook is polling, or while output is prepared.
+The park revalidates session ownership while polling and again inside the final commit section, but it deliberately does not hold the fleet session lock across output because an awaited hook must not block home-wide session acquisition; the remaining microsecond takeover window can produce at most one harmless wake that drains the durable queue.
+Without those records an older park still running after the next `stop` could leak one process and one stale duplicate wake.
+Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does not fire for hook-driven follow-ups, so invalidating the park baton there would close the pre-claim window exactly.
+That hook is deliberately left to a follow-up alongside the deferred `preCompact` surface and is not registered in this change.
+
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 
@@ -103,8 +130,11 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 - Child crewmate and scout worktrees are outside scope.
 - A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
-- The direct-blocking and bounded passive-follow-up split is limited to the primary integrations listed above.
+- The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
+- Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
+- A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
+- Cursor's `preCompact` step is deliberately unregistered: its response can return only `user_message` and it is absent from Cursor's `additional_context` step set, so a post-compaction re-emit needs its own design and is deferred to a follow-up ([`sessionstart-nudge.md`](sessionstart-nudge.md) owns that uncovered surface).
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
 - Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.
@@ -119,6 +149,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
+`tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
+`FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
