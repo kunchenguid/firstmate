@@ -143,6 +143,20 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# Every lock file is published through mktemp inside the lock directory, so a
+# worker killed between mktemp and mv leaves a dot-prefixed temporary behind.
+# Reclaiming a provably stale lock has to discard those too: rmdir refuses a
+# non-empty directory, and without this every replacement worker would fail
+# ownership forever against residue its predecessor could no longer clean up.
+worker_discard_lock_temporaries() {
+  local entry
+  for entry in "$WORKER_LOCK"/.pid.* "$WORKER_LOCK"/.start.* \
+    "$WORKER_LOCK"/.command.* "$WORKER_LOCK"/.quarantine.*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    rm -f -- "$entry" || return 1
+  done
+}
+
 worker_acquire_lock() {
   local account_home=$1 attempt=0
   while [ "$attempt" -lt 150 ]; do
@@ -164,6 +178,7 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
+    worker_discard_lock_temporaries || return 1
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1

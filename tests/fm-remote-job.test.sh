@@ -285,6 +285,28 @@ wait "$OTHER_PID" 2>/dev/null || true
 OTHER_PID=
 pass "stale ownership is reclaimed without signaling a reused pid"
 
+# A worker killed between mktemp and mv leaves a dot-prefixed publish temporary
+# inside its own lock directory. Reclaiming that provably stale lock has to
+# discard the residue, or rmdir refuses the directory and every replacement
+# worker exits before it can ever publish readiness.
+INTERRUPTED_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+fm_remote_job_stop_worker_tree "$INTERRUPTED_WORKER_PID" \
+  || fail "the interrupted-publish fixture could not stop the running worker"
+rm -f -- "$STATE_ROOT/worker.ready"
+mkdir -p "$STATE_ROOT/worker.lock"
+chmod 700 "$STATE_ROOT/worker.lock"
+LOCK_RESIDUE="$STATE_ROOT/worker.lock/.quarantine.aBc123"
+: > "$LOCK_RESIDUE"
+touch -t 200001010000 "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+assert_absent "$LOCK_RESIDUE" "the reclaimed lock retained an interrupted publish temporary"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+[ "$NEW_WORKER_PID" != "$INTERRUPTED_WORKER_PID" ] \
+  || fail "the replacement adopted the interrupted worker's pid"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "interrupted publish residue prevented the current worker from starting"
+pass "an interrupted ownership publish never strands every replacement worker"
+
 FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
