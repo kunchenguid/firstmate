@@ -408,8 +408,12 @@ assert_present "$HSELF/state/procevent-inbox/self-src.1.handled" "the self-annou
 if [ -e "$HSELF/state/.wake-queue" ] && grep -q 'procevent selfann self-src 1' "$HSELF/state/.wake-queue"; then
   fail "a fully autohandled self-announcing capture still published a duplicate check wake"
 fi
+# Retire before reconciliation so this assertion checks only whether the
+# handled capture is republished, without reconcile starting a competing runner.
+pe_adapter "$HSELF" retire self-src >/dev/null
 out=$(pe_adapter "$HSELF" reconcile)
 assert_contains "$out" "published=0" "reconcile re-announced a capture its adapter already acknowledged"
+pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
 : > "$HSELF/state/selfann-fail"
 out=$(pe_adapter "$HSELF" start self-src 2>&1)
 assert_contains "$out" "not-autohandled: self-src" "a failed self-announcing application was reported as applied"

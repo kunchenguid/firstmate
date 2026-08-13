@@ -3,7 +3,7 @@
 # lifecycle verbs addressed to an exact task id.
 #
 # Usage: fm-control.sh <task-id> interrupt
-#        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> exit [--discard-unlanded]
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
@@ -31,6 +31,10 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
+#              A recorded PR/MR must be confirmed merged first, so the worker's
+#              review context stays available until teardown. An unreadable
+#              merge state fails closed. --discard-unlanded bypasses only this
+#              guard and means the caller is authorized to discard that context.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -132,6 +136,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -192,6 +198,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+DISCARD_UNLANDED=0
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
@@ -227,15 +234,21 @@ for a in "$@"; do
       NOTE=$(cat "${a#--note-file=}")
       NOTE_SET=1
       ;;
+    --discard-unlanded) DISCARD_UNLANDED=1 ;;
     *) die "unexpected argument '$a'" ;;
   esac
 done
 [ -z "$want_value" ] || die "--$want_value requires a value"
 
-if [ "$VERB" != relaunch ]; then
+if [ "$VERB" = interrupt ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
     || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
 fi
+[ "$VERB" != exit ] || { [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] \
+  && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ]; } \
+  || die "--harness, --model, --effort, and --note apply to 'relaunch' only; exit accepts only --discard-unlanded"
+[ "$VERB" = exit ] || [ "$DISCARD_UNLANDED" = 0 ] \
+  || die "--discard-unlanded applies to 'exit' only"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -480,6 +493,24 @@ do_exit() {
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
   printf 'stopped'
+}
+
+# Refuse only the top-level exit verb while a recorded delivery is unlanded.
+# Relaunch deliberately calls do_exit directly and remains a recovery path.
+guard_exit_delivery() {
+  local pr_url status
+  [ "$DISCARD_UNLANDED" = 0 ] || return 0
+  pr_url=$(fm_meta_get "$META" pr)
+  [ -n "$pr_url" ] || return 0
+  if fm_scm_pr_merge_status "$WT" "$pr_url" 2>/dev/null; then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ]; then
+    die "task $ID's delivery at $pr_url has not merged, and exiting would discard the worker's review and rework context; wait for merge and use teardown, or retry with --discard-unlanded only with explicit discard authorization"
+  fi
+  die "task $ID's delivery merge status at $pr_url cannot be confirmed, and exiting would discard the worker's review and rework context; restore provider access and retry, wait for confirmed merge and use teardown, or retry with --discard-unlanded only with explicit discard authorization"
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -853,6 +884,7 @@ case "$VERB" in
     echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
     ;;
   exit)
+    guard_exit_delivery
     result=$(do_exit)
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;

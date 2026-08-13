@@ -930,7 +930,7 @@ flush_provider_diag() {
 }
 
 pr_is_merged() {
-  local branch=$1 target info provider state head source_ref current
+  local branch=$1 target provider head source_ref current
   open_provider_diag
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
@@ -938,15 +938,10 @@ pr_is_merged() {
     target=$(fm_scm_target_from_branch "$WT" "$branch" 2>>"$PROVIDER_DIAG") || return 1
   fi
   [ -n "$target" ] || return 1
-  info=$(fm_scm_pr_info "$WT" "$target" 2>>"$PROVIDER_DIAG") || return 1
-  IFS=$FM_SCM_FS read -r provider state head source_ref <<EOF
-$info
-EOF
-  [ -n "$provider" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
+  fm_scm_pr_merge_status "$WT" "$target" 2>>"$PROVIDER_DIAG" || return 1
+  provider=$FM_SCM_PR_PROVIDER
+  head=$FM_SCM_PR_HEAD
+  source_ref=$FM_SCM_PR_SOURCE_REF
   [ -n "$head" ] || return 1
   fm_scm_fetch_pr_head "$WT" "$provider" "$target" "$head" "$source_ref" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1

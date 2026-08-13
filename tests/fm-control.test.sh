@@ -14,7 +14,9 @@
 #   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
 #   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
 #      is idempotent success, and an agent that does not stop fails closed.
-#   6. Marker non-regression: a control command to a kind=secondmate task
+#   6. Delivery guard: a recorded unmerged or unreadable PR/MR refuses exit,
+#      while merged, unrecorded, and explicitly discarded deliveries proceed.
+#   7. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
 set -u
@@ -153,6 +155,37 @@ exit 0
 SH
   chmod +x "$fb/sleep"
   printf '%s\n' "$fb"
+}
+
+add_github_pr_state() {  # <case-dir> <state|unreadable>
+  local dir=$1 state=$2
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"pr view https://github.com/example/repo/pull/7 --json state,headRefOid"*)
+    [ '$state' != unreadable ] || exit 1
+    printf '%s\t%s\n' '$state' '0123456789abcdef0123456789abcdef01234567'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$dir/fakebin/gh"
+}
+
+add_codebase_mr_state() {  # <case-dir> <state>
+  local dir=$1 state=$2
+  cat > "$dir/fakebin/bytedcli" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "--json codebase mr get 7 -R example/repo")
+    printf '%s\n' '{"status":"success","data":{"merge_request":{"Number":7,"Status":"$state"},"version":{"SourceCommitId":"0123456789abcdef0123456789abcdef01234567","SourceRef":"refs/merge-requests/7/7/1"}},"error":null}'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$dir/fakebin/bytedcli"
 }
 
 # new_case <name> -> echoes a case dir holding home/, fake/, and fakebin.
@@ -624,7 +657,119 @@ test_relaunch_only_flags_are_rejected_on_other_verbs() {
   pass "fm-control: profile and note flags belong to relaunch only"
 }
 
-# --- 5. lifecycle states ----------------------------------------------------
+test_discard_flag_is_scoped_to_exit() {
+  local dir out rc
+  dir=$(new_case discard-scope)
+  add_task "$dir" t1 claude
+  out=$(run_control "$dir" t1 interrupt --discard-unlanded); rc=$?
+  expect_code 1 "$rc" "--discard-unlanded should not apply to interrupt"
+  assert_contains "$out" "applies to 'exit' only" "the refusal should scope discard authority"
+  pass "fm-control: explicit unlanded-discard authority belongs to exit only"
+}
+
+# --- 5. delivery landing guard ---------------------------------------------
+
+test_unmerged_recorded_pr_refuses_exit() {
+  local dir out rc
+  dir=$(new_case pr-open)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/t1.meta"
+  add_github_pr_state "$dir" OPEN
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unmerged recorded PR should refuse exit"
+  assert_contains "$out" "has not merged" "the refusal should identify known unmerged delivery"
+  assert_contains "$out" "review and rework context" "the refusal should name the context at risk"
+  assert_contains "$out" "wait for merge and use teardown" "the refusal should name the normal path"
+  assert_contains "$out" "--discard-unlanded" "the refusal should name the explicit escape hatch"
+  [ -z "$(literals "$dir")" ] || fail "an unmerged delivery guard must act before exit bytes"
+  pass "fm-control exit: an unmerged recorded PR preserves the worker's review context"
+}
+
+test_merged_recorded_pr_allows_exit() {
+  local dir out rc
+  dir=$(new_case pr-merged)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/t1.meta"
+  add_github_pr_state "$dir" MERGED
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a merged recorded PR should allow exit"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] || fail "a merged delivery should reach normal exit"
+  pass "fm-control exit: a merged recorded PR allows the normal stop"
+}
+
+test_no_recorded_pr_allows_exit_without_provider_lookup() {
+  local dir out rc
+  dir=$(new_case no-pr)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a task with no recorded PR should allow exit"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] || fail "a task with no delivery should reach normal exit"
+  pass "fm-control exit: a task with no recorded PR is outside the delivery guard"
+}
+
+test_discard_authority_allows_unmerged_exit() {
+  local dir out rc
+  dir=$(new_case pr-discard)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/t1.meta"
+  add_github_pr_state "$dir" OPEN
+  out=$(run_control "$dir" t1 exit --discard-unlanded); rc=$?
+  expect_code 0 "$rc" "explicit discard authority should bypass the landing guard"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] || fail "authorized discard should reach normal exit"
+  pass "fm-control exit: explicit discard authority bypasses the delivery guard"
+}
+
+test_unreadable_pr_state_refuses_exit_as_unknown() {
+  local dir out rc
+  dir=$(new_case pr-unknown)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/t1.meta"
+  add_github_pr_state "$dir" unreadable
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unreadable PR state should fail closed"
+  assert_contains "$out" "cannot be confirmed" "unknown state must not be reported as unmerged"
+  assert_not_contains "$out" "has not merged" "unknown state must stay distinct from known unmerged"
+  [ -z "$(literals "$dir")" ] || fail "unknown delivery state must act before exit bytes"
+  pass "fm-control exit: an unreadable PR state fails closed as unconfirmed"
+}
+
+test_codebase_mr_uses_the_shared_delivery_guard() {
+  local dir out rc
+  dir=$(new_case codebase-open)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '%s\n' 'pr=https://code.byted.org/example/repo/merge_requests/7' >> "$dir/home/state/t1.meta"
+  add_codebase_mr_state "$dir" opened
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an open Codebase MR should refuse exit"
+  assert_contains "$out" "has not merged" "Codebase should share the known-unmerged verdict"
+
+  add_codebase_mr_state "$dir" merged
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a merged Codebase MR should allow exit"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] || fail "a merged Codebase MR should reach normal exit"
+  pass "fm-control exit: Codebase MRs use the shared provider merge-state owner"
+}
+
+test_interrupt_ignores_unmerged_delivery() {
+  local dir out rc
+  dir=$(new_case pr-interrupt)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/t1.meta"
+  add_github_pr_state "$dir" OPEN
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an unmerged delivery should not block interrupt"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] || fail "interrupt must remain available during review"
+  pass "fm-control interrupt: delivery landing state does not gate recovery control"
+}
+
+# --- 6. lifecycle states ----------------------------------------------------
 
 test_already_stopped_exit_is_idempotent() {
   local dir out rc
@@ -837,7 +982,7 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
-# --- 6. marker non-regression -----------------------------------------------
+# --- 7. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
   local dir out rc typed home
@@ -900,6 +1045,14 @@ test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
+test_discard_flag_is_scoped_to_exit
+test_unmerged_recorded_pr_refuses_exit
+test_merged_recorded_pr_allows_exit
+test_no_recorded_pr_allows_exit_without_provider_lookup
+test_discard_authority_allows_unmerged_exit
+test_unreadable_pr_state_refuses_exit_as_unknown
+test_codebase_mr_uses_the_shared_delivery_guard
+test_interrupt_ignores_unmerged_delivery
 test_already_stopped_exit_is_idempotent
 test_missing_endpoint_refuses
 test_interrupt_refuses_when_no_agent_runs
