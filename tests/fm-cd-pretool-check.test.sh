@@ -374,8 +374,9 @@ test_policy_cli_direct() {
 # --- per-harness wiring -----------------------------------------------------
 
 # Delegated to bin/fm-lint.sh, the single owner of the lint definition including
-# --external-sources; a bare shellcheck call here would be a second copy of that
-# definition and would disagree the moment this checker sourced a shared library.
+# --external-sources; calling the linter directly here would be a second copy of
+# that definition, and would disagree the moment this checker sourced a shared
+# library.
 test_scripts_are_shellcheck_clean() {
   local out
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }

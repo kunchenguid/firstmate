@@ -443,8 +443,8 @@ test_allow_is_silent_both_modes() {
 #
 # Delegated to bin/fm-lint.sh rather than calling shellcheck directly, because
 # that script is the single owner of the lint definition - the file set, the
-# pinned version, and the options, including --external-sources. A bare
-# shellcheck call here is a second, weaker copy of that definition, and it
+# pinned version, and the options, including --external-sources. Calling the
+# linter directly here would be a second, weaker copy of that definition, and it
 # disagreed with the owner the moment this checker sourced a shared library.
 
 test_shellcheck_clean() {
