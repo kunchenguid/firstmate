@@ -45,6 +45,13 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Every crewmate scaffold's rules keep shared infrastructure firstmate's alone.
+# The worktree pool, the repository its worktrees share, and the single
+# no-mistakes daemon each serve every lane and home at once, so administering
+# any of them from inside one lane destroys work in the others; the worker stops
+# with "blocked:" and asks instead. The rule names the act rather than one
+# provider, because the supported worktree providers and runtime backends differ
+# in their commands but not in the damage.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -316,6 +323,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+   That is a rule about files; shared administration is rule 7 and is not covered by staying inside your own directory.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -332,9 +340,20 @@ The report is the only thing that survives, so anything worth keeping must be in
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+7. Shared infrastructure is firstmate's, never yours. This worktree's contents are your laboratory;
+   the worktree itself, the pool it came from, the repository every lane's worktree shares, and the
+   \`no-mistakes\` daemon are each ONE instance serving every lane and home, so an action that looks
+   local here hits every other lane at once - and those lanes are running right now.
+   Never create, remove, return, prune, move, or reassign any worktree or pool slot: \`git worktree
+   add/remove/prune\`, \`treehouse get/return\`, \`orca worktree create/rm\`, and the equivalent on
+   whatever other worktree provider is in use are all forbidden here, including on worktrees that
+   look stale or unused, and including this one - firstmate discards yours at teardown.
+   Never delete or rewrite a branch or ref you did not create, and never stop, restart, or update
+   the \`no-mistakes\` daemon.
+   Removing worktrees from inside a lane has already destroyed other lanes' working copies mid-run,
+   so there is no safe local workaround - if you need a second checkout, a worktree or branch
+   removed, a daemon action, or anything else on that list, and on ANY no-mistakes daemon error,
+   append \`blocked: {what you need and why}\` and stop. Firstmate does it for you.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -428,7 +447,8 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; modify nothing outside it. That is a rule about files;
+   shared administration is rule 7 and is not covered by staying inside your own directory.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -448,9 +468,20 @@ $RULE1
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+7. Shared infrastructure is firstmate's, never yours. The contents of this worktree are yours to
+   change; the worktree itself, the pool it came from, the repository every lane's worktree shares,
+   and the \`no-mistakes\` daemon are each ONE instance serving every lane and home, so an action
+   that looks local here hits every other lane at once - and those lanes are running right now.
+   Never create, remove, return, prune, move, or reassign any worktree or pool slot: \`git worktree
+   add/remove/prune\`, \`treehouse get/return\`, \`orca worktree create/rm\`, and the equivalent on
+   whatever other worktree provider is in use are all forbidden here, including on worktrees that
+   look stale or unused, and including this one - firstmate cleans yours up when you are done.
+   Never delete or rewrite a branch or ref you did not create, and never stop, restart, or update
+   the \`no-mistakes\` daemon.
+   Removing worktrees from inside a lane has already destroyed other lanes' working copies mid-run,
+   so there is no safe local workaround - if you need a second checkout, a worktree or branch
+   removed, a daemon action, or anything else on that list, and on ANY no-mistakes daemon error,
+   append \`blocked: {what you need and why}\` and stop. Firstmate does it for you.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
