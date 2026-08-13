@@ -674,10 +674,37 @@ EOF
 }
 
 status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
+
+  # A remote-home teardown can legitimately retire an endpoint ID that has no
+  # status log in that home. Do not contend with that home's unrelated status
+  # presenter in this no-op case. A concurrent presenter cannot add this task
+  # without its status file, so a valid manifest with no matching row is a
+  # durable proof that there is nothing to retire.
+  if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
+    && [ ! -e "$state/.$task.open-decisions-cursor" ] \
+    && [ ! -L "$state/.$task.open-decisions-cursor" ]; then
+    if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
+      return 0
+    fi
+    if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
+      && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+        [ -n "$row_task" ] || continue
+        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
+        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        [ "$row_task" != "$task" ] || found=1
+      done <<EOF
+$data
+EOF
+      [ "$rc" -ne 0 ] || [ "$found" -ne 0 ] || return 0
+      rc=0
+    fi
+  fi
+
   fm_lock_acquire_wait "$lock" || return 1
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
