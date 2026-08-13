@@ -14,7 +14,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
 When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
-The same shared hook first runs `bin/fm-continuation-check.sh` when the current primary session owns the home lock.
+The same shared hook also evaluates `bin/fm-continuation-check.sh` when the current primary session owns the home lock, but acts on it only after the supervision predicate below has resolved.
 One bounded follow-up is required when `tasks-axi ready` exposes accepted dispatchable work or an ordinary In flight backlog item lacks a matching worker whose canonical current state is `working`.
 Structured dependency, date, external-resource, load, parked, future, and Captain-decision holds remain non-dispatchable because `tasks-axi ready` owns that eligibility decision.
 The checker is read-only and never launches a worker, changes a hold, or treats speculative work as accepted.
