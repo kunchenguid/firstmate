@@ -24,11 +24,8 @@
 # agent_settled adapters use.
 #
 # Follow-up sources, in priority order, at most one per invocation:
-#   1. a staged session-start digest left by a compaction (see
-#      bin/fm-sessionstart-cursor.sh; Cursor's preCompact step cannot inject
-#      context itself);
-#   2. an actionable watcher wake from the park;
-#   3. the bounded repair instruction when supervision could not be established.
+#   1. an actionable watcher wake from the park;
+#   2. the bounded repair instruction when supervision could not be established.
 #
 # LOOP BOUNDING IS DOUBLE, because either bound alone is insufficient:
 #   - `loop_limit` in .cursor/hooks.json is Cursor's own ceiling. Once
@@ -62,10 +59,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.cursor-park-owner"
-CLAIM="$STATE/.cursor-park-claim"
-CLAIM_LOCK="$STATE/.cursor-park-claim.lock"
+OWNER_LOCK="$STATE/.cursor-park-owner.lock"
 BUDGET_FILE="$STATE/.turnend-cursor-blocks"
-PENDING_CONTEXT_PREFIX="$STATE/.cursor-pending-context"
 
 LOOP_CEILING=${FM_CURSOR_TURNEND_LOOP_CEILING:-180}
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
@@ -118,34 +113,16 @@ lock_acquire_bounded() {  # <lock>
   return 1
 }
 
-claim_restore() {  # <private-claim>
-  local private=$1
-  [ -e "$CLAIM" ] || ln "$private" "$CLAIM" 2>/dev/null || true
-  rm -f "$private" 2>/dev/null || true
-}
-
-claim_commit() {
-  local private seq
-  private="$CLAIM.commit.$PARK_SEQ.${BASHPID:-$$}"
-  mv "$CLAIM" "$private" 2>/dev/null || return 1
-  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$private" 2>/dev/null || true)
-  if [ "$seq" != "$PARK_SEQ" ]; then
-    claim_restore "$private"
-    return 1
-  fi
-  rm -f "$private" 2>/dev/null || true
-  return 0
-}
-
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
 # embedded quote, newline, or the U+2063 prefix cannot corrupt the response.
 emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
-  claim_commit || exit 0
-  printf '%s\n' "$response" || exit 0
+  park_still_ours || exit 0
   [ "$reset_budget" = reset-budget ] && budget_reset
+  park_still_ours || exit 0
+  printf '%s\n' "$response" || exit 0
   exit 0
 }
 
@@ -172,44 +149,8 @@ budget_reset() {
 }
 
 budget_reset_if_ours() {
-  claim_commit || exit 0
+  park_still_ours || exit 0
   budget_reset
-}
-
-emit_staged_context() {
-  local staged_file claimed staged_session staged encoded response
-  [ "$SESSION_ID" != unknown ] || return 0
-  staged_file="$PENDING_CONTEXT_PREFIX.$OWNER_ID"
-  [ -f "$staged_file" ] && [ ! -L "$staged_file" ] || return 0
-  claimed="$staged_file.claim.$PARK_SEQ.${BASHPID:-$$}"
-  mv "$staged_file" "$claimed" 2>/dev/null || return 0
-  staged_session=$(jq -r '.session_id // empty' "$claimed" 2>/dev/null || true)
-  staged=$(jq -r '.digest // empty' "$claimed" 2>/dev/null || true)
-  if [ "$staged_session" != "$SESSION_ID" ] || [ -z "$staged" ]; then
-    if [ "$staged_session" != "$SESSION_ID" ] && [ -n "$staged_session" ]; then
-      [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
-    fi
-    rm -f "$claimed" 2>/dev/null || true
-    return 0
-  fi
-  fm_operational_input_encode session-start "$staged" encoded || {
-    [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
-    rm -f "$claimed" 2>/dev/null || true
-    exit 0
-  }
-  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || {
-    [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
-    rm -f "$claimed" 2>/dev/null || true
-    exit 0
-  }
-  if ! claim_commit; then
-    [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
-    rm -f "$claimed" 2>/dev/null || true
-    exit 0
-  fi
-  rm -f "$claimed" 2>/dev/null || exit 0
-  printf '%s\n' "$response" || exit 0
-  exit 0
 }
 
 emit_repair_followup() {  # <reason> <arm-tail> <attempt>
@@ -227,51 +168,43 @@ $reason"
   fm_operational_input_encode turn-end-guard "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
 
-  claim_commit || exit 0
+  park_still_ours || exit 0
   budget_read
   [ "$BUDGET_COUNT" -eq "$prior" ] || exit 0
   budget_write "$count"
+  park_still_ours || exit 0
   printf '%s\n' "$response" || exit 0
   exit 0
 }
 
 # --- park ownership ----------------------------------------------------------
-# Last arrival wins. Publication uses only the short claim-writer lock; output
-# commits never hold it, so a newer stop can always supersede a parked writer.
+# Last arrival wins. The short writer lock serializes only publication, so a
+# newer stop can supersede a park while it sleeps, polls, or prepares output.
 claim_park() {
-  local seq owner_seq tmp
-  lock_acquire_bounded "$CLAIM_LOCK" || return 1
-  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$CLAIM" 2>/dev/null || true)
-  owner_seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
+  local seq tmp
+  lock_acquire_bounded "$OWNER_LOCK" || return 1
+  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
   case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
-  case "$owner_seq" in ''|*[!0-9]*) owner_seq=0 ;; esac
-  [ "$owner_seq" -le "$seq" ] || seq=$owner_seq
   PARK_SEQ=$((seq + 1))
-  tmp="$CLAIM.tmp.${BASHPID:-$$}"
+  tmp="$OWNER.tmp.${BASHPID:-$$}"
   if ! printf 'seq=%s pid=%s updated_at=%s\n' "$PARK_SEQ" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
-    || ! cp "$tmp" "$OWNER" 2>/dev/null \
-    || ! mv -f "$tmp" "$CLAIM" 2>/dev/null; then
+    || ! mv -f "$tmp" "$OWNER" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
-    fm_lock_release "$CLAIM_LOCK"
+    fm_lock_release "$OWNER_LOCK"
     return 1
   fi
-  rm -f "$tmp" 2>/dev/null || true
-  fm_lock_release "$CLAIM_LOCK"
+  fm_lock_release "$OWNER_LOCK"
   return 0
 }
 
-claim_still_ours() {
+park_still_ours() {
   local seq
-  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$CLAIM" 2>/dev/null || true)
+  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
   [ "$seq" = "$PARK_SEQ" ]
 }
 
-park_still_ours() {
-  claim_still_ours
-}
-
-# Only the lock-owning session may consume staged context, arm, or wake. A prior
-# session that died leaving its numeric harness pid behind is the one recoverable
+# Only the lock-owning session may arm or wake. A prior session that died
+# leaving its numeric harness pid behind is the one recoverable
 # case, delegated to bin/fm-lock.sh so acquisition keeps its single owner.
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
@@ -294,13 +227,6 @@ if [ "$LOOP_COUNT" -ge "$LOOP_CEILING" ]; then
   fm_supervision_needed "$STATE" "$GRACE" || exit 0
   emit_followup turn-end-guard "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $LOOP_COUNT consecutive hook-driven turns without a captain message, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the captain's next message."
 fi
-
-# --- staged compaction digest ------------------------------------------------
-# Cursor's preCompact step accepts only user_message, never additional_context
-# (index.js @ 4814884 lists sessionStart, beforeSubmitPrompt, preToolUse,
-# postToolUse, postToolUseFailure), so the re-emit digest is staged there and
-# delivered here at the first turn boundary after the compaction.
-emit_staged_context
 
 # Away mode owns the watcher and its own triage; never park and never wake.
 [ -e "$STATE/.afk" ] && exit 0

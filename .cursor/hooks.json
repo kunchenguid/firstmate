@@ -8,13 +8,6 @@
         "timeout": 180
       }
     ],
-    "preCompact": [
-      {
-        "type": "command",
-        "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-sessionstart-cursor.sh --source compact",
-        "timeout": 180
-      }
-    ],
     "stop": [
       {
         "type": "command",

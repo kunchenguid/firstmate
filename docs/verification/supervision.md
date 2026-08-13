@@ -257,9 +257,10 @@ Two defects were found and fixed by that run rather than assumed absent.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
-Not covered by this run: Cursor's `preCompact` step was never observed firing, because a real compaction could not be forced in the throwaway session.
-What IS established is static and decisive - `PreCompactRequestResponse` carries only `user_message`, and `preCompact` is absent from the `additional_context` step set - so the registration stages the digest rather than injecting it, and `tests/fm-cursor-primary.test.sh` proves that staging and its single delivery at the next turn boundary against a `preCompact`-shaped payload.
-Treat the firing itself as unverified until a session compacts under this registration.
+Cursor compaction instruction refresh - DEFERRED.
+A Cursor primary does not re-emit its session-start digest after compaction, and Firstmate does not register `preCompact` in this release.
+The static reason this surface needs its own design is decisive: `PreCompactRequestResponse` carries only `user_message`, and Cursor's `preCompact` step cannot inject `additional_context`.
+As with the uncovered Codex interactive TUI session-open surface, no delivery claim is made until a native transport is designed and verified.
 
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 
