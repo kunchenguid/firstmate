@@ -296,6 +296,13 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   out=$(FM_COMPOSER_HARNESS=cursor fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
   [ "$out" = empty ] \
     || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
+  # Unscoped: a `→` row immediately under a herdr half-block top rule is a
+  # composer candidate, so a right-aligned busy token on that row is content.
+  # Bare `→` outside those rules stays unknown.
+  screen=$' \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up                   ctrl+c to stop${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  [ "$out" = pending ] \
+    || fail "an unscoped half-block mid-turn row with a busy token must read pending, got '$out'"
   pass "matrix: herdr half-block rules bound a bare composer's wrap region"
 }
 

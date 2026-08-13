@@ -2674,14 +2674,17 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
 # agent-state (fm_backend_herdr_busy_state) stays the semantic owner, and this
 # read exists only so the submit core below can confirm a delivery for a
 # harness whose native state never transitions. Without a harness argument the
-# shared matcher uses its union of verified tokens, which is what the submit
-# core wants: it has no recorded harness for the pane.
+# shared matcher uses its union of verified tokens. Cursor's `ctrl+c to stop`
+# stays out of that union so tmux fallback cannot widen; this submit path has
+# no recorded harness, so an empty harness also tries the Cursor signature.
 fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unknown
   local target=$1 harness=${2:-} cap visible
   cap=$(fm_backend_herdr_capture "$target" 40) || { printf 'unknown'; return 0; }
   visible=$(printf '%s' "$cap" | grep -v '^[[:space:]]*$' | tail -12)
   [ -n "$visible" ] || { printf 'unknown'; return 0; }
   if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
+    printf 'busy'
+  elif [ -z "$harness" ] && printf '%s' "$visible" | fm_busy_lines_match cursor; then
     printf 'busy'
   else
     printf 'idle'

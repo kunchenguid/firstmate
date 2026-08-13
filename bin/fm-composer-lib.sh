@@ -327,11 +327,11 @@ fm_composer_strip_ghost() {
 # exposes no stable ASCII busy token.
 # The harness-less default is the UNION of the per-harness tokens below, used
 # when a caller has no recorded harness for the pane (the submit cores read the
-# baseline and the post-Enter transition this way). cursor's `ctrl+c to stop` is
-# part of that union for the same reason the others are: without it a cursor
-# submit could never be acknowledged, because cursor parks its terminal cursor
-# outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+# baseline and the post-Enter transition this way). Cursor's `ctrl+c to stop`
+# stays out of that union: it is Cursor-scoped so a stray footer cannot busy a
+# non-Cursor pane. Herdr submit confirmation, which has no recorded harness,
+# still matches it through fm_backend_herdr_rendered_busy_state.
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -646,6 +646,30 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# Herdr draws a Cursor composer's top/bottom rules with half-block glyphs
+# instead of the box-drawing family. A solid ▄ or ▀ rule at least 8 columns
+# wide is a complete-box edge so the inner row classifies as bordered content
+# even without Cursor harness identity (bare `→` stays unknown unscoped).
+_fm_composer_halfblock_top_row() {  # <trimmed-row>
+  local row=$1
+  [ -n "$row" ] || return 1
+  [ -z "${row//▄/}" ] || return 1
+  case "$row" in
+    ▄▄▄▄▄▄▄▄*) return 0 ;;
+  esac
+  return 1
+}
+
+_fm_composer_halfblock_bottom_row() {  # <trimmed-row>
+  local row=$1
+  [ -n "$row" ] || return 1
+  [ -z "${row//▀/}" ] || return 1
+  case "$row" in
+    ▀▀▀▀▀▀▀▀*) return 0 ;;
+  esac
+  return 1
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -671,7 +695,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
-  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max halfblock_open=0
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -742,6 +766,14 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           # arrow via fm_composer_cursor_arrow_ok.
           FM_COMPOSER_SCAN_BARE_ROW=$row
           ;;
+      esac
+    elif [ "$halfblock_open" = 1 ]; then
+      # Herdr draws Cursor's composer between half-block rules. A `→` row
+      # immediately under that top rule is the composer even without Cursor
+      # identity, so extra content (a right-aligned busy token) can read
+      # pending. A stray transcript `→` outside those rules stays unscoped.
+      case "$trimmed" in
+        '→'*) FM_COMPOSER_SCAN_BARE_ROW=$row ;;
       esac
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
@@ -853,6 +885,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           ;;
         *) valid=0 ;;
       esac
+    fi
+    if _fm_composer_halfblock_top_row "$trimmed"; then
+      halfblock_open=1
+    elif _fm_composer_halfblock_bottom_row "$trimmed"; then
+      halfblock_open=0
     fi
     row=$((row + 1))
   done <<EOF
