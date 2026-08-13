@@ -162,18 +162,22 @@ status_is_paused_or_captain_held() {  # <status-line>
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token names the decision. Its documented
 # position sits between the verb and the colon, and a complete token at the
-# head of the note is accepted as an EQUIVALENT position, because that
-# misplaced-colon shape is common real worker output whose stated key must
-# never silently collapse into the shared "default" bucket (issue #2109):
+# head of the note, or a complete token at the very end of the line, is each
+# accepted as an EQUIVALENT position, because those misplaced-colon shapes are
+# common real worker output whose stated key must never silently collapse into
+# the shared "default" bucket (issue #2109):
 #   needs-decision [key=api-shape]: <summary>
 #   needs-decision: [key=api-shape] <summary>
+#   needs-decision: <summary> [key=api-shape]
 #   resolved       [key=api-shape]: <how it was decided>
-# Both positions state the same key and yield the same note (a consumed
-# note-head token is key metadata, stripped from the note); when both positions
-# carry a token, the documented before-colon one wins and the note-head token
-# stays note text. A token deeper inside the note is prose, never a stated key,
-# so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
-# A line with no token in either position uses the key "default", preserving
+# All three positions state the same key and yield the same note (a consumed
+# note-head or trailing token is key metadata, stripped from the note); when
+# more than one position carries a token, the documented before-colon one wins
+# over both alternates, and the losing token stays note text. A token deeper
+# inside the note - anywhere other than the note's own head or the line's own
+# end - is prose, never a stated key, so a summary merely MENTIONING "[key=x]"
+# cannot open or close that decision.
+# A line with no token in any position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
 # folds skip the line), never rewritten to "default".
@@ -212,6 +216,28 @@ _fm_key_at_note_head() {  # <status-line> -> raw slug
     *) return 1 ;;
   esac
 }
+# Raw slug of a complete "[key=<slug>]" token anchored at the very END of the
+# line (trailing whitespace ignored), the position a worker lands in when it
+# appends the tag after already writing the summary. Fails when the line does
+# not end in a complete token there; slug charset validity is the caller's
+# check via _fm_decision_slug_ok, exactly as for the other two positions. A
+# token that is not the line's own last token - i.e. anything followed by more
+# note text - is left as ordinary prose and never reaches this function's
+# match, which is what keeps a summary merely mentioning "[key=x]" mid-line
+# from being read as a stated key.
+_fm_key_trailing() {  # <status-line> -> raw slug
+  local line=$1 tail
+  line=${line%"${line##*[![:space:]]}"}
+  case "$line" in
+    *\[key=*\]) ;;
+    *) return 1 ;;
+  esac
+  tail=${line##*\[key=}
+  case "$tail" in
+    *\]) printf '%s' "${tail%\]}" ;;
+    *) return 1 ;;
+  esac
+}
 # 0 when a stated key slug is well-formed: nonempty, A-Za-z0-9._- only.
 _fm_decision_slug_ok() {  # <slug>
   case "$1" in
@@ -232,6 +258,11 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
+  elif ! _fm_key_before_colon "$1" && k=$(_fm_key_trailing "$1") \
+    && _fm_decision_slug_ok "$k"; then
+    n=${n%"${n##*[![:space:]]}"}
+    n=${n%"[key=$k]"}
+    n=${n%"${n##*[![:space:]]}"}
   fi
   printf '%s' "$n"
 }
@@ -241,8 +272,12 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     k=${1%%:*}
     k=${k#*\[key=}
     k=${k%%\]*}
+  elif k=$(_fm_key_at_note_head "$1"); then
+    :
+  elif k=$(_fm_key_trailing "$1"); then
+    :
   else
-    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+    printf 'default'; return 0
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"

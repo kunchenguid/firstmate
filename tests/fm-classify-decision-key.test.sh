@@ -236,6 +236,63 @@ test_blocked_and_resolved_are_tag_order_independent() {
   pass "blocked/resolved parse their bare verb with any bracket-tag order preceding the colon"
 }
 
+test_trailing_key_position_is_honored() {
+  local dir expected
+  dir=$(case_dir trailing)
+  # A worker sometimes appends the tag after the summary instead of the
+  # documented before-colon position (issue observed 2026-08-12): the token
+  # still names the decision and the note still reads the same either way.
+  printf 'needs-decision: pick REST or RPC [key=api-shape]\n' > "$dir/t.status"
+  expected=$(printf 'api-shape\tneeds-decision\tpick REST or RPC\n')
+  assert_fold "$dir/t.status" "$expected" "trailing key position"
+  pass "a stated [key=X] opens X when the token trails the summary"
+}
+
+test_trailing_key_matches_across_open_and_close_positions() {
+  local dir
+  dir=$(case_dir trailing-cross-close)
+  # Opened trailing, closed in the documented position.
+  printf 'needs-decision: pick the bound [key=seam-max-bound]\n' > "$dir/a.status"
+  printf 'resolved [key=seam-max-bound]: answered: use 4\n' >> "$dir/a.status"
+  assert_fold "$dir/a.status" "" "documented resolution closing a trailing open"
+
+  # And the mirror: opened documented, closed trailing.
+  printf 'needs-decision [key=seam-max-bound]: pick the bound\n' > "$dir/b.status"
+  printf 'resolved: answered: use 4 [key=seam-max-bound]\n' >> "$dir/b.status"
+  assert_fold "$dir/b.status" "" "trailing resolution closing a documented open"
+
+  # And opened trailing, closed trailing.
+  printf 'needs-decision: pick the bound [key=seam-max-bound]\n' > "$dir/c.status"
+  printf 'resolved: answered: use 4 [key=seam-max-bound]\n' >> "$dir/c.status"
+  assert_fold "$dir/c.status" "" "trailing resolution closing a trailing open"
+  pass "a resolution closes its decision regardless of open/close trailing-vs-documented position"
+}
+
+test_mid_line_bracket_is_not_a_trailing_key() {
+  local dir
+  dir=$(case_dir mid-line-not-trailing)
+  # A bracket that merely sits somewhere in the middle of the note - not at
+  # its head, not at the line's own end - is prose, never a stated key, even
+  # when it looks like a well-formed token.
+  printf 'needs-decision: consider [key=red] before deciding on a theme\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tconsider [key=red] before deciding on a theme\n')" \
+    "mid-line bracket text"
+  pass "a [key=x] token that is not at the line's own end is never read as a stated key"
+}
+
+test_canonical_position_wins_over_disagreeing_trailing_token() {
+  local dir
+  dir=$(case_dir canonical-wins)
+  # Both positions carry a token and they disagree: the documented
+  # before-colon position wins, and the trailing token stays note text.
+  printf 'needs-decision [key=alpha]: pick the bound [key=beta]\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'alpha\tneeds-decision\tpick the bound [key=beta]\n')" \
+    "canonical vs trailing disagreement"
+  pass "the documented before-colon key wins when a disagreeing trailing token is also present"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -271,4 +328,8 @@ test_corr_and_key_tags_open_and_close_under_the_stated_key
 test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
+test_trailing_key_position_is_honored
+test_trailing_key_matches_across_open_and_close_positions
+test_mid_line_bracket_is_not_a_trailing_key
+test_canonical_position_wins_over_disagreeing_trailing_token
 test_incremental_agrees_with_full_fold_across_appends
