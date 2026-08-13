@@ -612,6 +612,57 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# A harness whose semantic state source is explicitly unavailable cannot
+# independently confirm a deliberate pause.
+# The latest pause declaration is authoritative only for that unavailable
+# source, and a later non-pause append restores the immediate wedge alarm.
+test_unavailable_harness_state_uses_only_current_pause_declaration() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case unavailable-state-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-codex-parked"
+  printf 'idle codex prompt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/codex-parked.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/codex-parked.status"
+  sig=$(seen_sig "$state/codex-parked.status"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle codex prompt")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+
+  [ "$(crew_absorb_class codex-parked)" = unavailable ] \
+    || fail "an explicit unavailable harness-state source was not distinguished from an inconclusive available source"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=2 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a current declared pause surfaced when the harness-state source was unavailable: $(<"$out")"
+  fi
+  [ ! -s "$out" ] || fail "an unavailable-state declared pause printed an immediate stale wake"
+  [ ! -s "$state/.wake-queue" ] || fail "an unavailable-state declared pause enqueued an immediate stale wake"
+  [ -e "$state/.paused-$key" ] || fail "an unavailable-state declared pause did not enter bounded pause handling"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an unavailable-state declared pause started wedge aging"
+  reap "$pid"
+
+  printf 'working: upstream landed, resuming\n' >> "$state/codex-parked.status"
+  sig=$(seen_sig "$state/codex-parked.status"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a wedged worker did not stale-alarm after a later append superseded its pause"
+  rg -Fx "stale: $window" "$out" >/dev/null \
+    || fail "a superseded pause suppressed the wedged worker's stale alarm: $(<"$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "a later non-pause append retained bounded pause handling"
+  unset FM_FAKE_CREW_STATE
+  pass "an unavailable harness-state source trusts only the current pause declaration, and a superseding append restores stale alarms"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -1828,6 +1879,7 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
+test_unavailable_harness_state_uses_only_current_pause_declaration
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

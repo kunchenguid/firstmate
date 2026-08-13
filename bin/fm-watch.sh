@@ -363,10 +363,12 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A current pause declaration is also authoritative when fm-crew-state explicitly
+# reports that the harness has no semantic state source.
+# Generic unknown state remains unsafe, and only a confidently dead ordinary crew
+# may otherwise recover paused classification after a stopped or unknown verdict.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive recheck_class
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -378,6 +380,11 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    recheck_class=$(cat "$recheck_file" 2>/dev/null || true)
+    if [ "$recheck_class" = unavailable ]; then
+      printf 'paused'
+      return
+    fi
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -393,6 +400,11 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  if [ "$class" = unavailable ]; then
+    printf 'unavailable' > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then

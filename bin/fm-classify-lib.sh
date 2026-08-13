@@ -554,6 +554,9 @@ signal_reason_is_actionable() {  # <file> ...
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
+#   unavailable - the crew reader explicitly reports that this harness has no
+#             semantic state source, so the stale path may consult a current
+#             pause declaration without treating generic unknown state as safe;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
@@ -573,6 +576,12 @@ crew_absorb_class() {  # <id>
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
+  case "$line" in
+    'state: unknown · source: pane · harness state unavailable ('*')')
+      printf 'unavailable'
+      return
+      ;;
+  esac
   printf 'none'
 }
 
