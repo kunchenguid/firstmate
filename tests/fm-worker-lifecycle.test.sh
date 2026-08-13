@@ -472,6 +472,30 @@ except module.ProviderError as exc:
 else:
     raise AssertionError("unreviewed eight-vCPU control SKU was accepted")
 
+# An interrupted create (template children, no VM) replays the same landed
+# deployment only under exact or absent bindings; foreign bindings refuse.
+# A fresh module instance keeps these stubs out of the shared assertions.
+partial_spec=importlib.util.spec_from_file_location("azure_provider_partial", sys.argv[1])
+partial_module=importlib.util.module_from_spec(partial_spec); partial_spec.loader.exec_module(partial_module)
+partial_calls=[]
+partial_module.run_pilot_create=lambda controller, action: partial_calls.append("create")
+partial_module.create_lifecycle_children=lambda controller, action: partial_calls.append("children")
+partial_module.converge_create_tags=lambda controller, action: partial_calls.append("converge") or {"slot": 1, "resources": {}}
+partial_action={"slot":1,"bindings":{"home_binding":"h"*64,"task":"task-a","task_generation":"g","assignment_generation":"asg-1","account_binding":"a"*64,"worktree_binding":"w"*64,"repository_binding":"r"*64,"repository_generation":"rg"},"sku":"Standard_D4as_v6","sku_family":"standardDav6Family","shared_admission_digest":"x","type":"create"}
+partial_worker={"slot":1,"resources":{"nic":{"id":"/nic","immutable_id":"n","tags":{"home-binding":"h"*64,"task-binding":"task-a","invocation-binding":"asg-1"}},"task-disk":{"id":"/d","immutable_id":"d","tags":{}}}}
+partial_module.inventory=lambda controller, include_metrics=True: {"workers":[partial_worker],"conflicts":[],"capacity_reservations":[],"metrics":{}}
+partial_module.worker_by_slot=lambda snapshot, slot: partial_worker
+partial_module.create_or_resume({"prefix":"fmtest"}, partial_action)
+assert partial_calls==["create","children","converge"], partial_calls
+partial_foreign=dict(partial_worker); partial_foreign["resources"]={"nic":{"id":"/nic","immutable_id":"n","tags":{"invocation-binding":"asg-OTHER"}}}
+partial_module.worker_by_slot=lambda snapshot, slot: partial_foreign
+try:
+    partial_module.create_or_resume({"prefix":"fmtest"}, partial_action)
+except partial_module.ProviderError as exc:
+    assert "refuses to inherit" in str(exc)
+else:
+    raise AssertionError("foreign partial slot was inherited")
+
 # Guest marker framing: only marker lines parse, the last one wins, and a
 # malformed payload fails closed.
 assert module.marker_payload("noise\nFM-X:{}\n", "FM-WORKER-RESULT:") is None

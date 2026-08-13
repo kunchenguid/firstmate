@@ -752,13 +752,17 @@ def inventory(controller, include_metrics=True):
         container_by_slot[slot] = container_value
         add("state-container", container_value, slot, tags_override=metadata)
         blob_prefix = "worker/{:02d}/".format(slot)
+        # A create interrupted before its lifecycle children leaves a slot
+        # with template resources but no staging blobs; inventory classifies
+        # that partial state instead of failing, and completeness gates still
+        # refuse to adopt an incomplete worker.
         reservation = blob_record(
             controller, control_storage, "runner-control", blob_prefix + "reservation.json",
-            "global-reservation", required=slot in workers,
+            "global-reservation", required=False,
         )
         request_blob = blob_record(
             controller, storage, container["name"], "request.json", "staging-request",
-            required=slot in workers,
+            required=False,
         )
         result_blob = blob_record(
             controller, storage, container["name"], "result.json", "staging-result",
@@ -1264,7 +1268,21 @@ def create_or_resume(controller, action):
                 allow_previous_cloud_generation=True,
             )
         else:
-            raise ProviderError("fresh assignment found retained slot resources and refuses to inherit them")
+            # A deployment interrupted before the VM leaves bindingless or
+            # exactly-bound template children. Replaying the same landed
+            # incremental deployment is safe only when every present resource
+            # carries this action's exact bindings or none at all.
+            bindings = action["bindings"]
+            for kind, resource in resources.items():
+                tags = resource.get("tags") or {}
+                for tag_name, expected in (
+                    ("home-binding", bindings["home_binding"]),
+                    ("task-binding", bindings["task"]),
+                    ("invocation-binding", bindings["assignment_generation"]),
+                ):
+                    value = tags.get(tag_name)
+                    if value not in (None, "", expected):
+                        raise ProviderError("fresh assignment found retained slot resources and refuses to inherit them")
     elif reuse:
         raise ProviderError("dirty-task resume found no exact retained capacity")
     run_pilot_create(controller, action)
