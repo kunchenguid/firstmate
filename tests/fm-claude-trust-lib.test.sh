@@ -79,9 +79,11 @@ test_unusable_paths_fail_without_hanging() {
   PATH=$original_path
   lock=$(fm_claude_trust_lock_path) || fail "could not resolve lock path"
   printf 'not a lock directory\n' > "$lock"
+  # shellcheck disable=SC2329  # invoked indirectly by fm_claude_trust_lock_acquire
   sleep() { :; }
   fm_claude_trust_lock_acquire "$lock" && fail "bounded acquisition accepted an unusable lock path"
   unset -f sleep
+  # shellcheck disable=SC2016  # expansions belong to the nested bash process
   out=$(timeout 2 bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-claude-trust-lib.sh"
@@ -230,6 +232,7 @@ test_external_writer_changes_retry_and_fail_bounded() {
   real_cksum=$(command -v cksum)
   real_jq=$(command -v jq)
   original_path=$PATH
+  # shellcheck disable=SC2016  # expansions belong to the generated helper script
   printf '%s\n' \
     '#!/bin/sh' \
     'count=$(cat "$FM_RACE_COUNT" 2>/dev/null || echo 0)' \
