@@ -1151,7 +1151,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed landing_target landing_target_pending landing_ref unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed landing_target landing_target_pending landing_ref pending_ref pending_unmerged_raw pending_unmerged unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1178,6 +1178,27 @@ validate_worktree_teardown_safety() {
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
+  pending_unmerged=
+  if [ "$MODE" = local-only ] && [ -n "$LOCAL_MERGE_TARGET_PENDING" ]; then
+    if git -C "$PROJ" check-ref-format --branch "$LOCAL_MERGE_TARGET_PENDING" >/dev/null 2>&1; then
+      pending_ref="refs/heads/$LOCAL_MERGE_TARGET_PENDING"
+      if git -C "$PROJ" show-ref --verify --quiet "$pending_ref"; then
+        if ! pending_unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$pending_ref" -- 2>/dev/null); then
+          if worktree_safety_blocked_by_lock "commits not on $LOCAL_MERGE_TARGET_PENDING"; then
+            return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+          fi
+          echo "REFUSED: cannot inspect worktree $WT for commits not on $LOCAL_MERGE_TARGET_PENDING." >&2
+          echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+          return 1
+        fi
+        pending_unmerged=$(printf '%s\n' "$pending_unmerged_raw" | head -5)
+        if [ -z "$pending_unmerged" ]; then
+          LOCAL_MERGE_TARGET=$LOCAL_MERGE_TARGET_PENDING
+        fi
+      fi
+    fi
+  fi
+
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     landing_target=$LOCAL_MERGE_TARGET
     landing_target_pending=0
@@ -1196,24 +1217,25 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: recorded local merge target '$landing_target' does not exist in $PROJ." >&2
       return 1
     fi
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$landing_ref" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $landing_target"; then
-        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    if [ "$landing_target_pending" = 1 ] && [ "$landing_ref" = "${pending_ref:-}" ]; then
+      unmerged=$pending_unmerged
+    else
+      if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$landing_ref" -- 2>/dev/null); then
+        if worktree_safety_blocked_by_lock "commits not on $landing_target"; then
+          return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+        fi
+        echo "REFUSED: cannot inspect worktree $WT for commits not on $landing_target." >&2
+        echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $landing_target." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
+      unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $landing_target and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$landing_target" "$unmerged" >&2
       echo "Merge the branch into local $landing_target first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
-    fi
-    if [ "$landing_target_pending" = 1 ]; then
-      LOCAL_MERGE_TARGET=$landing_target
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
