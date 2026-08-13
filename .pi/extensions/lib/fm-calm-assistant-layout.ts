@@ -2,10 +2,10 @@
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi.
-// This layout removes collapsed thinking, and at the "max" presentation level also the
-// mid-turn assistant text blocks classified as "assistant-working-note", from a shallow
-// presentation copy. The message itself, model context, session storage, and export
-// rendering are never touched. ./fm-calm-visibility.ts owns which classes each level hides.
+// This layout removes collapsed thinking and the mid-turn assistant text blocks
+// classified as "assistant-working-note" from a shallow presentation copy. The message
+// itself, model context, session storage, and export rendering are never touched.
+// ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";

@@ -29,22 +29,12 @@ export const CALM_TRANSCRIPT_CLASSES = [
 
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
-// Calm's presentation is a level, not a boolean: "off" is stock Pi, "on" is Calm, and
-// "max" is Calm plus the classes in CALM_MAX_HIDDEN_CLASSES below.
-export const CALM_PRESENTATION_LEVELS = ["off", "on", "max"] as const;
-
-export type CalmPresentationLevel = (typeof CALM_PRESENTATION_LEVELS)[number];
-
+// Calm is on or off. "assistant-working-note" is deliberately absent from the allowlist:
+// Calm hides mid-turn assistant working notes, keeping the genuine final reply.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
-  "assistant-working-note",
   "working-status",
-]);
-
-// Classes ordinary Calm keeps but the "max" level also hides.
-const CALM_MAX_HIDDEN_CLASSES = new Set<CalmTranscriptClass>([
-  "assistant-working-note",
 ]);
 
 // Legacy session entries from Calm versions before 2026-07-23 retain this
@@ -73,23 +63,15 @@ type FirstmateSyntheticPresentation = {
   kind: FirstmateSyntheticKind;
 };
 
-let calmLevel: CalmPresentationLevel = "off";
+let calm = false;
 let stockExportRendering = false;
 
-export function calmTranscriptClassIsVisible(
-  itemClass: CalmTranscriptClass,
-  level: CalmPresentationLevel = calmLevel,
-): boolean {
-  if (!CALM_VISIBLE_CLASSES.has(itemClass)) return false;
-  return level !== "max" || !CALM_MAX_HIDDEN_CLASSES.has(itemClass);
+export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
+  return CALM_VISIBLE_CLASSES.has(itemClass);
 }
 
-export function setCalmPresentation(level: CalmPresentationLevel): void {
-  calmLevel = level;
-}
-
-export function calmPresentationLevel(): CalmPresentationLevel {
-  return calmLevel;
+export function setCalmPresentation(active: boolean): void {
+  calm = active;
 }
 
 export function setCalmStockExportRendering(active: boolean): void {
@@ -97,15 +79,11 @@ export function setCalmStockExportRendering(active: boolean): void {
 }
 
 export function calmPresentationIsActive(): boolean {
-  return calmLevel !== "off";
+  return calm;
 }
 
 export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
-  return (
-    calmLevel !== "off" &&
-    !stockExportRendering &&
-    !calmTranscriptClassIsVisible(itemClass, calmLevel)
-  );
+  return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
 }
 
 export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {
