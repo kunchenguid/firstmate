@@ -1229,25 +1229,26 @@ EOF
   pass "session start: a deferred relaunch is always reported, so the digest's stale endpoint record cannot stand"
 }
 
-test_session_start_preserves_bootstrap_profile_warning_stderr() {
-  local rec root home fakebin mate log spawned out err
+test_session_start_preserves_bootstrap_profile_warning_in_deferred_report() {
+  local rec root home fakebin mate log spawned out report
   rec=$(prepare_session_start_secondmate secondmate-profile-warning)
   IFS='|' read -r root home fakebin mate log spawned <<EOF
 $rec
 EOF
   printf '%s\n' 'opencode default high' > "$home/config/secondmate-harness"
-  err="${root%/root}/session-start.err"
 
-  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing 2> "$err")
+  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
+  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
+  report=$(network_stage_report "$home" "$root")
 
-  assert_grep "warning: harness 'opencode' cannot thread requested effort 'high'; accepted effort values: no supported values; omitting effort flag" \
-    "$err" "session start swallowed or rechanneled the bootstrap respawn effort warning"
+  assert_contains "$report" "warning: harness 'opencode' cannot thread requested effort 'high'; accepted effort values: no supported values; omitting effort flag" \
+    "the deferred network report swallowed the bootstrap respawn effort warning"
   assert_not_contains "$out" "cannot thread requested effort" \
-    "session start moved the bootstrap respawn effort warning onto stdout"
+    "the deferred bootstrap warning leaked into the initial digest"
   assert_grep 'harness=opencode' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
     "session-start warning regression did not exercise the real opencode respawn"
 
-  pass "session start preserves successful bootstrap profile diagnostics on stderr"
+  pass "session start preserves deferred bootstrap profile diagnostics in its durable report"
 }
 
 test_session_start_preserves_ambiguous_pi_process() {
@@ -2437,7 +2438,7 @@ test_unreachable_network_never_blocks_the_digest
 test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
 test_read_only_session_declares_skipped_network_checks
 test_tasks_axi_compatibility_is_probed_once
-test_session_start_preserves_bootstrap_profile_warning_stderr
+test_session_start_preserves_bootstrap_profile_warning_in_deferred_report
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
