@@ -2602,6 +2602,25 @@ EOF
   pass "a completed local-only task seals accepted with active duration and token usage from only its exact session"
 }
 
+test_local_only_zero_work_does_not_seal_accepted() {
+  local case_dir
+  case_dir=$(make_case telemetry-local-only-zero-work)
+  write_meta "$case_dir" local-only ship
+  seed_teardown_telemetry "$case_dir" || fail "could not seed zero-work telemetry"
+
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" >/dev/null || fail "zero-work local-only teardown failed"
+
+  jq -e '
+    select(.eventType=="attempt-terminal") and
+    .terminal.classification=="incomplete" and
+    .terminal.evidence.oracle=="not-run" and
+    .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
+  ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
+    fail "a zero-work local-only task falsely sealed accepted"
+  pass "a zero-work local-only task seals classification=incomplete oracle=not-run gate=delivery/incomplete"
+}
+
 test_teardown_notes_gate_observation_branch_mismatch() {
   local case_dir head rc
   case_dir=$(make_case telemetry-branch-mismatch-note)
@@ -2701,6 +2720,7 @@ test_forced_teardown_still_requires_ledger_repair() {
   pass "a damaged ledger blocks even a forced teardown and prints its repair-then-re-run route"
 }
 
+test_local_only_zero_work_does_not_seal_accepted
 test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible

@@ -1296,7 +1296,8 @@ observe_telemetry_gate_facts() {  # <worktree>
   fi
 
   # Delivery acceptance is a property, not a status-file wording check. A
-  # local-only ship is accepted only after its exact commit reached local main;
+  # local-only ship is accepted only after it made a commit beyond its branch
+  # point and its exact HEAD reached local main;
   # a PR ship is accepted only when the forge proves that exact work merged;
   # and a scout is accepted only after the report and decision gates above.
   if [ "$FORCE" != --force ]; then
@@ -1305,8 +1306,13 @@ observe_telemetry_gate_facts() {  # <worktree>
       return 0
     fi
     if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
-      local default_name
+      local default_name task_base task_commits
+      # The oldest per-worktree HEAD reflog entry is this task's branch point.
+      # Require a commit beyond it so a no-op branch cannot prove delivery.
       if default_name=$(default_branch) \
+        && task_base=$(git -C "$wt" reflog show --format=%H HEAD 2>/dev/null | tail -1) \
+        && task_commits=$(git -C "$wt" rev-list --count "$task_base..HEAD" 2>/dev/null) \
+        && [ "$task_commits" -gt 0 ] \
         && git -C "$wt" merge-base --is-ancestor HEAD "refs/heads/$default_name" 2>/dev/null; then
         TELEMETRY_GATE_RESULT=green
         return 0
