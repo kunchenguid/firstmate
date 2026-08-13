@@ -11,7 +11,7 @@ When this session owns supervision and away mode is not active:
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
 4. The captain keeps control while the hook is parked.
    A message typed into a parked Cursor pane is accepted and runs its turn immediately, and the superseded park stands down without delivering its own follow-up.
-   The private supersession records are `state/.cursor-park-owner` and its short writer lock `state/.cursor-park-owner.lock`.
+   The private supersession records are `state/.cursor-park-owner` and its short publication and commit lock `state/.cursor-park-owner.lock`.
 5. On a `turn-end-guard` follow-up, the park could not establish a live cycle.
    Inspect the watcher startup path rather than turning the notice into a repeating manual-arm loop; the nag is bounded by `FM_CURSOR_TURNEND_BLOCK_BUDGET` (default 3) and then stops on its own.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside park output as proof that one live cycle exists.

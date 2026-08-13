@@ -390,8 +390,8 @@ Do not confuse `harness=cursor` using a `cursor-grok-4.5-*` model with `harness=
 | Environment marker | `CURSOR_INVOKED_AS=cursor-agent` on the agent process and its children, plus `CURSOR_AGENT=1` on child/tool processes. Other `CURSOR_*` endpoint and credential variables are not identity markers. |
 | Effort | No effort flag exists. The requested axis is recorded in task metadata and never reaches the launch command. |
 | Composer | A BARE row whose prompt glyph is `→` (U+2192); no border. Idle placeholders are `Plan, search, build anything` fresh and `Add a follow-up` after a turn, drawn de-emphasised so a styled capture separates them from real typed text. |
-| Primary hooks | Tracked project-scope `.cursor/hooks.json` registers `stop`, `sessionStart`, `preCompact`, and two `preToolUse` seatbelts, all anchored through `$CURSOR_PROJECT_DIR`. Cursor ALSO loads `<project>/.claude/settings.json`, so the tracked Claude entries stand down on a Cursor-delivered payload; `docs/turnend-guard.md` owns that predicate. |
-| Primary limits | `stop` does not fire in headless `cursor-agent -p`. `preCompact` cannot inject context, so the compaction digest is staged for the next turn boundary. Project hooks need `--trust`. |
+| Primary hooks | Tracked project-scope `.cursor/hooks.json` registers `stop`, `sessionStart`, and two `preToolUse` seatbelts, all anchored through `$CURSOR_PROJECT_DIR`. Cursor ALSO loads `<project>/.claude/settings.json`, so the tracked Claude entries stand down on a Cursor-delivered payload; `docs/turnend-guard.md` owns that predicate. |
+| Primary limits | `stop` does not fire in headless `cursor-agent -p`. `preCompact` is deliberately unregistered in this change because it can return only `user_message` and cannot inject context, so a Cursor primary does not re-emit its digest after compaction pending a separate design. Project hooks need `--trust`. |
 
 **Detection ordering is load-bearing.**
 Cursor does NOT clear an inherited `CLAUDECODE`, so a cursor worker under a claude primary carries both markers and whichever is tested first wins.

@@ -258,7 +258,7 @@ Two defects were found and fixed by that run rather than assumed absent.
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
 Cursor compaction instruction refresh - DEFERRED.
-A Cursor primary does not re-emit its session-start digest after compaction, and Firstmate does not register `preCompact` in this release.
+A Cursor primary does not re-emit its session-start digest after compaction, and Firstmate deliberately leaves `preCompact` unregistered in this change.
 The static reason this surface needs its own design is decisive: `PreCompactRequestResponse` carries only `user_message`, and Cursor's `preCompact` step cannot inject `additional_context`.
 As with the uncovered Codex interactive TUI session-open surface, no delivery claim is made until a native transport is designed and verified.
 

@@ -113,9 +113,9 @@ The follow-up loop is bounded TWICE, because either bound alone is insufficient.
 `loop_count` is Cursor's richer analogue of `stop_hook_active`: verified live as 0 on the first stop after a real user message, +1 per follow-up-driven stop, and reset to 0 by the next real user message.
 
 A captain message typed while the hook is parked is accepted and runs its turn immediately, and Cursor does NOT terminate the parked hook, so its follow-up would still be delivered when the park finally closes.
-Each invocation publishes its sequence in `state/.cursor-park-owner` under the short writer lock `state/.cursor-park-owner.lock`.
-A park checks that owner record before output or shared-state mutation, so a newer sequence makes the older park stand down without emitting or changing the repair budget.
-The writer lock is never held while the arm is sleeping, while the hook is polling, or while output is prepared.
+Each invocation publishes its sequence in `state/.cursor-park-owner` under the short publication and commit lock `state/.cursor-park-owner.lock`.
+The same bounded critical section covers the final owner and away-mode checks, follow-up output, and repair-budget commit, so a published newer sequence makes the older park stand down without emitting or changing shared state.
+The lock is never held while the arm is sleeping, while the hook is polling, or while output is prepared.
 Without those records every captain message during a park would leak one process and one duplicate wake.
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
@@ -129,7 +129,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
-- Cursor's `preCompact` step cannot inject context, and Firstmate does not register that step or claim instruction-refresh delivery after Cursor compaction.
+- Cursor's `preCompact` step can return only `user_message` and cannot inject context, so it is deliberately unregistered in this change and a Cursor primary does not re-emit its digest after compaction pending a separate design.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
 - Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.

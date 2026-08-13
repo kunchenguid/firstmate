@@ -284,6 +284,19 @@ test_park_repair_nag_is_bounded() {
   pass "cursor park: the repair nag is bounded and then goes quiet"
 }
 
+test_park_repair_nag_requires_a_persisted_budget() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/park-nag-write-failure")
+  : > "$dir/state/task1.meta"
+  mkdir "$dir/state/.turnend-cursor-blocks"
+  write_arm_fixture "$dir" failed
+  out=$(run_park "$dir")
+  [ -z "$out" ] || fail "a repair nag without a persisted budget increment must fail open: $out"
+  [ -z "$(find "$dir/state/.turnend-cursor-blocks" -mindepth 1 -print -quit 2>/dev/null)" ] \
+    || fail "the failed budget commit left partial state"
+  pass "cursor park: a repair nag is emitted only after its budget persists"
+}
+
 test_park_nag_budget_resets_after_a_real_wake() {
   local dir out
   dir=$(make_primary_dir "$TMP_ROOT/park-nag-reset")
@@ -424,6 +437,39 @@ test_park_inert_when_afk() {
   pass "cursor park: inert while away mode is active"
 }
 
+test_park_stands_down_when_away_mode_activates_before_commit() {
+  local dir park_pid out waited budget_count
+  dir=$(make_primary_dir "$TMP_ROOT/park-afk-transition")
+  : > "$dir/state/task1.meta"
+  printf 'session=sess-cursor\ncount=1\n' > "$dir/state/.turnend-cursor-blocks"
+  write_arm_fixture "$dir" actionable
+  cat >> "$dir/bin/fm-operational-input.sh" <<'SH'
+fm_operational_input_encode() {
+  local kind=${1-} body=${2-} result_var=${3-}
+  [ -n "$result_var" ] && fm_operational_kind_is_current "$kind" && [ -n "$body" ] || return 2
+  : > "$FM_HOME/state/afk-commit-entered"
+  while [ ! -e "$FM_HOME/state/afk-commit-release" ]; do sleep 0.05; done
+  printf -v "$result_var" '%s%s: %s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body"
+}
+SH
+  ( run_park "$dir" > "$dir/state/afk-transition-out" ) &
+  park_pid=$!
+  waited=0
+  while [ ! -e "$dir/state/afk-commit-entered" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || fail "the park never reached follow-up preparation"
+  done
+  : > "$dir/state/.afk"
+  : > "$dir/state/afk-commit-release"
+  wait "$park_pid" 2>/dev/null || true
+  out=$(cat "$dir/state/afk-transition-out" 2>/dev/null || true)
+  [ -z "$out" ] || fail "the park emitted after away mode activated: $out"
+  budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-cursor-blocks" 2>/dev/null || true)
+  [ "$budget_count" = 1 ] || fail "the park reset nag state after away mode activated: $budget_count"
+  pass "cursor park: an away-mode transition wins before follow-up commit"
+}
+
 test_park_inert_without_session_lock() {
   local dir out
   dir=$(make_primary_dir "$TMP_ROOT/park-nolock")
@@ -543,12 +589,14 @@ test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
+test_park_repair_nag_requires_a_persisted_budget
 test_park_nag_budget_resets_after_a_real_wake
 test_park_loop_ceiling_warns_once_then_goes_quiet
 test_park_stands_down_when_superseded
 test_park_serializes_supersession_with_followup_commit
 test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
+test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
 test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload

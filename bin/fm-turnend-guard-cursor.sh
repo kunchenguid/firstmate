@@ -119,10 +119,17 @@ emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
-  park_still_ours || exit 0
-  [ "$reset_budget" = reset-budget ] && budget_reset
-  park_still_ours || exit 0
-  printf '%s\n' "$response" || exit 0
+  lock_acquire_bounded "$OWNER_LOCK" || exit 0
+  if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  if [ "$reset_budget" = reset-budget ] && ! budget_reset; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  printf '%s\n' "$response" || true
+  fm_lock_release "$OWNER_LOCK"
   exit 0
 }
 
@@ -138,19 +145,30 @@ budget_read() {
 }
 
 budget_write() {  # <count>
-  local tmp="$BUDGET_FILE.tmp.$$"
+  local tmp="$BUDGET_FILE.tmp.$$" status=0
+  [ ! -d "$BUDGET_FILE" ] || return 1
   printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$1" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null
+    && mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null \
+    || status=1
   rm -f "$tmp" 2>/dev/null || true
+  return "$status"
 }
 
 budget_reset() {
-  rm -f "$BUDGET_FILE" 2>/dev/null || true
+  rm -f "$BUDGET_FILE" 2>/dev/null
 }
 
 budget_reset_if_ours() {
-  park_still_ours || exit 0
-  budget_reset
+  lock_acquire_bounded "$OWNER_LOCK" || exit 0
+  if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  budget_reset || {
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  }
+  fm_lock_release "$OWNER_LOCK"
 }
 
 emit_repair_followup() {  # <reason> <arm-tail> <attempt>
@@ -168,18 +186,24 @@ $reason"
   fm_operational_input_encode turn-end-guard "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
 
-  park_still_ours || exit 0
+  lock_acquire_bounded "$OWNER_LOCK" || exit 0
+  if ! park_still_ours || [ -e "$STATE/.afk" ]; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
   budget_read
-  [ "$BUDGET_COUNT" -eq "$prior" ] || exit 0
-  budget_write "$count"
-  park_still_ours || exit 0
-  printf '%s\n' "$response" || exit 0
+  if [ "$BUDGET_COUNT" -ne "$prior" ] || ! budget_write "$count"; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  printf '%s\n' "$response" || true
+  fm_lock_release "$OWNER_LOCK"
   exit 0
 }
 
 # --- park ownership ----------------------------------------------------------
-# Last arrival wins. The short writer lock serializes only publication, so a
-# newer stop can supersede a park while it sleeps, polls, or prepares output.
+# Last arrival wins. The short owner lock serializes publication with only the
+# final ownership, away-mode, output, and repair-budget commit.
 claim_park() {
   local seq tmp
   lock_acquire_bounded "$OWNER_LOCK" || return 1

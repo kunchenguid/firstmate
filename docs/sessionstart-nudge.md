@@ -76,7 +76,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Cursor | Run | `.cursor/hooks.json` registers `sessionStart`, anchored through `$CURSOR_PROJECT_DIR` with a 180s timeout, invoking `bin/fm-sessionstart-cursor.sh`. | Cursor's payload has no `source` field, so the registration supplies `--source` itself. The adapter returns the digest as `additional_context`, which Cursor injects into model context. Project hooks load only when the workspace is launched with `--trust`. |
 
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.
-Cursor's `preCompact` response cannot inject additional context, so Firstmate leaves that surface uncovered pending a separate design.
+Cursor's `preCompact` response can return only `user_message` and cannot inject additional context, so it is deliberately unregistered in this change and a Cursor primary does not re-emit its digest after compaction pending a separate design.
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
