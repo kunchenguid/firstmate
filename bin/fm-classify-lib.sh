@@ -177,11 +177,12 @@ status_is_paused_or_captain_held() {  # <status-line>
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
 # folds skip the line), never rewritten to "default".
-# The parsers are pure reads of a single line; the verb parser strips any key
-# token before the colon so the leading word is recovered cleanly.
+# The parsers are pure reads of a single line. Status metadata may contain any
+# number of "[name=value]" tags before the colon, in any order, so verb parsing
+# ends at the first tag rather than special-casing "[key=...]".
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
-  v=${v%%\[key=*}
+  v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
@@ -436,7 +437,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=3
+FM_OPEN_DECISIONS_FOLD_VERSION=4
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
