@@ -50,6 +50,16 @@ wait_for_text() {
   return 1
 }
 
+wait_for_file() {
+  local file=$1 i=0
+  while [ "$i" -lt 600 ]; do
+    [ -s "$file" ] && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 find_chrome() {
   local candidate
   if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
@@ -352,6 +362,424 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
   [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
+}
+
+test_pi_dock_repaint_reuses_operational_classification() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm dock classification-reuse test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/dock-classification-reuse"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  cat >"$fixture/classify-probe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+if [ "$(cat "$FM_CLASSIFY_MODE_FILE" 2>/dev/null)" = "never-operational" ] && [ "${1-}" = "kind" ]; then
+  cat >/dev/null
+  exit 1
+fi
+exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
+SH
+  chmod +x "$fixture/classify-probe.sh"
+  : >"$fixture/calls"
+  printf '%s\n' 'real' >"$fixture/classify-mode"
+
+  # A second classifier script that records its own invocations and declares nothing
+  # operational. A genuinely reloaded adapter binds this one; an adapter that retained its
+  # old classifier closure keeps calling classify-probe.sh and never touches this file.
+  cat >"$fixture/reloaded-probe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_RELOADED_INPUT_CALLS"
+cat >/dev/null
+exit 1
+SH
+  chmod +x "$fixture/reloaded-probe.sh"
+  : >"$fixture/reloaded-calls"
+
+  # A reloaded copy of the adapter plus its own copy of the classifier module, so the
+  # reloaded adapter resolves a different module-level classifier script exactly as a real
+  # extension reload would. Importing the same file under a query string would share the
+  # already-cached fm-operational-input.ts and could not change that binding.
+  # Calm visibility stays shared so both copies observe the same toggle state; only the
+  # classifier module is duplicated, so the reloaded adapter binds the reloaded script.
+  mkdir -p "$fixture/project/.pi/extensions/reloaded"
+  sed 's#"\./fm-calm-visibility\.ts"#"../lib/fm-calm-visibility.ts"#' \
+    "$OPERATIONAL_USER_LAYOUT" >"$fixture/project/.pi/extensions/reloaded/fm-calm-operational-user-layout.ts"
+  sed 's#process\.env\.FM_OPERATIONAL_INPUT_SCRIPT#process.env.FM_RELOADED_INPUT_SCRIPT#' \
+    "$PI_OPERATIONAL_INPUT" >"$fixture/project/.pi/extensions/reloaded/fm-operational-input.ts"
+
+  out=$(cd "$fixture/project" && \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$fixture/classify-probe.sh" \
+    FM_RELOADED_INPUT_SCRIPT="$fixture/reloaded-probe.sh" \
+    FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
+    FM_OPERATIONAL_INPUT_CALLS="$fixture/calls" \
+    FM_RELOADED_INPUT_CALLS="$fixture/reloaded-calls" \
+    FM_CLASSIFY_MODE_FILE="$fixture/classify-mode" \
+    CLASSIFY_MODE_FILE="$fixture/classify-mode" \
+    CALLS_FILE="$fixture/calls" \
+    RELOADED_CALLS_FILE="$fixture/reloaded-calls" \
+    node --input-type=module 2>&1 <<'JS'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const callsFile = process.env.CALLS_FILE;
+const { initTheme } = await import(
+  pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href
+);
+initTheme("dark");
+const { InteractiveMode } = await import(pathToFileURL(`${packageRoot}/dist/index.js`).href);
+const operationalInput = await import("./.pi/extensions/lib/fm-operational-input.ts");
+const visibility = await import("./.pi/extensions/lib/fm-calm-visibility.ts");
+const layout = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+
+const classifyCalls = () => {
+  const raw = readFileSync(callsFile, "utf8").trim();
+  if (!raw) return 0;
+  return raw.split("\n").filter((line) => line === "kind").length;
+};
+
+const operational = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/reuse-probe.status",
+);
+const genuine = "CAPTAIN_QUEUED_REUSE_PROBE";
+
+layout.installCalmOperationalUserLayout();
+visibility.setCalmPresentation(true);
+
+const container = {
+  children: [],
+  clear() {
+    this.children = [];
+  },
+  addChild(component) {
+    this.children.push(component);
+  },
+};
+const mode = Object.create(InteractiveMode.prototype, {
+  pendingMessagesContainer: { value: container, writable: true },
+  session: {
+    value: {
+      getSteeringMessages: () => [operational],
+      getFollowUpMessages: () => [genuine, operational],
+    },
+    writable: true,
+  },
+  compactionQueuedMessages: { value: [], writable: true },
+  getAppKeyDisplay: { value: () => "Option+Up", writable: true },
+});
+const dockText = () =>
+  container.children.flatMap((component) => component.render?.(180) ?? []).join("\n");
+
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+const firstPaintCalls = classifyCalls();
+const firstPaintText = dockText();
+if (firstPaintCalls === 0) {
+  throw new Error("the dock filter never classified the queued operational message");
+}
+if (firstPaintText.includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("Calm left the operational row visible in the pending dock");
+}
+if (!firstPaintText.includes(genuine)) {
+  throw new Error("Calm hid the genuine queued captain message");
+}
+
+// Repaint the unchanged queue. Pi re-renders the dock on every queue mutation, so a
+// classifier subprocess per message per repaint would block the TUI event loop.
+writeFileSync(callsFile, "");
+for (let repaint = 0; repaint < 5; repaint += 1) {
+  mode.updatePendingMessagesDisplay();
+}
+const repaintCalls = classifyCalls();
+if (repaintCalls !== 0) {
+  throw new Error(
+    `repainting an unchanged pending dock re-ran the classifier ${repaintCalls} time(s) instead of reusing the cached verdict`,
+  );
+}
+if (dockText() !== firstPaintText) {
+  throw new Error("cached classification changed what the pending dock rendered");
+}
+
+// A message the cache has not seen must still be classified exactly once.
+const fresh = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/reuse-probe-2.status",
+);
+mode.session = {
+  getSteeringMessages: () => [operational, fresh],
+  getFollowUpMessages: () => [genuine],
+};
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+if (classifyCalls() !== 1) {
+  throw new Error(
+    `a newly queued operational message should be classified exactly once, saw ${classifyCalls()}`,
+  );
+}
+if (dockText().includes("reuse-probe-2")) {
+  throw new Error("Calm left the newly queued operational row visible in the pending dock");
+}
+
+// The cache must stay bounded: after evicting far more distinct messages than it can
+// hold, the oldest entry is recomputed rather than retained forever.
+const flood = [];
+for (let i = 0; i < 300; i += 1) {
+  flood.push(
+    operationalInput.encodeFirstmateOperationalInput("watcher", `FLOOD WAKE ${i}`),
+  );
+}
+mode.session = {
+  getSteeringMessages: () => flood,
+  getFollowUpMessages: () => [],
+};
+mode.updatePendingMessagesDisplay();
+mode.session = {
+  getSteeringMessages: () => [operational],
+  getFollowUpMessages: () => [],
+};
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+if (classifyCalls() !== 1) {
+  throw new Error(
+    `the classification cache is unbounded: the evicted entry should be recomputed once, saw ${classifyCalls()}`,
+  );
+}
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("an evicted-then-recomputed message stopped being hidden");
+}
+
+// Reloading the extension re-runs the installer against the already-patched prototype.
+// A reload rebinds the classifier, so the reinstall must adopt the new one and drop the
+// verdicts the old one cached: a reloaded module can resolve a different classifier
+// script, and reusing stale verdicts would keep classifying by the previous rules.
+mode.session = {
+  getSteeringMessages: () => [operational],
+  getFollowUpMessages: () => [genuine],
+};
+mode.updatePendingMessagesDisplay();
+layout.installCalmOperationalUserLayout();
+writeFileSync(callsFile, "");
+mode.updatePendingMessagesDisplay();
+const coldPassCalls = classifyCalls();
+if (coldPassCalls !== 1) {
+  throw new Error(
+    `reinstalling the adapter should re-classify each queued operational message exactly once, saw ${coldPassCalls}`,
+  );
+}
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("reinstalling the adapter stopped hiding the operational dock row");
+}
+if (!dockText().includes(genuine)) {
+  throw new Error("reinstalling the adapter hid the genuine queued captain message");
+}
+
+// After that single cold pass the new cache must be warm again.
+writeFileSync(callsFile, "");
+for (let repaint = 0; repaint < 3; repaint += 1) {
+  mode.updatePendingMessagesDisplay();
+}
+if (classifyCalls() !== 0) {
+  throw new Error(
+    `repaints after a reinstall should reuse the refreshed cache, saw ${classifyCalls()} classifier run(s)`,
+  );
+}
+
+// Reinstalling must adopt classification rules that changed since the previous install,
+// which is the case a retained classifier closure cannot serve. The probe script switches
+// to declaring nothing operational, so a reinstall that reuses the old cached verdicts
+// would keep hiding a row the current rules call ordinary.
+writeFileSync(process.env.CLASSIFY_MODE_FILE, "never-operational");
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (!dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error(
+    "reinstalling kept stale cached verdicts: the row stayed hidden even though the current classifier declares nothing operational",
+  );
+}
+if (!dockText().includes(genuine)) {
+  throw new Error("the reinstalled adapter hid the genuine queued captain message");
+}
+
+// Restore the real classification rules and confirm a further reinstall picks them up.
+writeFileSync(process.env.CLASSIFY_MODE_FILE, "real");
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("restoring the real classifier did not hide the operational dock row again");
+}
+
+// A real extension reload imports a fresh adapter module, which resolves its own
+// classifier script at import time. Reinstalling from that reloaded module must adopt its
+// classifier, not keep the one the first install captured. Clearing the cache alone would
+// not satisfy this: the retained closure would still route every call to the original
+// script, leaving the call log of the reloaded script empty.
+const reloadedCallsFile = process.env.RELOADED_CALLS_FILE;
+const reloadedCalls = () => {
+  const raw = readFileSync(reloadedCallsFile, "utf8").trim();
+  if (!raw) return 0;
+  return raw.split("\n").filter((line) => line === "kind").length;
+};
+const reloadedSpecifier = "./.pi/extensions/reloaded/fm-calm-operational-user-layout.ts";
+const reloadedLayout = await import(reloadedSpecifier);
+writeFileSync(callsFile, "");
+writeFileSync(reloadedCallsFile, "");
+reloadedLayout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (reloadedCalls() === 0) {
+  throw new Error(
+    "reinstalling from a reloaded module kept the previously captured classifier: the reloaded classifier script was never invoked",
+  );
+}
+if (classifyCalls() !== 0) {
+  throw new Error(
+    `reinstalling from a reloaded module still routed ${classifyCalls()} call(s) to the original classifier script`,
+  );
+}
+if (!dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error(
+    "the reloaded classifier declares nothing operational, so its row should have become visible",
+  );
+}
+if (!dockText().includes(genuine)) {
+  throw new Error("the reloaded adapter hid the genuine queued captain message");
+}
+
+// Reinstalling from the original module must swing the binding back.
+writeFileSync(callsFile, "");
+writeFileSync(reloadedCallsFile, "");
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (reloadedCalls() !== 0) {
+  throw new Error(
+    `reinstalling from the original module still routed ${reloadedCalls()} call(s) to the reloaded classifier script`,
+  );
+}
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("reinstalling from the original module did not hide the operational row again");
+}
+
+// The reload must still adopt the reloaded Calm visibility state, so turning Calm off
+// after a reinstall has to restore the operational row.
+visibility.setCalmPresentation(false);
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (!dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("after a reinstall, Calm-off did not restore the operational dock row");
+}
+visibility.setCalmPresentation(true);
+layout.installCalmOperationalUserLayout();
+mode.updatePendingMessagesDisplay();
+if (dockText().includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("after a reinstall, re-enabling Calm did not hide the operational dock row");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm dock classification-reuse failed: $out"
+  [ -z "$out" ] || fail "Pi calm dock classification-reuse printed output: $out"
+  pass "repainting the pending dock reuses cached operational classification, classifies new messages once, keeps the cache bounded, and on reinstall adopts the current classification rules with one cold pass before caching again"
+}
+
+test_pi_private_member_probe_fails_loudly() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm private-member probe test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/private-member-probe"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  out=$(cd "$fixture/project" && \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const { InteractiveMode } = await import(
+  pathToFileURL(`${packageRoot}/dist/index.js`).href
+);
+
+// Every Pi-private member the Calm operational-row adapter binds. Removing any one of
+// them must abort installation with a diagnostic naming it, rather than installing a
+// partially-working adapter that silently renders operational rows differently.
+const privateMembers = [
+  "addMessageToChat",
+  "getAllQueuedMessages",
+  "getMarkdownTransformers",
+  "setHiddenThinkingLabel",
+  "updatePendingMessagesDisplay",
+];
+
+for (const member of privateMembers) {
+  const original = InteractiveMode.prototype[member];
+  if (typeof original !== "function") {
+    throw new Error(
+      `fixture precondition failed: installed Pi lacks InteractiveMode.${member}`,
+    );
+  }
+  delete InteractiveMode.prototype[member];
+
+  let reason;
+  try {
+    const layout = await import(
+      `./.pi/extensions/lib/fm-calm-operational-user-layout.ts?probe=${member}`
+    );
+    layout.installCalmOperationalUserLayout();
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  } finally {
+    InteractiveMode.prototype[member] = original;
+  }
+
+  if (!reason) {
+    throw new Error(
+      `removing InteractiveMode.${member} did not fail the Calm operational-row adapter installation`,
+    );
+  }
+  if (!reason.includes(member)) {
+    throw new Error(
+      `the Calm operational-row adapter failed without naming the missing member ${member}: ${reason}`,
+    );
+  }
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm private-member probe failed: $out"
+  [ -z "$out" ] || fail "Pi calm private-member probe printed output: $out"
+  pass "removing any Pi-private member the Calm operational-row adapter binds fails installation loudly and names it"
 }
 
 test_builtin_gate_load_time() {
@@ -827,6 +1255,7 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -1126,6 +1555,64 @@ if (operationalComponent.render(100).length !== 0) {
 }
 if (legacyOperationalComponent.render(100).length !== 0) {
   throw new Error("Calm left the supported bare-marker legacy user row visible");
+}
+const pendingUpdate = InteractiveMode.prototype.updatePendingMessagesDisplay;
+const pendingQueueReader = InteractiveMode.prototype.getAllQueuedMessages;
+if (typeof pendingUpdate !== "function" || typeof pendingQueueReader !== "function") {
+  throw new Error("Pi no longer exposes the pending-message dock members the Calm adapter binds");
+}
+{
+  const pendingContainer = {
+    children: [],
+    clear() {
+      this.children = [];
+    },
+    addChild(component) {
+      this.children.push(component);
+    },
+  };
+  // Inherit from the real prototype so Pi's own getAllQueuedMessages resolves through
+  // `this`, exactly as it does on a live InteractiveMode instance. `session` is a
+  // getter-only accessor on that prototype, so define own properties rather than assign.
+  const pendingMode = Object.create(InteractiveMode.prototype, {
+    pendingMessagesContainer: { value: pendingContainer, writable: true },
+    session: {
+      value: {
+        getSteeringMessages: () => [watcherMessage, "CAPTAIN_STEERING_PENDING"],
+        getFollowUpMessages: () => ["CAPTAIN_FOLLOW_UP_PENDING", watcherMessage],
+      },
+      writable: true,
+    },
+    compactionQueuedMessages: { value: [], writable: true },
+    getAppKeyDisplay: { value: () => "Option+Up", writable: true },
+  });
+  const pendingText = () => pendingContainer.children
+    .flatMap((component) => component.render?.(180) ?? [])
+    .join("\n");
+  // Pi renders each queued message through a single-line TruncatedText, so assert on a
+  // distinctive marker from the operational message's first line rather than the whole
+  // multi-line envelope, which the dock can never emit intact.
+  const operationalDockMarker = "FIRSTMATE WATCHER WAKE";
+  pendingUpdate.call(pendingMode);
+  if (!pendingText().includes("to edit all queued messages")) {
+    throw new Error("the pending-message dock did not render the queued messages at all");
+  }
+  if (pendingText().includes(operationalDockMarker) || !pendingText().includes("CAPTAIN_FOLLOW_UP_PENDING")) {
+    throw new Error("Calm did not filter current operational text from the pending-message dock");
+  }
+  if (!pendingText().includes("CAPTAIN_STEERING_PENDING")) {
+    throw new Error("Calm hid genuine queued steering text");
+  }
+  await calmCommand.handler("", commandContext);
+  pendingUpdate.call(pendingMode);
+  if (!pendingText().includes(operationalDockMarker)) {
+    throw new Error("Calm-off pending-message rendering did not restore operational text");
+  }
+  await calmCommand.handler("", commandContext);
+  pendingUpdate.call(pendingMode);
+  if (pendingText().includes(operationalDockMarker)) {
+    throw new Error("re-enabling Calm did not hide current operational pending text");
+  }
 }
 const operationalNearMisses = [
   {
@@ -1552,9 +2039,18 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    i=0
+    while [ "$i" -lt 120 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" && \
+        printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+        break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+      || fail "Pi follow-up $label case did not render exactly one captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
@@ -2815,7 +3311,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot pending_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2834,6 +3330,7 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
+  pending_snapshot="$TMP_ROOT/pending.txt"
   export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
@@ -3017,6 +3514,12 @@ export default function (pi: ExtensionAPI): void {
         throw new Error("could not select the long-delay Calm E2E model");
       }
       await pi.sendUserMessage("CALM_BOAT_E2E_PROMPT");
+    },
+  });
+  pi.registerCommand("calm-queue-genuine-e2e", {
+    description: "Queue one genuine captain follow-up for the Calm pending-dock check.",
+    handler: async () => {
+      await pi.sendUserMessage("CALM_GENUINE_QUEUED_E2E", { deliverAs: "followUp" });
     },
   });
   pi.registerCommand("calm-working-e2e", {
@@ -3234,12 +3737,66 @@ JS
   done
   assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "operational arrival lost its preceding transient diagnostic"
   assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
+
+  # A follow-up can remain in Pi's pending-message dock while a long run is active.
+  # This is a separate presentation path from addMessageToChat: Calm must hide the
+  # known operational envelope there too, while retaining genuine queued captain text.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$pending_snapshot"
+    if grep -Fq '\__/' "$pending_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_contains "$(cat "$pending_snapshot")" "CALM_BOAT_E2E_PROMPT" \
+    "pending-dock fixture did not start the long Calm run"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e watcher"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  # Gate on Pi's own dequeue hint, which the pending dock renders only after it has
+  # actually repainted with at least one queued message. Waiting on the model name
+  # instead would satisfy before the follow-up was queued, making the negative
+  # assertion below pass even if Calm never filtered the operational row.
+  wait_for_text "$pending_snapshot" "to edit all queued messages" \
+    || fail "Pi's pending-message dock never rendered the queued operational follow-up"
+  assert_not_contains "$(cat "$pending_snapshot")" "CURRENT_WATCHER_E2E" \
+    "Calm left a current operational follow-up visible in Pi's pending-message dock"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-queue-genuine-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  wait_for_text "$pending_snapshot" "CALM_GENUINE_QUEUED_E2E" \
+    || fail "the genuine queued captain follow-up did not remain visible"
+  assert_contains "$(cat "$pending_snapshot")" "CALM_GENUINE_QUEUED_E2E" \
+    "Calm hid genuine queued captain text"
+  # Dequeue the two test messages into the editor, clear that editor text, and
+  # then abort. This exercises Pi's public queue-edit path so the fixture does
+  # not accidentally start the queued follow-ups while the rest of the E2E
+  # checks continue.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-Up
+  sleep 0.1
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-c
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$pending_snapshot"
+    if ! grep -Fq '\__/' "$pending_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$pending_snapshot")" '\__/' \
+    "pending-dock fixture did not abort cleanly"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  if ! wait_for_file "$export_file"; then
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_snapshot" 2>/dev/null || true
+    fail "/export did not create a non-empty file while calm mode was on: $(cat "$export_snapshot")"
+  fi
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
@@ -3656,6 +4213,8 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
+test_pi_private_member_probe_fails_loudly
+test_pi_dock_repaint_reuses_operational_classification
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle

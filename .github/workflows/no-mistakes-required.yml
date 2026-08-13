@@ -47,6 +47,10 @@ jobs:
             echo
             echo "    $marker"
             echo
+            echo "If the pipeline already opened this PR, the signature was lost by an"
+            echo "edit that replaced the body. Restore the pipeline's '## Pipeline'"
+            echo "section in the PR body; the check re-runs on every body edit."
+            echo
             echo "See CONTRIBUTING.md for setup and the full workflow."
             echo
             echo "PR author: ${PR_AUTHOR}"

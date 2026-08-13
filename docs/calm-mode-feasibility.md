@@ -136,7 +136,7 @@ The real Pi viewport moved the unchanged assistant text from row 7 to row 2, ren
 The leading cause would have been falsified if the row or height remained, the provider lost or duplicated the message, or the persisted role or bytes changed.
 None occurred.
 
-The fix installs a separate idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `InteractiveMode.addMessageToChat` method.
+The fix installs a separate idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the `InteractiveMode.addMessageToChat` method, which Pi's declarations mark `private`; the [2026-08-12 Pi 0.84.1 verification](#2026-08-12-pi-0841-pending-message-verification) records the complete private surface this adapter now binds.
 The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
 It delegates current recognition to `bin/fm-operational-input.sh`, adds only the evidence-backed bare-U+2063 `Supervisor escalate (` presentation compatibility shape, mounts a `UserMessageComponent` subclass that preserves Pi's stock row plus leading spacer while Calm is off, and returns zero rendered lines while Calm is on.
 It never intercepts the input event, rewrites the message, changes its role, filters model context, or changes session data.
@@ -224,7 +224,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
+Pi 0.81.1 through 0.84.1 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, member-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those seams is handled.
+The exported `InteractiveMode` class is only the entry point: the members the operational-user adapter patches are declared `private`, so that adapter's stability rests on the probed private surface rather than on the class export.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -249,7 +250,7 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
+| Pi (verified 0.81.1 through 0.84.1) | Partially feasible with two API-probed exported-class adapters, one of which binds Pi-private members. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws. The collapsed-thinking boundary uses the exported `AssistantMessageComponent.updateContent`. The operational-user layout and pending-message dock boundaries have no public equivalent, so they bind `InteractiveMode` members that Pi declares `private` (`addMessageToChat`, `getAllQueuedMessages`, `getMarkdownTransformers`, `setHiddenThinkingLabel`, `updatePendingMessagesDisplay`); these are not stable API and a minor Pi upgrade may rename or remove them. Each is probed by name at install time and a miss fails loudly rather than degrading silently. Generic user, tool, and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -265,9 +266,10 @@ It covers persisted preference restoration across every session-start reason and
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
+The real Pi TUI pending-message fixture holds one operational follow-up and one genuine Captain follow-up during an active run, proves Calm hides only the operational dock row, and exercises the public dequeue path without changing either queued message.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
-`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
+`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations and reports that package version dynamically.
 
 The relevant commands are:
 
@@ -436,3 +438,65 @@ right-heading:  <|          over  \__/~~-~~~-~
 
 At 3 columns the sprite fell back to a single exact-width row, `<|~`.
 Escape aborted the run leaving `Operation aborted`, no boat, and no stale sprite rows, and the trial exited 0 after deleting its temporary state.
+
+## 2026-08-12 Pi 0.84.1 pending-message verification
+
+Pi 0.84.1 added a visible pending-message dock for extension-queued follow-ups, which is a separate rendering path from delivered transcript rows.
+The Calm adapter now filters the same narrow operational-input classification at that presentation boundary while leaving the underlying steering and follow-up queues unchanged.
+Pi exposes no public renderer for either the transcript row or the dock, so this adapter binds `InteractiveMode` members that Pi's declarations mark `private`.
+That was already true of the pre-existing `addMessageToChat` path; the dock work extends the same private surface rather than introducing the dependency.
+The adapter declares that surface in one list, probes every member by name at install time, and throws a named diagnostic when any is missing, so a Pi upgrade that renames one fails loudly instead of silently leaving operational rows visible.
+`getMarkdownTransformers` is part of that probed list rather than an optional call, because Pi's `UserMessageComponent` defaults `markdownTransformers` to `[]`: a silently absent member would strip extension markdown transformers from Calm-rendered operational rows while ordinary Pi-rendered rows kept them.
+A dedicated check deletes each of the five members from the real Pi prototype in turn and asserts that installation aborts with a diagnostic naming that member.
+Classifying operational text shells out to `bin/fm-operational-input.sh` through `spawnSync`, measured at roughly 9ms per call, and Pi repaints the dock on every queue mutation.
+Re-filtering each queued message on each repaint would therefore block the TUI event loop for that cost times the queue length, so the adapter caches the verdict per exact message text behind the existing U+2063 fast path.
+Classification is a pure function of that text, so the cache changes only how often the subprocess runs and never which rows are hidden; it is bounded at 256 entries and evicts in insertion order so a long session cannot grow it without limit.
+Reloading the extension re-runs the installer against the already-patched prototype, and that path replaces both closures rather than retaining the classifier.
+A reload is exactly when the rebuilt classifier can differ from the retained one, because `fm-operational-input.ts` resolves its classifier script at module-import time, so a reloaded module can bind a different script; keeping the old closure would also keep verdicts it cached under the previous rules.
+The cost is one cold classification pass over the queue after a reload, after which repaints reuse the refreshed cache.
+The real TUI regression holds an operational follow-up and a genuine Captain follow-up during an active run, proves only the operational dock row is hidden, and then verifies unchanged delivery, ordering, session persistence, restart behavior, Calm-off rendering, and export behavior.
+Claude, Codex, OpenCode, Grok, tmux, Herdr, Zellij, Orca, and cmux do not load this Pi-only presentation adapter, so their delivery and rendering surfaces remain unchanged.
+
+The component-level dock check builds its fixture with `Object.create(InteractiveMode.prototype, ...)` so Pi's own `getAllQueuedMessages` resolves through `this`, exactly as on a live instance.
+A plain object literal cannot stand in here: Pi's dock renderer calls that member on `this`, and `session` is a getter-only accessor on the prototype.
+The dock renders each queued message through a single-line `TruncatedText`, so the assertions match a first-line marker of the operational envelope rather than the whole multi-line string, and every dock assertion is gated on Pi's own dequeue hint so a missing repaint fails instead of passing vacuously.
+Removing only the two queue filters from the adapter makes `tests/fm-calm-pi-extension.test.sh` fail with `Calm did not filter current operational text from the pending-message dock`, and restoring them makes it pass, so the regression is genuinely covered.
+The classification-reuse check wraps the classifier script in a counting probe and drives the real dock renderer: it asserts the first paint hides the operational row, that five further repaints of an unchanged queue spawn the classifier zero times and render identically, that a newly queued message is still classified exactly once, and that flooding the cache past its bound forces the evicted entry to be recomputed while staying hidden.
+It then reinstalls the adapter and asserts the next repaint re-classifies each queued operational message exactly once while still hiding only the operational row, and that three further repaints spawn the classifier zero times because the refreshed cache is warm again.
+It then switches the probe script to declare nothing operational and reinstalls, asserting the previously hidden row becomes visible: a reinstall that reused the old cached verdicts would keep hiding it.
+Because that check varies only the verdict, a further step reinstalls from a genuinely reloaded adapter module that carries its own copy of the classifier module bound to a second probe script, and asserts the reloaded script's call log is non-empty while the original script's stays empty.
+That distinguishes a rebuilt classifier closure from mere cache invalidation, since an adapter that retained the captured closure would keep routing every call to the original script; reinstalling from the original module then swings the binding back.
+Restoring the real rules and reinstalling hides it again, and toggling Calm off and back on across further reinstalls still restores and re-hides that row.
+
+The commands below were run with `FM_PI_PACKAGE_DIR` pointed at the installed Pi 0.84.1 package so no Pi-dependent block was skipped.
+
+```text
+$ pi --version
+0.84.1
+
+$ tests/fm-calm-pi-extension.test.sh
+ok - Pi calm resolves its persistent home independently of Pi's launch directory
+ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
+ok - a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
+ok - missing Pi presentation class exports reach the independent adapter degradation path
+ok - removing any Pi-private member the Calm operational-row adapter binds fails installation loudly and names it
+ok - repainting the pending dock reuses cached operational classification, classifies new messages once, keeps the cache bounded, and on reinstall adopts the current classification rules with one cold pass before caching again
+ok - Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on
+ok - Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
+ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
+ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
+ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched
+ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=67 local_links=241
+```
+
+`tests/fm-pi-primary-types.test.sh` skips unless `tsc` is on `PATH`.
+Running it with a TypeScript 5.9.3 compiler available reports one pre-existing error in `.pi/extensions/fm-calm.ts`, where Pi 0.84.1 narrowed `TerminalInputHandler` to return `{ consume?, data? } | undefined` rather than `void`.
+That error reproduces unchanged on the base commit, is unrelated to the pending-message dock, and is left for a separate focused change.
+The tracked `.pi/extensions/lib/` adapters, including this one, pass the same strict no-emit configuration cleanly.

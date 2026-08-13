@@ -13,8 +13,9 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows both in the transcript and while they wait in Pi's pending-message dock.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+Genuine queued Captain messages remain visible in the pending-message dock.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
@@ -30,7 +31,10 @@ These are supported-API boundaries rather than hidden-content failures.
 ## Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
-The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
+The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi members they patch when Calm loads.
+The collapsed-thinking adapter patches the exported `AssistantMessageComponent.updateContent`.
+Pi exposes no public transcript-row or pending-message-dock renderer, so the operational-user-row adapter instead binds `InteractiveMode` members that Pi's own declarations mark `private`; these are not stable API, and a minor Pi upgrade may rename or remove one.
+Every member it binds is probed by name at load time, so a renamed or removed member fails loudly rather than silently letting operational rows reappear.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
