@@ -66,7 +66,6 @@ fm_run_manifest_path() { printf '%s/manifest.json\n' "$(fm_run_root "$1")"; }
 fm_run_hash_path()     { printf '%s/manifest.sha256\n' "$(fm_run_root "$1")"; }
 fm_run_state_path()    { printf '%s/run.state\n' "$(fm_run_root "$1")"; }
 fm_run_receipts_path() { printf '%s/receipts.jsonl\n' "$(fm_run_root "$1")"; }
-fm_run_evidence_path() { printf '%s/evidence\n' "$(fm_run_root "$1")"; }
 
 fm_run_exists() {  # <run-id>
   [ -f "$(fm_run_manifest_path "$1")" ]
