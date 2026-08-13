@@ -895,15 +895,16 @@ while time.monotonic() < deadline and process.poll() is None:
         key_honoured_during_local = not os.path.exists(local_finished)
         break
     time.sleep(0.01)
-while not os.path.exists(local_finished) and time.monotonic() < deadline:
-    read_available(master_fd, output)
-    time.sleep(0.01)
 if process.poll() is None:
+    q_sent_at = time.monotonic()
     os.write(master_fd, b"q")
-exit_deadline = time.monotonic() + 3
+else:
+    q_sent_at = time.monotonic()
+exit_deadline = q_sent_at + 3
 while process.poll() is None and time.monotonic() < exit_deadline:
     read_available(master_fd, output)
     time.sleep(0.01)
+q_during_local_latency_ms = (time.monotonic() - q_sent_at) * 1000
 if process.poll() is None:
     process.kill()
 exit_code = process.wait(timeout=3)
@@ -965,6 +966,7 @@ os.close(slave_fd)
 
 print(f"first_paint_ms={first_paint_ms:.3f}" if first_paint_ms is not None else "first_paint_ms=missing")
 print(f"keypress_during_local_honoured={int(key_honoured_during_local)}")
+print(f"q_during_local_latency_ms={q_during_local_latency_ms:.3f}")
 print(f"first_row_paint_ms={row_paint_ms:.3f}" if row_paint_ms is not None else "first_row_paint_ms=missing")
 print(f"first_row_before_forge={int(first_row_before_forge)}")
 print(f"keypress_during_forge_honoured={int(expanded_before_forge)}")
@@ -983,6 +985,8 @@ PY
   [ "$paint_ms" != "missing" ] || fail "watch mode never painted an immediate loading frame"
   assert_contains "$metrics" "keypress_during_local_honoured=1" \
     "keypress was not handled while the local snapshot worker was still blocked"
+  awk -F= '$1 == "q_during_local_latency_ms" { found = 1; if ($2 >= 1000) exit 1 } END { if (!found) exit 1 }' \
+    <<< "$metrics" || fail "q during the local worker did not exit within one second"
   assert_contains "$metrics" "first_row_before_forge=1" \
     "first local row stayed behind the forge refresh"
   assert_contains "$metrics" "keypress_during_forge_honoured=1" \
@@ -994,6 +998,143 @@ PY
     "watch exit did not show the cursor and leave the alternate screen"
   assert_contains "$metrics" "tty_canonical_restored=1" "watch exit left the terminal in raw mode"
   pass "watch paints locally, handles input during forge refresh, and restores the terminal"
+}
+
+test_watch_redraw_clears_detail_tails_and_narrower_frames() {
+  local home fakebin real_tmux metrics
+  home=$(make_home watch-redraw)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  real_tmux=$(command -v tmux) || fail "tmux is required for the real-terminal redraw regression"
+  sed -i '' \
+    's/Decide the public API/Decide the public API AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA NARROW_FRAME_SENTINEL DETAIL_FRAME_SENTINEL/' \
+    "$home/data/backlog.md"
+
+  metrics=$(python3 - "$real_tmux" "$DASHBOARD" "$home" "$fakebin" <<'PY'
+import os, subprocess, sys, time
+
+tmux, dashboard, home, fakebin = sys.argv[1:]
+socket = os.path.join(home, "cockpit-redraw.sock")
+target = "cockpit"
+environment = (
+    f"PATH={fakebin}:{os.environ['PATH']} "
+    f"FM_HOME={home} FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z "
+    "FM_FLEET_WATCH_LOCAL_SECONDS=30 FM_FLEET_WATCH_GITHUB_SECONDS=120 NO_COLOR=1"
+)
+
+def run(*arguments, check=True):
+    return subprocess.run(
+        [tmux, "-S", socket, *arguments], check=check,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+def capture():
+    return run("capture-pane", "-p", "-t", target).stdout
+
+def wait_for(needle, timeout=15):
+    deadline = time.monotonic() + timeout
+    screen = ""
+    while time.monotonic() < deadline:
+        screen = capture()
+        if needle in screen:
+            return screen
+        time.sleep(0.02)
+    return screen
+
+command = f"env {environment} {dashboard} --watch"
+run("new-session", "-d", "-x", "120", "-y", "50", "-s", target, command)
+try:
+    list_screen = wait_for("DETAIL_FRAME_SENTINEL")
+    run("send-keys", "-t", target, "1", "Enter")
+    detail_screen = wait_for("row id:")
+    detail_wider = "DETAIL_FRAME_SENTINEL" in detail_screen
+    run("send-keys", "-t", target, "b")
+    returned_screen = wait_for("select: type row number + Enter")
+    detail_tail_gone = "DETAIL_FRAME_SENTINEL" not in returned_screen
+
+    run("resize-window", "-t", target, "-x", "50", "-y", "50")
+    run("send-keys", "-t", target, "9")
+    time.sleep(0.1)
+    run("resize-window", "-t", target, "-x", "120", "-y", "50")
+    resized_screen = capture()
+    narrow_tail_gone = "NARROW_FRAME_SENTINEL" not in resized_screen
+    run("send-keys", "-t", target, "q")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and run("has-session", "-t", target, check=False).returncode == 0:
+        time.sleep(0.02)
+    exited = run("has-session", "-t", target, check=False).returncode != 0
+finally:
+    run("kill-server", check=False)
+
+print(f"detail_frame_wider={int(detail_wider)}")
+print(f"detail_tail_gone={int(detail_tail_gone)}")
+print(f"narrow_resize_tail_gone={int(narrow_tail_gone)}")
+print(f"exit_clean={int(exited)}")
+PY
+  ) || fail "tmux real-terminal redraw driver failed"
+  printf '%s\n' "$metrics"
+  assert_contains "$metrics" "detail_frame_wider=1" "redraw fixture never rendered its wide detail frame"
+  assert_contains "$metrics" "detail_tail_gone=1" "detail-frame text survived the back-navigation redraw"
+  assert_contains "$metrics" "narrow_resize_tail_gone=1" "wide-frame text survived a narrower redraw"
+  assert_contains "$metrics" "exit_clean=1" "redraw PTY did not exit cleanly"
+  pass "watch redraw clears every shortened line after detail navigation and resize"
+}
+
+test_watch_does_not_claim_a_github_check_without_github_work() {
+  local home fakebin metrics
+  home=$(make_home watch-no-github)
+  fakebin=$(make_fakebin "$home")
+  metrics=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" <<'PY'
+import fcntl, os, pty, select, struct, subprocess, sys, termios, time
+
+dashboard, home = sys.argv[1:]
+master, slave = pty.openpty()
+monitor = os.dup(slave)
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "30",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "120",
+    "NO_COLOR": "1",
+})
+process = subprocess.Popen(
+    [dashboard, "--watch", "--width", "80"],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=environment,
+)
+os.close(slave)
+output = bytearray()
+deadline = time.monotonic() + 10
+while process.poll() is None and time.monotonic() < deadline:
+    if select.select([master], [], [], 0.02)[0]:
+        try:
+            output.extend(os.read(master, 65536))
+        except OSError:
+            break
+    if b"github status not checked" in output and b"select: type row number" in output:
+        break
+if process.poll() is None:
+    os.write(master, b"q")
+exit_deadline = time.monotonic() + 2
+while process.poll() is None and time.monotonic() < exit_deadline:
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+exit_code = process.wait(timeout=3)
+print(f"checking_github_claimed={int(b'checking GitHub' in output)}")
+print(f"not_checked_rendered={int(b'github status not checked' in output)}")
+print(f"exit_code={exit_code}")
+os.close(master)
+os.close(monitor)
+PY
+  ) || fail "no-GitHub PTY driver failed"
+  printf '%s\n' "$metrics"
+  assert_contains "$metrics" "checking_github_claimed=0" \
+    "watch claimed it was checking GitHub on a home that makes no GitHub call"
+  assert_contains "$metrics" "not_checked_rendered=1" "watch did not render the truthful no-GitHub status"
+  assert_contains "$metrics" "exit_code=0" "no-GitHub PTY did not exit cleanly"
+  pass "watch does not claim a GitHub check when no GitHub work exists"
 }
 
 test_ignored_operational_directories_are_never_output_targets() {
@@ -1554,6 +1695,108 @@ PY
   pass "watch expansion during forge loading persistently acknowledges a NEW row"
 }
 
+test_watch_keeps_forge_newness_visible_until_it_can_be_acknowledged() {
+  local home fakebin changed row_id store pending_before metrics
+  home=$(make_home watch-forge-newness-ack)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  store="$home/state/fleet-dashboard-observations.json"
+  NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
+    || fail "forge-newness baseline render failed"
+  touch "$home/ci-red-fixture"
+  changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
+    || fail "forge-newness changed render failed"
+  row_id=$(printf '%s\n' "$changed" | rg -F "PR 4001" | awk '{print $2}')
+  [ -n "$row_id" ] || fail "forge-derived NEW row was not addressable"
+  pending_before=$(jq -c '[.rows | to_entries[] | select(.value.pending == true) | .key] | sort' "$store")
+  touch "$home/slow-github-fixture"
+
+  metrics=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" "$row_id" <<'PY'
+import fcntl, json, os, pty, re, select, struct, subprocess, sys, termios, time
+
+dashboard, home, row_id = sys.argv[1:]
+master, slave = pty.openpty()
+monitor = os.dup(slave)
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "30",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "120",
+    "FM_TEST_GITHUB_SLEEP_SECONDS": "15",
+    "NO_COLOR": "1",
+})
+process = subprocess.Popen(
+    [dashboard, "--watch", "--all", "--width", "80"],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=environment,
+)
+os.close(slave)
+output = bytearray()
+started = os.path.join(home, "github-refresh-started")
+finished = os.path.join(home, "github-refresh-finished")
+sent = False
+back_sent = False
+badge_stayed_visible = False
+deadline = time.monotonic() + 60
+while process.poll() is None and time.monotonic() < deadline:
+    if select.select([master], [], [], 0.02)[0]:
+        try:
+            output.extend(os.read(master, 65536))
+        except OSError:
+            break
+    latest_frame = bytes(output).rsplit(b"\x1b[H", 1)[-1].split(b"\x1b[J", 1)[0]
+    if not sent and os.path.exists(started):
+        row_line = next((line for line in latest_frame.splitlines() if row_id.encode() in line and b"[NEW]" in line), None)
+        row_match = re.match(rb"\s*(\d+)\s", row_line or b"")
+        if row_match:
+            os.write(master, row_match.group(1) + b"\r")
+            sent = True
+    if sent and not back_sent and b"row id: " + row_id.encode() in latest_frame:
+        output.clear()
+        os.write(master, b"b")
+        back_sent = True
+    if back_sent and b"select: type row number" in latest_frame and b"PR 4001" in latest_frame:
+        badge_stayed_visible = any(
+            b"PR 4001" in line and b"[NEW]" in line
+            for line in latest_frame.splitlines()
+        )
+        break
+if process.poll() is None:
+    os.write(master, b"q")
+exit_deadline = time.monotonic() + 2
+while process.poll() is None and time.monotonic() < exit_deadline:
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+exit_code = process.wait(timeout=3)
+with open(os.path.join(home, "state", "fleet-dashboard-observations.json"), encoding="utf-8") as handle:
+    store = json.load(handle)
+pending_after = sorted(key for key, value in store["rows"].items() if value.get("pending") is True)
+os.close(master)
+os.close(monitor)
+print(f"badge_stayed_visible={int(badge_stayed_visible)}")
+print(f"selection_sent={int(sent)}")
+print(f"back_sent={int(back_sent)}")
+print(f"store_version={store.get('version')}")
+print(f"pending_after={json.dumps(pending_after, separators=(',', ':'))}")
+print(f"forge_still_loading={int(not os.path.exists(finished))}")
+print(f"exit_code={exit_code}")
+PY
+  ) || fail "forge-newness PTY driver failed"
+  printf '%s\n' "$metrics"
+  assert_contains "$metrics" "badge_stayed_visible=1" \
+    "forge-derived NEW badge flickered off after an acknowledgement the stale model could not persist"
+  assert_contains "$metrics" "selection_sent=1" "forge-derived NEW row was not selected in the PTY"
+  assert_contains "$metrics" "back_sent=1" "forge-derived NEW detail was not closed in the PTY"
+  assert_contains "$metrics" "store_version=1" "loading-window acknowledgement changed the observation-store schema"
+  assert_contains "$metrics" "pending_after=$pending_before" \
+    "loading-window acknowledgement invented or silently ate a pending NEW marker"
+  assert_contains "$metrics" "forge_still_loading=1" \
+    "forge-newness assertion did not run inside the loading window"
+  pass "forge-derived NEW stays visible until a revision-complete acknowledgement is possible"
+}
+
 test_watch_forge_refresh_has_a_deadline() {
   local home fakebin metrics
   home=$(make_home watch-forge-timeout)
@@ -1585,6 +1828,7 @@ os.close(slave)
 output = bytearray()
 timeout_seen = False
 timeout_before_command_finished = False
+q_latency_ms = None
 deadline = time.monotonic() + 8
 finished = os.path.join(home, "github-refresh-finished")
 while process.poll() is None and time.monotonic() < deadline:
@@ -1598,18 +1842,35 @@ while process.poll() is None and time.monotonic() < deadline:
         timeout_before_command_finished = not os.path.exists(finished)
         break
 if process.poll() is None:
+    q_sent_at = time.monotonic()
+    os.write(master, b"q")
+    exit_deadline = q_sent_at + 1
+    while process.poll() is None and time.monotonic() < exit_deadline:
+        if select.select([master], [], [], 0.01)[0]:
+            try:
+                output.extend(os.read(master, 65536))
+            except OSError:
+                break
+        time.sleep(0.01)
+    q_latency_ms = (time.monotonic() - q_sent_at) * 1000
+if process.poll() is None:
     process.kill()
 exit_code = process.wait(timeout=3)
 os.close(master)
 os.close(monitor)
 print(f"forge_timeout_seen={int(timeout_seen)}")
 print(f"forge_timeout_before_command_finished={int(timeout_before_command_finished)}")
+print(f"q_after_forge_timeout_latency_ms={q_latency_ms:.3f}" if q_latency_ms is not None else "q_after_forge_timeout_latency_ms=missing")
 print(f"exit_code={exit_code}")
 PY
   ) || fail "forge-timeout PTY driver failed"
+  printf '%s\n' "$metrics"
   assert_contains "$metrics" "forge_timeout_seen=1" "wedged forge worker had no visible deadline"
   assert_contains "$metrics" "forge_timeout_before_command_finished=1" \
     "forge deadline did not settle before the blocked command"
+  awk -F= '$1 == "q_after_forge_timeout_latency_ms" { found = 1; if ($2 >= 1000) exit 1 } END { if (!found) exit 1 }' \
+    <<< "$metrics" || fail "timed-out forge worker kept the dashboard alive after q"
+  assert_contains "$metrics" "exit_code=0" "q after a forge timeout did not exit cleanly"
   pass "watch forge refresh fails visibly at a bounded deadline"
 }
 
@@ -2009,6 +2270,8 @@ test_html_page_renders_minimal_sections_with_reachable_detail
 test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
 test_watch_paints_and_accepts_input_during_forge_refresh
+test_watch_redraw_clears_detail_tails_and_narrower_frames
+test_watch_does_not_claim_a_github_check_without_github_work
 test_ignored_operational_directories_are_never_output_targets
 test_default_screen_defers_non_actionable_rows_without_losing_full_inventory
 test_default_slots_prioritize_new_rows_and_name_hidden_reviews
@@ -2023,6 +2286,7 @@ test_empty_observation_store_reseeds_silently
 test_identical_newness_render_stays_quiet_and_does_not_mark_seen
 test_expansion_marks_only_the_selected_row_seen
 test_watch_expansion_acknowledges_new_row_during_forge_loading
+test_watch_keeps_forge_newness_visible_until_it_can_be_acknowledged
 test_watch_forge_refresh_has_a_deadline
 test_watched_field_change_flags_exactly_one_row
 test_excluded_events_never_flag_newness

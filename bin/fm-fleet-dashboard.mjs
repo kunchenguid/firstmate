@@ -25,7 +25,7 @@
 //   observation store  seeded silently on first render; terminal expansion
 //                      atomically acknowledges only the selected row
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -188,19 +188,41 @@ function assertSafeOutput(outputPath) {
   }
 }
 
-function run(command, argumentsList, environment = process.env, timeout = 60000) {
-  try {
-    return execFileSync(command, argumentsList, {
+function run(command, argumentsList, environment = process.env, timeout = 60000, killProcessGroup = false) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let timedOut = false;
+    const detached = killProcessGroup && process.platform !== "win32";
+    const child = execFile(command, argumentsList, {
+      detached,
       encoding: "utf8",
       env: environment,
       maxBuffer: 16 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout,
+    }, (error, stdout, stderr) => {
+      clearTimeout(timeoutTimer);
+      if (!error) {
+        resolvePromise(stdout);
+        return;
+      }
+      const diagnostic = stderr?.toString().trim() || error.message;
+      const wrapped = new Error(`${command} failed: ${diagnostic}`);
+      wrapped.timedOut = timedOut;
+      rejectPromise(wrapped);
     });
-  } catch (error) {
-    const diagnostic = error.stderr?.toString().trim() || error.message;
-    throw new Error(`${command} failed: ${diagnostic}`);
-  }
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    }, timeout);
+  });
+}
+
+function commandTimeout(deadlineMs, fallback = 60000) {
+  if (!Number.isFinite(deadlineMs)) return fallback;
+  return Math.max(1, Math.min(fallback, deadlineMs - Date.now()));
 }
 
 function markdownSection(text, names) {
@@ -241,10 +263,16 @@ function reportEvidence(reportPath) {
   };
 }
 
-function fetchQuota() {
+async function fetchQuota(deadlineMs = null) {
   const fetchedAtMs = Date.now();
   try {
-    const data = JSON.parse(run("quota-axi", ["--json"], process.env, 10000));
+    const data = JSON.parse(await run(
+      "quota-axi",
+      ["--json"],
+      process.env,
+      commandTimeout(deadlineMs, 10000),
+      Number.isFinite(deadlineMs),
+    ));
     return {
       available: true,
       fetchedAtMs,
@@ -253,19 +281,26 @@ function fetchQuota() {
       reason: null,
     };
   } catch (error) {
+    if (error.timedOut) throw error;
     return { available: false, fetchedAtMs, generatedAt: null, providers: [], reason: error.message.split("\n")[0] };
   }
 }
 
-function fetchReviewRequests() {
+async function fetchReviewRequests(deadlineMs = null) {
   const fetchedAtMs = Date.now();
   try {
-    const viewer = run("gh", ["api", "user", "--jq", ".login"]).trim();
+    const viewer = (await run(
+      "gh",
+      ["api", "user", "--jq", ".login"],
+      process.env,
+      commandTimeout(deadlineMs),
+      Number.isFinite(deadlineMs),
+    )).trim();
     if (!viewer) throw new Error("authenticated GitHub login is unknown");
-    const found = JSON.parse(run("gh", [
+    const found = JSON.parse(await run("gh", [
       "search", "prs", "--review-requested=@me", "--state=open", "--limit", String(REVIEW_REQUEST_LIMIT),
       "--json", "author,createdAt,number,repository,title,updatedAt,url",
-    ]));
+    ], process.env, commandTimeout(deadlineMs), Number.isFinite(deadlineMs)));
     const items = [];
     for (let index = 0; index < (Array.isArray(found) ? found.length : 0); index += 1) {
       const result = found[index];
@@ -273,17 +308,17 @@ function fetchReviewRequests() {
       let requestedAt = null;
       if (repository && result.number && index < REVIEW_REQUEST_TIMELINE_LIMIT) {
         try {
-          const requestedReviewers = JSON.parse(run("gh", [
+          const requestedReviewers = JSON.parse(await run("gh", [
             "api", "--method", "GET", `repos/${repository}/pulls/${result.number}/requested_reviewers`,
-          ]));
+          ], process.env, commandTimeout(deadlineMs), Number.isFinite(deadlineMs)));
           const viewerIsRequested = (requestedReviewers.users ?? [])
             .some((reviewer) => reviewer.login === viewer);
           const requestedTeamKeys = new Set((requestedReviewers.teams ?? []).flatMap((team) =>
             [team.id == null ? null : String(team.id), team.slug, team.name].filter(Boolean),
           ));
-          const timeline = JSON.parse(run("gh", [
+          const timeline = JSON.parse(await run("gh", [
             "api", "--method", "GET", `repos/${repository}/issues/${result.number}/timeline`, "-f", "per_page=100",
-          ]));
+          ], process.env, commandTimeout(deadlineMs), Number.isFinite(deadlineMs)));
           const events = (Array.isArray(timeline) ? timeline : [])
             .filter((event) => {
               const requestedTeam = event.requested_team;
@@ -298,7 +333,8 @@ function fetchReviewRequests() {
             })
             .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
           requestedAt = events[0]?.created_at ?? null;
-        } catch {
+        } catch (error) {
+          if (error.timedOut) throw error;
           requestedAt = null;
         }
       }
@@ -306,6 +342,7 @@ function fetchReviewRequests() {
     }
     return { available: true, fetchedAtMs, viewer, items, reason: null };
   } catch (error) {
+    if (error.timedOut) throw error;
     return { available: false, fetchedAtMs, viewer: null, items: [], reason: error.message.split("\n")[0] };
   }
 }
@@ -506,7 +543,7 @@ function recordActivityDate(record) {
   return record.reported ?? record.done ?? record.merged ?? record.completion?.date ?? record.since ?? null;
 }
 
-function githubPrUrlFromProjectRemote(home, project, number) {
+async function githubPrUrlFromProjectRemote(home, project, number) {
   if (!project || !/^[0-9A-Za-z._-]+$/.test(project) || !/^\d+$/.test(number ?? "")) {
     return null;
   }
@@ -517,7 +554,7 @@ function githubPrUrlFromProjectRemote(home, project, number) {
   }
   let remote;
   try {
-    remote = run("git", ["-C", projectPath, "remote", "get-url", "origin"]).trim();
+    remote = (await run("git", ["-C", projectPath, "remote", "get-url", "origin"])).trim();
   } catch {
     return null;
   }
@@ -531,7 +568,7 @@ function githubPrUrlFromProjectRemote(home, project, number) {
   return slug && /^[^/\s]+\/[^/\s]+$/.test(slug) ? `https://github.com/${slug}/pull/${number}` : null;
 }
 
-function collectReviewRelationships() {
+async function collectReviewRelationships() {
   const domain = findReviewsDomain();
   if (!domain.available) {
     return { available: false, reason: domain.reason, relationships: [] };
@@ -541,7 +578,7 @@ function collectReviewRelationships() {
   }
   let snapshot;
   try {
-    const text = run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--json"], {
+    const text = await run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--json"], {
       ...process.env,
       FM_HOME: domain.home,
       FM_STATE_OVERRIDE: resolve(domain.home, "state"),
@@ -621,7 +658,7 @@ function collectReviewRelationships() {
     const recordedLink = [...group.links][0] ?? null;
     const derivedLink = recordedLink
       ? null
-      : githubPrUrlFromProjectRemote(domain.home, current.repo, group.number);
+      : await githubPrUrlFromProjectRemote(domain.home, current.repo, group.number);
     relationships.push({
       id: group.number ? `pr-${group.number}` : current.id,
       number: group.number,
@@ -861,17 +898,17 @@ function ourPrRecommendation({ markerKey, registeredPr, githubResult, prNumber, 
 // GitHub state is fetched on its own slow cadence because it is expensive and
 // rate-limited, and its age is always printed so a cached CI result is never
 // read as live.
-function fetchGithubThreadObservations(url, viewer) {
+async function fetchGithubThreadObservations(url, viewer, deadlineMs = null) {
   const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/i);
   if (!match || !viewer) return null;
   try {
-    const data = JSON.parse(run("gh", [
+    const data = JSON.parse(await run("gh", [
       "api", "graphql",
       "-f", `query=${REVIEW_THREADS_QUERY}`,
       "-f", `owner=${match[1]}`,
       "-f", `name=${match[2]}`,
       "-F", `number=${match[3]}`,
-    ]));
+    ], process.env, commandTimeout(deadlineMs), Number.isFinite(deadlineMs)));
     const nodes = data?.data?.repository?.pullRequest?.reviewThreads?.nodes;
     if (!Array.isArray(nodes)) return null;
     return Object.fromEntries(nodes.flatMap((thread) => {
@@ -884,12 +921,13 @@ function fetchGithubThreadObservations(url, viewer) {
         openedAt: firstComment?.createdAt ?? null,
       }]];
     }));
-  } catch {
+  } catch (error) {
+    if (error.timedOut) throw error;
     return null;
   }
 }
 
-function fetchGithubStatuses(urls, viewer = null) {
+async function fetchGithubStatuses(urls, viewer = null, deadlineMs = null) {
   const results = new Map();
   let error = null;
   for (const url of urls) {
@@ -902,19 +940,20 @@ function fetchGithubStatuses(urls, viewer = null) {
       continue;
     }
     try {
-      const text = run("gh", [
+      const text = await run("gh", [
         "pr",
         "view",
         url,
         "--json",
         "state,isDraft,mergeable,reviewDecision,statusCheckRollup,reviews,reviewRequests,headRefOid",
-      ]);
+      ], process.env, commandTimeout(deadlineMs), Number.isFinite(deadlineMs));
       results.set(url, {
         ok: true,
         ...githubStatus(JSON.parse(text)),
-        threadObservations: fetchGithubThreadObservations(url, viewer),
+        threadObservations: await fetchGithubThreadObservations(url, viewer, deadlineMs),
       });
     } catch (fetchError) {
+      if (fetchError.timedOut) throw fetchError;
       results.set(url, {
         ok: false,
         ci: "CI unknown (GitHub unavailable)",
@@ -926,22 +965,23 @@ function fetchGithubStatuses(urls, viewer = null) {
   return { fetchedAtMs: Date.now(), results, error };
 }
 
-function fetchForgeState(inputs) {
+async function fetchForgeState(inputs, deadlineMs = null) {
   const reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
-    ? fetchReviewRequests()
+    ? await fetchReviewRequests(deadlineMs)
     : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
   const urls = githubPrUrls(inputs, reviewRequests);
   return {
     reviewRequests,
-    github: urls.length > 0 ? fetchGithubStatuses(urls, reviewRequests.viewer) : null,
-    quota: fetchQuota(),
+    github: urls.length > 0 ? await fetchGithubStatuses(urls, reviewRequests.viewer, deadlineMs) : null,
+    quota: await fetchQuota(deadlineMs),
   };
 }
 
 function fetchForgeStateAsync(inputs) {
   return new Promise((resolvePromise, rejectPromise) => {
+    const deadlineMs = Date.now() + FORGE_REFRESH_TIMEOUT_MS;
     const worker = new Worker(new URL(import.meta.url), {
-      workerData: { operation: "fetch-forge-state", inputs },
+      workerData: { operation: "fetch-forge-state", inputs, deadlineMs },
     });
     let settled = false;
     const settle = (callback) => {
@@ -952,14 +992,19 @@ function fetchForgeStateAsync(inputs) {
     };
     const timeout = setTimeout(() => {
       settle(() => {
-        worker.unref();
-        rejectPromise(new Error(`forge refresh timed out after ${FORGE_REFRESH_TIMEOUT_MS}ms`));
+        worker.terminate().finally(() => {
+          rejectPromise(new Error(`forge refresh timed out after ${FORGE_REFRESH_TIMEOUT_MS}ms`));
+        });
       });
-    }, FORGE_REFRESH_TIMEOUT_MS);
+    }, FORGE_REFRESH_TIMEOUT_MS + 100);
     worker.once("message", (message) => {
       settle(() => {
         if (message.ok) resolvePromise(message.value);
-        else rejectPromise(new Error(message.error));
+        else if (message.timedOut) {
+          worker.terminate().finally(() => {
+            rejectPromise(new Error(`forge refresh timed out after ${FORGE_REFRESH_TIMEOUT_MS}ms`));
+          });
+        } else rejectPromise(new Error(message.error));
       });
     });
     worker.once("error", (error) => {
@@ -1964,15 +2009,17 @@ function renderHtml(model) {
 `;
 }
 
-function collectLocalInputs() {
-  const snapshot = collectFleetSnapshot();
-  const telemetry = collectTelemetry();
-  const reviews = collectReviewRelationships();
+async function collectLocalInputs() {
+  const [snapshot, telemetry, reviews] = await Promise.all([
+    collectFleetSnapshot(),
+    collectTelemetry(),
+    collectReviewRelationships(),
+  ]);
   return { snapshot, ...telemetry, reviews };
 }
 
-function collectFleetSnapshot() {
-  const snapshotText = run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--local-json"]);
+async function collectFleetSnapshot() {
+  const snapshotText = await run(resolve(scriptDirectory, "fm-fleet-snapshot.sh"), ["--local-json"]);
   let snapshot;
   try {
     snapshot = JSON.parse(snapshotText);
@@ -1982,11 +2029,11 @@ function collectFleetSnapshot() {
   return snapshot;
 }
 
-function collectTelemetry() {
+async function collectTelemetry() {
   const telemetryPresent = existsSync(telemetryPath);
   let telemetryRows = null;
   if (telemetryPresent) {
-    const telemetryText = run(resolve(scriptDirectory, "fm-model-telemetry.sh"), [
+    const telemetryText = await run(resolve(scriptDirectory, "fm-model-telemetry.sh"), [
       "sheet",
       "--format",
       "json",
@@ -2328,6 +2375,7 @@ function applyNewness(model) {
 }
 
 function markRowSeen(item) {
+  let acknowledged = false;
   withObservationStoreLock(() => {
     const store = readObservationStore() ?? { version: OBSERVATION_STORE_VERSION, rows: {} };
     const watched = watchedValuesForItem(item);
@@ -2347,9 +2395,16 @@ function markRowSeen(item) {
         row: current?.row ?? retainedRowForItem(item),
       };
       writeObservationStore(store);
+      acknowledged = true;
     }
   });
-  item.isNew = false;
+  if (acknowledged) item.isNew = false;
+  return acknowledged;
+}
+
+function terminalFrame(body) {
+  const erasedLines = body.split("\n").map((line) => `${line}\u001b[K`).join("\n");
+  return `\u001b[?2026h\u001b[H${erasedLines}\u001b[J\u001b[?2026l`;
 }
 
 // Internal loop rather than external watch(1) because the GitHub cache must
@@ -2397,7 +2452,7 @@ function watchLoop(width, useColor, showAll) {
         ? `select row: ${input}_ while local state loads | q: exit`
         : "q: exit";
       const body = `FIRSTMATE FLEET\n\n${detail}\n\n${prompt}\n`;
-      process.stdout.write(`\u001b[H${body}\u001b[J`);
+      process.stdout.write(terminalFrame(body));
       return;
     }
     let body;
@@ -2421,7 +2476,7 @@ function watchLoop(width, useColor, showAll) {
           : "select: type row number + Enter | q: exit");
       body += `${useColor ? ANSI.dim : ""}${clip(prompt, Math.min(frameWidth, 80))}${useColor ? ANSI.reset : ""}\n`;
     }
-    process.stdout.write(`\u001b[H${body}\u001b[J`);
+    process.stdout.write(terminalFrame(body));
   };
 
   const rebuildModel = (previewOnly = false) => {
@@ -2440,18 +2495,31 @@ function watchLoop(width, useColor, showAll) {
 
   const refreshForge = () => {
     forgeRefreshInFlight = true;
-    github = github
-      ? { ...github, loading: true }
-      : { loading: true, fetchedAtMs: null, results: new Map(), error: null };
+    const githubWillBeChecked = inputs.snapshot.backlog?.present === true ||
+      inputs.reviews.available ||
+      githubPrUrls(inputs).some((url) => /^https:\/\/github\.com\//.test(url));
+    github = githubWillBeChecked
+      ? github
+        ? { ...github, loading: true }
+        : { loading: true, fetchedAtMs: null, results: new Map(), error: null }
+      : null;
     if (reviewRequests === null) {
-      reviewRequests = {
-        available: false,
-        loading: true,
-        fetchedAtMs: null,
-        viewer: null,
-        items: [],
-        reason: "checking GitHub…",
-      };
+      reviewRequests = githubWillBeChecked
+        ? {
+            available: false,
+            loading: true,
+            fetchedAtMs: null,
+            viewer: null,
+            items: [],
+            reason: "checking GitHub…",
+          }
+        : {
+            available: false,
+            fetchedAtMs: Date.now(),
+            viewer: null,
+            items: [],
+            reason: "no fleet sources available",
+          };
     }
     if (quota === null) {
       quota = { available: false, loading: true, fetchedAtMs: null, providers: [], reason: "checking quota…" };
@@ -2556,25 +2624,32 @@ function watchLoop(width, useColor, showAll) {
 
 if (!isMainThread && workerData?.operation === "fetch-forge-state") {
   try {
-    parentPort.postMessage({ ok: true, value: fetchForgeState(workerData.inputs) });
+    parentPort.postMessage({
+      ok: true,
+      value: await fetchForgeState(workerData.inputs, workerData.deadlineMs),
+    });
   } catch (error) {
-    parentPort.postMessage({ ok: false, error: error.message });
+    parentPort.postMessage({
+      ok: false,
+      error: error.message,
+      timedOut: error.timedOut === true || Date.now() >= workerData.deadlineMs,
+    });
   }
 } else if (!isMainThread && workerData?.operation === "collect-fleet-snapshot") {
   try {
-    parentPort.postMessage({ ok: true, value: collectFleetSnapshot() });
+    parentPort.postMessage({ ok: true, value: await collectFleetSnapshot() });
   } catch (error) {
     parentPort.postMessage({ ok: false, error: error.message });
   }
 } else if (!isMainThread && workerData?.operation === "collect-telemetry") {
   try {
-    parentPort.postMessage({ ok: true, value: collectTelemetry() });
+    parentPort.postMessage({ ok: true, value: await collectTelemetry() });
   } catch (error) {
     parentPort.postMessage({ ok: false, error: error.message });
   }
 } else if (!isMainThread && workerData?.operation === "collect-review-relationships") {
   try {
-    parentPort.postMessage({ ok: true, value: collectReviewRelationships() });
+    parentPort.postMessage({ ok: true, value: await collectReviewRelationships() });
   } catch (error) {
     parentPort.postMessage({ ok: false, error: error.message });
   }
@@ -2587,8 +2662,8 @@ if (!isMainThread && workerData?.operation === "fetch-forge-state") {
     if (watch) {
       watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
     } else {
-      const inputs = collectLocalInputs();
-      const { github, reviewRequests, quota } = fetchForgeState(inputs);
+      const inputs = await collectLocalInputs();
+      const { github, reviewRequests, quota } = await fetchForgeState(inputs);
       const model = buildModel({ ...inputs, github, reviewRequests, quota });
       applyNewness(model);
       if (showRow !== null) {
