@@ -22,8 +22,9 @@ Usage: fm-merge-local.sh [--target-branch <branch>] <task-id>
 
 Fast-forward the project's currently checked-out clean target branch from the
 local-only task branch fm/<task-id>. Without --target-branch, the target remains
-the project's remote default branch. The explicit target must be an existing
-local branch and must already be checked out; this command never switches it.
+the project's resolved default branch: origin/HEAD, then local main or master.
+The explicit target must be an existing local branch and must already be checked
+out; this command never switches it.
 EOF
 }
 
