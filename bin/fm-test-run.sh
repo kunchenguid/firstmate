@@ -213,6 +213,9 @@ family_for_basename() {
     fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
+    fm-run-engine.test.sh|fm-run-governor.test.sh)
+      printf '%s\n' autonomous-runs
+      ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
       printf '%s\n' cmux
       ;;
@@ -250,6 +253,7 @@ backend-dispatch
 pr-forge
 afk
 snapshot-bearings
+autonomous-runs
 cmux
 zellij
 orca
@@ -953,6 +957,11 @@ families_for_changed_path() {
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
+      ;;
+    bin/fm-run.sh|bin/fm-run-lib.sh|bin/fm-run-governor.sh)
+      # The engine and its governor share one library, and a change to any of
+      # the three can move the other two's behavior.
+      printf '%s\n' autonomous-runs
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
