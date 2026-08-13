@@ -43,12 +43,18 @@
 # one bin/fm-pr-merge.sh lands PRs with, so it needs its own rule or the most
 # likely merge command is the one left open.
 #
-# Known residual: the REST endpoints and the inline GraphQL mergePullRequest
-# mutation are covered, but a GraphQL merge whose query text never reaches the
-# command line - read from a file or piped in on stdin - matches no pattern here.
-# Command-line rules cannot see that, so it is out of scope by construction
-# rather than by oversight; AGENTS.md section 1's captain-only landing boundary
-# is what covers it.
+# Known residual: every rule is matched against the top-level command string, so
+# the block covers DIRECT forge merge invocations and nothing else. Three shapes
+# fall outside it. A wrapper that reaches a merge verb in a subprocess matches no
+# pattern - including bin/fm-pr-merge.sh, the entrypoint AGENTS.md section 7 names
+# for every task PR merge, and equally any bash -c, script, or make target. So
+# does a GraphQL merge whose query text never reaches the command line, read from
+# a file or piped in on stdin. Local landing carries no rule at all, because the
+# list gates forge merge verbs rather than git: bin/fm-merge-local.sh and a bare
+# git merge --ff-only are ungated. Command-line rules cannot see any of that, so
+# this is a boundary by construction rather than an oversight, and the rule list
+# must not be read as full coverage; AGENTS.md section 1's captain-only landing
+# boundary is what covers the rest.
 
 # Print the merge-block permission rules as a JSON array.
 # Kept as one canonical list so the rules and their regression test cannot drift.

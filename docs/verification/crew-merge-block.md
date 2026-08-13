@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports the current guarantee that a claude crewmate's generated `.claude/settings.local.json` loads without a settings dialog and actually blocks the merge verbs.
+This record supports the current guarantee that a claude crewmate's generated `.claude/settings.local.json` loads without a settings dialog and actually blocks the merge verbs it names when they are run directly.
 The rules themselves and the reasoning behind them live in `bin/fm-crew-settings-lib.sh`; the enforced invariants live in `tests/fm-crew-settings.test.sh`.
 Those tests are hermetic and never invoke `claude`, so this record holds the live-binary evidence they cannot carry.
 
@@ -120,5 +120,5 @@ The refusal surfaced as `Permission to use Bash with command gh api --method PUT
 
 ### Known residual
 
-A GraphQL merge whose query text never appears on the command line - read from a file or piped in on stdin - matches no pattern here, because command-line rules cannot see it.
-That path is out of scope by construction; the captain-only landing boundary in AGENTS.md section 1 is what covers it.
+Every command exercised above was invoked directly, so no run here is evidence about a merge reached through a wrapper, a subprocess, or stdin.
+`bin/fm-crew-settings-lib.sh` owns the residual and what covers it.
