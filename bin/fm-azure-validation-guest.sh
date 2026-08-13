@@ -107,13 +107,28 @@ if by_lun.get("0") != sys.argv[4].lower() or by_lun.get("1") != sys.argv[5].lowe
     raise SystemExit("validation guest: IMDS data-disk identity mismatch")
 PY
 
-WORK_DEVICE=/dev/disk/azure/scsi1/lun0
-CREDENTIAL_DEVICE=/dev/disk/azure/scsi1/lun1
-for device in "$WORK_DEVICE" "$CREDENTIAL_DEVICE"; do
+# SCSI SKUs publish data disks under scsi1/lunN; NVMe-only SKUs (v6 families)
+# publish them under data/by-lun/N via azure-vm-utils. Both are udev identity
+# paths; never guess raw namespaces because luksFormat runs on the resolved
+# device.
+resolve_data_disk() {
+  lun="$1"
   deadline=$((SECONDS + 120))
-  while [ ! -b "$device" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 2; done
-  [ -b "$device" ] || { echo "validation guest: attached data disk did not appear" >&2; exit 125; }
-done
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    for link in "/dev/disk/azure/scsi1/lun$lun" "/dev/disk/azure/data/by-lun/$lun"; do
+      candidate=$(readlink -f "$link" 2>/dev/null || true)
+      if [ -n "$candidate" ] && [ -b "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+    sleep 2
+  done
+  echo "validation guest: attached data disk did not appear" >&2
+  exit 125
+}
+WORK_DEVICE=$(resolve_data_disk 0)
+CREDENTIAL_DEVICE=$(resolve_data_disk 1)
 
 if cryptsetup isLuks "$WORK_DEVICE"; then
   [ "$MODE" != start ] || { echo "validation guest: new cell found a pre-existing LUKS worktree" >&2; exit 125; }

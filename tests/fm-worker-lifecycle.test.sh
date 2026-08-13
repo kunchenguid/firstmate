@@ -43,6 +43,7 @@ for marker in (
     '"role", "assignment", "list", "--all"',
     "same-name foreign", "/usr/local/libexec/fm-worker-supervisor", "create_lifecycle_children",
     "prepare_disk 0 /mnt/account", "prepare_disk 1 /mnt/task", "blkid",
+    "/dev/disk/azure/scsi1/lun", "/dev/disk/azure/data/by-lun/",
     '"bootstrap-command"', '"task-command"', '"ttl-schedule"', '"global-reservation"',
     '"staging-request"', '"staging-result"',
     "worker NIC has a public IP relation", "VM cloud identity set is not exactly one slot identity",

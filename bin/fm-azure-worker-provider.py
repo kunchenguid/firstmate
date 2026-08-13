@@ -1082,9 +1082,19 @@ prepare_disk() {{
   target="$2"
   device=""
   attempts=0
+  # SCSI SKUs publish data disks under scsi1/lunN; NVMe-only SKUs (v6
+  # families) publish them under data/by-lun/N via azure-vm-utils. Both are
+  # udev identity paths; never guess raw namespaces because mkfs runs on the
+  # resolved device.
   while [ "$attempts" -lt 30 ]; do
-    device=$(readlink -f "/dev/disk/azure/scsi1/lun$lun" 2>/dev/null || true)
-    if [ -n "$device" ] && [ -b "$device" ]; then
+    for link in "/dev/disk/azure/scsi1/lun$lun" "/dev/disk/azure/data/by-lun/$lun"; do
+      candidate=$(readlink -f "$link" 2>/dev/null || true)
+      if [ -n "$candidate" ] && [ -b "$candidate" ]; then
+        device="$candidate"
+        break
+      fi
+    done
+    if [ -n "$device" ]; then
       break
     fi
     attempts=$((attempts + 1))
