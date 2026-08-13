@@ -659,10 +659,11 @@ test_handle_wake_routes_self_and_escalate() {
 }
 
 test_away_queue_handoff_classifies_once_without_consuming() {
-  local dir state drain_out latest
+  local dir state drain_out drain_err latest sequence generation
   dir=$(make_supercase away-queue-handoff)
   state="$dir/state"
   drain_out="$dir/drain.out"
+  drain_err="$dir/drain.err"
   : > "$state/.afk"
   printf 'done: PR https://example.test/pr/afk-handoff\n' > "$state/handoff-done.status"
   append_wake "$state" heartbeat heartbeat heartbeat
@@ -745,10 +746,17 @@ test_away_queue_handoff_classifies_once_without_consuming() {
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 3 ] \
     || fail "effect-first crash replay duplicated its buffered escalation"
 
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$drain_out" \
-    || fail "handoff queue could not be consumed by its sole drain owner"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$drain_out" 2> "$drain_err" \
+    || fail "handoff queue could not be presented by its sole drain owner"
   [ "$(grep -c $'\theartbeat\t\|\tsignal\t\|\tcheck\t' "$drain_out")" -eq 4 ] \
     || fail "handoff queue drain did not preserve each logical routine and actionable record"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ "$sequence" = 7 ] && [ -n "$generation" ] \
+    || fail "handoff queue drain did not require acknowledgement of its exact presented generation"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation" \
+    || fail "handled handoff queue could not be acknowledged"
   [ ! -s "$state/.wake-queue" ] || fail "handoff drain left consumed records in the queue"
   pass "away handoff classifies routine/actionable queue rows once without consuming or duplicating them"
 }
