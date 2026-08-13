@@ -229,7 +229,7 @@ Mechanism facts established first, in a separate throwaway workspace:
 | Can `stop` park? | hook sleeps, then returns a follow-up | Yes. It is awaited; a 20s sleep held the boundary and the follow-up landed after it. |
 | What is `loop_count`? | four consecutive follow-ups, then a real user message | `0,1,2,3`, then `0` again. It counts follow-up-driven stops since the last real user message. |
 | Does `loop_limit` bind? | `loop_limit: 2` with an always-follow-up hook | Yes. The hook was invoked at `loop_count` 0 and 1 and never at 2. |
-| Does a superseded park still deliver? | captain message typed during a 600s park | Yes, and Cursor does not kill the parked hook. Both parks later delivered a follow-up, which is the defect `state/.cursor-park-owner` exists to close. |
+| Does a captain message terminate an existing park? | captain message typed during a 600s park | No. Cursor leaves the park running, and without a baton an older park can still deliver after the captain turn's next `stop` has started another park. |
 | Does Cursor load `.claude/settings.json`? | Claude-shaped `SessionStart`, `PreToolUse`, `Stop` in the same workspace | `SessionStart` and `PreToolUse` fired with a CURSOR-shaped payload carrying `cursor_version`; `Stop` did not fire. |
 
 The integration itself is exercised by the opt-in guard:
@@ -247,12 +247,14 @@ ok - cursor primary: the run-tier session start completes every stage
 ok - cursor primary: sessionStart additional_context reaches model context before the first turn
 ok - cursor primary: the stop-hook park delivers a real watcher wake as one follow-up
 ok - cursor primary: the park owns exactly one arm cycle with a live watcher beacon
-ok - cursor primary: the captain keeps control mid-park and the superseded park stands down
+ok - cursor primary: the captain keeps control and the older park stands down after the next stop claim
 ok - cursor primary: an away-mode escalation is delivered, confirmed, and processed
 ```
 
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
 It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
+The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
+Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 

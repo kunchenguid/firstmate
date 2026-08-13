@@ -43,12 +43,12 @@
 #
 # SUPERSESSION. A captain message typed while this hook is parked is accepted
 # and runs its turn immediately, and Cursor does NOT terminate the parked hook
-# (verified live): its follow-up is still delivered when the park finally
-# closes, so a naive park leaks one process and one duplicate wake per captain
-# message. Each invocation therefore publishes itself as the current park owner
-# in state/.cursor-park-owner, and a park whose owner record no longer names it
-# stands down without emitting. Newest stop wins; the arm's own singleton keeps
-# the overlap from ever starting a second watcher.
+# (verified live). Until that turn ends and the next stop claims the baton, an
+# actionable close can still produce one real, durable-queue-backed follow-up
+# from the sole existing park. Each invocation publishes itself as the current
+# park owner in state/.cursor-park-owner, and once a newer stop has published its
+# claim, an older park still running stands down without emitting. Newest stop
+# wins; the arm's own singleton keeps the overlap from starting a second watcher.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -173,12 +173,12 @@ while [ "$i" -lt 240 ]; do
 done
 [ -n "$AFTER_SEQ" ] && [ "$AFTER_SEQ" -gt "$BEFORE_SEQ" ] \
   || harness_fail "a captain message mid-park must claim a newer park generation (before=$BEFORE_SEQ after=$AFTER_SEQ)"
-# Give a superseded park its poll interval to notice and stand down.
+# Give the older park one poll interval to observe the newer stop's claim.
 sleep 5
 LIVE_PARKS=$(pgrep -f "$HOME_DIR/bin/fm-turnend-guard-cursor.sh" 2>/dev/null | wc -l | tr -d ' ')
 [ "${LIVE_PARKS:-0}" -le 1 ] \
-  || harness_fail "a superseded park leaked: $LIVE_PARKS park processes are alive, and each would deliver a duplicate wake"
-pass "cursor primary: the captain keeps control mid-park and the superseded park stands down"
+  || harness_fail "an older park leaked after the newer stop claim: $LIVE_PARKS park processes are alive, and each could deliver a stale duplicate wake"
+pass "cursor primary: the captain keeps control and the older park stands down after the next stop claim"
 
 # --- 4. away-mode escalation delivery ---------------------------------------
 

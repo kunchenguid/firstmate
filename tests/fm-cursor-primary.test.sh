@@ -11,7 +11,7 @@
 #                 event twice.
 #   PARK        - bin/fm-turnend-guard-cursor.sh, the stop-hook park: its
 #                 follow-up sources, its double loop bound, its bounded repair
-#                 nag, and its supersession contract.
+#                 nag, and its post-claim supersession contract.
 #   SESSION     - bin/fm-sessionstart-cursor.sh, which injects the digest at
 #                 sessionStart.
 #
@@ -348,8 +348,8 @@ test_park_stands_down_when_superseded() {
   run_park "$dir" >/dev/null 2>&1
   wait "$first_pid" 2>/dev/null || true
   first_out=$(cat "$marker" 2>/dev/null || true)
-  [ -z "$first_out" ] || fail "the superseded park delivered a duplicate follow-up: $first_out"
-  pass "cursor park: a superseded park stands down instead of delivering a stale duplicate"
+  [ -z "$first_out" ] || fail "the older park delivered after the newer stop claimed the baton: $first_out"
+  pass "cursor park: an older park stands down after a newer stop claim"
 }
 
 test_park_serializes_supersession_with_followup_commit() {

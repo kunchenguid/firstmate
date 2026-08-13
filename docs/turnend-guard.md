@@ -112,12 +112,16 @@ The follow-up loop is bounded TWICE, because either bound alone is insufficient.
 `FM_CURSOR_TURNEND_LOOP_CEILING` (default 180) bounds the payload's `loop_count` from inside and sits deliberately BELOW the registered `loop_limit`, so firstmate's bound bites first and emits one final loud notice instead of supervision going silently dark at Cursor's ceiling.
 `loop_count` is Cursor's richer analogue of `stop_hook_active`: verified live as 0 on the first stop after a real user message, +1 per follow-up-driven stop, and reset to 0 by the next real user message.
 
-A captain message typed while the hook is parked is accepted and runs its turn immediately, and Cursor does NOT terminate the parked hook, so its follow-up would still be delivered when the park finally closes.
+A captain message typed while the hook is parked is accepted and runs its turn immediately, and Cursor does NOT terminate the parked hook.
+The older park remains the recorded owner until that captain turn ends and the next `stop` hook claims the baton, so an actionable watcher close in that window can still be delivered by the older park as one follow-up.
+That delivery is bounded and safe: only one park exists before the next `stop` claim, so it is a real wake and never a stale duplicate of another park's wake, while the durable wake queue makes handling idempotent.
 Each invocation publishes its sequence in `state/.cursor-park-owner` under the short publication and commit lock `state/.cursor-park-owner.lock`.
-The same bounded critical section covers the final owner and away-mode checks, follow-up output, and repair-budget commit, so a published newer sequence makes the older park stand down without emitting or changing shared state.
+The same bounded critical section covers the final owner and away-mode checks, follow-up output, and repair-budget commit, so the next `stop` claim makes an older park that is still running stand down without emitting or changing shared state.
 The lock is never held while the arm is sleeping, while the hook is polling, or while output is prepared.
 The park revalidates session ownership while polling and again inside the final commit section, but it deliberately does not hold the fleet session lock across output because an awaited hook must not block home-wide session acquisition; the remaining microsecond takeover window can produce at most one harmless wake that drains the durable queue.
-Without those records every captain message during a park would leak one process and one duplicate wake.
+Without those records an older park still running after the next `stop` could leak one process and one stale duplicate wake.
+Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does not fire for hook-driven follow-ups, so invalidating the park baton there would close the pre-claim window exactly.
+That hook is deliberately left to a follow-up alongside the deferred `preCompact` surface and is not registered in this change.
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
