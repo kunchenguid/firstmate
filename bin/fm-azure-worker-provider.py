@@ -401,6 +401,15 @@ def cost_body(controller, forecast):
 
 
 def cost_query(controller, forecast):
+    value, _untrained = cost_query_with_state(controller, forecast)
+    return value
+
+
+def cost_query_with_state(controller, forecast):
+    """Return (value, untrained). untrained is True only for the exact
+    Cost Management refusal that the forecast model has insufficient
+    training data, which is the expected bootstrap state of a fresh
+    resource group; every other failure stays plainly unreadable."""
     endpoint = "forecast" if forecast else "query"
     url = "https://management.azure.com/subscriptions/{}/providers/Microsoft.CostManagement/{}?api-version=2023-11-01".format(
         controller["subscription"], endpoint
@@ -410,21 +419,22 @@ def cost_query(controller, forecast):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(cost_body(controller, forecast), handle, separators=(",", ":"))
-        result, rc, _ = az(controller, [
+        result, rc, stderr = az(controller, [
             "rest", "--method", "post", "--url", url, "--body", "@" + name,
         ], check=False)
         if rc != 0 or not isinstance(result, dict):
-            return None
+            untrained = bool(forecast) and "cost training data" in str(stderr).lower()
+            return None, untrained
         properties = result.get("properties", result)
         columns = properties.get("columns") or []
         rows = properties.get("rows") or []
         if not rows:
-            return 0.0
+            return 0.0, False
         names = [item.get("name") for item in columns]
         index = names.index("PreTaxCost") if "PreTaxCost" in names else 0
-        return float(rows[0][index])
+        return float(rows[0][index]), False
     except (IndexError, TypeError, ValueError):
-        return None
+        return None, False
     finally:
         with contextlib.suppress(FileNotFoundError):
             Path(name).unlink()
@@ -599,6 +609,7 @@ def specialized_capacity_inventory(controller, vms, identities):
 
 
 def metrics(controller, vms, capacity_reservations, specialized_active_by_family):
+    forecast_value, forecast_untrained = cost_query_with_state(controller, True)
     usage, rc, _ = az(controller, ["vm", "list-usage", "--location", "eastus"], check=False)
     regional_limit = None
     regional_used = None
@@ -626,7 +637,8 @@ def metrics(controller, vms, capacity_reservations, specialized_active_by_family
                     family_free[family] = limit - used
     return {
         "actual_usd": cost_query(controller, False),
-        "forecast_usd": cost_query(controller, True),
+        "forecast_usd": forecast_value,
+        "forecast_untrained": forecast_untrained,
         "regional_limit_vcpus": regional_limit,
         "regional_used_vcpus": regional_used,
         "specialized_active_vcpus": sum(specialized_active_by_family.values()),

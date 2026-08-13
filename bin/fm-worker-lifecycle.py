@@ -629,6 +629,7 @@ def metrics_from_inventory(inventory):
     result = {
         "actual_usd": metrics.get("actual_usd"),
         "forecast_usd": metrics.get("forecast_usd"),
+        "forecast_untrained": metrics.get("forecast_untrained"),
         "regional_limit_vcpus": metrics.get("regional_limit_vcpus"),
         "regional_used_vcpus": metrics.get("regional_used_vcpus"),
         "specialized_active_vcpus": metrics.get("specialized_active_vcpus"),
@@ -801,6 +802,19 @@ def capacity_admission(
     metrics = inventory["metrics"]
     actual = metrics.get("actual_usd")
     forecast = metrics.get("forecast_usd")
+    if (
+        forecast is None
+        and metrics.get("forecast_untrained") is True
+        and isinstance(actual, (int, float))
+        and not isinstance(actual, bool)
+        and env["policy_phase"] == "commissioning"
+        and os.environ.get("FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST") == "1"
+    ):
+        # Bootstrap-only seam: a fresh resource group cannot train the
+        # forecast model until real spend exists. With the operator's explicit
+        # commissioning confirmation, the readable actual substitutes as the
+        # conservative forecast; any other unreadable telemetry still refuses.
+        forecast = float(actual)
     if not isinstance(actual, (int, float)) or not isinstance(forecast, (int, float)):
         return False, "shared actual or forecast spend is unreadable"
     try:

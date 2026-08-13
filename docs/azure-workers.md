@@ -95,6 +95,7 @@ After stabilization, set `FM_AZURE_WORKER_POLICY_PHASE=steady` and tune `FM_AZUR
 That changes the admission limit without changing resource identity or lifecycle design.
 The commissioning ceiling must remain exactly $1,500.
 Budget pressure never deallocates, deletes, duplicates, or terminates active or unlanded work.
+During commissioning only, when the fresh resource group's Cost Management forecast model reports the exact insufficient-training-data refusal while actual spend is readable, the operator may set `FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST=1` so the readable actual substitutes as the conservative forecast; any other unreadable cost telemetry still refuses admission.
 It blocks new discretionary author and specialized capacity and allows only ordinary idle cleanup.
 
 Example specialized reservation flow (the disposable runner performs this automatically):

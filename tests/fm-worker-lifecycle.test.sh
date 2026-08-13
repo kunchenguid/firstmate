@@ -71,6 +71,7 @@ classification_and_admission_matrix() {
   python3 - "$CONTROLLER" <<'PY' || fail "classification/admission matrix failed"
 import copy
 import importlib.util
+import os
 import sys
 
 spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
@@ -156,6 +157,25 @@ for field in ("actual_usd", "forecast_usd"):
     changed = copy.deepcopy(inventory)
     changed["metrics"][field] = None
     assert module.admission_result(env, state, changed, 1, item)[0] is False
+# Bootstrap-only untrained-forecast seam: the exact Cost Management
+# insufficient-training-data refusal may substitute the readable actual as the
+# conservative forecast, but only in commissioning phase with the operator's
+# explicit confirmation; every other unreadable shape still refuses.
+untrained = copy.deepcopy(inventory)
+untrained["metrics"]["forecast_usd"] = None
+untrained["metrics"]["forecast_untrained"] = True
+assert module.admission_result(env, state, untrained, 1, item)[0] is False
+os.environ["FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST"] = "1"
+try:
+    assert module.admission_result(env, state, untrained, 1, item)[0] is True
+    plain_unreadable = copy.deepcopy(inventory)
+    plain_unreadable["metrics"]["forecast_usd"] = None
+    assert module.admission_result(env, state, plain_unreadable, 1, item)[0] is False
+    no_actual = copy.deepcopy(untrained)
+    no_actual["metrics"]["actual_usd"] = None
+    assert module.admission_result(env, state, no_actual, 1, item)[0] is False
+finally:
+    del os.environ["FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST"]
 changed = copy.deepcopy(inventory)
 changed["metrics"]["regional_limit_vcpus"] = 127
 assert module.admission_result(env, state, changed, 1, item)[0] is False
