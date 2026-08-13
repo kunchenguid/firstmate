@@ -449,7 +449,8 @@ Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watc
 The Pi-to-AFK ownership handoff was verified on 2026-08-10 with installed Pi 0.84.1 and Herdr 0.7.3 in a helper-provisioned named non-default session, a throwaway Firstmate home, the real tracked Pi extension, and no model-provider request.
 The reproduced failure PID remained the same live bash wrapper at failure: PID, PPID, sleeping foreground state, start time, and command matched launch, while Node had observed neither `exit` nor `close`.
 The signal boundary was the wrapper's bash wait: signaling only its PID left that wrapper alive after its watcher exited.
-The correction gives each Pi arm an exact POSIX process group and retires that group, then requires both the launch-time wrapper identity and watcher-lock identity to disappear before accepting away ownership.
+The live correction exercised the POSIX path: each Pi arm owns a dedicated process group, and handoff retires that group before the daemon acquires the watcher singleton.
+The cross-platform retirement contract is owned by [`watcher-continuity.md`](../watcher-continuity.md#ownership); `tests/fm-pi-watch-extension.test.sh` covers the Windows native-to-MSYS identity binding, fail-closed identity refusals, partial-retirement retry, and single replacement convergence.
 
 ```sh
 HERDR_LAB_HELPER='/data/1/projects/bin/fm-herdr-lab.sh'

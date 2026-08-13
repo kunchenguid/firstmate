@@ -38,6 +38,7 @@ cleanup() {
       "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null 2>&1 || true
   fi
   "$LAB_HELPER" teardown "$SESSION" || rc=1
+  fm_test_cleanup
   exit "$rc"
 }
 trap cleanup EXIT

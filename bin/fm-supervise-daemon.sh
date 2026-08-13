@@ -37,8 +37,9 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon lock-snapshots and classifies unseen queue records without
-#     consuming them; fm-wake-drain.sh remains the only consumer.
+#     The daemon lock-snapshots unseen queue rows, classifies the newest row per
+#     logical wake, and makes interrupted classification idempotent without
+#     consuming the queue; fm-wake-drain.sh remains the only consumer.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
