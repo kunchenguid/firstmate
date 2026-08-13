@@ -205,7 +205,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -251,9 +251,8 @@ ok - cursor primary: the captain keeps control mid-park and the superseded park 
 ok - cursor primary: an away-mode escalation is delivered, confirmed, and processed
 ```
 
-Two defects were found and fixed by that run rather than assumed absent.
-`bin/fm-session-lock-lib.sh` could not locate Cursor in the process ancestry, so every Cursor session start refused the fleet lock with `error: cannot locate harness process in ancestry` and produced a read-only digest; Cursor's identity is not expressible as a command-name pattern, so the lib now delegates to `bin/fm-cursor-lib.sh`.
-`fm_supervision_model` classified Cursor as `persistent`, so the mid-turn pull guard reported `WATCHER DOWN` between turns even with a beacon seconds old; Cursor's park runs the watcher only between turns, exactly like Claude's auto-arm, and is now classified `autoarm`.
+The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
+It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
