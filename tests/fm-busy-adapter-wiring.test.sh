@@ -81,31 +81,8 @@ classify() {  # <harness> <id> <state-dir>
   fm_busy_classify tmux fake:w "$1" "$2" "$3"
 }
 
-# drive_pi_ext <ext-path> <mode>: load the generated Pi extension in a plain
-# Node host and fire one lifecycle handler. Modes: agent-start, settle-idle,
-# settle-continuing, turn-end.
 drive_pi_ext() {
-  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
-import { pathToFileURL } from "node:url";
-const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
-const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
-const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
-switch (process.env.MODE) {
-  case "agent-start": await handlers["agent_start"]({}, ctx); break;
-  case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
-  case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
-  case "settle-then-start":
-    await handlers["agent_settled"]({}, ctx);
-    await handlers["agent_start"]({}, ctx);
-    break;
-  case "turn-end": await handlers["turn_end"]({}, ctx); break;
-  default: throw new Error("unknown mode " + process.env.MODE);
-}
-if (process.env.MODE === "turn-end") {
-  await new Promise((resolve) => setTimeout(resolve, 200));
-}
-EOF
+  fm_test_drive_pi_ext "$@"
 }
 
 test_pi_extension_semantic_lifecycle() {
@@ -1052,6 +1029,50 @@ test_omp_extension_repairs_stopped_pointer_before_pending_run() {
   pass "omp repairs a stopped current pointer before settling the pending sibling"
 }
 
+test_omp_extension_blocks_rotation_after_rejected_durable_state() {
+  local rec id=busy-omp-recovery-blocked out state ext first_token second_token
+  rec=$(make_spawn_case omp-recovery-blocked omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp recovery-blocked spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "malformed-state setup failed: $out"
+  printf '%s\n' malformed-run-token > "$state/$id.omp-session-run"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "malformed-state recovery drive failed: $out"
+  [ "$(cat "$state/$id.omp-session-run")" = malformed-run-token ] \
+    || fail "a rejected malformed run marker was replaced by a fresh run"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "a rejected malformed run marker published turn-end evidence"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "malformed durable state did not remain busy: $out"
+
+  rec=$(make_spawn_case omp-ambiguous-recovery-blocked omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp ambiguous-recovery spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" agent-start) || fail "ambiguous-state first run failed: $out"
+  first_token=$(cat "$state/$id.omp-session-run")
+  out=$(drive_omp_ext "$ext" agent-start) || fail "ambiguous-state second run failed: $out"
+  second_token=$(cat "$state/$id.omp-session-run")
+  printf '%s\n%s\n' "$first_token" "$second_token" > "$state/$id.omp-session-run"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "ambiguous-state recovery drive failed: $out"
+  [ "$(cat "$state/$id.omp-session-run")" = "$(printf '%s\n%s' "$first_token" "$second_token")" ] \
+    || fail "a rejected ambiguous run marker was replaced by a fresh run"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "a rejected ambiguous run marker published turn-end evidence"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "ambiguous durable state did not remain busy: $out"
+  pass "omp blocks fresh rotation until malformed or ambiguous durable state is reconciled"
+}
+
 test_omp_extension_rejects_state_marker_symlinks() {
   local rec id=busy-omp-state-symlinks out state ext
   rec=$(make_spawn_case omp-state-symlinks omp "$id")
@@ -1369,6 +1390,7 @@ test_omp_extension_preserves_unverified_evidence_temps
 test_omp_extension_rejects_evidence_path_collisions
 test_omp_extension_reconciles_idle_finalizing_before_new_run
 test_omp_extension_repairs_stopped_pointer_before_pending_run
+test_omp_extension_blocks_rotation_after_rejected_durable_state
 test_omp_extension_rejects_state_marker_symlinks
 test_omp_extension_uses_incarnation_unique_marker_temps
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps

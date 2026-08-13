@@ -671,7 +671,8 @@ hash_manifest() {
 
 pi_extension_loaded() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
-  [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ -f "$lock" ] && [ ! -L "$lock" ] \
+    && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
   marker_pid=$(sed -n '2p' "$marker")
   lock_pid=$(sed -n '1p' "$lock")

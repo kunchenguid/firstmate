@@ -2809,18 +2809,31 @@ const rotateRun = () => {
   return token;
 };
 const persistedRuns = () => {
+  let durableState = false;
+  const blocked = () => ({ blocked: true });
+  const absent = () => durableState ? blocked() : null;
   try {
     if (!generationIsCurrent()) return null;
+    const markerExists = (path: string) => {
+      try {
+        lstatSync(path);
+        return true;
+      } catch (error) {
+        if ((error as any)?.code === "ENOENT") return false;
+        throw error;
+      }
+    };
+    durableState = markerExists(SESSION_RUN) || markerExists(SESSION_STOP);
     const runLines = readOptional(SESSION_RUN).split(/\r?\n/).filter(Boolean);
     const stop = readOptional(SESSION_STOP).trim();
     const busyFields = new Set(readRegularFile("$STATE_REAL/$ID.busy-state").trim().split(/\s+/));
     const busy = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=busy");
     const idle = busyFields.has("gen=$BUSY_GEN") && busyFields.has("state=idle");
-    if (!busy && !idle) return null;
-    if (runLines.length > 1) return null;
+    if (!busy && !idle) return blocked();
+    if (runLines.length > 1) return blocked();
     let token = runLines[0] || "";
-    if (token && !parseRunToken(token)) return null;
-    if (stop !== "" && stop !== "pending" && !parseRunToken(stop)) return null;
+    if (token && !parseRunToken(token)) return blocked();
+    if (stop !== "" && stop !== "pending" && !parseRunToken(stop)) return blocked();
     const evidence = new Map<string, any>();
     const materialize: any[] = [];
     let repairPendingStop = false;
@@ -2828,19 +2841,20 @@ const persistedRuns = () => {
     let entries: any[] = [];
     try {
       const directory = lstatSync(SESSION_EVIDENCE_DIR);
-      if (!directory.isDirectory()) return null;
+      durableState = true;
+      if (!directory.isDirectory()) return blocked();
       entries = readdirSync(SESSION_EVIDENCE_DIR, { withFileTypes: true });
     } catch (error) {
-      if ((error as any)?.code !== "ENOENT") return null;
+      if ((error as any)?.code !== "ENOENT") return blocked();
     }
     for (const entry of entries) {
       if (entry.name.endsWith(".tmp")) {
-        if (!entry.isFile() || !isAtomicTempName(entry.name)) return null;
+        if (!entry.isFile() || !isAtomicTempName(entry.name)) return blocked();
         continue;
       }
-      if (!entry.isFile() || !parseRunToken(entry.name)) return null;
+      if (!entry.isFile() || !parseRunToken(entry.name)) return blocked();
       const record = parseRunEvidence(readRegularFile(evidencePath(entry.name)));
-      if (!record || record.token !== entry.name) return null;
+      if (!record || record.token !== entry.name) return blocked();
       evidence.set(record.token, record);
     }
     let pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
@@ -2858,13 +2872,13 @@ const persistedRuns = () => {
     }
     const pointerRecord = token ? evidence.get(token) : undefined;
     if (pointerRecord?.stoppedAt > 0 && pendingEvidence.length > 0) {
-      if (stop !== token) return null;
+      if (stop !== token) return blocked();
       token = pendingEvidence[0].token;
       pointerRepair = true;
     }
     if (!token && stop !== "" && stop !== "pending") {
       const stopRecord = evidence.get(stop);
-      if (!stopRecord) return null;
+      if (!stopRecord) return blocked();
       if (stopRecord.stoppedAt === 0) token = stop;
       else if (pendingEvidence.length > 0) token = pendingEvidence[0].token;
       else token = stop;
@@ -2872,17 +2886,17 @@ const persistedRuns = () => {
     if (!token && pendingEvidence.length > 0) {
       token = pendingEvidence[0].token;
     }
-    if (!token) return null;
+    if (!token) return absent();
     if (!evidence.has(token)) {
       const tokenData = parseRunToken(token);
-      if (!tokenData) return null;
+      if (!tokenData) return blocked();
       const record = { token, startedAt: tokenData.startedAt, lastEventAt: tokenData.startedAt, stoppedAt: 0 };
       evidence.set(token, record);
       materialize.push(record);
     }
     if (stop !== "" && stop !== "pending") {
       const stopRecord = evidence.get(stop);
-      if (!stopRecord) return null;
+      if (!stopRecord) return blocked();
       if (stopRecord.stoppedAt === 0) {
         const recoveredRecord = {
           ...stopRecord,
@@ -2895,16 +2909,16 @@ const persistedRuns = () => {
     }
     if (stop !== "" && stop !== "pending" && stop !== token) {
       const stoppedSibling = evidence.get(stop);
-      if (!stoppedSibling || stoppedSibling.stoppedAt === 0) return null;
+      if (!stoppedSibling || stoppedSibling.stoppedAt === 0) return blocked();
       repairPendingStop = true;
     }
     const records = [...evidence.values()];
     const pending = records.filter((record) => record.stoppedAt === 0);
     const current = evidence.get(token);
-    if (!current) return null;
-    if (repairPendingStop && current.stoppedAt > 0) return null;
+    if (!current) return blocked();
+    if (repairPendingStop && current.stoppedAt > 0) return blocked();
     if (current.stoppedAt === 0) {
-      if ((!busy && !idle) || !pending.some((record) => record.token === token)) return null;
+      if ((!busy && !idle) || !pending.some((record) => record.token === token)) return blocked();
       return {
         token, pending, finalizing: [], materialize,
         pointerMissing: pointerRepair,
@@ -2912,15 +2926,15 @@ const persistedRuns = () => {
         needsBusy: !busy,
       };
     }
-    if (pending.length > 0) return null;
-    if (!busy && !idle) return null;
+    if (pending.length > 0) return blocked();
+    if (!busy && !idle) return blocked();
     return {
       token, pending: [],
       finalizing: [{ ...current, idlePending: busy }], materialize,
       pointerMissing: pointerRepair, stopMissing: stop === "", needsBusy: false,
     };
   } catch {
-    return null;
+    return blocked();
   }
 };
 const adoptCurrentRun = () => {
@@ -2946,6 +2960,11 @@ const adoptCurrentRun = () => {
   if (runToken) return runToken;
   const persisted = persistedRuns();
   if (!persisted) return "";
+  if ("blocked" in persisted) {
+    recoveryBlocked = true;
+    runToken = "";
+    return "";
+  }
   try {
     for (const record of persisted.materialize) writeRunEvidence(record);
     if (persisted.pointerMissing) atomicWrite(SESSION_RUN, persisted.token + "\n");

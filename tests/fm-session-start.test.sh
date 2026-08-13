@@ -2503,6 +2503,49 @@ EOF
   pass "session start accepts current OMP watcher and turn-end markers"
 }
 
+test_omp_diagnostic_rejects_symlinked_loaded_state() {
+  local rec root home fakebin out holder_pid marker_target lock_target
+  rec=$(new_world omp-symlinked-loaded-state)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+  marker_target="$home/state/.omp-watch-extension-loaded.target"
+  mv "$home/state/.omp-watch-extension-loaded" "$marker_target"
+  ln -s "$marker_target" "$home/state/.omp-watch-extension-loaded"
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "OMP startup trusted a symlinked extension marker"
+
+  rec=$(new_world omp-symlinked-lock-state)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+  lock_target="$home/state/.lock.target"
+  printf '%s\n' "$holder_pid" > "$lock_target"
+  ln -s "$lock_target" "$home/state/.lock"
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "OMP startup trusted a symlinked session lock"
+  pass "OMP startup rejects symlinked extension markers and session locks"
+}
+
 # OMP's tracked entrypoints are re-export shims: every line of watcher and
 # turn-end logic lives in the shared Pi-family core they import. An update that
 # only touches that core must still make the session running the OLD code in
@@ -2784,6 +2827,7 @@ test_pi_primary_target_overrides_inherited_omp_marker
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_omp_primary_uses_verified_supervision_extensions
 test_omp_diagnostic_accepts_current_loaded_markers
+test_omp_diagnostic_rejects_symlinked_loaded_state
 test_omp_diagnostic_rejects_shared_core_drift
 test_omp_diagnostic_rejects_transitive_dependency_drift
 test_omp_diagnostic_rejects_dependency_read_failure

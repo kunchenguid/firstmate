@@ -310,3 +310,27 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+fm_test_drive_pi_ext() {
+  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
+switch (process.env.MODE) {
+  case "agent-start": await handlers["agent_start"]({}, ctx); break;
+  case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
+  case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "settle-then-start":
+    await handlers["agent_settled"]({}, ctx);
+    await handlers["agent_start"]({}, ctx);
+    break;
+  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+if (process.env.MODE === "turn-end") {
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}
+EOF
+}

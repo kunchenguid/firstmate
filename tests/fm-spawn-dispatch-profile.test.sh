@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$ROOT/bin/fm-busy-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -660,7 +662,7 @@ test_pi_threads_model_and_max_effort() {
 }
 
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
-  local rec id out status launch
+  local rec id out status launch state ext
   id=profile-pi-signed-z8b
   rec=$(make_spawn_case profile-pi-signed pi-signed "$id")
   read_case_record "$rec"
@@ -680,16 +682,15 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_present "$HOME_DIR/state/$id.busy-gen" "pi-signed spawn did not arm the busy-state contract"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
     "pi-signed spawn did not seed the busy-state record from the launch brief"
-  local ext gen
-  ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
-  gen=$(cat "$HOME_DIR/state/$id.busy-gen")
-  assert_contains "$ext" 'pi.on("agent_start"' "pi extension lost the semantic agent_start busy edge"
-  assert_contains "$ext" 'pi.on("agent_settled"' "pi extension lost the semantic agent_settled idle edge"
-  assert_contains "$ext" 'ctx.isIdle()' "pi extension no longer confirms idle with ctx.isIdle()"
-  assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
-  assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
-  assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
-  pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+  out=$(fm_test_drive_pi_ext "$ext" agent-start) || fail "pi-signed agent_start drive failed: $out"
+  out=$(fm_busy_classify tmux fake:w pi-signed "$id" "$state")
+  [ "$out" = "busy pi-ext" ] || fail "pi-signed agent_start did not classify busy through the extension: $out"
+  out=$(fm_test_drive_pi_ext "$ext" settle-idle) || fail "pi-signed agent_settled drive failed: $out"
+  out=$(fm_busy_classify tmux fake:w pi-signed "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "pi-signed agent_settled did not classify idle through the extension: $out"
+  pass "pi-signed executes the shared Pi extension lifecycle while preserving its configured identity"
 }
 
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
