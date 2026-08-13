@@ -532,8 +532,32 @@ SH
 	pass "router: large timeout overrides remain owned by the shared shell bound"
 }
 
-test_pending_route_publication_failure_falls_back_to_same() {
-	local root="$TMP_ROOT/pending-publication-failure" out status=0 pending log fakebin
+test_new_route_publication_failure_falls_back_to_same() {
+	local root="$TMP_ROOT/new-publication-failure" out status=0 pending log fakebin
+	make_primary "$root"
+	printf 'Do you want me to start the blender export fix?' |
+		run "$root" --on-settle --session-id primary >/dev/null
+	pending=$(pending_dir "$root")
+	printf 'not a directory\n' >"$pending"
+	fakebin=$(cursor_fixture "$root" new-publication-fail 'verdict=new
+target=-
+explanation=new topic')
+	out=$(printf 'a new unrelated topic' |
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "new publication failure exit"
+	assert_contains "$out" "verdict=same target=primary confidence=det" \
+		"a new route that cannot be published fails open to the current session"
+	log=$(failures_log "$root")
+	assert_grep "pending route publication failed" "$log" \
+		"the new-route staging failure is recorded"
+	assert_grep $'same\tprimary\tdet' "$(verdicts_log "$root")" \
+		"the verdict log records only the surfaced deterministic fallback"
+	assert_absent "$pending/LATEST" "a failed new-route publication does not claim a latest route"
+	pass "router: failed new-route publication never surfaces an unstaged handoff"
+}
+
+test_reroute_publication_failure_falls_back_to_same() {
+	local root="$TMP_ROOT/reroute-publication-failure" out status=0 pending log fakebin
 	make_primary "$root"
 	printf 'Do you want me to start the blender export fix?' |
 		run "$root" --on-settle --session-id primary >/dev/null
@@ -541,21 +565,21 @@ test_pending_route_publication_failure_falls_back_to_same() {
 		run "$root" --on-settle --session-id sess-shader >/dev/null
 	pending=$(pending_dir "$root")
 	printf 'not a directory\n' >"$pending"
-	fakebin=$(cursor_fixture "$root" publication-fail 'verdict=reroute
+	fakebin=$(cursor_fixture "$root" reroute-publication-fail 'verdict=reroute
 target=sess-shader
 explanation=continue the existing shader review')
 	out=$(printf 'continue the shader review' |
 		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
-	expect_code 0 "$status" "pending publication failure exit"
+	expect_code 0 "$status" "reroute publication failure exit"
 	assert_contains "$out" "verdict=same target=primary confidence=det" \
-		"a route that cannot be published fails open to the current session"
+		"a reroute that cannot be published fails open to the current session"
 	log=$(failures_log "$root")
 	assert_grep "pending route publication failed" "$log" \
-		"the durable staging failure is recorded"
+		"the reroute staging failure is recorded"
 	assert_grep $'same\tprimary\tdet' "$(verdicts_log "$root")" \
 		"the verdict log records only the surfaced deterministic fallback"
-	assert_absent "$pending/LATEST" "a failed publication does not claim a latest route"
-	pass "router: pending publication failure never surfaces an unstaged handoff"
+	assert_absent "$pending/LATEST" "a failed reroute publication does not claim a latest route"
+	pass "router: failed reroute publication never surfaces an unstaged handoff"
 }
 
 test_pi_hook_uses_context_session_ids_without_outer_timeout() {
@@ -1236,7 +1260,8 @@ test_builtin_default_uses_cursor_cli_read_only
 test_submit_prompt_rides_the_file_not_argv
 test_submit_dependency_free_timeout_terminates_hung_spawn
 test_submit_large_timeout_override_reaches_shared_owner
-test_pending_route_publication_failure_falls_back_to_same
+test_new_route_publication_failure_falls_back_to_same
+test_reroute_publication_failure_falls_back_to_same
 test_pi_hook_uses_context_session_ids_without_outer_timeout
 test_pi_hook_classifies_queued_input_and_rejects_mixed_runs
 test_pi_hook_rejects_typed_session_start_context
