@@ -86,6 +86,10 @@ fail() {
   exit 1
 }
 
+# A classification that dies inside its critical section must not leave the next
+# one waiting on a lock nobody holds.
+trap fm_run_lock_release_all EXIT
+
 # --- numeric helpers (percentages are fractional in quota-axi output) --------
 
 num_le() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 <= b + 0) }'; }
@@ -194,25 +198,52 @@ read_kv() {  # <file> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# Write one lane's day record through a temp file. A direct `>` truncates in
+# place, so a concurrent reader can observe a half-written record and read an
+# empty baseline as "a new day"; the rename is atomic, so a reader sees either
+# the old record or the new one.
+day_write() {  # <file> <day> <baseline> <last>
+  local file=$1 tmp
+  mkdir -p "$(dirname "$file")"
+  tmp="$file.tmp.$$"
+  printf 'day=%s\nbaseline=%s\nlast=%s\n' "$2" "$3" "$4" > "$tmp" || return 1
+  mv -f "$tmp" "$file"
+}
+
 # Records today's baseline on the first observation of a local day and returns
 # "<day> <baseline> <consumed>". Rollover is implicit: a different day resets the
 # baseline to the current reading, so yesterday's spend never leaks into today.
+#
+# Reading the stored day, deciding whether it is still today, and writing the
+# baseline is one step, not three. Without the lock two concurrent
+# classifications for the same lane both read a missing or stale baseline, both
+# conclude a new day started, and both write - so the second overwrites the first
+# lane's real baseline with a later reading and that day's consumption is
+# undercounted for the rest of the day. The lock is per lane, so classifying
+# different lanes still proceeds concurrently.
 day_track() {  # <lane> <percent> <epoch> <record:0|1>
-  local lane=$1 percent=$2 epoch=$3 record=$4 file day stored_day baseline consumed
+  local lane=$1 percent=$2 epoch=$3 record=$4 file day stored_day baseline consumed lock
   day=$(local_day "$epoch") || fail "could not resolve the local day in $FM_GOV_TZ"
   file=$(state_file "$lane" day)
+
+  # A read-only classification never writes, so it needs no lock: it reads one
+  # atomically-renamed record and cannot corrupt anything.
+  if [ "$record" = 1 ]; then
+    lock="$file.lock"
+    fm_run_lock_acquire "$lock" || fail "could not take the day-state lock for lane $lane"
+  fi
+
   stored_day=$(read_kv "$file" day)
   baseline=$(read_kv "$file" baseline)
   if [ "$stored_day" != "$day" ] || ! num_is "$baseline"; then
     baseline=$percent
-    if [ "$record" = 1 ]; then
-      mkdir -p "$FM_GOV_STATE"
-      printf 'day=%s\nbaseline=%s\nlast=%s\n' "$day" "$baseline" "$percent" > "$file"
-    fi
-  elif [ "$record" = 1 ]; then
-    mkdir -p "$FM_GOV_STATE"
-    printf 'day=%s\nbaseline=%s\nlast=%s\n' "$day" "$baseline" "$percent" > "$file"
   fi
+  if [ "$record" = 1 ]; then
+    day_write "$file" "$day" "$baseline" "$percent" \
+      || { fm_run_lock_release "$lock"; fail "could not record the day state for lane $lane"; }
+    fm_run_lock_release "$lock"
+  fi
+
   consumed=$(num_sub "$baseline" "$percent")
   num_gt "$consumed" 0 || consumed=0
   printf '%s %s %s\n' "$day" "$baseline" "$consumed"

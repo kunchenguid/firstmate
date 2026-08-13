@@ -291,8 +291,54 @@ test_local_policy_file_overrides_the_built_in_lanes() {
   pass "a home can retune a lane's floor and day budget without editing the governor"
 }
 
+# The day record is a read-modify-write: a classification reads the stored day and
+# baseline, decides whether the day is still current, and writes the result.
+# Concurrent classifications for one lane must leave exactly one baseline, and it
+# must be the day's first reading rather than whichever contender wrote last.
+#
+# What this case can and cannot establish is worth stating plainly. It proves the
+# converged outcome. It does NOT prove the absence of the torn-read window that
+# the atomic rename closes: a classification takes ~70ms while that window is
+# microseconds wide, so no CLI-level test provokes it at a useful rate, and one
+# that pretended to would pass against the unlocked code and read as proof it
+# never earned. The rename's correctness rests on `mv` being atomic, and the
+# lock's on the run-engine suite, which drives contention on a much cheaper
+# command; see tests/fm-run-engine.test.sh's concurrent-claim case.
+test_concurrent_classifications_keep_one_day_baseline() {
+  local out day baseline stored
+  day=$(epoch_for 2026-08-20T10:00:00)
+  quota_doc "$TMP_ROOT/race99.json" codex 99
+  quota_doc "$TMP_ROOT/race80.json" codex 80
+  reset_state
+
+  # Establish the day's baseline with one settled reading, then contend with it.
+  classify company-codex "$TMP_ROOT/race99.json" --now "$day" >/dev/null
+  stored="$HOME_DIR/state/run-governor/company-codex.day"
+
+  for _ in $(seq 1 8); do
+    classify company-codex "$TMP_ROOT/race80.json" --now "$day" >/dev/null 2>&1 &
+  done
+  wait
+
+  # The lane keeps ONE baseline, and it is the day's first reading rather than
+  # whichever contender happened to write last.
+  baseline=$(sed -n 's/^baseline=//p' "$stored" | head -1)
+  [ "$baseline" = 99 ] \
+    || fail "concurrent classifications rewrote the day baseline to $baseline, expected 99"
+  [ "$(grep -c '^baseline=' "$stored")" = 1 ] || fail "the day record has a duplicated baseline"
+  [ "$(grep -c '^day=' "$stored")" = 1 ] || fail "the day record has a duplicated day"
+
+  # Consumption is still measured from that real baseline, which is the thing the
+  # budget actually depends on.
+  out=$(classify company-codex "$TMP_ROOT/race80.json" --now "$day")
+  [ "$(field "$out" day_consumed)" = 19 ] \
+    || fail "consumption after the race was $(field "$out" day_consumed), expected 19"
+  pass "concurrent classifications preserve one day baseline per lane"
+}
+
 test_threshold_boundaries
 test_hysteresis_dead_band
+test_concurrent_classifications_keep_one_day_baseline
 test_unknown_and_stale_quota_are_never_available
 test_projected_runway_bounds_a_healthy_percentage
 test_company_codex_floor
