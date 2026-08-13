@@ -281,7 +281,9 @@ def resource_record(kind, value, power_state=None, tags_override=None):
     record = {
         "id": resource_id,
         "immutable_id": identity,
-        "etag": value.get("etag"),
+        # Storage listings carry the ETag under properties (the top level has
+        # none), so both locations feed the conditional-delete guard.
+        "etag": value.get("etag") or (value.get("properties") or {}).get("etag"),
         "tags": dict(tags_override if tags_override is not None else (value.get("tags") or {})),
     }
     if power_state is not None:
