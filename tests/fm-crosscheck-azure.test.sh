@@ -603,10 +603,17 @@ image=json.load(open(sys.argv[1]))
 policy=json.load(open(sys.argv[2]))
 parameters=image["parameters"]
 assert "ubuntuExactVersion" in parameters and "defaultValue" not in parameters["ubuntuExactVersion"]
-for name in ("reviewerCliUrl","reviewerCliSha256","reviewerCliBytes","modelGuestSha256","modelGuestBase64"):
+for name in (
+    "codexCliUrl","codexCliSha256","codexCliBytes",
+    "claudeCliUrl","claudeCliSha256","claudeCliBytes",
+    "modelGuestSha256","modelGuestBase64",
+):
     assert name in parameters, name
 inline="\n".join(image["resources"][0]["properties"]["customize"][0]["inline"])
-for marker in ("mcp=disabled","skills=disabled","extensions=disabled","sessions=disabled","sha256sum -c"):
+for marker in (
+    "mcp=disabled","skills=disabled","extensions=disabled","sessions=disabled","sha256sum -c",
+    "/usr/local/bin/codex","/usr/local/bin/claude",
+):
     assert marker in inline, marker
 assert image["resources"][0]["properties"]["distribute"][0]["type"]=="ManagedImage"
 rules={rule["name"]:rule["properties"] for rule in policy["resources"][0]["properties"]["securityRules"]}

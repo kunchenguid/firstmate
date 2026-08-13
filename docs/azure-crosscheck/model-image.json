@@ -1,101 +1,171 @@
 {
-  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
-  "contentVersion": "1.0.0.0",
-  "metadata": {
-    "description": "Tracked pinned model-image build contract for the credentialed Crosscheck reviewer compartment. The image carries exactly the pinned reviewer CLI closure and the tracked model guest; it has no ambient credential, Azure CLI, repository helper, generic shell service, MCP server, extension, skill, or session surface. Building it is a billable mutation owned by bin/fm-crosscheck-azure-image.sh and requires explicit operator confirmation from released main."
+ "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+ "contentVersion": "1.0.0.0",
+ "metadata": {
+  "description": "Tracked pinned model-image build contract for the credentialed Crosscheck reviewer compartment. The image carries exactly the pinned Codex and Claude reviewer CLI closures (cross-review: each harness reviews the other's work) and the tracked model guest; it has no ambient credential, Azure CLI, repository helper, generic shell service, MCP server, extension, skill, or session surface. Building it is a billable mutation owned by bin/fm-crosscheck-azure-image.sh and requires explicit operator confirmation from released main."
+ },
+ "parameters": {
+  "namingPrefix": {
+   "type": "string",
+   "minLength": 3,
+   "maxLength": 12
   },
-  "parameters": {
-    "namingPrefix": {"type": "string", "minLength": 3, "maxLength": 12},
-    "imageVersion": {"type": "string", "minLength": 1, "maxLength": 32},
-    "location": {"type": "string", "defaultValue": "eastus", "allowedValues": ["eastus"]},
-    "builderIdentityId": {"type": "string", "minLength": 1},
-    "ubuntuOffer": {"type": "string", "defaultValue": "ubuntu-24_04-lts"},
-    "ubuntuSku": {"type": "string", "defaultValue": "server"},
-    "ubuntuExactVersion": {
-      "type": "string",
-      "minLength": 1,
-      "metadata": {"description": "Exact marketplace image version; the literal value latest is refused by the command owner."}
-    },
-    "reviewerCliUrl": {
-      "type": "string",
-      "minLength": 1,
-      "metadata": {"description": "Exact HTTPS release URL of the single supported reviewer CLI binary."}
-    },
-    "reviewerCliSha256": {"type": "string", "minLength": 64, "maxLength": 64},
-    "reviewerCliBytes": {"type": "int", "minValue": 1},
-    "modelGuestSha256": {
-      "type": "string",
-      "minLength": 64,
-      "maxLength": 64,
-      "metadata": {"description": "SHA-256 of the tracked bin/fm-crosscheck-azure-model-guest.sh installed by the build."}
-    },
-    "modelGuestBase64": {"type": "string", "minLength": 1},
-    "commonTags": {"type": "object", "defaultValue": {}}
+  "imageVersion": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 32
   },
-  "variables": {
-    "templateName": "[format('imgt-{0}-ccm-{1}', parameters('namingPrefix'), parameters('imageVersion'))]",
-    "imageName": "[format('img-{0}-ccm-{1}', parameters('namingPrefix'), parameters('imageVersion'))]"
+  "location": {
+   "type": "string",
+   "defaultValue": "eastus",
+   "allowedValues": [
+    "eastus"
+   ]
   },
-  "resources": [
-    {
-      "type": "Microsoft.VirtualMachineImages/imageTemplates",
-      "apiVersion": "2024-02-01",
-      "name": "[variables('templateName')]",
-      "location": "[parameters('location')]",
-      "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-image', 'image-version', parameters('imageVersion')))]",
-      "identity": {
-        "type": "UserAssigned",
-        "userAssignedIdentities": {
-          "[parameters('builderIdentityId')]": {}
-        }
-      },
-      "properties": {
-        "buildTimeoutInMinutes": 60,
-        "source": {
-          "type": "PlatformImage",
-          "publisher": "Canonical",
-          "offer": "[parameters('ubuntuOffer')]",
-          "sku": "[parameters('ubuntuSku')]",
-          "version": "[parameters('ubuntuExactVersion')]"
-        },
-        "customize": [
-          {
-            "type": "Shell",
-            "name": "install-pinned-reviewer-closure",
-            "inline": [
-              "set -eu",
-              "umask 077",
-              "install -d -m 0755 /usr/local/libexec/fm-crosscheck-model",
-              "[format('printf %s ''{0}'' | base64 -d > /usr/local/libexec/fm-crosscheck-model/model-guest.sh', parameters('modelGuestBase64'))]",
-              "[format('printf ''%s  %s\\n'' ''{0}'' /usr/local/libexec/fm-crosscheck-model/model-guest.sh | sha256sum -c -', parameters('modelGuestSha256'))]",
-              "chmod 0755 /usr/local/libexec/fm-crosscheck-model/model-guest.sh",
-              "[format('curl --fail --silent --show-error --location --connect-timeout 30 --max-time 600 --max-filesize {0} --output /usr/local/libexec/fm-crosscheck-model/reviewer-cli ''{1}''', parameters('reviewerCliBytes'), parameters('reviewerCliUrl'))]",
-              "[format('[ \"$(stat -c %s /usr/local/libexec/fm-crosscheck-model/reviewer-cli)\" = ''{0}'' ]', parameters('reviewerCliBytes'))]",
-              "[format('printf ''%s  %s\\n'' ''{0}'' /usr/local/libexec/fm-crosscheck-model/reviewer-cli | sha256sum -c -', parameters('reviewerCliSha256'))]",
-              "chmod 0755 /usr/local/libexec/fm-crosscheck-model/reviewer-cli",
-              "apt-get -y purge azure-cli 2>/dev/null || true",
-              "rm -rf /root/.azure /home/*/.azure 2>/dev/null || true",
-              "find / -xdev -maxdepth 6 \\( -name '.codex' -o -name '.claude*' -o -name 'mcp*.json' \\) -exec rm -rf {} + 2>/dev/null || true",
-              "install -d -m 0555 /etc/fm-crosscheck-model",
-              "printf 'surface=none\\nmcp=disabled\\nextensions=disabled\\nskills=disabled\\nsessions=disabled\\n' > /etc/fm-crosscheck-model/surfaces.conf",
-              "chmod 0444 /etc/fm-crosscheck-model/surfaces.conf"
-            ]
-          }
-        ],
-        "distribute": [
-          {
-            "type": "ManagedImage",
-            "imageId": "[resourceId('Microsoft.Compute/images', variables('imageName'))]",
-            "location": "[parameters('location')]",
-            "runOutputName": "[variables('imageName')]",
-            "artifactTags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-image', 'model-guest-sha256', parameters('modelGuestSha256'), 'reviewer-cli-sha256', parameters('reviewerCliSha256')))]"
-          }
-        ]
-      }
-    }
-  ],
-  "outputs": {
-    "imageTemplateName": {"type": "string", "value": "[variables('templateName')]"},
-    "managedImageName": {"type": "string", "value": "[variables('imageName')]"}
+  "builderIdentityId": {
+   "type": "string",
+   "minLength": 1
+  },
+  "ubuntuOffer": {
+   "type": "string",
+   "defaultValue": "ubuntu-24_04-lts"
+  },
+  "ubuntuSku": {
+   "type": "string",
+   "defaultValue": "server"
+  },
+  "ubuntuExactVersion": {
+   "type": "string",
+   "minLength": 1,
+   "metadata": {
+    "description": "Exact marketplace image version; the literal value latest is refused by the command owner."
+   }
+  },
+  "modelGuestSha256": {
+   "type": "string",
+   "minLength": 64,
+   "maxLength": 64,
+   "metadata": {
+    "description": "SHA-256 of the tracked bin/fm-crosscheck-azure-model-guest.sh installed by the build."
+   }
+  },
+  "modelGuestBase64": {
+   "type": "string",
+   "minLength": 1
+  },
+  "commonTags": {
+   "type": "object",
+   "defaultValue": {}
+  },
+  "codexCliUrl": {
+   "type": "string",
+   "minLength": 1
+  },
+  "codexCliSha256": {
+   "type": "string",
+   "minLength": 64,
+   "maxLength": 64
+  },
+  "codexCliBytes": {
+   "type": "int",
+   "minValue": 1
+  },
+  "claudeCliUrl": {
+   "type": "string",
+   "minLength": 1
+  },
+  "claudeCliSha256": {
+   "type": "string",
+   "minLength": 64,
+   "maxLength": 64
+  },
+  "claudeCliBytes": {
+   "type": "int",
+   "minValue": 1
   }
+ },
+ "variables": {
+  "templateName": "[format('imgt-{0}-ccm-{1}', parameters('namingPrefix'), parameters('imageVersion'))]",
+  "imageName": "[format('img-{0}-ccm-{1}', parameters('namingPrefix'), parameters('imageVersion'))]"
+ },
+ "resources": [
+  {
+   "type": "Microsoft.VirtualMachineImages/imageTemplates",
+   "apiVersion": "2024-02-01",
+   "name": "[variables('templateName')]",
+   "location": "[parameters('location')]",
+   "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-image', 'image-version', parameters('imageVersion')))]",
+   "identity": {
+    "type": "UserAssigned",
+    "userAssignedIdentities": {
+     "[parameters('builderIdentityId')]": {}
+    }
+   },
+   "properties": {
+    "buildTimeoutInMinutes": 60,
+    "source": {
+     "type": "PlatformImage",
+     "publisher": "Canonical",
+     "offer": "[parameters('ubuntuOffer')]",
+     "sku": "[parameters('ubuntuSku')]",
+     "version": "[parameters('ubuntuExactVersion')]"
+    },
+    "customize": [
+     {
+      "type": "Shell",
+      "name": "install-pinned-reviewer-closure",
+      "inline": [
+       "set -eu",
+       "umask 077",
+       "export DEBIAN_FRONTEND=noninteractive",
+       "apt-get update -qq",
+       "apt-get install -y -qq jq >/dev/null",
+       "install -d -m 0755 /usr/local/libexec/fm-crosscheck-model",
+       "[format('printf %s ''{0}'' | base64 -d > /usr/local/libexec/fm-crosscheck-model/model-guest.sh', parameters('modelGuestBase64'))]",
+       "[format('printf ''%s  %s\\n'' ''{0}'' /usr/local/libexec/fm-crosscheck-model/model-guest.sh | sha256sum -c -', parameters('modelGuestSha256'))]",
+       "chmod 0755 /usr/local/libexec/fm-crosscheck-model/model-guest.sh",
+       "[format('curl --fail --silent --show-error --location --connect-timeout 30 --max-time 600 --max-filesize {0} --output /tmp/codex-cli.tar.gz ''{1}''', parameters('codexCliBytes'), parameters('codexCliUrl'))]",
+       "[format('[ \"$(stat -c %s /tmp/codex-cli.tar.gz)\" = ''{0}'' ]', parameters('codexCliBytes'))]",
+       "[format('printf ''%s  %s\\n'' ''{0}'' /tmp/codex-cli.tar.gz | sha256sum -c -', parameters('codexCliSha256'))]",
+       "tar -xzf /tmp/codex-cli.tar.gz -C /tmp codex-x86_64-unknown-linux-musl",
+       "install -m 0755 /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex",
+       "rm -f /tmp/codex-cli.tar.gz /tmp/codex-x86_64-unknown-linux-musl",
+       "[format('curl --fail --silent --show-error --location --connect-timeout 30 --max-time 900 --max-filesize {0} --output /tmp/claude-cli ''{1}''', parameters('claudeCliBytes'), parameters('claudeCliUrl'))]",
+       "[format('[ \"$(stat -c %s /tmp/claude-cli)\" = ''{0}'' ]', parameters('claudeCliBytes'))]",
+       "[format('printf ''%s  %s\\n'' ''{0}'' /tmp/claude-cli | sha256sum -c -', parameters('claudeCliSha256'))]",
+       "install -m 0755 /tmp/claude-cli /usr/local/bin/claude",
+       "rm -f /tmp/claude-cli",
+       "/usr/local/bin/codex --version",
+       "/usr/local/bin/claude --version",
+       "apt-get -y purge azure-cli 2>/dev/null || true",
+       "rm -rf /root/.azure /home/*/.azure 2>/dev/null || true",
+       "find / -xdev -maxdepth 6 \\( -name '.codex' -o -name '.claude*' -o -name 'mcp*.json' \\) -exec rm -rf {} + 2>/dev/null || true",
+       "install -d -m 0555 /etc/fm-crosscheck-model",
+       "printf 'surface=none\\nmcp=disabled\\nextensions=disabled\\nskills=disabled\\nsessions=disabled\\n' > /etc/fm-crosscheck-model/surfaces.conf",
+       "chmod 0444 /etc/fm-crosscheck-model/surfaces.conf"
+      ]
+     }
+    ],
+    "distribute": [
+     {
+      "type": "ManagedImage",
+      "imageId": "[resourceId('Microsoft.Compute/images', variables('imageName'))]",
+      "location": "[parameters('location')]",
+      "runOutputName": "[variables('imageName')]",
+      "artifactTags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-image', 'model-guest-sha256', parameters('modelGuestSha256'), 'codex-cli-sha256', parameters('codexCliSha256'), 'claude-cli-sha256', parameters('claudeCliSha256')))]"
+     }
+    ]
+   }
+  }
+ ],
+ "outputs": {
+  "imageTemplateName": {
+   "type": "string",
+   "value": "[variables('templateName')]"
+  },
+  "managedImageName": {
+   "type": "string",
+   "value": "[variables('imageName')]"
+  }
+ }
 }
