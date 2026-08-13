@@ -797,6 +797,60 @@ test_quota_kill_without_reset_time_still_classified() {
   pass "quota kill without a reset time is still classified, and says so"
 }
 
+# The banner is concatenated into the middle of an existing output line, so
+# whatever the agent was writing after it trails the reset phrase to end of line.
+# The emitted state line is the token-tight contract fm-fleet-snapshot.sh and
+# fm-bearings-snapshot.sh parse by splitting on the ` · ` separator, so the
+# phrase must stay one bounded, separator-free field no matter what trails it.
+test_quota_reset_phrase_is_bounded() {
+  reset_fakes
+  local d out detail; d=$(new_case quotaresetbound)
+  make_repo_on_branch "$d/wt" fm/feat-bound
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bound.meta" "window=fm:fm-feat-bound" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_at_step fm/feat-bound test)"
+  FM_FAKE_STEP_LOGS="$(quota_killed_step_log \
+    "7:40pm (Europe/Paris) · source: run-step · and then the agent kept writing a very long prose sentence about the repository")"
+
+  out=$(run_crew_state "$d" feat-bound)
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "state stayed one line"
+  assert_contains "$out" "state: blocked" "trailing prose does not stop the quota classification"
+  assert_contains "$out" "resets 7:40pm (Europe/Paris)" "the real reset phrase still survives"
+  # Exactly one ` · source: ` field, so crew_state_json's split still resolves the
+  # true source rather than a forged one carried in the detail.
+  [ "$(printf '%s\n' "$out" | grep -o ' · source: ' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "trailing provider output forged a second source field"
+  detail=${out#*" · source: run-step · "}
+  [ "${#detail}" -le 140 ] || fail "quota detail was unbounded (${#detail} chars)"
+  assert_not_contains "$detail" "kept writing" "unbounded provider prose reached the state detail"
+  pass "the reset phrase is bounded and cannot forge a field in the state line"
+}
+
+# The steps table is third-party output. The sibling gate-row matcher already
+# tolerates a quoted step column, so this one must too: a future no-mistakes that
+# quotes the name must not silently disable quota detection. The NM_LOG_STEPS
+# allowlist, not the row regex, is what keeps this fail-closed.
+test_quota_kill_detected_with_quoted_step_column() {
+  reset_fakes
+  local d out; d=$(new_case quotaquoted)
+  make_repo_on_branch "$d/wt" fm/feat-quoted
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-quoted.meta" "window=fm:fm-feat-quoted" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_at_step fm/feat-quoted '"test"')"
+  FM_FAKE_STEP_LOGS="$(quota_killed_step_log "7:40pm (Europe/Paris)")"
+  out=$(run_crew_state "$d" feat-quoted)
+  assert_contains "$out" "state: blocked" "a quoted step column must not disable quota detection"
+  assert_contains "$out" "during test" "the quoted step name is unquoted before use"
+
+  # Still fail-closed: a step name outside the allowlist is never passed to the
+  # CLI and never reclassifies, banner or not.
+  FM_FAKE_AXI_STATUS="$(run_failed_at_step fm/feat-quoted 'not-a-real-step')"
+  out=$(run_crew_state "$d" feat-quoted)
+  assert_contains "$out" "state: failed" "an unrecognized step name must still fail"
+  assert_not_contains "$out" "quota" "an unrecognized step name is never a quota kill"
+  pass "quota detection tolerates a quoted step column and stays fail-closed"
+}
+
 # Requirement: do not weaken any other failure path. A step that failed with the
 # same bare exit-1 signature but NO provider banner is a genuine defect and must
 # keep failing loudly. Exit 143/SIGTERM is deliberately included here: a
@@ -1506,6 +1560,8 @@ test_terminal_passed
 test_terminal_failed
 test_quota_killed_step_is_distinguished_from_failure
 test_quota_kill_without_reset_time_still_classified
+test_quota_reset_phrase_is_bounded
+test_quota_kill_detected_with_quoted_step_column
 test_genuine_failure_still_fails
 test_cancelled_run_is_not_a_quota_kill
 test_cross_branch_attribution_via_runs_list

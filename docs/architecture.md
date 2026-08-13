@@ -26,7 +26,9 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start performs the same bounded local scan immediately.
-In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
+In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done`, `failed`, or a run-step-sourced `blocked` from `bin/fm-crew-state.sh`.
+That last one is the provider-quota kill described below: it is terminal in the same sense as `failed`, and because the killed agent appends nothing further this scan is its only surfacing path, so it must not drop out of terminal reporting merely for being named.
+A `blocked` from any other source is a captain-relevant status-log append that already surfaces on its own and stays outside the scan.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
@@ -41,6 +43,8 @@ A turn-ended-only queue row omits its historical latest-status annotation only w
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+A run that already reads `failed` takes the same shape of extra read for the same reason: the provider prints its session/weekly limit banner to stdout and exits 1 with an empty stderr, so `axi status` cannot tell a quota-killed step from one that failed on a real defect.
+Only that banner in the failing step's own log reclassifies the run to `blocked` naming the killed step and the bounded reset phrase; a bare exit 1, a bare SIGTERM, a transient rate limit, a deliberate cancellation, and the coarse runs-list path all keep failing loudly.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.

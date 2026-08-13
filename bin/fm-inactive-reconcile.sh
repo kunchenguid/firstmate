@@ -16,10 +16,17 @@
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses fm-crew-state.sh as the sole current-state source.
-# Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
-# captain-held work retain their existing supervision semantics.
+# Only a done, failed, or run-step-sourced blocked state is suspicious enough to
+# create a durable terminal outcome record or wake the supervisor.
+# A run-step-sourced blocked is terminal in exactly the same sense as failed: it
+# is the provider-quota kill fm-crew-state.sh reclassifies out of failed, whose
+# run does not resume by itself and needs a re-run once quota returns. The
+# killed agent appends nothing further, so this scan is its only surfacing path.
+# A blocked state from any other source is a captain-relevant status-log append
+# that surfaces on its own, and stays outside this scan.
+# Working, paused, parked, non-run-step blocked, unknown, persistent
+# secondmates, and captain-held work retain their existing supervision
+# semantics.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
@@ -341,6 +348,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    'state: blocked · source: run-step'*) state='blocked' ;;
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta" "$status")

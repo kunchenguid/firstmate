@@ -32,7 +32,8 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+printf 'state: %s · source: %s · %s\n' "${FM_FAKE_CREW_STATE:-unknown}" \
+  "${FM_FAKE_CREW_SOURCE:-fake}" "${FM_FAKE_CREW_DETAIL:-detail}"
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -315,9 +316,27 @@ test_scan_marker_replaces_symlink_safely() {
   pass "scan marker replaces a symlink without overwriting its target"
 }
 
+# A provider-quota kill is the one run-step state fm-crew-state.sh reclassifies
+# out of failed. The killed agent appends nothing further, so this scan is its
+# only surfacing path: it must stay terminal here or the change that names the
+# stall would be the change that hides it.
+test_run_step_blocked_quota_kill_is_terminal() {
+  make_world quota-kill; write_child "$MAIN" child 'working: validating'
+  FM_FAKE_CREW_STATE='blocked' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL='provider quota limit hit during test: resets 7:40pm (Europe/Paris) - run failed, needs re-run when quota returns' \
+    run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "quota-killed crew did not wake the supervisor"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "quota-killed crew did not retain a terminal outcome record"
+  grep -Fq 'child=child state=blocked' "$MAIN/state/.wake-queue" \
+    || fail "quota-killed crew was not reported as blocked"
+  pass "a run-step-sourced blocked quota kill stays a terminal outcome"
+}
+
 test_nonterminal_and_captain_held_states_do_not_report() {
   local state
-  for state in working paused parked unknown; do
+  for state in working paused parked unknown blocked; do
     make_world "nonterminal-$state"; write_child "$MAIN" child 'working: still active'
     FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
     [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$state produced a terminal outcome"
@@ -451,6 +470,7 @@ test_legacy_metadata_rewrite_keeps_receipt_identity
 test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
+test_run_step_blocked_quota_kill_is_terminal
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses

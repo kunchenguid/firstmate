@@ -351,18 +351,37 @@ NM_LOG_STEPS='intent rebase review test document lint push pr ci'
 nm_failed_step_name() {
   local row step
   row=$(printf '%s\n' "$RUN_OUT" \
-    | grep -E '^[[:space:]]*[a-z]+,[[:space:]]*"?failed"?[[:space:]]*,' | head -1)
+    | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?failed"?[[:space:]]*,' | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   step=$(strip_quotes "$(trim "${row%%,*}")")
   case " $NM_LOG_STEPS " in *" $step "*) printf '%s' "$step" ;; esac
 }
 
+# Longest reset phrase that may reach the emitted state line. Observed phrases
+# ("7:40pm (Europe/Paris)", "Jul 9 at 9pm (America/Chicago)") sit well inside it.
+NM_QUOTA_RESET_MAX=48
+
+# Make a slice of raw provider output safe for the one-line state contract.
+# The line is parsed by splitting on the ` · ` separator (fm-fleet-snapshot.sh's
+# crew_state_json, fm-bearings-snapshot.sh), and the provider concatenates its
+# banner into the middle of an existing output line, so whatever trails the
+# banner would otherwise land in the detail verbatim: cut at the first
+# separator, drop newlines/control characters and any remaining middle dot, and
+# cap the length.
+nm_bounded_phrase() {  # <phrase>
+  local phrase=${1%%"$SEP"*}
+  phrase=$(printf '%s' "$phrase" | tr -d '\000-\037\177' | sed 's/·/ /g')
+  phrase=$(trim "$phrase")
+  [ "${#phrase}" -le "$NM_QUOTA_RESET_MAX" ] || phrase="${phrase:0:$NM_QUOTA_RESET_MAX}..."
+  printf '%s' "$phrase"
+}
+
 # Reset phrase from the LAST provider limit banner in a failed step's log tail
 # (the log is append-only/chronological, so the last match is the operative
-# one). Prints the reset phrase when the banner carries one, the literal
-# `unknown` when a banner is present but reports no reset, and nothing at all
-# when there is no banner - the caller treats "nothing" as a genuine failure.
+# one). Prints the bounded reset phrase when the banner carries one, the literal
+# `unknown` when a banner is present but reports no usable reset, and nothing at
+# all when there is no banner - the caller treats "nothing" as a genuine failure.
 nm_quota_reset_phrase() {  # <step>
   local step=$1 run_id log_tail banner reset
   run_id=$(strip_quotes "$(nm_field id)")
@@ -372,7 +391,7 @@ nm_quota_reset_phrase() {  # <step>
   banner=$(printf '%s\n' "$log_tail" | grep -iE 'hit your [a-z]+ limit' | tail -1)
   [ -n "$banner" ] || return 0
   reset=$(printf '%s\n' "$banner" | sed -n 's/.*[Rr]esets[[:space:]]\{1,\}\(.*\)$/\1/p' | head -1)
-  reset=$(trim "$reset")
+  reset=$(nm_bounded_phrase "$reset")
   [ -n "$reset" ] || reset=unknown
   printf '%s' "$reset"
 }
