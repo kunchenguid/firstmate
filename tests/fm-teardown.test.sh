@@ -681,6 +681,29 @@ test_local_only_merged_to_recorded_target_allows() {
   pass "local-only worktree merged into its recorded integration target is torn down"
 }
 
+test_local_only_recorded_non_main_default_preserves_legacy_note() {
+  local case_dir rc wt_head
+  case_dir=$(make_case merged-master-default)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "master work"
+  git -C "$case_dir/project" branch -m main master
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/master "$wt_head"
+  printf '%s\n' 'local_merge_target=master' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-master-default: teardown should accept the recorded default target"
+  assert_grep 'tasks-axi done task-x1 --note "local main"' "$case_dir/stdout" \
+    "merged-master-default: completion reminder changed legacy default-target wording"
+  pass "local-only worktree on a non-main default preserves the legacy completion note"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2625,6 +2648,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_local_only_merged_to_recorded_target_allows
+test_local_only_recorded_non_main_default_preserves_legacy_note
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
