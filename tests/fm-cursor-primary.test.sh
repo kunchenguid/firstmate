@@ -133,6 +133,39 @@ run_session() {  # <dir> <event> <source> [session-id]
   ' 2>/dev/null
 }
 
+hold_pending_context_lock() {  # <dir>
+  local dir=$1 waited=0
+  FM_HOME="$dir" bash -c '
+    STATE="$FM_HOME/state"
+    . "$FM_HOME/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$STATE/.cursor-pending-context.lock" || exit 1
+    : > "$STATE/pending-lock-held"
+    while [ ! -e "$STATE/pending-lock-release" ]; do sleep 0.05; done
+    fm_lock_release "$STATE/.cursor-pending-context.lock"
+  ' &
+  PENDING_LOCK_PID=$!
+  while [ ! -e "$dir/state/pending-lock-held" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 100 ] || fail "the pending-context fixture lock was not acquired"
+  done
+}
+
+start_replacement_session_owner() {  # <dir>
+  local dir=$1 waited=0
+  FM_HOME="$dir" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    : > "$FM_HOME/state/replacement-owner-ready"
+    while [ ! -e "$FM_HOME/state/replacement-owner-release" ]; do sleep 0.05; done
+  ' &
+  REPLACEMENT_OWNER_PID=$!
+  while [ ! -e "$dir/state/replacement-owner-ready" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 100 ] || fail "the replacement Cursor session did not take ownership"
+  done
+}
+
 followup_of() {  # <json>
   printf '%s' "$1" | jq -r '.followup_message // empty' 2>/dev/null
 }
@@ -568,6 +601,64 @@ test_precompact_stages_instead_of_injecting() {
   pass "fm-sessionstart-cursor: preCompact stages the digest for the next turn boundary"
 }
 
+test_precompact_stands_down_after_session_takeover() {
+  local dir old_pid out staged waited=0
+  dir=$(make_primary_dir "$TMP_ROOT/session-compact-takeover")
+  install_digest_fixture "$dir"
+  jq -n --arg session_id sess-new --arg digest 'CURRENT SESSION DIGEST' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+  hold_pending_context_lock "$dir"
+  ( run_session "$dir" preCompact compact > "$dir/state/orphan-precompact-out" ) &
+  old_pid=$!
+  while [ ! -s "$dir/state/digest-args" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 100 ] || fail "the old preCompact hook did not reach staging"
+  done
+  sleep 0.2
+  start_replacement_session_owner "$dir"
+  : > "$dir/state/pending-lock-release"
+  wait "$PENDING_LOCK_PID" 2>/dev/null || true
+  wait "$old_pid" 2>/dev/null || true
+  out=$(cat "$dir/state/orphan-precompact-out" 2>/dev/null || true)
+  [ -z "$out" ] || fail "an orphaned preCompact hook emitted output: $out"
+  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  [ "$staged" = 'CURRENT SESSION DIGEST' ] \
+    || fail "an orphaned preCompact hook replaced the current session's digest: $staged"
+  : > "$dir/state/replacement-owner-release"
+  wait "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
+  pass "fm-sessionstart-cursor: orphaned preCompact cannot replace current context"
+}
+
+test_sessionstart_stands_down_after_session_takeover() {
+  local dir old_pid out staged waited=0
+  dir=$(make_primary_dir "$TMP_ROOT/session-start-takeover")
+  install_digest_fixture "$dir"
+  jq -n --arg session_id sess-new --arg digest 'CURRENT SESSION DIGEST' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+  hold_pending_context_lock "$dir"
+  ( run_session "$dir" sessionStart startup > "$dir/state/orphan-sessionstart-out" ) &
+  old_pid=$!
+  while [ ! -s "$dir/state/digest-args" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 100 ] || fail "the old sessionStart hook did not reach cleanup"
+  done
+  sleep 0.2
+  start_replacement_session_owner "$dir"
+  : > "$dir/state/pending-lock-release"
+  wait "$PENDING_LOCK_PID" 2>/dev/null || true
+  wait "$old_pid" 2>/dev/null || true
+  out=$(cat "$dir/state/orphan-sessionstart-out" 2>/dev/null || true)
+  [ -z "$out" ] || fail "an orphaned sessionStart hook did not stand down silently: $out"
+  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  [ "$staged" = 'CURRENT SESSION DIGEST' ] \
+    || fail "an orphaned sessionStart hook deleted the current session's digest: $staged"
+  : > "$dir/state/replacement-owner-release"
+  wait "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
+  pass "fm-sessionstart-cursor: orphaned sessionStart cannot delete current context"
+}
+
 test_precompact_replacement_cannot_be_deleted_by_consumer() {
   local dir park_pid compact_pid second_pid out second_out waited
   dir=$(make_primary_dir "$TMP_ROOT/session-compact-race")
@@ -684,6 +775,8 @@ test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
 test_precompact_stages_instead_of_injecting
+test_precompact_stands_down_after_session_takeover
+test_sessionstart_stands_down_after_session_takeover
 test_precompact_replacement_cannot_be_deleted_by_consumer
 test_sessionstart_silent_in_child_worktree
 test_tracked_registration_covers_the_primary_events

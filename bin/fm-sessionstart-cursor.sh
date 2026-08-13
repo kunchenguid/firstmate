@@ -85,14 +85,24 @@ if [ "$EVENT" = preCompact ]; then
   [ -d "$STATE" ] && [ -n "$SESSION_ID" ] || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
   lock_acquire_bounded || exit 0
+  fm_session_lock_owned_by_self "$STATE" || {
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
+    exit 0
+  }
   TMP=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
     fm_lock_release "$PENDING_CONTEXT_LOCK"
     exit 0
   }
   STAGE_ID=${TMP##*/}
-  jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" --arg stage_id "$STAGE_ID" \
-    '{session_id:$session_id,digest:$digest,stage_id:$stage_id}' > "$TMP" 2>/dev/null \
-    && mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null
+  if jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" --arg stage_id "$STAGE_ID" \
+    '{session_id:$session_id,digest:$digest,stage_id:$stage_id}' > "$TMP" 2>/dev/null; then
+    fm_session_lock_owned_by_self "$STATE" || {
+      rm -f "$TMP" 2>/dev/null || true
+      fm_lock_release "$PENDING_CONTEXT_LOCK"
+      exit 0
+    }
+    mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null || true
+  fi
   rm -f "$TMP" 2>/dev/null || true
   fm_lock_release "$PENDING_CONTEXT_LOCK"
   exit 0
@@ -100,7 +110,15 @@ fi
 
 command -v jq >/dev/null 2>&1 || exit 0
 RESPONSE=$(jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null) || exit 0
-if fm_session_lock_owned_by_self "$STATE" && lock_acquire_bounded; then
+if fm_session_lock_owned_by_self "$STATE"; then
+  lock_acquire_bounded || {
+    printf '%s\n' "$RESPONSE"
+    exit 0
+  }
+  fm_session_lock_owned_by_self "$STATE" || {
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
+    exit 0
+  }
   rm -f "$PENDING_CONTEXT" 2>/dev/null || true
   fm_lock_release "$PENDING_CONTEXT_LOCK"
 fi
