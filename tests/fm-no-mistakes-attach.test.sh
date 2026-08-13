@@ -43,6 +43,10 @@ case "${1:-} ${2:-}" in
       :
     elif [ -e "${FM_FAKE_NM_STATUS_NO_HEAD:-}" ]; then
       printf '%s\n' 'run:' '  id: "NOHEAD123"' '  branch: fm/dashboard-test' '  status: running'
+    elif [ -e "${FM_FAKE_NM_NO_RUN_LEADING_MIXED:-}" ]; then
+      printf '%s\n' 'unexpected leading payload' 'No active run. Push through the gate to start a pipeline:'
+    elif [ -e "${FM_FAKE_NM_NO_RUN_TRAILING_MIXED:-}" ]; then
+      printf '%s\n' 'No active run. Push through the gate to start a pipeline:' 'unexpected trailing payload'
     elif [ -e "${FM_FAKE_NM_NO_RUN_ALWAYS:-}" ]; then
       printf '%s\n' 'No active run. Push through the gate to start a pipeline:'
     elif [ "$count" -le 1 ] && [ -e "${FM_FAKE_NM_NO_RUN_FIRST:-}" ]; then
@@ -302,6 +306,34 @@ assert_contains "$output" 'no active no-mistakes run appeared for branch fm/dash
 assert_no_grep 'attach ' "$FM_FAKE_NM_CALLS" 'explicit no-run response attached a run'
 pass 'fm-no-mistakes-attach: persistent explicit no-run response reaches the normal absence timeout'
 unset FM_FAKE_NM_NO_RUN_ALWAYS
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-leading-mixed"
+export FM_FAKE_NM_NO_RUN_LEADING_MIXED="$FIXTURE/no-run-leading-mixed"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'leading mixed no-run payload bypassed the status error limit' "$output"
+assert_contains "$output" 'axi status failed 1 consecutive times: unexpected leading payload' \
+  'leading mixed no-run payload did not preserve the malformed diagnostic'
+pass 'fm-no-mistakes-attach: leading mixed no-run payload is malformed'
+unset FM_FAKE_NM_NO_RUN_LEADING_MIXED
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-trailing-mixed"
+export FM_FAKE_NM_NO_RUN_TRAILING_MIXED="$FIXTURE/no-run-trailing-mixed"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'trailing mixed no-run payload bypassed the status error limit' "$output"
+assert_contains "$output" 'axi status failed 1 consecutive times: No active run. Push through the gate to start a pipeline:' \
+  'trailing mixed no-run payload did not preserve the malformed diagnostic'
+pass 'fm-no-mistakes-attach: trailing mixed no-run payload is malformed'
+unset FM_FAKE_NM_NO_RUN_TRAILING_MIXED
 
 : > "$FM_FAKE_NM_CALLS"
 : > "$FIXTURE/wrong-branch"

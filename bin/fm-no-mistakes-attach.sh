@@ -86,7 +86,7 @@ fm_nm_attach_status_usable() { # <status-output>
 }
 
 fm_nm_attach_status_absent() { # <status-output>
-  printf '%s\n' "$1" | grep -Fx 'No active run. Push through the gate to start a pipeline:' >/dev/null
+  [ "$1" = 'No active run. Push through the gate to start a pipeline:' ]
 }
 
 fm_nm_attach_status_diagnostic() { # <status-output>
