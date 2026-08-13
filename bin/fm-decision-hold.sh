@@ -7,8 +7,8 @@
 # The invoking agent inventories unresolved decisions, assigns stable keys, and
 # routes dependent work. This script supplies deterministic identities, creates
 # and verifies structured tasks-axi captain holds, records completion attestation
-# in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# in the originating task's metadata, and requires a durable captain decision
+# record before it closes or repairs a hold.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
@@ -35,11 +35,12 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
-# `resolve`, `decline`, and `repair` are the three close paths. Each one requires a
-# non-empty captain decision file of at most 8192 bytes, records the same durable
-# resolution block in the hold body, and stores the decision digest plus routed
-# identities so an exact retry is idempotent while a changed decision or routed set
-# is rejected. The recorded `Resolution mode:` names which path closed the hold.
+# `resolve` and `decline` close active holds; `repair` attests a hold already closed
+# outside this script. All three paths require a non-empty captain decision file of
+# at most 8192 bytes, record the same durable resolution block in the hold body, and
+# store the decision digest plus routed identities so an exact retry is idempotent
+# while a changed decision or, for `resolve`, routed set is rejected. New records
+# include a `Resolution mode:` naming their path; older routed records remain valid.
 #
 # `resolve` is the routed path. It requires every --routed-to task to exist and to
 # be blocked by the hold. It writes the captain decision and routed identities into

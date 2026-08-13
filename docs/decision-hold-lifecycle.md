@@ -23,9 +23,9 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-The `resolve`, `decline`, and `repair` subcommands are the three close paths.
-Each requires a non-empty captain decision file, records the same resolution block in the hold body, and stores the decision digest, the routed identities, and a `Resolution mode:` naming the path that closed the hold.
-An exact retry is idempotent, while a changed decision or a changed routed-task set is rejected.
+The `resolve` and `decline` subcommands close active holds, while `repair` attests a hold already closed outside the script.
+All three require a non-empty captain decision file and record the same resolution block in the hold body with the decision digest, routed identities, and a `Resolution mode:` naming the path.
+An exact retry is idempotent, while a changed decision or, for `resolve`, a changed routed-task set is rejected.
 
 The `resolve` subcommand is the routed path and additionally requires at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
