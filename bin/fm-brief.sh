@@ -49,6 +49,14 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every ship and scout scaffold unconditionally tells the crewmate to name its
+# chrome-devtools-axi session CHROME_DEVTOOLS_AXI_SESSION=<task-id> and to stop
+# that session itself once it is done checking.
+# The name is a contract, not a hint: bin/fm-teardown.sh stops exactly that
+# session at teardown, so a headed browser window left behind by any browser
+# work still gets closed.
+# Secondmate charters omit it because a secondmate home is not returned as a
+# task worktree.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
