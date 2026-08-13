@@ -383,6 +383,18 @@ else:
 for kind in module.REQUIRED_RESOURCE_KINDS:
     changed = copy.deepcopy(worker)
     changed["resources"][kind]["immutable_id"] = "foreign"
+    if kind in ("staging-request", "staging-result"):
+        # Transport blobs rewrite on every execute; only their path is fenced.
+        module.recorded_exact(action, changed)
+        moved = copy.deepcopy(worker)
+        moved["resources"][kind]["id"] = "/slot/1/elsewhere"
+        try:
+            module.recorded_exact(action, moved)
+        except module.ProviderError:
+            pass
+        else:
+            raise AssertionError("relocated {} blob path accepted".format(kind))
+        continue
     try:
         module.recorded_exact(action, changed)
     except module.ProviderError:

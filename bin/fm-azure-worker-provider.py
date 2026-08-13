@@ -938,7 +938,15 @@ def recorded_exact(
         if prior is not None:
             if current.get("id") != prior.get("id"):
                 raise ProviderError("{} resource ID differs from the recorded assignment".format(kind))
-            if kind not in skip_immutable and current.get("immutable_id") != prior.get("immutable_id"):
+            # Staging request/result blobs are per-execution transport: every
+            # execute rewrites them under the same stable blob path and binds
+            # their content through the request and result digests, so only
+            # their path identity is fenced here.
+            if (
+                kind not in skip_immutable
+                and kind not in ("staging-request", "staging-result")
+                and current.get("immutable_id") != prior.get("immutable_id")
+            ):
                 raise ProviderError("{} immutable identity differs from the recorded assignment".format(kind))
         for key, value in tags.items():
             if kind in (
