@@ -617,18 +617,20 @@ test_nonterminal_stale_not_working_surfaced() {
 # The latest pause declaration is authoritative only for that unavailable
 # source, and a later non-pause append restores the immediate wedge alarm.
 test_unavailable_harness_state_uses_only_current_pause_declaration() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
+  local dir state fakebin out capture_file window key pane_hash sig pid back statusf
   dir=$(make_case unavailable-state-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-codex-parked"
+  statusf="$state/codex-parked.status"
   printf 'idle codex prompt\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/codex-parked.meta"
-  printf 'paused: awaiting the upstream release\n' > "$state/codex-parked.status"
-  sig=$(seen_sig "$state/codex-parked.status"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle codex prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
 
   [ "$(crew_absorb_class codex-parked)" = unavailable ] \
     || fail "an explicit unavailable harness-state source was not distinguished from an inconclusive available source"
@@ -647,8 +649,25 @@ test_unavailable_harness_state_uses_only_current_pause_declaration() {
   [ ! -e "$state/.stale-since-$key" ] || fail "an unavailable-state declared pause started wedge aging"
   reap "$pid"
 
-  printf 'working: upstream landed, resuming\n' >> "$state/codex-parked.status"
-  sig=$(seen_sig "$state/codex-parked.status"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
+  : > "$out"
+  printf 'idle codex prompt, cadence check\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an unavailable-state declared pause did not re-surface on its bounded cadence"
+  rg -F "stale: $window" "$out" >/dev/null || fail "bounded pause recheck did not print a stale wake"
+  rg -F "awaiting external" "$out" >/dev/null || fail "bounded pause recheck omitted its external-wait label"
+  rg -F "awaiting external" "$state/.wake-queue" >/dev/null || fail "bounded pause recheck did not reach the durable wake queue"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "bounded pause recheck did not record its throttle marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "bounded pause recheck started wedge aging"
+
+  printf 'working: upstream landed, resuming\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-codex-parked_status"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=codex \
@@ -661,6 +680,67 @@ test_unavailable_harness_state_uses_only_current_pause_declaration() {
   [ ! -e "$state/.paused-$key" ] || fail "a later non-pause append retained bounded pause handling"
   unset FM_FAKE_CREW_STATE
   pass "an unavailable harness-state source trusts only the current pause declaration, and a superseding append restores stale alarms"
+}
+
+# Only reasons emitted before any semantic-state record read mean that no source
+# structurally exists. Every source-present degradation keeps the immediate alarm.
+test_only_structural_no_source_reasons_trust_current_pause() {
+  local harness verdict expected case_no=0 failures=0 dir state fakebin out capture_file
+  local id window key pane_hash sig pid
+  while IFS='|' read -r harness verdict expected; do
+    case_no=$((case_no + 1))
+    id="pause-reason-$case_no"
+    dir=$(make_case "$id"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$id"
+    printf 'idle %s prompt\n' "$harness" > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=%s\nbackend=tmux\n' "$window" "$harness" > "$state/$id.meta"
+    printf 'paused: awaiting the upstream release\n' > "$state/$id.status"
+    sig=$(seen_sig "$state/$id.status"); printf '%s' "$sig" > "$state/.seen-${id}_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "idle $harness prompt")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    export FM_FAKE_CREW_STATE="state: unknown · source: pane · harness state unavailable ($verdict)"
+    export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$harness" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if [ "$expected" = surface ]; then
+      if ! wait_for_exit "$pid" 40; then
+        reap "$pid"
+        printf 'not ok - %s %s lost its immediate stale alarm\n' "$harness" "$verdict" >&2
+        failures=$((failures + 1))
+      elif ! rg -Fx "stale: $window" "$out" >/dev/null \
+        || ! rg -F "stale: $window" "$state/.wake-queue" >/dev/null; then
+        printf 'not ok - %s %s did not surface the exact immediate stale alarm\n' "$harness" "$verdict" >&2
+        failures=$((failures + 1))
+      fi
+    else
+      if ! wait_live "$pid" 30; then
+        reap "$pid"
+        printf 'not ok - %s %s did not enter bounded pause handling: %s\n' "$harness" "$verdict" "$(<"$out")" >&2
+        failures=$((failures + 1))
+      elif [ -s "$out" ] || [ -s "$state/.wake-queue" ] || [ ! -e "$state/.paused-$key" ]; then
+        reap "$pid"
+        printf 'not ok - %s %s did not remain quietly bounded\n' "$harness" "$verdict" >&2
+        failures=$((failures + 1))
+      else
+        reap "$pid"
+      fi
+    fi
+  done <<'REASONS'
+claude|unknown missing|surface
+grok|unknown capture-failed|surface
+claude|unknown gen-mismatch|surface
+codex|unknown codex-unverified|absorb
+kimi|unknown kimi-unverified|absorb
+REASONS
+  unset FM_FAKE_CREW_STATE
+  [ "$failures" -eq 0 ] || exit 1
+  pass "only structural no-source reasons trust a current pause; degraded verified sources retain immediate stale alarms"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -1880,6 +1960,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_unavailable_harness_state_uses_only_current_pause_declaration
+test_only_structural_no_source_reasons_trust_current_pause
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
