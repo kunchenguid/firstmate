@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, then assert liveness.
+# annotate validated signal status keys, surface unread informational status
+# lines and OPEN DECISIONS, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -79,12 +80,53 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
+# Print still-unread informational status lines (note: answers and pending-reply
+# resolutions) that the OPEN DECISIONS fold never carries. Uses the same
+# cursor-backed unread span as the annotation path, and runs on every drain -
+# including the empty-queue fast path - so a buried answer cannot be swallowed
+# when the fold later advances the cursor. Prints nothing when nothing is
+# unread, which is the common case.
+print_unread_status_section() {
+  local unread task line item_bytes=220 global_bytes=4000
+  local output='' used=0 shown=0 omitted=0 bytes
+
+  unread=$(scan_unread_surface_lines "$STATE") || return 0
+  [ -n "$unread" ] || return 0
+
+  while IFS=$(printf '\t') read -r task line; do
+    [ -n "$task" ] || continue
+    [ -n "$line" ] || continue
+    line="$task $line"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$unread
+EOF
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n'
+  printf '%s' "$output"
+  if [ "$omitted" -gt 0 ]; then
+    printf 'UNREAD STATUS: %d more omitted (byte cap)\n' "$omitted"
+  fi
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
-# scan_open_decisions_incremental wrapper) rather than from the latest-line
-# annotations above, so a decision buried under later unrelated appends cannot
-# be silently missed. Runs on every drain - including the empty-queue fast path
+# scan_open_decisions_incremental wrapper) rather than from the annotations
+# above, so a decision buried under later unrelated appends cannot be silently
+# missed. Informational `note:` lines and pending-reply resolutions are not
+# decisions; print_unread_status_section owns their one-shot surface. Runs on every drain - including the empty-queue fast path
 # - because the decision can still be open even when nothing new is queued for
 # its task this turn. The incremental wrapper bounds this scan's cost to bytes
 # appended to each task's status log since the LAST drain, not that log's whole
@@ -218,6 +260,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  (print_unread_status_section) || true
   (print_open_decisions_section) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
@@ -271,6 +314,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (fm_wake_print_annotations "$RAW_ROWS") || true
+(print_unread_status_section) || true
 (print_open_decisions_section) || true
 assert_watcher_liveness
 exit 0

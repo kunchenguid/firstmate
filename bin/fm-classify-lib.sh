@@ -575,6 +575,152 @@ EOF
   return 0
 }
 
+# --- unread status lines since the open-decisions cursor --------------------
+#
+# The drain annotation historically printed only the newest status line, so a
+# substantive `note:` answer immediately followed by a routine `note:` (or a
+# pending-reply resolution buried under a later unrelated append) never reached
+# the supervisor. Those verbs also never enter the OPEN DECISIONS fold, so they
+# had no other surfacing path.
+# These helpers are the ONE owner of "what is still unread since the last drain
+# presentation": they read the same cursor format and invalidation rules as
+# status_open_decisions_incremental, but they never write that cursor. The drain
+# prints the unread surface first, then the incremental fold advances the
+# cursor, so a presented line is not re-printed on the next drain.
+# Missing or invalid cursor state is offset 0 (every current line is unread):
+# fail toward showing more rather than dropping a line that was never presented.
+# A trusted cursor at EOF prints nothing: already-presented bytes are not
+# replayed as new.
+# Informational `note:` lines and reserved-key pending-reply resolutions are
+# the fleet-wide unread surface; they are not open decisions and are not
+# persisted in the folded open-set.
+
+# Print the already-presented byte offset for <status-file>, or 0 when the
+# cursor is missing or invalid. Never writes. Invalidation matches the
+# incremental fold: fold-version mismatch, ident mismatch, or offset past
+# current size all fall back to 0.
+status_open_decisions_cursor_offset() {  # <status-file>
+  local f=$1 cf offset=0 ident='' version='' cursor_data first rest
+  local offset_line ident_line cur_ident size
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf '0'; return 0; }
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
+    if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
+      first=${cursor_data%%$'\n'*}
+      case "$first" in
+        version=*)
+          version=${first#version=}
+          [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] || version=''
+          rest=${cursor_data#*$'\n'}
+          offset_line=${rest%%$'\n'*}
+          case "$offset_line" in
+            offset=*) offset=${offset_line#offset=} ;;
+            *) offset=0; version='' ;;
+          esac
+          case "$offset" in
+            ''|*[!0-9]*) offset=0; version='' ;;
+            *)
+              case "$rest" in
+                *$'\n'*)
+                  rest=${rest#*$'\n'}
+                  ident_line=${rest%%$'\n'*}
+                  case "$ident_line" in
+                    ident=*) ident=${ident_line#ident=} ;;
+                    *) offset=0; version='' ;;
+                  esac
+                  ;;
+                *) offset=0; version='' ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+    fi
+  fi
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '0'; return 0; }
+  [ -n "$cur_ident" ] || { printf '0'; return 0; }
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || { printf '0'; return 0; }
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+    offset=0
+  fi
+  printf '%s' "$offset"
+}
+
+# Print every non-blank status line whose bytes begin at or after the persisted
+# cursor offset. Does not write the cursor. A missing or invalid cursor prints
+# the whole current file (offset 0). Symlinks and unreadable files print nothing.
+status_new_lines_since_cursor() {  # <status-file>
+  local f=$1 cf offset size chunk_file line
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  offset=$(status_open_decisions_cursor_offset "$f")
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 0
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$offset" -lt "$size" ] || return 0
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  chunk_file="$cf.unread.$$"
+  tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null || { rm -f "$chunk_file"; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) printf '%s\n' "$line" ;;
+    esac
+  done < "$chunk_file"
+  rm -f "$chunk_file"
+  return 0
+}
+
+# 0 when a status line is an informational `note:` or a reserved-key
+# pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
+# drain's unread-status surface is their only guaranteed presentation.
+status_line_is_unread_surface() {  # <status-line>
+  local line=$1 verb key note resolve held prefix
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = note ] && return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  case "$verb" in
+    "$resolve"|"$held") ;;
+    *) return 1 ;;
+  esac
+  key=$(_fm_decision_key "$line") || return 1
+  note=$(status_line_note "$line")
+  for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
+    case "$key" in
+      "$prefix"*)
+        _fm_decision_key_transition_allowed "$key" "$note"
+        return
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Fleet-wide unread informational lines: one "<task>\t<status-line>" row per
+# still-unread `note:` or pending-reply resolution, in glob (task id) order.
+# Prints nothing when none are unread. Directory scan rejects status symlinks
+# the same way scan_open_decisions does.
+scan_unread_surface_lines() {  # <state>
+  local state=$1 f task lines line
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    lines=$(status_new_lines_since_cursor "$f") || continue
+    [ -n "$lines" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      status_line_is_unread_surface "$line" || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$lines
+EOF
+  done
+  return 0
+}
+
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
 # A later done, failed, needs-decision, blocked, or resolved event carrying that
