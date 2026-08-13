@@ -241,6 +241,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/cross-repo-workspaces.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/decision-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
