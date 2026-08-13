@@ -302,7 +302,8 @@ Supervise all live work under section 8.
 ### Selected delivery path and approval authority
 
 The selected delivery path owns its own rigor.
-When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
+When no-mistakes is selected, no-mistakes owns review, fixes, tests, documentation, push, PR, and CI; the only prior-review exception is an accepted consumed domain review under `consumed-domain-review`, which replaces its duplicate independent review step and nothing else.
+Load `consumed-domain-review` before treating any prior domain-review receipt as a delivery input, and otherwise follow the selected path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
@@ -518,6 +519,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
+- `consumed-domain-review` - load before treating any prior domain review as a delivery input, before authorizing a no-mistakes review skip from a receipt, and whenever code or identity changes may have invalidated a consumed receipt.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.

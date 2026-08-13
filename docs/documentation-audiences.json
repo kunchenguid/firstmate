@@ -55,6 +55,14 @@
       "target": "docs/documentation-audiences.json"
     },
     {
+      "source": "docs/architecture.md",
+      "target": "docs/consumed-domain-review.md"
+    },
+    {
+      "source": "docs/consumed-domain-review.md",
+      "target": "docs/verification/consumed-domain-review.md"
+    },
+    {
       "source": "docs/calm.md",
       "target": "docs/calm-mode-feasibility.md"
     },
@@ -126,6 +134,10 @@
     },
     {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/consumed-domain-review/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -241,6 +253,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/consumed-domain-review.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/decision-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
@@ -327,6 +343,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/consumed-domain-review.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

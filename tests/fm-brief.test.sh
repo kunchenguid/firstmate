@@ -312,10 +312,14 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief retained a personal review stacked on the selected delivery path"
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
+  assert_no_grep "consumed-domain-review" "$home/data/$id/brief.md" \
+    "local-only brief must not invent a review-consumption step"
   id="brief-direct-intent-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
+  assert_no_grep "consumed-domain-review" "$home/data/$id/brief.md" \
+    "direct-PR brief must not invent a review-consumption step"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
@@ -345,6 +349,12 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep "Only when Firstmate explicitly supplies an accepted result under its \`consumed-domain-review\` policy" "$brief" \
+    "no-mistakes DOD must require Firstmate's accepted receipt decision"
+  assert_grep "skip exactly the duplicate \`review\` step" "$brief" \
+    "consumed review must replace only the independent review step"
+  assert_grep "never infer receipt validity or omit another step" "$brief" \
+    "consumed review wording must retain every non-review delivery step"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution

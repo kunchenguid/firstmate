@@ -17,7 +17,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
-| `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
+| `fm-update.sh`           | Compare fork and canonical sources, then fast-forward firstmate and secondmate homes only to their shared descendant |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
 | `fm-remote-job-worker.sh` | Long-lived remote queue worker for tracked `fm-*.sh` commands in the account runtime |
@@ -49,6 +49,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
+| `fm-stow-cascade.sh`     | Enumerate this home's registered secondmates for an internal `/stow` cascade: per-home budget accounting and how the sweep reaches each home |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -61,6 +62,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture from `data/projects.md` for fleet sync and home seeding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-domain-review-consume.sh` | Delegate exact-head receipt validation to its domain producer and enforce Firstmate's independently resolved repository identity |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and keyed escalation lifecycle |

@@ -239,6 +239,7 @@ A ship brief records its mode as a fixed machine-readable line and the spawn ref
 `data/projects.md` records each project's standing posture and optional `+yolo` flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
 `bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
+A versioned exact-head domain review may replace only a duplicate no-mistakes review under the conditional policy and integration boundaries in [`consumed-domain-review.md`](consumed-domain-review.md).
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
@@ -315,10 +316,11 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
-For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
-Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+`/updatefirstmate` compares the configured fork `origin` with canonical `https://github.com/kunchenguid/firstmate` `main`, selects a target only when one history cleanly contains the other, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+This makes a fork that merely matches its own origin distinct from one that also contains the latest canonical upstream, while preserving fork-only commits whenever canonical is already their ancestor.
+Fork/canonical divergence or an unavailable source stops the update before any target moves, and dirty, locally diverged, offline, and off-default targets are reported and left untouched.
+For a remote route, the configured code root applies the same comparison on that host before the persistent home fast-forwards to the code-root commit.
+Local homes share the guarded fast-forward helper, and a standalone clone imports the exact selected commit from the primary code root before applying those same guards.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof
