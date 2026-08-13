@@ -159,8 +159,6 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$TASK_REF"; then
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
-git -C "$PROJ" merge --ff-only "$TASK_REF" >/dev/null
-after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 META_TMP=$(mktemp "$STATE/.fm-merge-local-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -172,4 +170,6 @@ printf 'local_merge_target=%s\n' "$TARGET" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 mv -f -- "$META_TMP" "$META" || exit 1
 META_TMP=
+git -C "$PROJ" merge --ff-only "$TASK_REF" >/dev/null
+after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

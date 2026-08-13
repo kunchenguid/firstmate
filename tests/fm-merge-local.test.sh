@@ -10,6 +10,8 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
+REAL_MKTEMP_FOR_TEST=$(command -v mktemp)
+export REAL_MKTEMP_FOR_TEST
 TMP_ROOT=$(fm_test_tmproot fm-merge-local-tests)
 ID=task-x1
 TASK_BRANCH="fm/$ID"
@@ -46,6 +48,7 @@ run_merge() {
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="${MERGE_LOCAL_TEST_PATH:-$PATH}" \
     "$MERGE_LOCAL" "$@"
 }
 
@@ -175,6 +178,35 @@ test_divergence_refuses() {
   pass "fm-merge-local refuses divergence without moving either branch"
 }
 
+test_metadata_failure_prevents_landing() {
+  local case_dir fakebin target_before rc
+  case_dir=$(make_case metadata-failure integration integration)
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.fm-merge-local-meta.XXXXXX) exit 1 ;;
+esac
+exec "$REAL_MKTEMP_FOR_TEST" "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  target_before=$(ref_sha "$case_dir" integration)
+
+  set +e
+  MERGE_LOCAL_TEST_PATH="$fakebin:$PATH" run_merge "$case_dir" "$ID" --target-branch integration \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "metadata-failure"
+  [ "$(ref_sha "$case_dir" integration)" = "$target_before" ] \
+    || fail "metadata-failure: integration branch moved without durable target metadata"
+  ! grep -q '^local_merge_target=' "$case_dir/state/$ID.meta" \
+    || fail "metadata-failure: failed metadata publication altered the task record"
+  pass "fm-merge-local persists teardown metadata before moving the target branch"
+}
+
 test_non_local_only_mode_refuses() {
   local case_dir target_before rc
   case_dir=$(make_case wrong-mode integration integration direct-PR)
@@ -244,6 +276,7 @@ test_wrong_checked_out_target_refuses
 test_dirty_target_refuses
 test_nonexistent_and_invalid_targets_refuse
 test_divergence_refuses
+test_metadata_failure_prevents_landing
 test_non_local_only_mode_refuses
 test_option_errors_refuse
 test_task_branch_cannot_be_target
