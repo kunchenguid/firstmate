@@ -110,6 +110,10 @@ test_handwritten_body_fails_with_guidance() {
     "the refusal should print the exact signature the author is missing"
   assert_contains "$err" "CONTRIBUTING.md" \
     "the refusal should point at the contributor workflow"
+  assert_contains "$err" "Restore the pipeline's '## Pipeline'" \
+    "the refusal should name the recovery for a PR whose body was overwritten"
+  assert_contains "$err" "re-runs on every body edit" \
+    "the refusal should say the gate re-evaluates after the body is restored"
   assert_contains "$err" "PR author: synthetic-contributor" \
     "the refusal should identify the author for maintainer triage"
   pass "a hand-written PR body without the signature fails the gate with actionable guidance"
