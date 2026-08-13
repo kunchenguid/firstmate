@@ -826,6 +826,23 @@ clear_omp_session_marker() {
   fi
 }
 
+clear_omp_session_marker_with_lifecycle_lock() {
+  local state=$1 id=$2 path=$3 status release_status
+  fm_omp_session_evidence_lock_acquire "$state" "$id" || return 1
+  if clear_omp_session_marker "$path"; then
+    status=0
+  else
+    status=$?
+  fi
+  if fm_omp_session_evidence_lock_release "$state" "$id"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -eq 0 ] || return "$status"
+  return "$release_status"
+}
+
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
@@ -852,7 +869,7 @@ clear_relaunch_harness_wiring() {
       fm_omp_session_evidence_clear "$state" "$id" || return 1
     elif [ "$path" = "$state/$id.omp-session-run" ] \
       || [ "$path" = "$state/$id.omp-session-stop" ]; then
-      clear_omp_session_marker "$path" || return 1
+      clear_omp_session_marker_with_lifecycle_lock "$state" "$id" "$path" || return 1
     else
       rm -f -- "$path" || return 1
     fi
@@ -2587,11 +2604,13 @@ if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     echo "error: failed to claim OMP session evidence for $ID" >&2
     exit 1
   }
-  clear_omp_session_marker "$STATE_REAL/$ID.omp-session-run" || {
+  clear_omp_session_marker_with_lifecycle_lock "$STATE_REAL" "$ID" \
+    "$STATE_REAL/$ID.omp-session-run" || {
     echo "error: refusing to replace unverified OMP session run marker for $ID" >&2
     exit 1
   }
-  clear_omp_session_marker "$STATE_REAL/$ID.omp-session-stop" || {
+  clear_omp_session_marker_with_lifecycle_lock "$STATE_REAL" "$ID" \
+    "$STATE_REAL/$ID.omp-session-stop" || {
     echo "error: refusing to replace unverified OMP session stop marker for $ID" >&2
     exit 1
   }
@@ -2759,12 +2778,13 @@ EOF
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
 const SESSION_EVIDENCE_OWNER = "$STATE_REAL/$ID.omp-session-evidence.owner";
 const BUSY_GEN_PATH = "$STATE_REAL/$ID.busy-gen";
+const GENERATION_LOCK = "$STATE_REAL/$ID.busy-state.lock";
 const TURNEND = "$TURNEND";
 const RUN_TOKEN_PREFIX = "$BUSY_GEN" + ".";
 let runToken = "";
@@ -2807,6 +2827,72 @@ const generationIsCurrent = () => {
 const requireCurrentGeneration = () => {
   if (!generationIsCurrent()) throw new Error("stale OMP extension generation");
 };
+const sleepMillis = (milliseconds: number) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+};
+let generationLockHeld = false;
+const acquireGenerationLock = () => {
+  let tries = 0;
+  while (true) {
+    try {
+      mkdirSync(GENERATION_LOCK, { mode: 0o700 });
+      generationLockHeld = true;
+      return;
+    } catch (error) {
+      if ((error as any)?.code !== "EEXIST") throw error;
+      tries += 1;
+      if (tries < 40) {
+        sleepMillis(50);
+        continue;
+      }
+      let stat;
+      try {
+        stat = lstatSync(GENERATION_LOCK);
+      } catch {
+        tries = 0;
+        continue;
+      }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("OMP lifecycle lock is not a directory");
+      }
+      if (Date.now() - stat.mtimeMs >= 5000) {
+        try { rmdirSync(GENERATION_LOCK); } catch {}
+        tries = 0;
+        continue;
+      }
+      throw new Error("OMP lifecycle lock timeout");
+    }
+  }
+};
+const releaseGenerationLock = () => {
+  if (!generationLockHeld) return;
+  try {
+    const stat = lstatSync(GENERATION_LOCK);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("OMP lifecycle lock was replaced");
+    }
+    rmdirSync(GENERATION_LOCK);
+  } finally {
+    generationLockHeld = false;
+  }
+};
+const withGenerationLock = <T>(fn: () => T): T => {
+  const ownsLock = !generationLockHeld;
+  if (ownsLock) acquireGenerationLock();
+  try {
+    requireCurrentGeneration();
+    return fn();
+  } finally {
+    if (ownsLock) releaseGenerationLock();
+  }
+};
+const beforeRenameTestPause = (path: string) => {
+  const gate = process.env.FM_OMP_TEST_BEFORE_RENAME_GATE;
+  const target = process.env.FM_OMP_TEST_BEFORE_RENAME_TARGET;
+  if (!gate || (target && target !== path)) return;
+  writeFileSync(gate + ".ready", "ready\n", { encoding: "utf8" });
+  while (existsSync(gate + ".hold")) sleepMillis(10);
+};
 const cleanupOwnedTemp = (path: string) => {
   if (!ownedTemps.delete(path)) return;
   try {
@@ -2816,7 +2902,8 @@ const cleanupOwnedTemp = (path: string) => {
   }
 };
 const atomicWrite = (path: string, value: string) => {
-  requireCurrentGeneration();
+  const ownsLock = !generationLockHeld;
+  if (ownsLock) acquireGenerationLock();
   const temp = path + "." + INCARNATION_ID + "." + String(++tempSequence) + ".tmp";
   let fd = -1;
   try {
@@ -2827,6 +2914,8 @@ const atomicWrite = (path: string, value: string) => {
     closeSync(fd);
     fd = -1;
     requireCurrentGeneration();
+    beforeRenameTestPause(path);
+    requireCurrentGeneration();
     renameSync(temp, path);
     ownedTemps.delete(temp);
   } catch (error) {
@@ -2835,6 +2924,8 @@ const atomicWrite = (path: string, value: string) => {
     }
     try { cleanupOwnedTemp(temp); } catch {}
     throw error;
+  } finally {
+    if (ownsLock) releaseGenerationLock();
   }
 };
 const ensureEvidenceDirectory = () => {
@@ -2974,20 +3065,22 @@ const rotateRun = () => {
     runToken = "";
     return "";
   }
-  const startedAt = Date.now();
-  const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
-  runToken = token;
-  idlePublishedToken = "";
-  const record = {
-    token, startedAt, lastEventAt: startedAt, stoppedAt: 0, active: true,
-    recovered: false, finalizing: false, idlePending: true,
-  };
-  runRecords.push(record);
-  trimRunHistory();
-  atomicWrite(SESSION_RUN, token + "\\n");
-  atomicWrite(SESSION_STOP, "pending\\n");
-  writeRunEvidence(record);
-  return token;
+  return withGenerationLock(() => {
+    const startedAt = Date.now();
+    const token = "$BUSY_GEN" + "." + process.pid + "." + String(startedAt) + "." + String(++runSequence);
+    runToken = token;
+    idlePublishedToken = "";
+    const record = {
+      token, startedAt, lastEventAt: startedAt, stoppedAt: 0, active: true,
+      recovered: false, finalizing: false, idlePending: true,
+    };
+    runRecords.push(record);
+    trimRunHistory();
+    atomicWrite(SESSION_RUN, token + "\\n");
+    atomicWrite(SESSION_STOP, "pending\\n");
+    writeRunEvidence(record);
+    return token;
+  });
 };
 const persistedRuns = () => {
   let durableState = false;
@@ -3119,11 +3212,14 @@ const persistedRuns = () => {
   }
 };
 const applyPersistedState = (persisted: any) => {
-  for (const record of persisted.materialize) writeRunEvidence(record);
-  if (persisted.pointerMissing) atomicWrite(SESSION_RUN, persisted.token + "\n");
-  if (persisted.finalizing.length > 0) atomicWrite(SESSION_STOP, persisted.token + "\n");
-  else if (persisted.stopMissing) atomicWrite(SESSION_STOP, "pending\n");
+  withGenerationLock(() => {
+    for (const record of persisted.materialize) writeRunEvidence(record);
+    if (persisted.pointerMissing) atomicWrite(SESSION_RUN, persisted.token + "\n");
+    if (persisted.finalizing.length > 0) atomicWrite(SESSION_STOP, persisted.token + "\n");
+    else if (persisted.stopMissing) atomicWrite(SESSION_STOP, "pending\n");
+  });
   if (persisted.needsBusy) {
+    requireCurrentGeneration();
     execFileSync("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", "busy", "--gen", "$BUSY_GEN",
       "--run-token", persisted.token, "--source", "omp-ext", "--event", "recover-busy",
@@ -3290,16 +3386,18 @@ const rememberRunTimestamp = (record: {
 };
 const advanceCurrentRun = () => {
   if (!generationIsCurrent()) return null;
-  const active = runRecords.filter((record) => record.active);
-  if (!active.length) return null;
-  const current = active[active.length - 1];
-  if (runToken !== current.token) {
-    runToken = current.token;
-    idlePublishedToken = "";
-    atomicWrite(SESSION_RUN, current.token + "\\n");
-    writeRunEvidence(current);
-  }
-  return current;
+  return withGenerationLock(() => {
+    const active = runRecords.filter((record) => record.active);
+    if (!active.length) return null;
+    const current = active[active.length - 1];
+    if (runToken !== current.token) {
+      runToken = current.token;
+      idlePublishedToken = "";
+      atomicWrite(SESSION_RUN, current.token + "\\n");
+      writeRunEvidence(current);
+    }
+    return current;
+  });
 };
 const uniqueActiveCurrentRun = (timestamp?: number, allowRecoveredAdvance = false) => {
   if (!adoptCurrentRun()) return null;
@@ -3335,36 +3433,43 @@ const resolveRunToken = (event: any) => {
 const settleRun = async (token: string, event: string, timestamp?: number) => {
   if (!generationIsCurrent()) return;
   if (!token) return;
-  const record = runRecords.find((candidate) => candidate.token === token);
-  if (!record?.active) return;
-  const hasActiveSibling = runRecords.some((candidate) => candidate.active && candidate.token !== token);
-  if (timestamp !== undefined && !timestampMatchesRun(record, timestamp)) return;
-  if (hasActiveSibling) {
+  let turnEndToken = "";
+  let idleToken = "";
+  withGenerationLock(() => {
+    const record = runRecords.find((candidate) => candidate.token === token);
+    if (!record?.active) return;
+    const hasActiveSibling = runRecords.some((candidate) => candidate.active && candidate.token !== token);
+    if (timestamp !== undefined && !timestampMatchesRun(record, timestamp)) return;
     if (!rememberRunTimestamp(record, timestamp)) return;
-    atomicWrite(SESSION_STOP, token + "\n");
-  } else if (!rememberRunTimestamp(record, timestamp)) {
-    return;
-  }
-  if (record.finalizing) {
-    record.active = false;
-    if (!record.idlePending) {
-      await touchTurnEnd(token);
+    if (event === "session-stop" || hasActiveSibling) atomicWrite(SESSION_STOP, token + "\n");
+    if (record.finalizing) {
+      record.active = false;
+      if (!record.idlePending) {
+        turnEndToken = token;
+        return;
+      }
+    } else {
+      record.stoppedAt = timestamp === undefined ? Math.max(Date.now(), record.lastEventAt) : timestamp;
+      writeRunEvidence(record);
+      record.active = false;
+    }
+    if (runRecords.some((candidate) => candidate.active)) {
+      advanceCurrentRun();
+      atomicWrite(SESSION_STOP, "pending\n");
       return;
     }
-  } else {
-    record.stoppedAt = timestamp === undefined ? Math.max(Date.now(), record.lastEventAt) : timestamp;
-    writeRunEvidence(record);
-    record.active = false;
-  }
-  if (runRecords.some((candidate) => candidate.active)) {
-    advanceCurrentRun();
-    atomicWrite(SESSION_STOP, "pending\n");
+    if (!runToken || idlePublishedToken === runToken) return;
+    idlePublishedToken = runToken;
+    idleToken = runToken;
+  });
+  if (turnEndToken) {
+    await touchTurnEnd(turnEndToken);
     return;
   }
-  if (!runToken || idlePublishedToken === runToken) return;
-  idlePublishedToken = runToken;
-  await busyEvent(runToken, "idle", event);
-  await touchTurnEnd(runToken);
+  if (idleToken) {
+    await busyEvent(idleToken, "idle", event);
+    await touchTurnEnd(idleToken);
+  }
 };
 export default function (omp: any) {
   omp.on("agent_start", () => {
@@ -3379,10 +3484,6 @@ export default function (omp: any) {
     const record = runRecords.find((candidate) => candidate.token === token);
     if (!record?.active) return;
     if (!timestampMatchesRun(record, timestamp)) return;
-    if (token === runToken && !runRecords.some((candidate) => candidate.active && candidate.token !== token)) {
-      if (!rememberRunTimestamp(record, timestamp)) return;
-      atomicWrite(SESSION_STOP, token + "\\n");
-    }
     await settleRun(token, "session-stop", timestamp);
   });
   omp.on("agent_end", (event: any) => {

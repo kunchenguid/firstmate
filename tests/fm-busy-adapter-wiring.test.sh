@@ -158,6 +158,9 @@ test_pi_extension_stale_incarnation_rejected() {
 # Node host and fire one lifecycle handler or one terminal event sequence.
 drive_omp_ext() {
   EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" TASK_ID="${4:-}" \
+    ATOMIC_GATE="${ATOMIC_GATE:-}" \
+    FM_OMP_TEST_BEFORE_RENAME_GATE="${FM_OMP_TEST_BEFORE_RENAME_GATE:-}" \
+    FM_OMP_TEST_BEFORE_RENAME_TARGET="${FM_OMP_TEST_BEFORE_RENAME_TARGET:-}" \
     BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -305,6 +308,40 @@ switch (process.env.MODE) {
       throw new Error("a stale extension mutated per-run evidence");
     }
     if (markerPresent(turnEndPath)) throw new Error("a stale extension published turn-end evidence");
+    if (!busyState().includes("state=busy")) throw new Error("the replacement generation did not remain busy");
+    break;
+  }
+  case "generation-atomic-commit-guard": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const gate = process.env.ATOMIC_GATE;
+    if (!gate) throw new Error("the atomic commit race gate was not configured");
+    const oldGeneration = readFileSync(base + ".busy-gen", "utf8").trim();
+    writeFileSync(gate + ".hold", "hold\n", { encoding: "utf8" });
+    const racer = (await import("node:child_process")).spawn("sh", [
+      "-c",
+      'gate=$1; busy=$2; state=$3; id=$4; while [ ! -e "$gate.ready" ]; do sleep 0.01; done; "$busy" arm "$state" "$id" > "$gate.gen" 2>/dev/null & arm_pid=$!; sleep 0.2; if [ -s "$gate.gen" ]; then printf raced > "$gate.raced"; else printf blocked > "$gate.blocked"; fi; rm -f "$gate.hold"; wait "$arm_pid"; printf armed > "$gate.armed"',
+      "omp-generation-race", gate, process.env.BUSY_EVENT_PATH, process.env.STATE_DIR, process.env.TASK_ID,
+    ], { stdio: "ignore" });
+    const racerExit = new Promise((resolve, reject) => {
+      racer.once("error", reject);
+      racer.once("exit", resolve);
+    });
+    try { await fire("agent_start"); } catch {}
+    await racerExit;
+    if (!existsSync(gate + ".blocked")) throw new Error("busy generation changed before the atomic commit completed");
+    if (existsSync(gate + ".raced")) throw new Error("busy generation writer crossed the commit lock");
+    if (!existsSync(gate + ".armed")) throw new Error("the replacement generation did not arm");
+    const runPath = base + ".omp-session-run";
+    const stopPath = base + ".omp-session-stop";
+    const evidenceDir = base + ".omp-session-evidence";
+    const token = readFileSync(runPath, "utf8").trim();
+    if (!token || readFileSync(stopPath, "utf8").trim() !== "pending") {
+      throw new Error("the generation-locked run transition was partially committed");
+    }
+    if (!existsSync(evidenceDir + "/" + token)) throw new Error("the generation-locked run evidence was not committed");
+    if (readFileSync(base + ".busy-gen", "utf8").trim() === oldGeneration) {
+      throw new Error("the replacement generation did not supersede the old one");
+    }
     if (!busyState().includes("state=busy")) throw new Error("the replacement generation did not remain busy");
     break;
   }
@@ -1398,6 +1435,26 @@ test_omp_extension_stale_incarnation_rejected() {
   pass "omp extension events from a superseded incarnation cannot mutate persistence"
 }
 
+test_omp_extension_generation_commit_is_atomic() {
+  local rec id=busy-omp-generation-commit out state state_real ext gate
+  rec=$(make_spawn_case omp-generation-commit omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  state_real=$(cd "$state" && pwd -P)
+  ext="$state/$id.omp-ext.ts"
+  gate="$state/$id.generation-race"
+  out=$(ATOMIC_GATE="$gate" \
+    FM_OMP_TEST_BEFORE_RENAME_GATE="$gate" \
+    FM_OMP_TEST_BEFORE_RENAME_TARGET="$state_real/$id.omp-session-run" \
+    drive_omp_ext "$ext" generation-atomic-commit-guard "$state" "$id") \
+    || fail "generation atomic-commit drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "replacement generation must remain busy after the guarded commit, got '$out'"
+  pass "OMP generation changes cannot interrupt a multi-file lifecycle commit"
+}
+
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
 # OpenCode plugin in a plain Node host and feed it one event per argument, in
 # order, through the same hooks.event entry OpenCode calls.
@@ -1594,6 +1651,7 @@ test_omp_extension_uses_incarnation_unique_marker_temps
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
+test_omp_extension_generation_commit_is_atomic
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

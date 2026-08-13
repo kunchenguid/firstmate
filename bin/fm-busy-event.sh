@@ -111,8 +111,8 @@ lock_acquire() {
       mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
       age=$((now - mtime))
       if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
-        rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
-        mkdir "$LOCK" 2>/dev/null && break
+        [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 1
+        rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null && break
       fi
       echo "error: busy-state lock timeout for $ID" >&2
       return 1

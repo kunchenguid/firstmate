@@ -5,6 +5,38 @@ fm_omp_session_evidence_owner_path() {
   printf '%s/%s.omp-session-evidence.owner\n' "$state" "$id"
 }
 
+fm_omp_session_evidence_lock_path() {
+  local state=$1 id=$2
+  printf '%s/%s.busy-state.lock\n' "$state" "$id"
+}
+
+fm_omp_session_evidence_lock_acquire() {
+  local state=$1 id=$2 lock tries=0 now mtime age
+  lock=$(fm_omp_session_evidence_lock_path "$state" "$id")
+  while ! mkdir "$lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 40 ]; then
+      now=$(date +%s)
+      mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || return 1)
+      age=$((now - mtime))
+      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ] \
+        && [ -d "$lock" ] && [ ! -L "$lock" ] \
+        && rmdir "$lock" 2>/dev/null; then
+        tries=0
+        continue
+      fi
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
+fm_omp_session_evidence_lock_release() {
+  local state=$1 id=$2 lock
+  lock=$(fm_omp_session_evidence_lock_path "$state" "$id")
+  rmdir "$lock" 2>/dev/null
+}
+
 fm_omp_session_evidence_owner_matches() {
   fm_omp_session_evidence_owner_content_valid "$1" "$2"
 }
@@ -190,27 +222,117 @@ fm_omp_session_evidence_validate() {
   fi
 }
 
-fm_omp_session_evidence_clear() {
-  local state=$1 id=$2 evidence_dir owner
-  fm_omp_session_evidence_validate "$state" "$id" || return 1
-  evidence_dir="$state/$id.omp-session-evidence"
-  owner=$(fm_omp_session_evidence_owner_path "$state" "$id")
-  if [ -e "$evidence_dir" ]; then
-    rm -rf -- "$evidence_dir" || return 1
-  fi
-  if [ -e "$owner" ]; then
-    rm -f -- "$owner" || return 1
+fm_omp_session_evidence_path_identity() {
+  local path=$1
+  [ -e "$path" ] && [ ! -L "$path" ] || return 1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%d:%i' "$path" 2>/dev/null
+  else
+    stat -c '%d:%i' "$path" 2>/dev/null
   fi
 }
 
+fm_omp_session_evidence_clear_pause() {
+  local gate=${FM_OMP_TEST_EVIDENCE_CLEAR_GATE:-}
+  [ -n "$gate" ] || return 0
+  : > "$gate.ready" || return 1
+  while [ ! -e "$gate.release" ]; do
+    sleep 0.01
+  done
+}
+
+fm_omp_session_evidence_clear_locked() {
+  local state=$1 id=$2 evidence_dir owner entry foreign_entry current_generation
+  local evidence_identity entry_identity current_identity owner_identity
+  fm_omp_session_evidence_validate "$state" "$id" || return 1
+  fm_omp_session_evidence_clear_pause || return 1
+  fm_omp_session_evidence_validate "$state" "$id" || return 1
+  evidence_dir="$state/$id.omp-session-evidence"
+  owner=$(fm_omp_session_evidence_owner_path "$state" "$id")
+  if [ -e "$evidence_dir" ] || [ -L "$evidence_dir" ]; then
+    [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || return 1
+    evidence_identity=$(fm_omp_session_evidence_path_identity "$evidence_dir") || return 1
+    current_generation=$(fm_omp_session_evidence_current_generation "$state" "$id") || return 1
+    for entry in "$evidence_dir"/* "$evidence_dir"/.[!.]* "$evidence_dir"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || return 1
+      current_identity=$(fm_omp_session_evidence_path_identity "$evidence_dir") || return 1
+      [ "$current_identity" = "$evidence_identity" ] || return 1
+      [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+      entry_identity=$(fm_omp_session_evidence_path_identity "$entry") || return 1
+      current_generation=$(fm_omp_session_evidence_current_generation "$state" "$id") || return 1
+      case "$entry" in
+        *.tmp) fm_omp_session_evidence_temp_valid "$entry" "$state" "$id" "$current_generation" || return 1 ;;
+        *) fm_omp_session_evidence_record_valid "$entry" "$current_generation" || return 1 ;;
+      esac
+      current_identity=$(fm_omp_session_evidence_path_identity "$evidence_dir") || return 1
+      [ "$current_identity" = "$evidence_identity" ] || return 1
+      current_identity=$(fm_omp_session_evidence_path_identity "$entry") || return 1
+      [ "$current_identity" = "$entry_identity" ] || return 1
+      rm -f -- "$entry" || return 1
+      [ ! -e "$entry" ] && [ ! -L "$entry" ] || return 1
+    done
+    [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || return 1
+    current_identity=$(fm_omp_session_evidence_path_identity "$evidence_dir") || return 1
+    [ "$current_identity" = "$evidence_identity" ] || return 1
+    foreign_entry=$(find -P "$evidence_dir" -mindepth 1 -print -quit) || return 1
+    [ -z "$foreign_entry" ] || return 1
+    rmdir "$evidence_dir" || return 1
+    [ ! -e "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || return 1
+  fi
+  [ ! -e "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || return 1
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+    owner_identity=$(fm_omp_session_evidence_path_identity "$owner") || return 1
+    fm_omp_session_evidence_owner_matches "$state" "$id" || return 1
+    current_identity=$(fm_omp_session_evidence_path_identity "$owner") || return 1
+    [ "$current_identity" = "$owner_identity" ] || return 1
+    rm -f -- "$owner" || return 1
+    [ ! -e "$owner" ] && [ ! -L "$owner" ] || return 1
+  fi
+}
+
+fm_omp_session_evidence_clear() {
+  local state=$1 id=$2 status release_status
+  fm_omp_session_evidence_lock_acquire "$state" "$id" || return 1
+  if fm_omp_session_evidence_clear_locked "$state" "$id"; then
+    status=0
+  else
+    status=$?
+  fi
+  if fm_omp_session_evidence_lock_release "$state" "$id"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -eq 0 ] || return "$status"
+  return "$release_status"
+}
+
 fm_omp_session_evidence_claim() {
-  local state=$1 id=$2 owner expected
+  local state=$1 id=$2 owner expected status release_status
+  fm_omp_session_evidence_lock_acquire "$state" "$id" || return 1
   owner=$(fm_omp_session_evidence_owner_path "$state" "$id")
   if [ -e "$owner" ] || [ -L "$owner" ]; then
-    fm_omp_session_evidence_owner_matches "$state" "$id"
-    return $?
+    if fm_omp_session_evidence_owner_matches "$state" "$id"; then
+      status=0
+    else
+      status=$?
+    fi
+  else
+    expected=$(printf 'firstmate-omp-session-evidence-v1\n%s\n%s' "$id" "$state")
+    if ( umask 077; set -C; printf '%s\n' "$expected" > "$owner" ) \
+      && fm_omp_session_evidence_owner_matches "$state" "$id"; then
+      status=0
+    else
+      status=$?
+    fi
   fi
-  expected=$(printf 'firstmate-omp-session-evidence-v1\n%s\n%s' "$id" "$state")
-  ( umask 077; set -C; printf '%s\n' "$expected" > "$owner" ) || return 1
-  fm_omp_session_evidence_owner_matches "$state" "$id"
+  if fm_omp_session_evidence_lock_release "$state" "$id"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -eq 0 ] || return "$status"
+  return "$release_status"
 }

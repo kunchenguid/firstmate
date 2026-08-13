@@ -545,6 +545,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_OMP_TEST_EVIDENCE_CLEAR_GATE="${FM_OMP_TEST_EVIDENCE_CLEAR_GATE:-}" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1407,6 +1408,46 @@ test_teardown_preserves_unrecognized_owned_omp_evidence() {
   assert_present "$case_dir/state/task-x1.omp-session-evidence/foreign" \
     "omp-unrecognized-evidence: teardown removed malformed evidence"
   pass "teardown refuses and preserves unrecognized owned OMP evidence"
+}
+
+test_teardown_preserves_foreign_omp_evidence_added_during_clear() {
+  local case_dir rc gate evidence_dir original_dir token racer
+  case_dir=$(make_case omp-evidence-clear-race)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  printf 'g-current\n' > "$case_dir/state/task-x1.busy-gen"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  evidence_dir="$case_dir/state/task-x1.omp-session-evidence"
+  mkdir -p "$evidence_dir"
+  token='g-current.123.1000.1'
+  printf '%s 1000 1000 0\n' "$token" > "$evidence_dir/$token"
+  gate="$case_dir/evidence-clear-race"
+  original_dir="$evidence_dir.original"
+  (
+    while [ ! -e "$gate.ready" ]; do sleep 0.01; done
+    mv "$evidence_dir" "$original_dir"
+    mkdir -p "$evidence_dir"
+    printf '%s\n' foreign-race > "$evidence_dir/foreign-race"
+    : > "$gate.release"
+  ) &
+  racer=$!
+
+  set +e
+  FM_OMP_TEST_EVIDENCE_CLEAR_GATE="$gate" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  wait "$racer" || true
+  set -e
+
+  expect_code 1 "$rc" "omp-evidence-clear-race: teardown must refuse a file added during cleanup"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "omp-evidence-clear-race: teardown removed task metadata after cleanup raced"
+  assert_present "$original_dir/$token" \
+    "omp-evidence-clear-race: cleanup removed the original evidence directory"
+  assert_present "$evidence_dir/foreign-race" \
+    "omp-evidence-clear-race: cleanup removed the replacement evidence directory"
+  pass "teardown revalidates OMP evidence after a foreign entry arrives during cleanup"
 }
 
 test_teardown_validates_omp_evidence_generation_and_temps() {
@@ -2748,6 +2789,7 @@ test_teardown_missing_busy_sidecar_completes
 test_teardown_removes_per_task_adapter_extensions
 test_teardown_preserves_foreign_omp_evidence_collision
 test_teardown_preserves_unrecognized_owned_omp_evidence
+test_teardown_preserves_foreign_omp_evidence_added_during_clear
 test_teardown_validates_omp_evidence_generation_and_temps
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
