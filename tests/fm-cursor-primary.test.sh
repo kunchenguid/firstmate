@@ -124,6 +124,15 @@ run_park() {  # <dir> [loop_count] [loop_ceiling]
   fi
 }
 
+run_session() {  # <dir> <event> <source> [session-id]
+  local dir=$1 event=$2 source=$3 session_id=${4:-sess-cursor} payload
+  payload=$(printf '{"hook_event_name":"%s","session_id":"%s","cursor_version":"x"}' "$event" "$session_id")
+  printf '%s' "$payload" | FM_HOME="$dir" FM_SESSION_SOURCE="$source" "$FAKE_CURSOR" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    "$FM_HOME/bin/fm-sessionstart-cursor.sh" --source "$FM_SESSION_SOURCE"
+  ' 2>/dev/null
+}
+
 followup_of() {  # <json>
   printf '%s' "$1" | jq -r '.followup_message // empty' 2>/dev/null
 }
@@ -309,7 +318,8 @@ test_park_loop_ceiling_warns_once_then_goes_quiet() {
 test_park_delivers_staged_compaction_digest_once() {
   local dir out body
   dir=$(make_primary_dir "$TMP_ROOT/park-staged")
-  printf 'STAGED DIGEST FOR COMPACTION\n' > "$dir/state/.cursor-pending-context"
+  jq -n --arg session_id sess-cursor --arg digest 'STAGED DIGEST FOR COMPACTION' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
   out=$(run_park "$dir")
   [ "$(kind_of_followup "$out")" = session-start ] \
     || fail "a staged compaction digest must arrive as a session-start follow-up, got: $out"
@@ -321,6 +331,18 @@ test_park_delivers_staged_compaction_digest_once() {
   pass "cursor park: a staged compaction digest is delivered exactly once"
 }
 
+test_park_does_not_consume_another_sessions_context() {
+  local dir out staged
+  dir=$(make_primary_dir "$TMP_ROOT/park-staged-other-session")
+  jq -n --arg session_id sess-other --arg digest 'OTHER SESSION CONTEXT' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+  out=$(run_park "$dir")
+  [ -z "$out" ] || fail "another session received staged context: $out"
+  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  [ "$staged" = 'OTHER SESSION CONTEXT' ] || fail "another session consumed the staged context"
+  pass "cursor park: staged context remains bound to its originating session"
+}
+
 test_park_stands_down_when_superseded() {
   local dir first_out first_pid marker
   dir=$(make_primary_dir "$TMP_ROOT/park-supersede")
@@ -329,20 +351,52 @@ test_park_stands_down_when_superseded() {
   marker="$dir/state/first-park-out"
   ( run_park "$dir" > "$marker" 2>/dev/null ) &
   first_pid=$!
-  # Wait until the first park has genuinely claimed ownership and started arming.
   local waited=0
   while [ ! -s "$dir/state/.cursor-park-owner" ] || [ ! -e "$dir/state/arm-ran" ]; do
     sleep 0.2
     waited=$((waited + 1))
     [ "$waited" -lt 100 ] || fail "the first park never claimed ownership"
   done
-  # A second stop claims the baton, exactly as a captain message mid-park does.
   : > "$dir/state/arm-fast"
   run_park "$dir" >/dev/null 2>&1
   wait "$first_pid" 2>/dev/null || true
   first_out=$(cat "$marker" 2>/dev/null || true)
   [ -z "$first_out" ] || fail "the superseded park delivered a duplicate follow-up: $first_out"
   pass "cursor park: a superseded park stands down instead of delivering a stale duplicate"
+}
+
+test_park_serializes_supersession_with_followup_commit() {
+  local dir first_pid first_out second_out waited count
+  dir=$(make_primary_dir "$TMP_ROOT/park-commit-race")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  cat >> "$dir/bin/fm-operational-input.sh" <<'SH'
+fm_operational_input_encode() {
+  local kind=${1-} body=${2-} result_var=${3-}
+  [ -n "$result_var" ] && fm_operational_kind_is_current "$kind" && [ -n "$body" ] || return 2
+  if [ "$kind" = watcher ] && ( set -C; : > "$FM_HOME/state/commit-entered" ) 2>/dev/null; then
+    while [ ! -e "$FM_HOME/state/commit-release" ]; do sleep 0.05; done
+  fi
+  printf -v "$result_var" '%s%s: %s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body"
+}
+SH
+  ( run_park "$dir" > "$dir/state/first-out" ) &
+  first_pid=$!
+  waited=0
+  while [ ! -e "$dir/state/commit-entered" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || fail "the first park never reached follow-up commit"
+  done
+  second_out=$(run_park "$dir")
+  : > "$dir/state/commit-release"
+  wait "$first_pid" 2>/dev/null || true
+  first_out=$(cat "$dir/state/first-out" 2>/dev/null || true)
+  count=0
+  [ -z "$first_out" ] || count=$((count + 1))
+  [ -z "$second_out" ] || count=$((count + 1))
+  [ "$count" -eq 1 ] || fail "concurrent commit emitted $count follow-ups: first=$first_out second=$second_out"
+  pass "cursor park: ownership claim and follow-up commit are serialized"
 }
 
 test_park_inert_when_afk() {
@@ -361,10 +415,13 @@ test_park_inert_without_session_lock() {
   local dir out
   dir=$(make_primary_dir "$TMP_ROOT/park-nolock")
   : > "$dir/state/task1.meta"
+  jq -n --arg session_id sess-cursor --arg digest 'LOCK OWNER CONTEXT' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
   write_arm_fixture "$dir" actionable
   out=$(printf '%s' "$CURSOR_PAYLOAD" | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>/dev/null)
   [ -z "$out" ] || fail "a session that does not hold the home lock must not arm or wake: $out"
   [ ! -e "$dir/state/arm-ran" ] || fail "the park armed without owning the session lock"
+  [ -e "$dir/state/.cursor-pending-context" ] || fail "a read-only session consumed the lock owner's staged context"
   pass "cursor park: inert when this session does not hold the home lock"
 }
 
@@ -410,25 +467,29 @@ test_sessionstart_emits_additional_context() {
   local dir out ctx
   dir=$(make_primary_dir "$TMP_ROOT/session-start")
   install_digest_fixture "$dir"
-  out=$(printf '{"hook_event_name":"sessionStart","cursor_version":"x"}' \
-    | FM_HOME="$dir" bash "$dir/bin/fm-sessionstart-cursor.sh" --source startup 2>/dev/null)
+  jq -n --arg session_id old-session --arg digest 'OBSOLETE CONTEXT' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+  out=$(run_session "$dir" sessionStart startup)
   ctx=$(printf '%s' "$out" | jq -r '.additional_context // empty' 2>/dev/null)
   case "$ctx" in *'FIRSTMATE DIGEST "quoted" line'*) ;; *) fail "the digest must reach model context verbatim, got: $out" ;; esac
   case "$ctx" in *'second line'*) ;; *) fail "the digest was truncated at the first line: $ctx" ;; esac
   grep -q -- '--source startup' "$dir/state/digest-args" \
     || fail "the adapter must supply --source itself; Cursor's payload has no source field"
+  [ ! -e "$dir/state/.cursor-pending-context" ] \
+    || fail "a successful new session start retained obsolete staged context"
   pass "fm-sessionstart-cursor: sessionStart injects the whole digest as additional_context"
 }
 
 test_precompact_stages_instead_of_injecting() {
-  local dir out staged
+  local dir out staged staged_session
   dir=$(make_primary_dir "$TMP_ROOT/session-compact")
   install_digest_fixture "$dir"
-  out=$(printf '{"hook_event_name":"preCompact","cursor_version":"x","trigger":"auto"}' \
-    | FM_HOME="$dir" bash "$dir/bin/fm-sessionstart-cursor.sh" --source compact 2>/dev/null)
+  out=$(run_session "$dir" preCompact compact)
   [ -z "$out" ] || fail "preCompact cannot inject context, so it must emit nothing, got: $out"
-  staged=$(cat "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  staged_session=$(jq -r '.session_id // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
   case "$staged" in *'FIRSTMATE DIGEST'*) ;; *) fail "the compaction digest was not staged for the next turn boundary: $staged" ;; esac
+  [ "$staged_session" = sess-cursor ] || fail "the staged digest is not bound to its Cursor session"
   pass "fm-sessionstart-cursor: preCompact stages the digest for the next turn boundary"
 }
 
@@ -492,7 +553,9 @@ test_park_repair_nag_is_bounded
 test_park_nag_budget_resets_after_a_real_wake
 test_park_loop_ceiling_warns_once_then_goes_quiet
 test_park_delivers_staged_compaction_digest_once
+test_park_does_not_consume_another_sessions_context
 test_park_stands_down_when_superseded
+test_park_serializes_supersession_with_followup_commit
 test_park_inert_when_afk
 test_park_inert_without_session_lock
 test_park_inert_in_child_worktree

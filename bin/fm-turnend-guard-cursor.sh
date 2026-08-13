@@ -108,9 +108,19 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
 # embedded quote, newline, or the U+2063 prefix cannot corrupt the response.
 emit_followup() {  # <kind> <body>
-  local kind=$1 body=$2 encoded
-  fm_operational_input_encode "$kind" "$body" encoded || exit 0
-  jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null || exit 0
+  local kind=$1 body=$2 encoded response
+  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  if ! park_still_ours; then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  if ! fm_operational_input_encode "$kind" "$body" encoded \
+    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null); then
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  fi
+  printf '%s\n' "$response"
+  fm_lock_release "$OWNER_LOCK"
   exit 0
 }
 
@@ -163,15 +173,32 @@ park_still_ours() {
   [ "$seq" = "$PARK_SEQ" ]
 }
 
+# Only the lock-owning session may consume staged context, arm, or wake. A prior
+# session that died leaving its numeric harness pid behind is the one recoverable
+# case, delegated to bin/fm-lock.sh so acquisition keeps its single owner.
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$LOCK_PID" in ''|*[!0-9]*) exit 0 ;; esac
+  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
+  fm_session_lock_owned_by_self "$STATE" || exit 0
+fi
+
+PARK_SEQ=
+claim_park || exit 0
+
 # --- staged compaction digest ------------------------------------------------
 # Cursor's preCompact step accepts only user_message, never additional_context
 # (index.js @ 4814884 lists sessionStart, beforeSubmitPrompt, preToolUse,
 # postToolUse, postToolUseFailure), so the re-emit digest is staged there and
 # delivered here at the first turn boundary after the compaction.
-if [ -s "$PENDING_CONTEXT" ] && [ ! -L "$PENDING_CONTEXT" ]; then
-  STAGED=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
-  rm -f "$PENDING_CONTEXT" 2>/dev/null || true
-  [ -n "$STAGED" ] && emit_followup session-start "$STAGED"
+if [ -s "$PENDING_CONTEXT" ] && [ ! -L "$PENDING_CONTEXT" ] && [ "$SESSION_ID" != unknown ]; then
+  STAGED_SESSION=$(jq -r '.session_id // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
+  if [ "$STAGED_SESSION" = "$SESSION_ID" ]; then
+    STAGED=$(jq -r '.digest // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
+    rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+    [ -n "$STAGED" ] && emit_followup session-start "$STAGED"
+  fi
 fi
 
 # Cursor's own loop_limit is the outer ceiling; this inner one bites first so the
@@ -189,20 +216,6 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   budget_reset
   exit 0
 fi
-
-# Only the lock-owning session may arm. A prior session that died leaving its
-# numeric harness pid behind is the one recoverable case, delegated to
-# bin/fm-lock.sh so acquisition keeps its single owner.
-if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in ''|*[!0-9]*) exit 0 ;; esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
-fi
-
-PARK_SEQ=
-claim_park || exit 0
 
 # X mode cadence: an opted-in home polls Relay at its generated cadence.
 # shellcheck source=/dev/null

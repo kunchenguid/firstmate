@@ -37,6 +37,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PENDING_CONTEXT="$STATE/.cursor-pending-context"
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
 SOURCE=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,9 +54,12 @@ done
 
 PAYLOAD=$(cat 2>/dev/null || true)
 EVENT=
+SESSION_ID=
 if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
   EVENT=$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
+  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null || true)
 fi
+case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID= ;; esac
 
 DIGEST=$("$SCRIPT_DIR/fm-sessionstart-run.sh" --source "$SOURCE" </dev/null 2>/dev/null || true)
 [ -n "$DIGEST" ] || exit 0
@@ -61,13 +67,20 @@ DIGEST=$("$SCRIPT_DIR/fm-sessionstart-run.sh" --source "$SOURCE" </dev/null 2>/d
 if [ "$EVENT" = preCompact ]; then
   # Staged, not injected. A stale stage from an interrupted compaction is
   # replaced rather than appended, so the session never receives two digests.
-  [ -d "$STATE" ] || exit 0
+  [ -d "$STATE" ] && [ -n "$SESSION_ID" ] || exit 0
+  fm_session_lock_owned_by_self "$STATE" || exit 0
   TMP="$PENDING_CONTEXT.tmp.$$"
-  printf '%s' "$DIGEST" > "$TMP" 2>/dev/null && mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null
+  jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" \
+    '{session_id:$session_id,digest:$digest}' > "$TMP" 2>/dev/null \
+    && mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null
   rm -f "$TMP" 2>/dev/null || true
   exit 0
 fi
 
 command -v jq >/dev/null 2>&1 || exit 0
-jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null || true
+RESPONSE=$(jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null) || exit 0
+if fm_session_lock_owned_by_self "$STATE"; then
+  rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+fi
+printf '%s\n' "$RESPONSE"
 exit 0
