@@ -276,6 +276,13 @@
       "metadata": {
         "description": "Reserved integrity seam. No installer consumes it in this revision."
       }
+    },
+    "operatorDataPlaneIp": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional single operator egress IPv4 (or CIDR) allowed to the storage data plane for private management. Empty keeps public network access fully disabled. Never weakens the Deny default, shared-key/public-blob disablement, or private endpoints."
+      }
     }
   },
   "variables": {
@@ -402,6 +409,9 @@
           },
           "commonTags": {
             "value": "[variables('commonTags')]"
+          },
+          "operatorDataPlaneIp": {
+            "value": "[parameters('operatorDataPlaneIp')]"
           }
         },
         "template": {
@@ -485,6 +495,13 @@
             },
             "commonTags": {
               "type": "object"
+            },
+            "operatorDataPlaneIp": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Optional single operator egress IPv4 (or CIDR) allowed to the storage data plane for private management. Empty keeps public network access fully disabled. Never weakens the Deny default, shared-key/public-blob disablement, or private endpoints."
+              }
             }
           },
           "variables": {
@@ -550,11 +567,12 @@
                 "allowSharedKeyAccess": false,
                 "defaultToOAuthAuthentication": true,
                 "minimumTlsVersion": "TLS1_2",
-                "publicNetworkAccess": "Disabled",
+                "publicNetworkAccess": "[if(empty(parameters('operatorDataPlaneIp')), 'Disabled', 'Enabled')]",
                 "supportsHttpsTrafficOnly": true,
                 "networkAcls": {
                   "bypass": "None",
-                  "defaultAction": "Deny"
+                  "defaultAction": "Deny",
+                  "ipRules": "[if(empty(parameters('operatorDataPlaneIp')), createArray(), createArray(createObject('value', parameters('operatorDataPlaneIp'), 'action', 'Allow')))]"
                 }
               }
             },
@@ -954,10 +972,11 @@
                 "defaultToOAuthAuthentication": true,
                 "supportsHttpsTrafficOnly": true,
                 "minimumTlsVersion": "TLS1_2",
-                "publicNetworkAccess": "Disabled",
+                "publicNetworkAccess": "[if(empty(parameters('operatorDataPlaneIp')), 'Disabled', 'Enabled')]",
                 "networkAcls": {
                   "bypass": "None",
-                  "defaultAction": "Deny"
+                  "defaultAction": "Deny",
+                  "ipRules": "[if(empty(parameters('operatorDataPlaneIp')), createArray(), createArray(createObject('value', parameters('operatorDataPlaneIp'), 'action', 'Allow')))]"
                 }
               }
             },
@@ -1236,7 +1255,6 @@
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
               "apiVersion": "2023-01-31",
               "name": "[format('id-{0}-wkr-{1}', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
-
               "copy": {
                 "name": "workerIdentities",
                 "count": "[variables('workerCount')]"

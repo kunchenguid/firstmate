@@ -589,6 +589,7 @@ values = {
     "reservedLandingWorkerHours": 400,
     "budgetStartDate": os.environ["FM_AZURE_BUDGET_START_DATE"],
     "runnerValidationSku": os.environ.get("FM_AZURE_RUNNER_VALIDATION_SKU", "Standard_D4as_v6"),
+    "operatorDataPlaneIp": os.environ.get("FM_AZURE_OPERATOR_DATA_PLANE_IP", ""),
     "workerHomeBinding": os.environ.get("FM_AZURE_WORKER_HOME_BINDING", "unbound"),
     "workerTaskBinding": os.environ.get("FM_AZURE_WORKER_TASK_BINDING", "unbound"),
     "workerInvocationBinding": os.environ.get("FM_AZURE_WORKER_INVOCATION_BINDING", "unbound"),
