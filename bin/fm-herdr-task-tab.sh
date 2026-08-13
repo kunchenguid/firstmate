@@ -122,7 +122,7 @@ if [ "$ACTION" = complete ]; then
       exit 1
       ;;
   esac
-  if [ "$COMPLETED" != 1 ] && [ "$(last_status_verb)" = done ]; then
+  if [ "$COMPLETED" != 1 ] && [ "$(last_status_verb)" = 'done' ]; then
     mark_completed || exit 1
     COMPLETED=1
   fi

@@ -1238,7 +1238,8 @@ test_sibling_tab_disambiguator_extends_a_colliding_prefix() {
 }
 
 task_tab_fixture() {
-  local dir=$1 agent=$2 label=$3 completed=${4:-0} state="$dir/state.json" home="$dir/home"
+  local dir=$1 agent=$2 label=$3 completed=${4:-0}
+  local state="$dir/state.json" home="$dir/home"
   mkdir -p "$home/state"
   jq -n --arg label "$label" --arg agent "$agent" '
     {next:2,
@@ -1267,7 +1268,7 @@ test_completed_task_tab_refuses_a_registered_done_agent() {
   local dir state fb out status
   dir="$TMP_ROOT/task-tab-done-agent"; mkdir -p "$dir"; state="$dir/state.json"
   fb=$(make_herdr_statefake "$dir")
-  task_tab_fixture "$dir" done '◐ Complete fixture'
+  task_tab_fixture "$dir" 'done' '◐ Complete fixture'
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
     "$ROOT/bin/fm-herdr-task-tab.sh" complete tasktab 2>&1); status=$?
