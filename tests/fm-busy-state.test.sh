@@ -246,6 +246,115 @@ Ctrl+c:cancel')
   pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
 }
 
+# --- Pi MCP tool-approval refinement -----------------------------------------
+
+# A faithful plain-text capture of Pi's MCP tool-approval selector, as
+# pi-mcp-adapter/tool-approval.ts builds the title/choices and pi-coding-agent's
+# ExtensionSelectorComponent renders them (docs/verification/supervision.md "Pi
+# MCP tool-approval wait"). The three choices stay CONSECUTIVE, as rendered.
+pi_mcp_approval_capture() {  # [server] [tool]
+  local server=${1:-demo-notes} tool=${2:-list_notes}
+  cat <<EOF
+────────────────────────────────────────────────────────────────────
+
+ MCP: $server wants to run $tool
+
+ Arguments:
+ {
+   "limit": 5,
+   "folder": "inbox"
+ }
+
+ → Allow once
+   Allow for session
+   Deny
+
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+────────────────────────────────────────────────────────────────────
+EOF
+}
+
+test_pi_approval_selector_detects_exact_modal() {
+  pi_mcp_approval_capture | fm_busy_pi_mcp_approval_selector \
+    || fail "the exact rendered Pi MCP approval selector must be detected"
+  pi_mcp_approval_capture chrome-devtools navigate | fm_busy_pi_mcp_approval_selector \
+    || fail "detection is structural, not tied to one server or tool name"
+  pass "the exact Pi MCP tool-approval selector is detected structurally"
+}
+
+test_pi_approval_selector_rejects_non_modal() {
+  if printf '%s\n' '• Working (6s • esc to interrupt)' 'Working...' 'Ctrl+c:cancel' \
+    | fm_busy_pi_mcp_approval_selector; then fail "a working footer must not detect"; fi
+  if printf '%s\n' ' → Allow once' '   Allow for session' '   Deny' \
+    | fm_busy_pi_mcp_approval_selector; then fail "choices without the MCP title must not detect"; fi
+  if printf '%s\n' ' MCP: srv wants to run tool' ' → Allow once' '   Deny' \
+    | fm_busy_pi_mcp_approval_selector; then fail "an incomplete choice set must not detect"; fi
+  if printf '%s\n' ' MCP: srv wants to run tool' 'Allow once' 'blah' 'Allow for session' 'x' 'Deny' \
+    | fm_busy_pi_mcp_approval_selector; then fail "non-consecutive choices must not detect"; fi
+  if printf '%s\n' ' MCP: srv wants to run tool' '  "a": "Allow once",' '  "b": "Allow for session",' '  "c": "Deny"' \
+    | fm_busy_pi_mcp_approval_selector; then fail "quoted argument values must not count as option lines"; fi
+  pass "the selector detector rejects footers, prose, incomplete, and quoted matches"
+}
+
+test_pi_busy_record_with_modal_reads_approval_wait() {
+  local state gen out
+  state=$(new_state_dir pi-approval)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" "$(pi_mcp_approval_capture)")
+  [ "$out" = "approval-wait pi-mcp-approval" ] || fail "pi busy + modal must read approval-wait, got '$out'"
+  out=$(fm_busy_classify tmux w1 pi-signed t1 "$state" "$(pi_mcp_approval_capture)")
+  [ "$out" = "approval-wait pi-mcp-approval" ] || fail "pi-signed busy + modal must read approval-wait, got '$out'"
+  if fm_busy_is_busy tmux w1 pi t1 "$state" "$(pi_mcp_approval_capture)"; then
+    fail "approval-wait must not read as busy, so a supervisor surfaces it"
+  fi
+  pass "a busy pi-ext record with the approval modal reads an actionable approval-wait"
+}
+
+test_pi_genuine_work_stays_busy() {
+  local state gen out
+  state=$(new_state_dir pi-working)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" "$(printf 'Working (12s)\nesc to interrupt\n')")
+  [ "$out" = "busy pi-ext" ] || fail "genuine pi work must stay busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" "")
+  [ "$out" = "busy pi-ext" ] || fail "pi busy with no tail must stay busy, never fabricate a wait, got '$out'"
+  pass "genuine un-settled Pi work stays busy; a missing tail never fabricates an approval wait"
+}
+
+test_pi_approval_clears_after_answer() {
+  local state gen out
+  state=$(new_state_dir pi-approval-clear)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" "$(pi_mcp_approval_capture)")
+  [ "$out" = "approval-wait pi-mcp-approval" ] || fail "precondition: modal reads approval-wait, got '$out'"
+  # Answered/dismissed: Pi settles the turn. The refinement fires only on busy,
+  # so even with the selector still on the tail the wait clears via pi-ext.
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event agent-settled
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" "$(pi_mcp_approval_capture)")
+  [ "$out" = "idle pi-ext" ] || fail "an answered modal must clear to idle pi-ext, got '$out'"
+  pass "an answered or dismissed modal clears through pi-ext's own settle event"
+}
+
+test_pi_approval_only_refines_valid_pi_ext_record() {
+  local state state2 gen out
+  state=$(new_state_dir pi-approval-scope)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  # Another adapter rendering the same text is never refined: a pi-ext record is
+  # untrusted for grok, so it stays source-mismatch, never approval-wait.
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$(pi_mcp_approval_capture)")
+  [ "$out" = "unknown source-mismatch" ] || fail "grok must not be refined to approval-wait, got '$out'"
+  # No record + the modal on the tail stays unknown: the refinement never
+  # invents busy (or approval-wait) from rendered text.
+  state2=$(new_state_dir pi-approval-norecord)
+  out=$(fm_busy_classify tmux w1 pi t1 "$state2" "$(pi_mcp_approval_capture)")
+  [ "$out" = "unknown missing" ] || fail "no record must stay unknown, not approval-wait, got '$out'"
+  pass "the approval refinement needs a valid busy pi-ext record and never invents state from text"
+}
+
 # --- kimi verification gate -----------------------------------------------------
 
 test_codex_unverified_gate() {
@@ -370,6 +479,12 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_pi_approval_selector_detects_exact_modal
+test_pi_approval_selector_rejects_non_modal
+test_pi_busy_record_with_modal_reads_approval_wait
+test_pi_genuine_work_stays_busy
+test_pi_approval_clears_after_answer
+test_pi_approval_only_refines_valid_pi_ext_record
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_dead_endpoint_overrides

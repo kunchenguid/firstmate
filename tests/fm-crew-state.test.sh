@@ -845,6 +845,105 @@ test_no_run_grok_uses_isolated_fallback() {
   pass "grok still reads working through its isolated rendered-tail fallback"
 }
 
+# A faithful plain-text capture of Pi's MCP tool-approval selector (see
+# tests/fm-busy-state.test.sh and docs/verification/supervision.md "Pi MCP
+# tool-approval wait"). The three choices stay consecutive, as rendered.
+pi_mcp_approval_capture() {
+  cat <<'EOF'
+────────────────────────────────────────
+
+ MCP: demo-notes wants to run list_notes
+
+ Arguments:
+ {
+   "limit": 5
+ }
+
+ → Allow once
+   Allow for session
+   Deny
+
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+────────────────────────────────────────
+EOF
+}
+
+# A Pi worker blocked on its MCP tool-approval selector keeps a valid busy
+# pi-ext record (agent_settled never fires while the modal waits), which would
+# otherwise reconcile to working. Current-state must instead report an
+# actionable parked/tool-approval wait so supervision surfaces the trust wait.
+test_no_run_pi_mcp_approval_reads_parked() {
+  reset_fakes
+  local d; d=$(new_case pi-approval)
+  make_repo_on_branch "$d/wt" fm/feat-piapp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-piapp.meta" "window=fm:fm-feat-piapp" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT=$(pi_mcp_approval_capture)
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-piapp)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-piapp busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  local out; out=$(run_crew_state "$d" feat-piapp)
+  assert_contains "$out" "state: parked" "a Pi worker on the MCP approval modal reads parked, not working"
+  assert_contains "$out" "source: pane" "the approval wait is pane-sourced"
+  assert_contains "$out" "tool approval" "the detail names the tool-approval wait"
+  assert_not_contains "$out" "state: working" "the approval wait must never read working"
+  pass "a Pi MCP tool-approval wait reconciles to an actionable parked state, not working"
+}
+
+# Genuine un-settled Pi work (no selector on the pane) still reads working.
+test_no_run_pi_busy_without_modal_reads_working() {
+  reset_fakes
+  local d; d=$(new_case pi-working)
+  make_repo_on_branch "$d/wt" fm/feat-piwork
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-piwork.meta" "window=fm:fm-feat-piwork" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='Working (12s)'
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-piwork)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-piwork busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  local out; out=$(run_crew_state "$d" feat-piwork)
+  assert_contains "$out" "state: working" "genuine un-settled Pi work still reads working"
+  assert_contains "$out" "source: pane" "the working verdict is pane-sourced"
+  assert_not_contains "$out" "state: parked" "genuine work must not read parked"
+  pass "genuine un-settled Pi work still reconciles to working"
+}
+
+# Once the modal is answered, Pi settles the turn (agent_settled -> idle). Even
+# with the selector still on the rendered pane, the wait clears through pi-ext's
+# own lifecycle, so current-state moves off parked promptly.
+test_no_run_pi_approval_clears_after_answer() {
+  reset_fakes
+  local d; d=$(new_case pi-approval-clear)
+  make_repo_on_branch "$d/wt" fm/feat-piclear
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-piclear.meta" "window=fm:fm-feat-piclear" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT=$(pi_mcp_approval_capture)
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-piclear)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-piclear busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  local out; out=$(run_crew_state "$d" feat-piclear)
+  assert_contains "$out" "state: parked" "precondition: the modal reconciles to parked"
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-piclear idle --gen "$gen" \
+    --source pi-ext --event agent-settled
+  printf 'done: implemented the change\n' > "$d/state/feat-piclear.status"
+  out=$(run_crew_state "$d" feat-piclear)
+  assert_not_contains "$out" "state: parked" "an answered modal must not keep reading parked"
+  assert_contains "$out" "state: done" "a settled turn falls through to the status log"
+  pass "an answered Pi approval modal clears promptly through the semantic settle event"
+}
+
 test_no_run_herdr_unknown_uses_backend_capture() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
@@ -1336,6 +1435,9 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
+test_no_run_pi_mcp_approval_reads_parked
+test_no_run_pi_busy_without_modal_reads_working
+test_no_run_pi_approval_clears_after_answer
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle

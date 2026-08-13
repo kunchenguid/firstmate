@@ -203,6 +203,41 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+### Pi MCP tool-approval wait
+
+A Pi worker blocks its whole turn on a modal MCP tool-approval selector, and Pi fires no `agent_settled` while that modal waits, so the `pi-ext` record stays `busy` and both current-state and the watcher would read the wait as provably-working.
+[`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh)'s `fm_busy_pi_mcp_approval_selector` refines that exact selector to `approval-wait pi-mcp-approval`, scoped to harness `pi`/`pi-signed`, so [`bin/fm-crew-state.sh`](../../bin/fm-crew-state.sh) reports a `parked` tool-approval wait and supervision surfaces it instead of absorbing it.
+
+The rendered strings the detector anchors on were read from the installed sources on 2026-08-08: `pi-mcp-adapter` 2.20.1, `@earendil-works/pi-coding-agent` 0.84.1, bundled `@earendil-works/pi-tui` 0.84.1, `pi --version` 0.84.1, on Node v24.15.0.
+`pi-mcp-adapter/tool-approval.ts` builds the title ``MCP: ${serverName} wants to run ${toolName}`` and offers exactly `["Allow once", "Allow for session", "Deny"]`, and `pi-coding-agent`'s `ExtensionSelectorComponent` (`dist/modes/interactive/components/extension-selector.js`) renders that title above the three choices, one option per line, the selected one prefixed with an arrow.
+Pi's default renderer is `TuiMainScreen` (`dist/tui-main-screen.js`), a diff renderer that never commits the ephemeral selector to scrollback, so the selector is present in a capture only while it is on screen and reverts to the record's own verdict once answered or dismissed.
+
+The selector was reproduced deterministically with no network, MCP server, credentials, or model call by rendering the real component the way Pi does and stripping ANSI:
+
+```js
+// node, PIA=<pi-coding-agent install dir>
+const t = await import(`${process.env.PIA}/dist/modes/interactive/theme/theme.js`);
+t.initTheme("dark");
+const { ExtensionSelectorComponent } = await import(`${process.env.PIA}/dist/modes/interactive/components/extension-selector.js`);
+const title = `MCP: demo-notes wants to run list_notes\n\nArguments:\n${JSON.stringify({ limit: 5, folder: "inbox" }, null, 2)}`;
+const c = new ExtensionSelectorComponent(title, ["Allow once", "Allow for session", "Deny"], () => {}, () => {}, {});
+process.stdout.write(c.render(80).map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n"));
+```
+
+The stripped output, which is what `tmux capture-pane -p` returns, was the border rule, a blank line, the ` MCP: demo-notes wants to run list_notes` title, the ` Arguments:` block, then the three consecutive option lines ` → Allow once`, `   Allow for session`, `   Deny`, the ` ↑↓ navigate  enter select  escape/ctrl+c cancel` hint, and the closing border rule.
+
+Detection requires the `MCP: <server> wants to run <tool>` title line plus the three fixed choices as consecutive selector-option lines in order; it reads no other pane content and never the `Arguments` block or any argument value.
+Bounded limitation: when the `Arguments` block is tall enough to push the title line off the top of the captured region, detection conservatively reports no selector (a missed wait, never a false one), and the pre-existing stale path still surfaces the frozen pane.
+Fork scoping: only harness `pi`/`pi-signed` is refined, so a Pi fork such as OMP is covered only when it is launched as `pi`/`pi-signed` and its renderer is empirically identical to the strings above; a fork whose selector renders differently is out of scope and keeps the pre-existing generic stale surfacing.
+
+Deterministic entry points for the refinement:
+
+```sh
+tests/fm-busy-state.test.sh    # fm_busy_pi_mcp_approval_selector + classify positive, negative, scope, and clear
+tests/fm-crew-state.test.sh    # parked/tool-approval reconciliation, working, and clear-after-answer
+tests/fm-watch-triage.test.sh  # the approval wait surfaces (crew_is_provably_working is false)
+```
+
 ## Turn-end guard
 
 The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.

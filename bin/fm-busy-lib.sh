@@ -41,24 +41,42 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
 #   malformed, gen-mismatch, source-mismatch, kimi-unverified,
-#   codex-unverified, capture-failed, no-target
+#   codex-unverified, capture-failed, no-target, pi-mcp-approval
 #
-# Classification (fm_busy_classify): busy | idle | unknown | dead, always
-# with the producing source as the second token. Precedence:
+# Classification (fm_busy_classify): busy | idle | approval-wait | unknown |
+# dead, always with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
+#   3. a valid, gen-matching, source-trusted record -> its state and source,
+#      EXCEPT the Pi MCP tool-approval refinement below
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log pull source, then the Grok-only temporary regex fallback
 #      classifies a grok task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# The Grok arm is the ONLY rendered-text classification that survives the
-# redesign, because Grok's structured lifecycle was not credited-live-verified
-# in the approved audit; it is scoped to harness=grok and can never classify
+# The Grok arm is the only rendered-text arm that CLASSIFIES a task busy or
+# idle, because Grok's structured lifecycle was not credited-live-verified in
+# the approved audit; it is scoped to harness=grok and can never classify
 # another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
+#
+# Pi MCP tool-approval refinement (fm_busy_pi_mcp_approval_selector, scoped to
+# harness pi/pi-signed): a valid busy pi-ext record only proves the Pi agent
+# turn has not settled, and Pi keeps that turn un-settled while it blocks on its
+# modal MCP tool-approval selector - agent_settled never fires while the modal
+# waits, so ordinary busy classification (and the watcher's stale absorption)
+# would hide the wait as provably-working. When that exact selector is on the
+# rendered tail, classification reports approval-wait pi-mcp-approval instead of
+# busy pi-ext, so current-state reconciliation and supervision surface an
+# actionable trust wait. This is the ONE rendered-text arm that REFINES an
+# already-busy record downward to a non-busy actionable wait; it never invents
+# busy from text, so the "converted adapters never classify busy from rendered
+# footer text" invariant still holds, and it never inspects the tool arguments.
+# Removing the selector (the modal was answered or dismissed) reverts to the
+# record's own verdict, so the wait clears through pi-ext's own agent_settled
+# lifecycle with no extra state. Verified renderer facts and the fork scoping
+# limitation: docs/verification/supervision.md "Pi MCP tool-approval wait".
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -604,12 +622,55 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_pi_mcp_approval_selector: 0 iff <tail-on-stdin> structurally shows
+# Pi's exact MCP tool-approval selector currently on screen. Pi's
+# pi-mcp-adapter builds a request titled "MCP: <server> wants to run <tool>"
+# offering exactly "Allow once", "Allow for session", and "Deny", and
+# pi-coding-agent's ExtensionSelectorComponent renders that title above the
+# three choices, one per line, in that order. This requires BOTH the title line
+# and those three choices as CONSECUTIVE selector-option lines in order (the
+# exact rendered layout), which is specific enough that ordinary agent work,
+# prose, or code cannot reproduce it. It reads ONLY those structural anchors -
+# never the Arguments block and never any tool argument value. Pi's default
+# TuiMainScreen is a diff renderer that never commits the ephemeral selector to
+# scrollback, so the selector appears in a capture iff it is currently
+# displayed. Bounded limitation: if the Arguments block is tall enough to push
+# the title line off the top of the captured region the title is not seen and
+# this reports no selector (conservative miss, never a false wait). Callers
+# scope this to harness pi/pi-signed; Pi forks are covered only when launched as
+# pi/pi-signed AND their renderer is empirically identical
+# (docs/verification/supervision.md "Pi MCP tool-approval wait").
+fm_busy_pi_mcp_approval_selector() {
+  local tail
+  tail=$(cat)
+  printf '%s\n' "$tail" \
+    | grep -Eq '(^|[[:space:]])MCP:[[:space:]].+[[:space:]]wants to run[[:space:]].+' || return 1
+  printf '%s\n' "$tail" | awk '
+    function opt(line, label,   s) {
+      s = line
+      sub(/^[^A-Za-z0-9]*/, "", s)
+      sub(/[[:space:]]*$/, "", s)
+      return s == label
+    }
+    { line[NR] = $0 }
+    END {
+      for (i = 1; i <= NR - 2; i++) {
+        if (opt(line[i], "Allow once") \
+          && opt(line[i + 1], "Allow for session") \
+          && opt(line[i + 2], "Deny")) exit 0
+      }
+      exit 1
+    }
+  '
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
-# the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed.
+# busy|idle|approval-wait|unknown plus the producing source (see header). Never
+# probes process state. <tail40> is optional pre-captured plain output used by
+# the Grok arm and the Pi MCP tool-approval refinement; when absent each arm
+# captures through fm_backend_capture if available, else the Grok arm reports
+# unknown capture-failed and the Pi arm leaves the busy record unrefined.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
@@ -633,6 +694,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
+      # Pi MCP tool-approval refinement (see the header): a valid busy pi-ext
+      # record hides a blocked-on-approval turn as busy. Downgrade it to an
+      # actionable approval-wait only while that exact selector is on the tail.
+      if [ "$r_state" = busy ] && [ "$r_source" = pi-ext ]; then
+        case "$harness" in
+          pi|pi-signed)
+            if [ -z "$tail40" ] && command -v fm_backend_capture >/dev/null 2>&1; then
+              tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || tail40=''
+            fi
+            if [ -n "$tail40" ] && printf '%s' "$tail40" | fm_busy_pi_mcp_approval_selector; then
+              printf 'approval-wait pi-mcp-approval'
+              return 0
+            fi
+            ;;
+        esac
+      fi
       printf '%s %s' "$r_state" "$r_source"
     else
       printf 'unknown source-mismatch'

@@ -445,9 +445,11 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
-  # A busy agent is interrupted first before the exit command is submitted.
+  # A busy agent - or one parked on a tool-approval wait, itself a busy turn
+  # blocked on a modal - is interrupted first before the exit command is
+  # submitted.
   case "$(busy_verdict)" in
-    busy*)
+    busy*|approval-wait*)
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
       case "$state" in

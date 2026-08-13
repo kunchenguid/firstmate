@@ -265,6 +265,11 @@ test_crew_is_provably_working_classifier() {
   ! crew_is_provably_working a || fail "finished run treated as provably working"
   FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
   ! crew_is_provably_working a || fail "parked run treated as provably working"
+  # A Pi worker blocked on its MCP tool-approval selector reconciles to a
+  # pane-sourced parked/tool-approval wait; it must surface, not be absorbed as
+  # provably-working, so supervision wakes firstmate to handle the trust wait.
+  FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on tool approval (pi-mcp-approval)'
+  ! crew_is_provably_working a || fail "Pi MCP tool-approval wait treated as provably working"
   FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
   ! crew_is_provably_working a || fail "failed run treated as provably working"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'

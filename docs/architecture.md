@@ -107,11 +107,12 @@ Text for a worker to read and commands that drive a worker's process are separat
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
-Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
+Every classification returns a verdict of busy, idle, approval-wait, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, and Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks.
 Kimi behind Pi inherits Pi's lifecycle.
-Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
+Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that is the only arm to classify a task busy or idle from rendered text and can only ever classify a Grok task.
+A single further rendered-text arm lives inside the contract as a refinement, not a classification: on harness pi/pi-signed an already-busy `pi-ext` record is refined down to an actionable `approval-wait` while Pi's exact MCP tool-approval selector is on screen, because Pi never settles that turn and ordinary busy classification would otherwise hide the blocked-on-approval wait as provably working; it never invents busy from rendered text and reverts to the record's own verdict once the modal is answered or dismissed, so `bin/fm-crew-state.sh` surfaces the wait as a parked tool-approval state instead of absorbing it as working ([`verification/supervision.md`](verification/supervision.md) owns the renderer facts and the Pi-fork scoping limitation).
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.

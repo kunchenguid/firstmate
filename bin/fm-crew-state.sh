@@ -160,10 +160,13 @@ pane_readable() {  # <target>
 # when no record exists, but its native `idle` is NOT, because agent.get
 # reports generation state (idle while a crew blocks on its own long-running
 # foreground tool call) rather than turn state.
+# Grok reads its rendered-tail fallback; pi/pi-signed need the tail so the
+# contract can refine a busy pi-ext record into an approval-wait when Pi's MCP
+# tool-approval selector is on screen (bin/fm-busy-lib.sh owns that refinement).
 crew_busy_verdict() {  # <target>
   local tail40=''
   case "$HARNESS" in
-    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
+    grok*|pi|pi-signed) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
@@ -543,11 +546,15 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
+# unverified semantic state remains unknown. A Pi worker blocked on its MCP
+# tool-approval selector reads approval-wait (bin/fm-busy-lib.sh) and is
+# reported as an actionable parked/tool-approval state, never working, so
+# supervision surfaces the trust wait instead of absorbing it.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    approval-wait) emit parked pane "waiting on tool approval (${BUSY_VERDICT#* })" ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
