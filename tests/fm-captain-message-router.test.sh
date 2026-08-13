@@ -537,12 +537,14 @@ test_pending_route_publication_failure_falls_back_to_same() {
 	make_primary "$root"
 	printf 'Do you want me to start the blender export fix?' |
 		run "$root" --on-settle --session-id primary >/dev/null
+	printf 'Should I continue the existing shader review?' |
+		run "$root" --on-settle --session-id sess-shader >/dev/null
 	pending=$(pending_dir "$root")
 	printf 'not a directory\n' >"$pending"
-	fakebin=$(cursor_fixture "$root" publication-fail 'verdict=new
-target=-
-explanation=new topic')
-	out=$(printf 'a new unrelated topic' |
+	fakebin=$(cursor_fixture "$root" publication-fail 'verdict=reroute
+target=sess-shader
+explanation=continue the existing shader review')
+	out=$(printf 'continue the shader review' |
 		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "pending publication failure exit"
 	assert_contains "$out" "verdict=same target=primary confidence=det" \
