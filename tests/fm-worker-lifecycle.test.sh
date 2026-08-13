@@ -142,6 +142,19 @@ foreign["resources"]["task-disk"]["immutable_id"] = "foreign"
 assert module.classify_worker(worker, foreign)[0] == "retained-for-investigation"
 assert module.classify_worker(worker, None)[0] == "retained-for-investigation"
 
+# Staging blobs are per-execution transport: their identity changes after an
+# execute and must not wedge classification, while every other kind still
+# fences on identity (the task-disk case above).
+executed = copy.deepcopy(cloud)
+executed["resources"]["staging-request"]["immutable_id"] = "post-execute-etag"
+executed["resources"]["staging-result"]["immutable_id"] = "post-execute-etag-2"
+assert module.classify_worker(worker, executed)[0] == "assigned"
+released_executed = copy.deepcopy(released)
+released_executed["phase"] = "assigned"
+executed_dark = copy.deepcopy(executed)
+executed_dark["resources"]["vm"]["power_state"] = "VM deallocated"
+assert module.classify_worker(released_executed, executed_dark)[0] == "deallocated"
+
 metrics = {
     "actual_usd": 100.0, "forecast_usd": 200.0,
     "regional_limit_vcpus": 128, "regional_used_vcpus": 2,

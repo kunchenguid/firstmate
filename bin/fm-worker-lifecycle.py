@@ -560,7 +560,15 @@ def resources_exact(worker, cloud, allow_missing_compute=False):
                 continue
             missing.append(kind)
             continue
-        if prior is not None and resource_identity(current) != resource_identity(prior):
+        # Staging request/result blobs are per-execution transport: every
+        # execute rewrites them and binds their content through the request
+        # and result digests, so their blob identity legitimately changes
+        # while every other kind stays immutable for the worker's lifetime.
+        if (
+            prior is not None
+            and kind not in ("staging-request", "staging-result")
+            and resource_identity(current) != resource_identity(prior)
+        ):
             return False, "{} immutable identity changed".format(kind)
         tags = current.get("tags") or {}
         for key, value in expected_tags(worker).items():
