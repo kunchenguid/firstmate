@@ -460,6 +460,7 @@ dashboard_serve() {
   python3 - "$SELF" "$PORT" "$HOST" "$REFRESH" "$GH_CACHE_TTL" <<'PY'
 import http.server
 import json
+import socket
 import subprocess
 import sys
 import time
@@ -469,6 +470,17 @@ PORT = int(sys.argv[2])
 HOST = sys.argv[3]
 REFRESH = int(sys.argv[4])
 GH_TTL = int(sys.argv[5])
+
+try:
+    ADDRESS_FAMILY = socket.getaddrinfo(
+        HOST, PORT, proto=socket.IPPROTO_TCP, flags=socket.AI_NUMERICHOST
+    )[0][0]
+except socket.gaierror:
+    try:
+        ADDRESS_FAMILY = socket.getaddrinfo(HOST, PORT, proto=socket.IPPROTO_TCP)[0][0]
+    except socket.gaierror as e:
+        print("fm-dashboard: cannot resolve --host %r: %s" % (HOST, e), file=sys.stderr)
+        sys.exit(1)
 
 
 def snapshot_json():
@@ -507,6 +519,7 @@ def pr_checks(url):
 
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    address_family = ADDRESS_FAMILY
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)

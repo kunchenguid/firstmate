@@ -391,6 +391,37 @@ test_serve_empty_fleet() {
   pass "dashboard serves an explicit empty state for an empty fleet"
 }
 
+# --host ::1 is a documented, validated loopback address; the server must
+# actually bind and serve on it instead of crashing with an AF_INET/IPv6
+# socket.gaierror.
+test_serve_ipv6_host() {
+  serve_tools_available || { pass "ipv6 host serve test skipped (python3 or curl absent)"; return 0; }
+  local home fakebin port pid out
+  home=$(make_home serveipv6)
+  fakebin=$(make_fakebin "$home")
+  port=$(python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0)); print(s.getsockname()[1]); s.close()')
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$DASH" --host ::1 --port "$port" >"$TMP_ROOT/serve-ipv6.log" 2>&1 &
+  pid=$!
+  local i=0 ready=0
+  while [ "$i" -lt 50 ]; do
+    if curl -fsS "http://[::1]:$port/health" >/dev/null 2>&1; then ready=1; break; fi
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$ready" -ne 1 ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "--host ::1 dashboard server did not come up: $(cat "$TMP_ROOT/serve-ipv6.log")"
+  fi
+  out=$(curl -fsS "http://[::1]:$port/snapshot")
+  printf '%s' "$out" | jq -e '(.tasks | length) == 0 and .error == null' >/dev/null \
+    || fail "ipv6 host snapshot must be empty with no error: $out"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "dashboard serves on --host ::1 instead of crashing on AF_INET bind"
+}
+
 test_usage_and_validation() {
   local out rc
   out=$("$DASH" --help)
@@ -413,4 +444,5 @@ test_pr_check_verdicts
 test_html_page
 test_serve_and_cache
 test_serve_empty_fleet
+test_serve_ipv6_host
 test_usage_and_validation
