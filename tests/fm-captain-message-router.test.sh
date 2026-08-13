@@ -811,13 +811,13 @@ JS
 	pass "router: Pi input records classify queued captain messages and isolate mixed runs"
 }
 
-test_pi_hook_rejects_typed_session_start_mixed_run() {
+test_pi_hook_rejects_typed_session_start_context() {
 	local fixture out status=0
 	if ! command -v node >/dev/null 2>&1; then
-		echo "skip: node not found for the Pi hook session-start message test"
+		echo "skip: node not found for the Pi hook session-start context test"
 		return 0
 	fi
-	fixture="$TMP_ROOT/hook-session-start-message"
+	fixture="$TMP_ROOT/hook-session-start-context"
 	mkdir -p "$fixture/state"
 	out=$(FM_STATE_OVERRIDE="$fixture/state" FM_OPERATIONAL_INPUT_SCRIPT=/probe/fm-operational-input.sh \
 		node --experimental-test-module-mocks --experimental-strip-types --no-warnings \
@@ -840,9 +840,20 @@ mock.module("node:child_process", { namedExports: {
     };
   },
 } });
-const extension = await import(`./.pi/extensions/fm-primary-captain-message-router.ts?session-start-message-test=${Date.now()}`);
+const extension = await import(`./.pi/extensions/fm-primary-captain-message-router.ts?session-start-context-test=${Date.now()}`);
 const handlers = new Map();
-extension.default({ on: (event, handler) => handlers.set(event, handler) });
+const accumulatedMessages = [];
+const pi = {
+  on: (event, handler) => handlers.set(event, handler),
+  sendMessage(message) {
+    accumulatedMessages.push({
+      role: "custom",
+      ...message,
+      timestamp: 1723500000000,
+    });
+  },
+};
+extension.default(pi);
 const context = { sessionManager: { getSessionId: () => "session-alpha" } };
 const finish = async (assistantText) => {
   await handlers.get("agent_end")({
@@ -853,17 +864,12 @@ const finish = async (assistantText) => {
 };
 
 await handlers.get("session_start")({ type: "session_start", reason: "startup" }, context);
-await handlers.get("message_start")({
-  type: "message_start",
-  message: {
-    role: "custom",
-    customType: "firstmate-sessionstart-nudge",
-    content: "SENSITIVE STARTUP DIGEST",
-    display: false,
-    details: { kind: "session-start" },
-    timestamp: Date.now(),
-  },
-}, context);
+pi.sendMessage({
+  customType: "firstmate-sessionstart-nudge",
+  content: "SENSITIVE STARTUP DIGEST",
+  display: false,
+  details: { kind: "session-start" },
+});
 await handlers.get("input")({
   type: "input",
   text: "captain input after startup",
@@ -873,7 +879,25 @@ await handlers.get("before_agent_start")({
   type: "before_agent_start",
   prompt: "captain input after startup",
 }, context);
+accumulatedMessages.push({
+  role: "user",
+  content: [{ type: "text", text: "captain input after startup" }],
+  timestamp: 1723500000001,
+});
+await handlers.get("context")({
+  type: "context",
+  messages: structuredClone(accumulatedMessages),
+}, context);
+await handlers.get("context")({
+  type: "context",
+  messages: structuredClone(accumulatedMessages),
+}, context);
 await finish("mixed startup response");
+accumulatedMessages.push({
+  role: "assistant",
+  content: [{ type: "text", text: "mixed startup response" }],
+  timestamp: 1723500000002,
+});
 
 await handlers.get("input")({
   type: "input",
@@ -884,12 +908,21 @@ await handlers.get("before_agent_start")({
   type: "before_agent_start",
   prompt: "ordinary captain input",
 }, context);
+accumulatedMessages.push({
+  role: "user",
+  content: [{ type: "text", text: "ordinary captain input" }],
+  timestamp: 1723500000003,
+});
+await handlers.get("context")({
+  type: "context",
+  messages: structuredClone(accumulatedMessages),
+}, context);
 await finish("ordinary captain response");
 
 console.log(JSON.stringify(calls));
 JS
 	) || status=$?
-	expect_code 0 "$status" "hook session-start message test exit ($out)"
+	expect_code 0 "$status" "hook session-start context test exit ($out)"
 	local submits settles
 	submits=$(printf '%s\n' "$out" | grep -o '"mode":"--on-submit"' | wc -l | tr -d ' ')
 	settles=$(printf '%s\n' "$out" | grep -o '"mode":"--on-settle"' | wc -l | tr -d ' ')
@@ -899,7 +932,7 @@ JS
 	assert_not_contains "$out" "mixed startup response" "the typed startup run cannot publish continuity"
 	assert_contains "$out" '"mode":"--on-settle","input":"ordinary captain response"' \
 		"an ordinary captain-only run still publishes continuity"
-	pass "router: typed session-start context invalidates mixed captain continuity"
+	pass "router: accumulated session-start context invalidates mixed captain continuity"
 }
 
 test_verdict_is_logged() {
@@ -1204,7 +1237,7 @@ test_submit_large_timeout_override_reaches_shared_owner
 test_pending_route_publication_failure_falls_back_to_same
 test_pi_hook_uses_context_session_ids_without_outer_timeout
 test_pi_hook_classifies_queued_input_and_rejects_mixed_runs
-test_pi_hook_rejects_typed_session_start_mixed_run
+test_pi_hook_rejects_typed_session_start_context
 test_verdict_is_logged
 test_pi_hook_threads_bounded_redacted_history
 test_inert_in_child_worktree

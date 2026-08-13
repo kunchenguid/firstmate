@@ -13,9 +13,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	AgentEndEvent,
+	ContextEvent,
 	ExtensionAPI,
 	InputEvent,
-	MessageStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { classifyFirstmateOperationalText } from "./lib/fm-operational-input.ts";
 
@@ -330,6 +330,7 @@ export default function (pi: ExtensionAPI) {
 	let activeRunGeneration = 0;
 	let currentRun: RunState | undefined;
 	let recentChatHistory = "";
+	let observedSessionStartMessages = new Set<number>();
 
 	function newRun(sessionId: string | undefined): RunState {
 		nextRunGeneration += 1;
@@ -355,6 +356,7 @@ export default function (pi: ExtensionAPI) {
 			activeSessionId = sessionId;
 			currentRun = undefined;
 			recentChatHistory = "";
+			observedSessionStartMessages = new Set();
 			sessionBound = true;
 		}
 		return sessionId;
@@ -402,25 +404,31 @@ export default function (pi: ExtensionAPI) {
 		markLoaded();
 	});
 
-	pi.on("message_start", (event, context) => {
-		const message = (event as MessageStartEvent).message as {
-			role?: unknown;
-			customType?: unknown;
-			details?: { kind?: unknown };
-		};
-		if (
-			message.role !== "custom" ||
-			message.customType !== "firstmate-sessionstart-nudge" ||
-			message.details?.kind !== "session-start"
-		) {
-			return;
-		}
+	pi.on("context", (event, context) => {
 		const sessionId = bindSession(context);
 		if (sessionId !== activeSessionId || !sessionLockOwned()) return;
-		const run = currentRun?.sessionId === sessionId
-			? currentRun
-			: (currentRun = newRun(sessionId));
-		markOperational(run);
+		const run = currentRun;
+		if (!run || run.sessionId !== sessionId) return;
+		for (const entry of (event as ContextEvent).messages ?? []) {
+			const message = entry as {
+				role?: unknown;
+				customType?: unknown;
+				details?: { kind?: unknown };
+				timestamp?: unknown;
+			};
+			if (
+				message.role !== "custom" ||
+				message.customType !== "firstmate-sessionstart-nudge" ||
+				message.details?.kind !== "session-start" ||
+				typeof message.timestamp !== "number" ||
+				!Number.isFinite(message.timestamp)
+			) {
+				continue;
+			}
+			if (observedSessionStartMessages.has(message.timestamp)) continue;
+			observedSessionStartMessages.add(message.timestamp);
+			markOperational(run);
+		}
 	});
 
 	pi.on("input", (event, context) => {
