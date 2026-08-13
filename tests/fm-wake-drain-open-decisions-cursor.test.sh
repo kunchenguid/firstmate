@@ -184,7 +184,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
   pass "a same-size file rotation (new inode) is detected and falls back to a full re-fold"
 }
 
-test_read_failure_never_silently_returns_empty() {
+test_read_failure_preserves_state_for_retry() {
   local dir state reader statusfile cursor out before_cursor after_cursor
   dir=$(make_case cursor-read-failure)
   state="$dir/state"
@@ -207,17 +207,22 @@ test_read_failure_never_silently_returns_empty() {
 
   FM_STATE_OVERRIDE="$state" FM_STATUS_SPAN_READER="$reader" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of preserving state after the injected read failure"
-  grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
-    || fail "the failed read silently hid the previously-open decision: $(command cat "$out")"
+  [ ! -s "$out" ] \
+    || fail "the failed presentation read emitted a partial status presentation: $(command cat "$out")"
   after_cursor=$(LC_ALL=C cksum "$cursor")
   [ "$after_cursor" = "$before_cursor" ] \
     || fail "the failed read advanced or rewrote the persisted cursor"
 
-  pass "a failed incremental read preserves the persisted open set instead of silently returning empty"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "wake drain did not recover after the injected read failure"
+  grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
+    || fail "the open decision disappeared when presentation reads recovered: $(command cat "$out")"
+
+  pass "a failed presentation read preserves status state for retry"
 }
 
-test_cursor_cache_read_failure_aborts_without_replay_or_advancement() {
-  local dir state fakebin statusfile cursor out probe real_cat before_cursor after_cursor
+test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
+  local dir state fakebin statusfile cursor out probe real_cat status_bytes probe_bytes
   dir=$(make_case cursor-cache-read-failure)
   state="$dir/state"
   fakebin="$dir/failbin"
@@ -228,16 +233,21 @@ test_cursor_cache_read_failure_aborts_without_replay_or_advancement() {
   probe="$dir/probe.tsv"
   real_cat=$(command -v cat)
 
-  printf 'needs-decision [key=cache]: recover from authoritative status\n' > "$statusfile"
+  {
+    printf 'needs-decision [key=cache]: recover from authoritative status\n'
+    printf 'note: already handled informational status\n'
+  } > "$statusfile"
   append_filler "$statusfile" 40 >/dev/null
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "bootstrap drain before the cursor-cache read failure failed"
   grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
     || fail "the decision did not surface before the cursor-cache read failure"
+  grep -F 'task5 note: already handled informational status' "$out" >/dev/null \
+    || fail "the bootstrap drain did not surface the informational status"
   [ -s "$cursor" ] || fail "no cursor was persisted before the cursor-cache read failure"
 
   printf 'working: appended before cache failure\n' >> "$statusfile"
-  before_cursor=$(LC_ALL=C cksum "$cursor")
+  status_bytes=$(LC_ALL=C wc -c < "$statusfile" | tr -d '[:space:]')
   : > "$probe"
   cat > "$fakebin/cat" <<SH
 #!/usr/bin/env bash
@@ -249,20 +259,18 @@ SH
   chmod +x "$fakebin/cat"
 
   FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
-    || fail "wake drain failed after the cursor-cache read failure"
-  [ ! -s "$out" ] \
-    || fail "the cursor-cache read failure replayed handled status as new: $(command cat "$out")"
-  after_cursor=$(LC_ALL=C cksum "$cursor")
-  [ "$after_cursor" = "$before_cursor" ] \
-    || fail "the cursor-cache read failure advanced or rewrote the cursor"
-  [ ! -s "$probe" ] || fail "the cursor-cache read failure folded status despite aborting presentation"
-
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
-    || fail "wake drain did not recover after the cursor-cache read failure"
+    || fail "wake drain failed instead of refolding after the cursor-cache read failure"
   grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
-    || fail "the open decision disappeared after cursor-cache reads recovered: $(command cat "$out")"
+    || fail "the cursor-cache read failure hid the recurring open decision: $(command cat "$out")"
+  if grep -F 'UNREAD STATUS' "$out" >/dev/null \
+    || grep -F 'already handled informational status' "$out" >/dev/null; then
+    fail "the cursor-cache read failure replayed handled informational status as new: $(command cat "$out")"
+  fi
+  probe_bytes=$(last_probe_bytes "$probe" "$statusfile")
+  [ "$probe_bytes" = "$status_bytes" ] \
+    || fail "the cursor-cache read failure read $probe_bytes bytes, expected a full $status_bytes-byte authoritative refold"
 
-  pass "a cursor-cache read failure aborts without replaying or advancing handled status"
+  pass "a cursor-cache read failure refolds decisions without replaying handled unread status"
 }
 
 test_pre_fix_cursor_refolds_corr_tagged_decision() {
@@ -341,8 +349,8 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
 
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
-test_read_failure_never_silently_returns_empty
-test_cursor_cache_read_failure_aborts_without_replay_or_advancement
+test_read_failure_preserves_state_for_retry
+test_cursor_cache_read_failure_refolds_without_replaying_unread_status
 test_pre_fix_cursor_refolds_corr_tagged_decision
 test_previous_fold_cache_is_refolded_under_current_semantics
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
