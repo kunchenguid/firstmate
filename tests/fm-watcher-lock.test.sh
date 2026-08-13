@@ -1002,9 +1002,14 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   drain_and_ack "$state" || fail "same-session watcher recovery acknowledgement failed"
 
   # Once the recovery episode is acknowledged, the next healthy cycle stays
-  # live and keeps advancing its real watcher-owned beacon beyond the grace.
+  # live and keeps advancing its real watcher-owned beacon. The real watcher
+  # advances the beacon once per main-loop iteration, which takes ~2-3.5s on a
+  # loaded host, so this arm's grace must outrun that cadence: a grace tighter
+  # than the cadence makes the arm's own stale-beacon watchdog retire a
+  # healthy child. Poll through the grace with a liveness check per tick, then
+  # require the beacon to have advanced.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_GUARD_GRACE=3 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_GUARD_GRACE=12 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$healthy_out" &
   healthy_arm=$!
   i=0
@@ -1017,9 +1022,14 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   grep -qF "watcher: started pid=$healthy_pid" "$healthy_out" \
     || fail "healthy recovery cycle did not establish: $(cat "$healthy_out")"
   beat_before=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_mtime "$2"' _ "$LIB" "$state/.last-watcher-beat")
-  sleep 4
+  i=0
+  while [ "$i" -lt 140 ]; do
+    sleep 0.1
+    is_live_non_zombie "$healthy_arm" \
+      || fail "healthy arm was retired by the stale-beacon watchdog"
+    i=$((i + 1))
+  done
   beat_after=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_mtime "$2"' _ "$LIB" "$state/.last-watcher-beat")
-  is_live_non_zombie "$healthy_arm" || fail "healthy arm was retired by the stale-beacon watchdog"
   [ "$beat_after" -gt "$beat_before" ] \
     || fail "healthy watcher did not advance its beacon ($beat_before -> $beat_after)"
   kill -HUP "$healthy_arm" 2>/dev/null || true
