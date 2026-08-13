@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -166,11 +166,14 @@ function pidAlive(pid: string): boolean {
 }
 
 function lockOwnership(): LockOwnership {
+  const lockPath = `${state}/.lock`;
   let lockPid = "";
   try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
-  } catch {
-    return "missing";
+    const lockStat = lstatSync(lockPath);
+    if (!lockStat.isFile()) return "other";
+    lockPid = readFileSync(lockPath, "utf8").trim();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "other";
   }
   if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
   let pid = String(process.pid);
@@ -182,10 +185,50 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
+function stateDirectoryReady(): boolean {
+  try {
+    return lstatSync(state).isDirectory();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    try {
+      mkdirSync(state, { recursive: true });
+      return lstatSync(state).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+}
+
+function writeLoadedMarker(): boolean {
+  try {
+    const markerStat = lstatSync(marker);
+    if (!markerStat.isFile()) return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  if (!stateDirectoryReady()) return false;
+  const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+  let fd = -1;
+  try {
+    fd = openSync(
+      marker,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (noFollow ?? 0),
+      0o600,
+    );
+    writeFileSync(fd, `${extensionVersion}\n${process.pid}\n`, { encoding: "utf8" });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd >= 0) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
 function markLoaded(): void {
   if (lockOwnership() === "other") return;
-  mkdirSync(state, { recursive: true });
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  writeLoadedMarker();
 }
 
 function actionableLine(output: string): string {

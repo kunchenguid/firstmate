@@ -124,6 +124,91 @@ EOF
   pass "OMP watcher entrypoint selects OMP lifecycle, command, tool, and marker names"
 }
 
+test_omp_watcher_rejects_symlinked_lock_and_marker() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/omp-symlinked-marker-root"
+  home="$TMP_ROOT/omp-symlinked-marker-home"
+  mkdir -p "$repo/.omp/extensions" "$home/state" "$home/config" "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.manifest" "$repo/.omp/extensions/fm-primary-omp-watch.manifest"
+  plugin="$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  printf '%s\n' 'marker-target' > "$home/state/.omp-watch-extension-loaded.target"
+  ln -s "$home/state/.omp-watch-extension-loaded.target" "$home/state/.omp-watch-extension-loaded"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(OMPCODE=1 PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const marker = `${process.env.FM_HOME}/state/.omp-watch-extension-loaded`;
+const target = `${marker}.target`;
+const handlers = new Map();
+const pi = {
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const before = readFileSync(target, "utf8");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.();
+if (!lstatSync(marker).isSymbolicLink()) throw new Error("OMP marker symlink was replaced");
+if (readFileSync(target, "utf8") !== before) throw new Error("OMP marker symlink target was modified");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OMP watcher must reject a symlinked loaded marker"
+  [ -z "$out" ] || fail "OMP symlinked-marker test printed output: $out"
+
+  repo="$TMP_ROOT/omp-symlinked-lock-root"
+  home="$TMP_ROOT/omp-symlinked-lock-home"
+  mkdir -p "$repo/.omp/extensions" "$home/state" "$home/config" "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.manifest" "$repo/.omp/extensions/fm-primary-omp-watch.manifest"
+  plugin="$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(OMPCODE=1 PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const target = `${lock}.target`;
+const marker = `${process.env.FM_HOME}/state/.omp-watch-extension-loaded`;
+const handlers = new Map();
+const pi = {
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+writeFileSync(target, `${process.pid}\n`);
+symlinkSync(target, lock);
+const before = readFileSync(target, "utf8");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.();
+if (!lstatSync(lock).isSymbolicLink()) throw new Error("OMP lock symlink was replaced");
+if (readFileSync(target, "utf8") !== before) throw new Error("OMP lock symlink target was modified");
+if (existsSync(marker)) throw new Error("OMP marker was written with a symlinked lock");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OMP watcher must reject a symlinked session lock"
+  [ -z "$out" ] || fail "OMP symlinked-lock test printed output: $out"
+  pass "OMP watcher rejects symlinked loaded markers and session locks"
+}
+
 # OMPCODE is inheritable: a Pi primary started from an OMP session's shell, or
 # in a pane whose multiplexer server stored that environment, carries it. The
 # entrypoint Pi auto-loads is the authoritative signal, so the marker must not
@@ -2283,6 +2368,7 @@ EOF
 
 test_pi_extension_reports_external_healthy_watcher
 test_omp_watcher_entrypoint_selects_omp_contract
+test_omp_watcher_rejects_symlinked_lock_and_marker
 test_pi_watcher_entrypoint_ignores_an_inherited_omp_marker
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

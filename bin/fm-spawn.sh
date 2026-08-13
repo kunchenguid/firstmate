@@ -815,6 +815,59 @@ spawn_herdr_presentation_order_lock_acquire() {
   return 1
 }
 
+omp_session_evidence_owner_path() {
+  local state=$1 id=$2
+  printf '%s/%s.omp-session-evidence.owner\n' "$state" "$id"
+}
+
+omp_session_evidence_owner_matches() {
+  local state=$1 id=$2 owner expected actual
+  owner=$(omp_session_evidence_owner_path "$state" "$id")
+  [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+  expected=$(printf 'firstmate-omp-session-evidence-v1\n%s\n%s' "$id" "$state")
+  actual=$(<"$owner") || return 1
+  [ "$actual" = "$expected" ]
+}
+
+clear_omp_session_evidence() {
+  local state=$1 id=$2 evidence_dir owner foreign_entry
+  evidence_dir="$state/$id.omp-session-evidence"
+  owner=$(omp_session_evidence_owner_path "$state" "$id")
+  [ ! -L "$evidence_dir" ] && [ ! -L "$owner" ] || return 1
+  if [ -e "$evidence_dir" ]; then
+    [ -d "$evidence_dir" ] || return 1
+    omp_session_evidence_owner_matches "$state" "$id" || return 1
+    foreign_entry=$(find -P "$evidence_dir" -mindepth 1 ! -type f -print -quit) || return 1
+    [ -z "$foreign_entry" ] || return 1
+    rm -rf -- "$evidence_dir" || return 1
+  fi
+  if [ -e "$owner" ]; then
+    omp_session_evidence_owner_matches "$state" "$id" || return 1
+    rm -f -- "$owner" || return 1
+  fi
+}
+
+claim_omp_session_evidence() {
+  local state=$1 id=$2 owner expected
+  owner=$(omp_session_evidence_owner_path "$state" "$id")
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    omp_session_evidence_owner_matches "$state" "$id"
+    return $?
+  fi
+  expected=$(printf 'firstmate-omp-session-evidence-v1\n%s\n%s' "$id" "$state")
+  ( umask 077; set -C; printf '%s\n' "$expected" > "$owner" ) || return 1
+  omp_session_evidence_owner_matches "$state" "$id"
+}
+
+clear_omp_session_marker() {
+  local path=$1
+  [ ! -L "$path" ] || return 1
+  if [ -e "$path" ]; then
+    [ -f "$path" ] || return 1
+    rm -f -- "$path" || return 1
+  fi
+}
+
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
@@ -836,8 +889,12 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if [ "$path" = "$state/$id.omp-session-evidence" ]; then
-      rm -rf -- "$path" || return 1
+    if [ "$path" = "$state/$id.omp-session-evidence" ] \
+      || [ "$path" = "$state/$id.omp-session-evidence.owner" ]; then
+      clear_omp_session_evidence "$state" "$id" || return 1
+    elif [ "$path" = "$state/$id.omp-session-run" ] \
+      || [ "$path" = "$state/$id.omp-session-stop" ]; then
+      clear_omp_session_marker "$path" || return 1
     else
       rm -f -- "$path" || return 1
     fi
@@ -2443,8 +2500,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
-  rm -f "$STATE_REAL/$ID.omp-session-run" "$STATE_REAL/$ID.omp-session-stop"
-  rm -rf "$STATE_REAL/$ID.omp-session-evidence"
+  clear_omp_session_evidence "$STATE_REAL" "$ID" || {
+    echo "error: refusing to replace unverified OMP session evidence for $ID" >&2
+    exit 1
+  }
+  claim_omp_session_evidence "$STATE_REAL" "$ID" || {
+    echo "error: failed to claim OMP session evidence for $ID" >&2
+    exit 1
+  }
+  clear_omp_session_marker "$STATE_REAL/$ID.omp-session-run" || {
+    echo "error: refusing to replace unverified OMP session run marker for $ID" >&2
+    exit 1
+  }
+  clear_omp_session_marker "$STATE_REAL/$ID.omp-session-stop" || {
+    echo "error: refusing to replace unverified OMP session stop marker for $ID" >&2
+    exit 1
+  }
 fi
 if [ "$KIND" != secondmate ] || { [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; }; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -2981,7 +3052,22 @@ const adoptCurrentRun = () => {
     return "";
   }
   const recoveredActive = persisted.pending.length > 0 || persisted.finalizing.some((record) => record.idlePending);
-  if (recoveredActive) {
+  const recoveredFinalizing = persisted.finalizing.some((record) => record.idlePending);
+  if (recoveredFinalizing) {
+    try {
+      execFileSync("$FM_ROOT/bin/fm-busy-event.sh", [
+        "apply", "$STATE_REAL", "$ID", "idle", "--gen", "$BUSY_GEN",
+        "--run-token", persisted.token, "--source", "omp-ext", "--event", "recover-idle",
+      ], { stdio: "ignore" });
+      execFileSync("touch", [TURNEND], { stdio: "ignore" });
+    } catch {
+      recoveryBlocked = true;
+      runToken = "";
+      return "";
+    }
+    runToken = "";
+    idlePublishedToken = persisted.token;
+  } else if (recoveredActive) {
     runToken = persisted.token;
     idlePublishedToken = "";
   } else {

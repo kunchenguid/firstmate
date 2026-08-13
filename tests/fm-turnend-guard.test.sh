@@ -1169,6 +1169,66 @@ EOF
   pass ".omp primary extension: session_switch restores the loaded marker over the whole load chain"
 }
 
+test_omp_turnend_guard_rejects_symlinked_lock_and_marker() {
+  local repo home ext out status
+  repo="$TMP_ROOT/omp-turnend-symlinked-marker-root"
+  home="$TMP_ROOT/omp-turnend-symlinked-marker-home"
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.manifest" "$repo/.omp/extensions/fm-primary-turnend-guard.manifest"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  printf '%s\n' marker-target > "$home/state/.omp-turnend-extension-loaded.target"
+  ln -s "$home/state/.omp-turnend-extension-loaded.target" "$home/state/.omp-turnend-extension-loaded"
+  out=$(OMPCODE=1 PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { lstatSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const marker = `${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`;
+const target = `${marker}.target`;
+const before = readFileSync(target, "utf8");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default({ on() {} });
+if (!lstatSync(marker).isSymbolicLink()) throw new Error("OMP turn-end marker symlink was replaced");
+if (readFileSync(target, "utf8") !== before) throw new Error("OMP turn-end marker target was modified");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OMP turn-end guard must reject a symlinked loaded marker"
+  [ -z "$out" ] || fail "OMP turn-end symlinked-marker test printed output: $out"
+
+  repo="$TMP_ROOT/omp-turnend-symlinked-lock-root"
+  home="$TMP_ROOT/omp-turnend-symlinked-lock-home"
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.manifest" "$repo/.omp/extensions/fm-primary-turnend-guard.manifest"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  out=$(OMPCODE=1 PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const target = `${lock}.target`;
+const marker = `${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`;
+writeFileSync(target, `${process.pid}\n`);
+symlinkSync(target, lock);
+const before = readFileSync(target, "utf8");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default({ on() {} });
+if (!lstatSync(lock).isSymbolicLink()) throw new Error("OMP turn-end lock symlink was replaced");
+if (readFileSync(target, "utf8") !== before) throw new Error("OMP turn-end lock target was modified");
+if (existsSync(marker)) throw new Error("OMP turn-end marker was written with a symlinked lock");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OMP turn-end guard must reject a symlinked session lock"
+  [ -z "$out" ] || fail "OMP turn-end symlinked-lock test printed output: $out"
+  pass "OMP turn-end guard rejects symlinked loaded markers and session locks"
+}
+
 # OMPCODE is inheritable, so a Pi primary launched from an OMP session's shell
 # carries it. Binding the guard to OMP's agent_end there would be silent and
 # total: Pi never emits agent_end, so every turn would end with no guard at all.
@@ -1847,6 +1907,7 @@ test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_omp_extension_uses_agent_end_for_logical_runs
 test_omp_session_switch_restores_a_current_loaded_marker
+test_omp_turnend_guard_rejects_symlinked_lock_and_marker
 test_pi_guard_entrypoint_ignores_an_inherited_omp_marker
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

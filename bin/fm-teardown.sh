@@ -2263,6 +2263,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.omp-session-run" \
       "$sub_state/$child_id.omp-session-stop" \
+      "$sub_state/$child_id.omp-session-evidence.owner" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
@@ -2546,6 +2547,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.omp-session-run" \
   "$STATE/$ID.omp-session-stop" \
+  "$STATE/$ID.omp-session-evidence.owner" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
