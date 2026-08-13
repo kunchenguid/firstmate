@@ -15,6 +15,7 @@ import type {
 	AgentEndEvent,
 	ExtensionAPI,
 	InputEvent,
+	MessageStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { classifyFirstmateOperationalText } from "./lib/fm-operational-input.ts";
 
@@ -366,11 +367,17 @@ export default function (pi: ExtensionAPI) {
 		if (
 			!currentRun ||
 			currentRun.sessionId !== sessionId ||
-			streamingBehavior === undefined
+			(streamingBehavior === undefined && currentRun.hasCaptainInput)
 		) {
 			currentRun = newRun(sessionId);
 		}
 		return currentRun;
+	}
+
+	function markOperational(run: RunState): void {
+		run.hasOperationalInput = true;
+		run.candidateAssistantText = "";
+		run.candidateRecentChatHistory = "";
 	}
 
 	function classifyCaptainInput(
@@ -395,6 +402,27 @@ export default function (pi: ExtensionAPI) {
 		markLoaded();
 	});
 
+	pi.on("message_start", (event, context) => {
+		const message = (event as MessageStartEvent).message as {
+			role?: unknown;
+			customType?: unknown;
+			details?: { kind?: unknown };
+		};
+		if (
+			message.role !== "custom" ||
+			message.customType !== "firstmate-sessionstart-nudge" ||
+			message.details?.kind !== "session-start"
+		) {
+			return;
+		}
+		const sessionId = bindSession(context);
+		if (sessionId !== activeSessionId || !sessionLockOwned()) return;
+		const run = currentRun?.sessionId === sessionId
+			? currentRun
+			: (currentRun = newRun(sessionId));
+		markOperational(run);
+	});
+
 	pi.on("input", (event, context) => {
 		const sessionId = bindSession(context);
 		if (sessionId !== activeSessionId) return { action: "continue" };
@@ -411,9 +439,7 @@ export default function (pi: ExtensionAPI) {
 			operational,
 		});
 		if (operational) {
-			run.hasOperationalInput = true;
-			run.candidateAssistantText = "";
-			run.candidateRecentChatHistory = "";
+			markOperational(run);
 			return { action: "continue" };
 		}
 		classifyCaptainInput(prompt, sessionId, run);
@@ -434,9 +460,7 @@ export default function (pi: ExtensionAPI) {
 		if (run.intakeRecords.length > 0 || run.fallbackPrompts.has(prompt)) return;
 		run.fallbackPrompts.add(prompt);
 		if (classifyFirstmateOperationalText(prompt) !== undefined) {
-			run.hasOperationalInput = true;
-			run.candidateAssistantText = "";
-			run.candidateRecentChatHistory = "";
+			markOperational(run);
 			return;
 		}
 		classifyCaptainInput(prompt, sessionId, run);
