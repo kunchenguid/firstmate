@@ -363,55 +363,20 @@ Directory existence alone is never accepted: a pool slot keeps its ignored direc
 The probe proves an installed environment from what the installer left behind, including a local editable requirement (`-e .`) which is verified against the PEP 610 `direct_url.json` and the `.pth` an editable install writes; a requirement whose identity still cannot be established that cheaply - a VCS or URL editable, an archive, a bare local path - is a cache miss that says so on stderr rather than a hit.
 What the lane writes into `node_modules` during ordinary work - the `.cache` directory webpack, vite, eslint, and babel all create - is not a change to the installed environment, so it does not invalidate the cache; a declared package directory that changes underneath it still does.
 A spawn into an already-provisioned, unchanged worktree therefore pays probe cost only, not install cost.
-The provisioned directories are added to the repository's git exclude file when the project does not already ignore them, so provisioning cannot dirty a checkout that the freshness proof and teardown both require to be clean.
+Provisioning never writes a git exclusion.
+An install directory that the project does not already ignore is a failure before installation, while an unignored `.fm-provisioning.md` only skips that report with a warning.
 
-Besides success there are exactly two outcomes, and which one applies never depends on where in the flow it happened, only on what kind of thing it is.
+Besides success, a capability gap records work the provisioner could not perform and launches the affected component unprovisioned, while a failure records an incomplete attempt and refuses the spawn.
+`bin/fm-provision-lib.sh`'s header is the sole exhaustive owner of both sets and routes them through `fm_provision_gap` or `fm_provision_fail`.
+This document intentionally does not duplicate those enumerations.
 
-A **capability gap** is work this provisioner was never able to do here.
-It is named on stderr, named again in `state/<id>.provision.log`, recorded in the spawn's `provision=` metadata, and launches the lane with that component unprovisioned - what was not provisioned is reported as loudly as what was.
-Refusing a gap would be strictly worse than the behavior provisioning replaced, which launched every lane unprovisioned, and would brick the spawn on the very monorepos this feature exists to serve.
-The complete set of capability gaps is:
-
-- More provisionable components than `FM_PROVISION_MAX_COMPONENTS`. The components within the budget are still provisioned; the rest are reported as `skipped:over-budget`, never dropped silently. Which ones land past the budget is decided by need before order: the spawn passes the task's own brief in, components whose directory that brief names are provisioned first, and detection order only breaks the remaining tie.
-- A component whose manifest lies deeper below the worktree root than `FM_PROVISION_SCAN_DEPTH`, reported as `skipped:below-scan-depth`. It is named without being classified or installed, so a monorepo's deeply nested service is a gap the lane can read rather than a component no surface mentions.
-- A Python component whose `pyproject.toml` declares a project while carrying neither a `uv.lock` nor a `requirements.txt`, reported as `skipped:no-python-lockfile`. Choosing an installer for a lockless project is a design decision firstmate has not made, and installing from a guess is not one provisioning gets to make on the project's behalf; a uv workspace member is not reported, since its root's sync installs it, and neither is a `pyproject.toml` that only configures tools.
-- A dependency scan that does not finish within its bound, recorded as `unavailable:scan-too-large`. No component was enumerated, so none can be named, and the lane's report says exactly that rather than carrying a header that would read like a worktree needing nothing.
-- A recognized-but-unsupported package manager (`yarn`, `bun`).
-- A JS component whose package manager is neither named by package.json's `packageManager` field nor implied by a single lockfile - including a directory carrying two lockfiles while declaring nothing.
-- A declared Node major that cannot be found under `$NVM_DIR`, `$FNM_DIR`, `$VOLTA_HOME`, or `~/.asdf`, components declaring conflicting Node majors, or a `node` that does not run. The worktree's Python components are still provisioned.
-- A missing installer (`uv`, `npm`, `pnpm`).
-- A pinned-Node toolchain directory that cannot be established under the provisioning cache, reported as `skipped:node-prefix-unavailable`. A stale one is stepped over rather than rewritten, so this can only mean the cache itself is unwritable.
-- A pip component whose `-r` / `-c` include graph reaches more requirements files than the library traverses. No fingerprint over the traversed prefix could cover what the component installs, and a fingerprint that cannot be stood behind would become a false cache hit, so the component is reported as `skipped:unresolved-manifests`.
-- A host with no bounded-execution mechanism (`timeout`, `gtimeout`, or `perl`), or without `python3`. Neither one can be worked around, so nothing is attempted and the whole worktree is recorded as `unavailable:`. That verdict is reached before any component is classified, because classification itself reads the project's own `package.json` through `python3` under a bound; the components are still enumerated afterwards, without running anything, so the lane's report names each one it is not getting rather than only the host verdict.
-
-A **failure** is an attempt that was made and did not complete.
-It refuses the spawn, names its cause, and prints the opt-out, because a lane launched onto a half-built environment is worse than no lane.
-The complete set of refusal causes is:
-
-- A tunable (`FM_PROVISION_SCAN_DEPTH`, `FM_PROVISION_MAX_COMPONENTS`, `FM_PROVISION_INSTALL_TIMEOUT`, `FM_PROVISION_PROBE_TIMEOUT`) that is not a positive integer, including an explicitly empty or zero override.
-- A worktree path that is not a directory, or a dependency scan that fails to traverse it. A scan that succeeds and finds nothing is a clean no-op, not a refusal.
-- A `UV_PROJECT_ENVIRONMENT` that would place a component's environment somewhere other than its own `.venv`, where it could not be proven.
-- A component that declares no ignored install directory to protect, or an install directory the project does not already ignore. Provisioning refuses rather than hiding it: for a linked worktree the only exclusion git honours lives in the main clone's `info/exclude`, so writing one would make the path invisible to `git status` in the primary checkout repo-wide, and installing into a path git can see leaves the leased worktree dirty, fails its returnable check on abort, and strands the workspace lease. The fix is one line in the project's own `.gitignore`. If refusing turns out to block real work often, the alternative is `extensions.worktreeConfig` plus a per-worktree `core.excludesFile`, which was verified to work and isolate correctly but displaces the operator's global excludes inside the worktree.
-- A project that does not ignore `.fm-provisioning.md` gets no in-worktree provisioning report, with a warning naming the fix. That is a skipped diagnostic, not a refusal.
-- A provisioning cache directory or log that cannot be written.
-- A previous lease's `.fm-provisioning.md` that cannot be removed from the worktree. A report that cannot be written is only a missing diagnostic; one left over from another task is a wrong one.
-- Declared manifests that cannot be read for a component, including a requirements include that cannot be opened, or a manifest that exists but yields no digest. The digest of nothing is a well-formed digest, so accepting one would give the component a stable fingerprint that does not depend on that file's content at all.
-- An install that exceeds its bound, exits non-zero, or is terminated by a signal.
-- An installed environment that is still not usable afterwards: no working interpreter at `.venv/bin/python`, an interpreter that does not report the runtime recorded for it, or a readiness probe that cannot capture the environment's state.
-- A fingerprint that cannot be recorded.
-
-`bin/fm-provision-lib.sh` routes every non-success outcome through one of two functions - `fm_provision_gap` or `fm_provision_fail` - so a capability limit added later cannot become a spawn refusal by accident.
-
-A **note** is neither outcome, and is the one thing a component that WAS provisioned can also carry.
-A non-zero `uv pip check` is the only one: it verifies that installed dependency metadata is mutually consistent, which is not the same thing as usable, and a project pinning through uv's `[tool.uv] override-dependencies` or `constraint-dependencies` installs a version some package's own metadata calls incompatible on purpose.
-Refusing there would block every spawn into an environment that installs, runs, and validates fine, so it is announced on stderr, written to the provisioning log, recorded as `<manager>:<dir>=installed+inconsistent-dependency-metadata` or `<manager>:<dir>=cached+inconsistent-dependency-metadata` - the check runs before the cache-phase split, so a cache hit carries it too - and carried into the lane's own report, while the component still counts as provisioned.
-A check that could not be run at all - an expired bound, a host that cannot bound anything, an undeterminable child status, a command that could not be executed - is never reported as one that found something: it records `unverified-dependency-metadata` instead, which says only that whether the metadata is self-consistent is unknown.
-The proofs kept as refusals are the ones that mean unusable: an interpreter that is missing, not executable, does not run, or does not report the runtime recorded for it.
+A successful component may also record a non-zero `uv pip check` note.
+`inconsistent-dependency-metadata` means the check found an inconsistency, while `unverified-dependency-metadata` means it could not run and must never be phrased as a finding.
 
 Installer output lands in `state/<id>.provision.log`, which is removed with the rest of the task's state on teardown and on a spawn abort; a refusal prints the tail of that log to stderr, since the rollback deletes the file.
-Those surfaces all live in the firstmate home, where the crewmate cannot read them, so provisioning also writes `.fm-provisioning.md` at the root of the leased worktree naming every component and what happened to it.
-That file is registered with the repository's git exclude file before it is written, so it cannot dirty the checkout; if that registration is impossible the report is skipped with a warning rather than written, and a report that cannot be filed never refuses a spawn.
-Because it is excluded, nothing else removes it, and a pool slot outlives the lease that used it: every spawn deletes whatever occupies that path before it decides anything - including a spawn that opts out, which is exactly the lease that would otherwise inherit a stale report - and the path is unlinked rather than truncated, so a symlink left there is replaced instead of followed.
+Those surfaces all live in the firstmate home, so provisioning also writes `.fm-provisioning.md` at the leased worktree root when the project already ignores it.
+If the project does not ignore it, the report is skipped with a warning; a report that cannot be filed never refuses a spawn.
+Because the project ignores it, ordinary cleanup may leave it while a pool slot outlives the lease: every spawn deletes whatever occupies that path before it decides anything, including opt-outs, and unlinks rather than truncates so a symlink is replaced instead of followed.
 The outcome is recorded as `provision=` in `state/<id>.meta`: `none` for a worktree that declares nothing, `off` for an opt-out, `unavailable:<reason>` for a host gap, or a comma-separated list of `<manager>:<dir>=installed|cached|skipped:<reason>`, where a provisioned component that carries a note reads `installed+<note>` or `cached+<note>`.
 Every install and probe is wall-clock bounded; a host with no `timeout`, `gtimeout`, or `perl` runs nothing at all and the lane launches unprovisioned, rather than risking an unbounded install wedging a spawn.
 
