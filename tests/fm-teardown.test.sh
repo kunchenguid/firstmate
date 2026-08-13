@@ -1336,8 +1336,9 @@ test_teardown_removes_per_task_adapter_extensions() {
   printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
   printf '// generated pi extension\n' > "$case_dir/state/task-x1.pi-ext.ts"
   printf '// generated omp extension\n' > "$case_dir/state/task-x1.omp-ext.ts"
-  printf 'g1.test\n' > "$case_dir/state/task-x1.omp-session-run"
-  printf 'g1\n' > "$case_dir/state/task-x1.omp-session-stop"
+  printf 'g1\n' > "$case_dir/state/task-x1.busy-gen"
+  printf 'g1.123.1000.1\n' > "$case_dir/state/task-x1.omp-session-run"
+  printf 'g1.123.1000.1\n' > "$case_dir/state/task-x1.omp-session-stop"
   printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
     > "$case_dir/state/task-x1.omp-session-evidence.owner"
   mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
@@ -1406,6 +1407,49 @@ test_teardown_preserves_unrecognized_owned_omp_evidence() {
   assert_present "$case_dir/state/task-x1.omp-session-evidence/foreign" \
     "omp-unrecognized-evidence: teardown removed malformed evidence"
   pass "teardown refuses and preserves unrecognized owned OMP evidence"
+}
+
+test_teardown_validates_omp_evidence_generation_and_temps() {
+  local case_dir rc token temp legacy_temp
+  case_dir=$(make_case omp-evidence-generation)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  printf 'g-current\n' > "$case_dir/state/task-x1.busy-gen"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
+  token='g-foreign.123.1000.1'
+  printf '%s 1000 1000 0\n' "$token" > "$case_dir/state/task-x1.omp-session-evidence/$token"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "omp-evidence-generation: teardown must reject a foreign generation"
+  assert_present "$case_dir/state/task-x1.omp-session-evidence/$token" \
+    "omp-evidence-generation: teardown removed foreign-generation evidence"
+
+  case_dir=$(make_case omp-evidence-owned-temp)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  printf 'g-current\n' > "$case_dir/state/task-x1.busy-gen"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
+  token='g-current.123.1000.1'
+  temp="$case_dir/state/task-x1.omp-session-evidence/$token.g-current.456.550e8400-e29b-41d4-a716-446655440000.1.tmp"
+  printf '%s 1000 1000 0\n' "$token" > "$temp"
+  legacy_temp="$case_dir/state/task-x1.omp-session-evidence/$token.456.2.tmp"
+  printf '%s 1000 1000 0\n' "$token" > "$legacy_temp"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "omp-evidence-owned-temp: teardown should accept a proven atomic temp"
+  assert_absent "$case_dir/state/task-x1.omp-session-evidence" \
+    "omp-evidence-owned-temp: teardown left proven atomic evidence temp behind"
+  pass "teardown enforces current-generation evidence and accepts only proven temps"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2685,6 +2729,7 @@ test_teardown_missing_busy_sidecar_completes
 test_teardown_removes_per_task_adapter_extensions
 test_teardown_preserves_foreign_omp_evidence_collision
 test_teardown_preserves_unrecognized_owned_omp_evidence
+test_teardown_validates_omp_evidence_generation_and_temps
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

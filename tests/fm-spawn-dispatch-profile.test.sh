@@ -1066,6 +1066,32 @@ test_no_node_keeps_generic_omp_mentions_generic() {
   pass "no-Node raw fallback keeps generic compound OMP mentions generic"
 }
 
+test_no_node_parses_quoted_canonical_omp_launch() {
+  local rec id=profile-raw-no-node-quoted-omp-z8t out status raw_omp probe launch raw_owner
+  rec=$(make_spawn_case raw-no-node-quoted-omp claude "$id")
+  read_case_record "$rec"
+  raw_omp="$FAKEBIN_DIR/omp"
+  probe="$CASE_DIR/raw-quoted-omp-probe"
+  cat > "$raw_omp" <<SH
+#!/usr/bin/env bash
+printf '%s|%s\n' "\${FM_HARNESS_UNVERIFIED:-unset}" "\${FM_RAW_LAUNCH_OWNER:-unset}" > "$probe"
+SH
+  chmod +x "$raw_omp"
+
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "'$raw_omp' --raw-flag")
+  status=$?
+  expect_code 0 "$status" "a quoted canonical OMP launch should retain ownership without Node.js: $out"
+  raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
+  [ -n "$raw_owner" ] || fail "a quoted canonical OMP launch lost its ownership marker"
+  launch=$(cat "$LAUNCH_LOG")
+  FM_RAW_LAUNCH_OWNER=wrong OMPCODE=1 PATH="$FAKEBIN_DIR:/usr/bin:/bin" bash -c "$launch"
+  [ "$(cat "$probe")" = "raw-launch|$raw_owner" ] \
+    || fail "a quoted canonical OMP launch did not preserve ownership: $(cat "$probe")"
+  pass "no-Node raw fallback parses quoted canonical OMP launches"
+}
+
 # The raw path is the escape hatch for verifying a new adapter, so it has to keep
 # accepting the shell forms an experimental launcher takes. A command-prefix
 # strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
@@ -1290,6 +1316,7 @@ test_generic_raw_launch_sanitizes_inherited_verified_markers
 test_raw_launch_marker_covers_process_tree_forms
 test_no_node_rejects_bare_omp_decoy
 test_no_node_keeps_generic_omp_mentions_generic
+test_no_node_parses_quoted_canonical_omp_launch
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

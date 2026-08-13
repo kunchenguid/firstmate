@@ -1265,9 +1265,73 @@ case "$ARG3" in
     ;;
 esac
 
+RAW_LAUNCH_WORDS=()
+
+raw_launch_tokenize() {
+  local input=$1 char quote= word= have=0 i=0 length=${#1}
+  RAW_LAUNCH_WORDS=()
+  while [ "$i" -lt "$length" ]; do
+    char=${input:$i:1}
+    if [ -n "$quote" ]; then
+      if [ "$char" = "$quote" ]; then
+        quote=
+        have=1
+      elif [ "$quote" = '"' ] && [ "$char" = '\' ]; then
+        i=$((i + 1))
+        [ "$i" -lt "$length" ] || return 1
+        word=$word${input:$i:1}
+        have=1
+      else
+        word=$word$char
+        have=1
+      fi
+    elif [ "$char" = "'" ] || [ "$char" = '"' ]; then
+      quote=$char
+      have=1
+    elif [ "$char" = '\' ]; then
+      i=$((i + 1))
+      [ "$i" -lt "$length" ] || return 1
+      word=$word${input:$i:1}
+      have=1
+    elif [ "$char" = ' ' ] || [ "$char" = $'\t' ] || [ "$char" = $'\n' ]; then
+      if [ "$have" -eq 1 ]; then
+        RAW_LAUNCH_WORDS+=("$word")
+        word=
+        have=0
+      fi
+    elif [ "$char" = '&' ] && [ "$((i + 1))" -lt "$length" ] \
+      && [ "${input:$((i + 1)):1}" = '&' ]; then
+      if [ "$have" -eq 1 ]; then
+        RAW_LAUNCH_WORDS+=("$word")
+        word=
+        have=0
+      fi
+      RAW_LAUNCH_WORDS+=("&&")
+      i=$((i + 1))
+    elif [ "$char" = ';' ] || [ "$char" = '|' ] || [ "$char" = '<' ] \
+      || [ "$char" = '>' ] || [ "$char" = '(' ] || [ "$char" = ')' ]; then
+      if [ "$have" -eq 1 ]; then
+        RAW_LAUNCH_WORDS+=("$word")
+        word=
+        have=0
+      fi
+      RAW_LAUNCH_WORDS+=("$char")
+    else
+      word=$word$char
+      have=1
+    fi
+    i=$((i + 1))
+  done
+  [ -z "$quote" ] || return 1
+  if [ "$have" -eq 1 ]; then
+    RAW_LAUNCH_WORDS+=("$word")
+  fi
+}
+
 raw_launch_uses_omp_fallback() {
   local word first= canonical
-  for word in $LAUNCH; do
+  raw_launch_tokenize "$LAUNCH" || return 1
+  for word in "${RAW_LAUNCH_WORDS[@]}"; do
     case "$word" in
       [A-Za-z_]*=*) continue ;;
       *) first=$word; break ;;
@@ -1280,7 +1344,8 @@ raw_launch_uses_omp_fallback() {
 
 raw_launch_needs_policy_runtime() {
   local launch=$1 word first= canonical wrapper token target i n
-  for word in $launch; do
+  raw_launch_tokenize "$launch" || return 1
+  for word in "${RAW_LAUNCH_WORDS[@]}"; do
     case "$word" in
       [A-Za-z_]*=*) continue ;;
       *) first=$word; break ;;
@@ -1291,8 +1356,7 @@ raw_launch_needs_policy_runtime() {
   esac
   canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
   wrapper="$(dirname "$canonical")/start-omp.sh"
-  local -a words=()
-  read -r -a words <<< "$launch"
+  local -a words=("${RAW_LAUNCH_WORDS[@]}")
   n=${#words[@]}
   i=0
   while [ "$i" -lt "$n" ]; do
