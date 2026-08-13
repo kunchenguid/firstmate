@@ -189,7 +189,9 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-The per-folder workspace-trust confirmation ("Is this a project you created or one you trust?") is pre-accepted by `bin/fm-spawn.sh` before every claude launch (`bin/fm-claude-trust-lib.sh` writes the worktree's trust into `<CLAUDE_CONFIG_DIR:-$HOME>/.claude.json` ahead of time), so it should never appear for a firstmate-spawned worktree; `--dangerously-skip-permissions` does NOT suppress this dialog on its own (verified live: it still gated a fresh, never-before-seen worktree on Claude Code 2.1.223).
+The per-folder workspace-trust confirmation ("Is this a project you created or one you trust?") is pre-accepted by `bin/fm-spawn.sh` before every claude launch, so it cannot appear in a successfully launched firstmate-spawned worktree.
+[`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns the trust-store location, scope, and fail-closed behavior.
+Captured incident evidence showed that `--dangerously-skip-permissions` did not suppress this dialog, but a fresh-directory attempt on Claude Code 2.1.231 did not reproduce it; the pre-accept remains defense in depth against version or account differences.
 A separate bypass-permissions mode warning ("WARNING: Claude Code running in Bypass Permissions mode") is a distinct, later dialog that this pre-accept step does not address; see issue #2325 for its two-dialog sequencing and the destructive default on its second option.
 First ever launch on a machine may still show its own onboarding confirmation.
 After every spawn, peek the pane within about 20 seconds.

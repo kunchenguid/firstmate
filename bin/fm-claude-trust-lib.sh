@@ -2,9 +2,10 @@
 # Pre-accepts Claude Code's per-folder workspace-trust dialog for a worktree
 # before launch, so a claude crewmate/secondmate never hangs on the "Is this
 # a project you created or one you trust?" prompt on a brand-new worktree.
-# --dangerously-skip-permissions bypasses TOOL permissions only, not this
-# dialog (verified live: a fresh untrusted directory still shows it under
-# that flag).
+# Captured incident evidence showed that --dangerously-skip-permissions did
+# not suppress this dialog. A fresh-directory attempt on Claude Code 2.1.231
+# did not reproduce it, so this pre-accept is defense in depth against version
+# or account differences.
 #
 # Claude Code persists per-folder trust in <config-dir>/.claude.json under
 # projects["<abs-worktree-path>"].hasTrustDialogAccepted (verified against

@@ -2275,11 +2275,12 @@ fi
 # Deterministically pre-accept Claude Code's per-folder workspace-trust dialog
 # for this worktree before launch (bin/fm-claude-trust-lib.sh), covering both
 # a fresh spawn and --relaunch: WT is finalized for every KIND and RELAUNCH
-# state by this point. --dangerously-skip-permissions does not suppress this
-# dialog, so a first-time worktree path would otherwise hang the worker with
-# an empty status log until a supervisor peeks the pane and answers it by
-# hand. Scoped to the verified claude harness only; every other adapter's
-# trust/bypass handling is unrelated and untouched.
+# state by this point. Captured incident evidence showed that
+# --dangerously-skip-permissions did not reliably suppress this dialog, so an
+# affected first-time worktree path could otherwise hang the worker with an
+# empty status log until a supervisor answers it. Scoped to the verified
+# claude harness only; every other adapter's trust/bypass handling is
+# unrelated and untouched.
 if [ "$HARNESS" = claude ]; then
   CLAUDE_TRUST_WT=$(real_path_or_raw "$WT")
   fm_claude_trust_ensure_dir || {
