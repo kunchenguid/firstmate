@@ -387,5 +387,60 @@
       "to": "done-task",
       "relation": "observes"
     }
-  ]
+  ],
+  "selector": {
+    "profiles": {
+      "Company Codex": {
+        "models": [
+          "openai-codex/gpt-5.6-sol",
+          "openai-codex/gpt-5.3-codex"
+        ],
+        "efforts": [
+          "low",
+          "medium",
+          "high thinking"
+        ],
+        "last_selection": {
+          "model": "openai-codex/gpt-5.6-sol",
+          "effort": "high thinking"
+        }
+      },
+      "Personal Codex": {
+        "models": [
+          "openai-codex/gpt-5.3-codex"
+        ],
+        "efforts": [
+          "low",
+          "medium"
+        ],
+        "last_selection": {
+          "model": "openai-codex/gpt-5.3-codex",
+          "effort": "medium"
+        }
+      },
+      "Company Claude": {
+        "models": [
+          "anthropic/claude-opus-5"
+        ],
+        "efforts": [
+          "medium",
+          "high thinking"
+        ]
+      },
+      "Personal Claude": {
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "efforts": [
+          "low",
+          "medium"
+        ]
+      }
+    },
+    "preview": {
+      "profile": "Company Codex",
+      "model": "openai-codex/gpt-5.6-sol",
+      "effort": "high thinking"
+    }
+  }
 }

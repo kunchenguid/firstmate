@@ -50,7 +50,8 @@ Render the fixture-only Herdr Firstmate operations console.
 
 Options:
   --fixture PATH              Required JSON fixture path, or - for stdin.
-  --format FORMAT             all (default), json, panel, status, decisions, activity, or network.
+  --format FORMAT             all (default), json, panel, status, decisions, selector,
+                              activity, or network.
   --now RFC3339               Observation time override for deterministic tests.
   --max-events N              Activity retention bound; default is fixture value or 80, max 200.
   --width N                    Maximum rendered line width; default is 120.
@@ -131,7 +132,7 @@ done
 
 [ -n "$FIXTURE" ] || { usage >&2; die '--fixture is required'; }
 case "$FORMAT" in
-  all|json|panel|status|decisions|activity|network) ;;
+  all|json|panel|status|decisions|selector|activity|network) ;;
   *) die "unsupported format: $FORMAT" ;;
 esac
 case "$WIDTH" in
@@ -271,8 +272,10 @@ NORMALIZED=$(
     def restricted_decision($value):
       ($value | type) == "string"
       and ($value | test("(merge|deploy|delete|destroy|drop |force[- ]push|revoke|rotate|production|prod |credential|secret|token|password|uninstall|overwrite|replace .*app|irreversible)"; "i"));
-    def decision_alias($index; $stem):
-      "D" + (($index + 1) | tostring)
+    def identity_ordinal($task_id):
+      ($task_id | explode | reduce .[] as $c (7; ((. * 31) + $c) % 900)) + 10;
+    def decision_alias($task_id; $stem):
+      "D" + (identity_ordinal($task_id) | tostring)
       + (if $stem == null then "" else " · " + $stem end);
     def node_for($id; $tasks):
       if $id == "Captain" then {id:"Captain", label:"Captain", state:null}
@@ -416,12 +419,15 @@ NORMALIZED=$(
                 elif $opened > ($now_epoch + 60) then null
                 else (($now_epoch - $opened) / 60 | floor)
                 end) as $age_minutes
-           | (restricted_decision($question)
-              or restricted_decision($recommendation)
-              or restricted_decision($t.blocker)
-              or restricted_decision($t.task)) as $restricted
+           | ([$decision.question, $decision.recommendation,
+               ($decision.options[]? | select((. | type) == "string")),
+               ($task_display[$t.id] // {}).blocker,
+               ($task_display[$t.id] // {}).task,
+               ($task_display[$t.id] // {}).project,
+               $t.blocker, $t.task]
+              | any(restricted_decision(.))) as $restricted
            | {
-               alias:decision_alias($index; $stem),
+               alias:decision_alias($t.id; $stem),
                task_id:$t.id,
                project:$t.project,
                task:$t.task,
@@ -437,7 +443,18 @@ NORMALIZED=$(
                options:(if ($named_options | length) >= 2 then $named_options else ["Igen", "Nem"] end),
                binary:(($named_options | length) < 2),
                keys:(if ($named_options | length) >= 2
-                     then ($named_options | map("[" + (.[0:1] | ascii_upcase) + "] " + .))
+                     then ($named_options
+                           | reduce .[] as $option
+                               ({used:[], keys:[]};
+                                . as $state
+                                | ([range(0; ($option | length))
+                                    | $option[.:(. + 1)] | ascii_upcase
+                                    | select(test("[A-Z0-9]"))]) as $candidates
+                                | (first($candidates[] | select(. as $c | ($state.used | index($c)) == null))
+                                   // ($candidates[0] // "?")) as $picked
+                                | {used:($state.used + [$picked]),
+                                   keys:($state.keys + ["[" + $picked + "] " + $option])})
+                           | .keys)
                      else ["[I] Igen", "[N] Nem"] end),
                shorthand_allowed:($restricted | not),
                restricted:$restricted,
@@ -445,7 +462,16 @@ NORMALIZED=$(
                                   then "explicit confirmation required"
                                   else "alias shorthand allowed" end),
                evidence_signature:([$question, $recommendation, ($named_options | join("|"))] | join("¦"))
-             })) as $decisions
+             })
+       | sort_by(.task_id)
+       | reduce .[] as $card
+           ({used:[], cards:[]};
+            . as $state
+            | (if ($state.used | index($card.alias)) == null then $card.alias
+               else ($card.alias + "#" + $card.task_id) end) as $unique_alias
+            | {used:($state.used + [$unique_alias]),
+               cards:($state.cards + [$card + {alias:$unique_alias}])})
+       | .cards) as $decisions
     | {
         schema:"fm-herdr-operations-console.v1",
         mode:"fixture",
@@ -466,8 +492,58 @@ NORMALIZED=$(
           bare_reply_accepted:(($decisions | length) == 1 and $decisions[0].shorthand_allowed),
           restricted:([$decisions[] | select(.restricted) | .alias]),
           click_to_approve:false,
-          asked_in_chat_once:true
+          chat_visibility:"unsupported",
+          chat_ask_state:"unknown"
         },
+        selector:(
+          ((.selector // {}) as $sel
+           | ($sel.profiles // {}) as $profiles
+           | (["Company Codex", "Personal Codex", "Company Claude", "Personal Claude"]
+              | map(. as $name
+                    | ($profiles[$name] // {}) as $entry
+                    | {
+                        profile:$name,
+                        models:([$entry.models[]? | select((. | type) == "string")
+                                 | safe(.; ""; 64) | select(. != "")] | unique),
+                        efforts:([$entry.efforts[]? | select((. | type) == "string")
+                                  | safe(.; ""; 32) | select(. != "")] | unique),
+                        last_selection:(
+                          ($entry.last_selection // null) as $last
+                          | if ($last | type) != "object" then null
+                            else ((safe($last.model; ""; 64)) as $m
+                                  | (safe($last.effort; ""; 32)) as $e
+                                  | if $m == "" or $e == "" then null
+                                    else {model:$m, effort:$e} end)
+                            end)
+                      })) as $lanes
+           | {
+               step_order:["Profile", "Model", "Effort"],
+               profiles:$lanes,
+               preview:(
+                 (safe($sel.preview.profile; ""; 32)) as $p
+                 | (safe($sel.preview.model; ""; 64)) as $m
+                 | (safe($sel.preview.effort; ""; 32)) as $e
+                 | ([$lanes[] | select(.profile == $p)] | .[0]) as $lane_entry
+                 | if $lane_entry == null or $m == "" or $e == "" then
+                     {state:"incomplete", tuple:null,
+                      reason:"select a profile, a verified model, and a supported effort"}
+                   elif ($lane_entry.models | index($m)) == null then
+                     {state:"unverified", tuple:null,
+                      reason:"model is not verified for this profile"}
+                   elif ($lane_entry.efforts | index($e)) == null then
+                     {state:"unsupported", tuple:null,
+                      reason:"effort is not supported for this profile"}
+                   else
+                     {state:"ready", tuple:($p + " · " + $m + " · " + $e), reason:null}
+                   end),
+               keyboard_only:true,
+               launches:false,
+               switches_account:false,
+               copies_credentials:false,
+               copies_session_state:false,
+               mode:"fixture-mock"
+             })
+        ),
         motion:{
           reduced_motion:$reduced_motion,
           pulse:(if $reduced_motion then "none"
@@ -743,6 +819,32 @@ if [ "$FORMAT" = decisions ] || [ "$FORMAT" = all ]; then
         end),
     fit("Approval by keyboard only; click-to-approve is not available.")
   ' || die 'decisions rendering failed'
+fi
+
+if [ "$FORMAT" = selector ] || [ "$FORMAT" = all ]; then
+  printf '%s\n' "$NORMALIZED" | jq -r --argjson width "$WIDTH" '
+    def fit($value):
+      if ($value | length) <= $width then $value
+      elif $width <= 3 then $value[:$width]
+      else $value[:($width - 3)] + "..."
+      end;
+    fit("SELECTOR // PROFILE - MODEL - EFFORT // FIXTURE MOCK"),
+    (.selector.profiles[] |
+      . as $p
+      | fit("[P] " + $p.profile),
+        fit("    MODELS  " + (if ($p.models | length) == 0 then "None verified"
+                              else ($p.models | join(", ")) end)),
+        fit("    EFFORT  " + (if ($p.efforts | length) == 0 then "None supported"
+                              else ($p.efforts | join(", ")) end)),
+        fit("    LAST    " + (if $p.last_selection == null then "None remembered"
+                              else ($p.last_selection.model + " · " + $p.last_selection.effort) end))
+    ),
+    "",
+    fit("PREVIEW   " + (if .selector.preview.state == "ready"
+                        then .selector.preview.tuple
+                        else (.selector.preview.state + " - " + .selector.preview.reason) end)),
+    fit("Keyboard only; this mock never launches, switches accounts, or copies credentials.")
+  ' || die 'selector rendering failed'
 fi
 
 if [ "$FORMAT" = network ] || [ "$FORMAT" = all ]; then

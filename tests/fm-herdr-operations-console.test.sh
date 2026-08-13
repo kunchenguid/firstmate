@@ -426,7 +426,7 @@ test_status_panel_uses_accessible_markers_and_required_fields() {
 }
 
 test_decision_inbox_is_stable_bounded_and_approval_safe() {
-  local out cards single_fixture single restricted_card
+  local out single_fixture single restricted_card
   out=$(run_json)
 
   printf '%s' "$out" | jq -e '
@@ -441,7 +441,7 @@ test_decision_inbox_is_stable_bounded_and_approval_safe() {
 
   printf '%s' "$out" | jq -e '
     ([.decisions.cards[] | select(.task_id == "review-merge")][0]
-      | .alias == "D3 · React Library" and .restricted == true
+      | (.alias | test("^D[0-9]+ · React Library$")) and .restricted == true
         and .shorthand_allowed == false
         and .approval_boundary == "explicit confirmation required")
   ' >/dev/null || fail "merge decision did not carry an Obsidian alias and a hard approval boundary"
@@ -455,9 +455,54 @@ test_decision_inbox_is_stable_bounded_and_approval_safe() {
         and (.keys | map(test("^\\[[A-Z]\\] [A-Za-z]")) | all))
   ' >/dev/null || fail "multi-option decision used bare letter codes instead of option names"
 
-  cards=$(printf '%s' "$out" | jq -c '[.decisions.cards[] | {alias, task_id, evidence_signature}]')
-  [ "$cards" = "$(run_json | jq -c '[.decisions.cards[] | {alias, task_id, evidence_signature}]')" ] \
-    || fail "decision aliases were not stable across runs"
+  local resolved_fixture resolved before_map after_map alias task_before task_after
+  resolved_fixture="$TMP_ROOT/decision-resolved.json"
+  jq 'del(.tasks["company-blocked"])
+      | .snapshot.tasks = [.snapshot.tasks[] | select(.id != "company-blocked")]' \
+    "$FIXTURE" > "$resolved_fixture"
+  resolved=$("$CONSOLE" --fixture "$resolved_fixture" --format json --now 2026-08-13T12:00:00Z)
+
+  before_map=$(printf '%s' "$out" | jq -c '[.decisions.cards[] | {alias, task_id}] | sort_by(.task_id)')
+  after_map=$(printf '%s' "$resolved" | jq -c '[.decisions.cards[] | {alias, task_id}] | sort_by(.task_id)')
+
+  printf '%s' "$resolved" | jq -e --argjson before "$before_map" '
+    . as $after
+    | ([$before[] | select(.task_id != "company-blocked")] | sort_by(.task_id))
+      == ([$after.decisions.cards[] | {alias, task_id}] | sort_by(.task_id))
+  ' >/dev/null || fail "resolving one decision renumbered the surviving aliases"
+
+  for alias in $(printf '%s' "$before_map" | jq -r '.[].alias | @base64'); do
+    task_before=$(printf '%s' "$before_map" | jq -r --arg a "$alias" \
+      '[.[] | select((.alias | @base64) == $a)][0].task_id')
+    task_after=$(printf '%s' "$after_map" | jq -r --arg a "$alias" \
+      '[.[] | select((.alias | @base64) == $a)][0].task_id // empty')
+    [ -z "$task_after" ] || [ "$task_before" = "$task_after" ] \
+      || fail "alias was reused for a different task: $task_before -> $task_after"
+  done
+
+  local new_fixture
+  new_fixture="$TMP_ROOT/decision-new.json"
+  jq '.snapshot.tasks += [{
+        id:"extra-decision", kind:"ship", harness:"codex", project:"extra",
+        backlog:{title:"Extra"},
+        current_state:{state:"parked", source:"run-step", observed_at:"2026-08-13T11:59:30Z"},
+        hints:{pending_decision:true}
+      }]
+      | .tasks["extra-decision"] = {
+          project:"Extra", task:"Unrelated follow-up", phase:"Review",
+          profile_lane:"Personal Codex", model:"Luna Max", effort:"low",
+          decision:{question:"Continue the follow-up?", recommendation:"Continue",
+                    opened_at:"2026-08-13T11:50:00Z"}
+        }' "$resolved_fixture" > "$new_fixture"
+  "$CONSOLE" --fixture "$new_fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e --argjson before "$before_map" '
+      [.decisions.cards[] | {alias, task_id}] as $now
+      | ([$now[] | .alias] | length) == ([$now[] | .alias] | unique | length)
+        and (all($now[];
+              . as $card
+              | ([$before[] | select(.alias == $card.alias)] | .[0]) as $prior
+              | $prior == null or $prior.task_id == $card.task_id))
+    ' >/dev/null || fail "a newly opened decision took over a resolved decision's alias"
 
   local signature_query baseline_sig changed_sig same_sig
   signature_query='[.decisions.cards[] | select(.task_id == "company-blocked")][0].evidence_signature'
@@ -523,6 +568,149 @@ test_decision_inbox_is_stable_bounded_and_approval_safe() {
   pass "decision inbox keeps stable aliases, explicit selection, and approval boundaries"
 }
 
+test_restriction_survives_truncation_redaction_and_options() {
+  local fixture long_question restricted_query
+  restricted_query='[.decisions.cards[] | select(.task_id == "multi-option")][0]'
+
+  long_question="Please confirm whether we should proceed with the following operational step which the team has already reviewed thank you kindly: deploy to production"
+  fixture="$TMP_ROOT/restrict-truncated.json"
+  jq --arg q "$long_question" '.tasks["multi-option"].task = "Routine step"
+      | .tasks["multi-option"].decision = {question:$q, recommendation:"Proceed",
+          opened_at:"2026-08-13T11:55:00Z"}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e "$restricted_query | .restricted == true and .shorthand_allowed == false" >/dev/null \
+    || fail "a truncated deploy question was downgraded to shorthand-approvable"
+
+  fixture="$TMP_ROOT/restrict-redacted.json"
+  jq '.tasks["multi-option"].task = "Routine step"
+      | .tasks["multi-option"].decision = {question:"Merge /Users/bob/release into main?",
+          recommendation:"Proceed", opened_at:"2026-08-13T11:55:00Z"}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e "$restricted_query
+        | .restricted == true and .shorthand_allowed == false
+          and (.question | test(\"/Users/bob\") | not)" >/dev/null \
+    || fail "a redacted merge question was downgraded to shorthand-approvable"
+
+  fixture="$TMP_ROOT/restrict-options.json"
+  jq '.tasks["multi-option"].task = "Routine step"
+      | .tasks["multi-option"].decision = {question:"Which follow-up should run?",
+          recommendation:"Pick the safe one", opened_at:"2026-08-13T11:55:00Z",
+          options:["archive","deploy to prod","rerun"]}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e "$restricted_query | .restricted == true and .shorthand_allowed == false" >/dev/null \
+    || fail "a restricted option name was shorthand-approvable"
+
+  fixture="$TMP_ROOT/restrict-blocker.json"
+  jq '.tasks["multi-option"].task = "Routine step"
+      | .tasks["multi-option"].blocker = "waiting to force-push the release"
+      | .tasks["multi-option"].decision = {question:"Continue?", recommendation:"Continue",
+          opened_at:"2026-08-13T11:55:00Z"}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e "$restricted_query | .restricted == true" >/dev/null \
+    || fail "a restricted blocker was not classified from raw evidence"
+  pass "restriction classification reads raw evidence before truncation and redaction"
+}
+
+test_option_key_tokens_are_unique_and_readable() {
+  local fixture keys
+  fixture="$TMP_ROOT/option-keys.json"
+  jq '.tasks["multi-option"].decision.options = ["zip","zstd","tarball"]' "$FIXTURE" > "$fixture"
+  keys=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -c '[.decisions.cards[] | select(.task_id == "multi-option")][0].keys')
+  printf '%s' "$keys" | jq -e '
+    length == 3
+      and ((map(capture("^\\[(?<k>[^]]+)\\]").k) | length)
+           == (map(capture("^\\[(?<k>[^]]+)\\]").k) | unique | length))
+      and (map(test("^\\[[A-Z0-9]\\] [A-Za-z]")) | all)
+  ' >/dev/null || fail "colliding option initials produced duplicate key tokens: $keys"
+
+  "$CONSOLE" --fixture "$FIXTURE" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e '
+      all(.decisions.cards[];
+        (.keys | map(capture("^\\[(?<k>[^]]+)\\]").k) | length)
+        == (.keys | map(capture("^\\[(?<k>[^]]+)\\]").k) | unique | length))
+    ' >/dev/null || fail "shipped fixture produced duplicate key tokens"
+  pass "option key tokens stay unique and readable under colliding initials"
+}
+
+test_chat_visibility_is_reported_honestly() {
+  run_json | jq -e '
+    .decisions.chat_visibility == "unsupported"
+      and .decisions.chat_ask_state == "unknown"
+      and (.decisions | has("asked_in_chat_once") | not)
+      and .safety.chat_read == false
+  ' >/dev/null || fail "console claimed chat knowledge it cannot observe"
+  pass "chat visibility is reported as unsupported rather than assumed"
+}
+
+test_profile_selector_is_display_only_and_verified() {
+  local out text fixture
+  out=$(run_json)
+
+  printf '%s' "$out" | jq -e '
+    .selector.mode == "fixture-mock"
+      and .selector.keyboard_only == true
+      and .selector.launches == false
+      and .selector.switches_account == false
+      and .selector.copies_credentials == false
+      and .selector.copies_session_state == false
+      and .selector.step_order == ["Profile", "Model", "Effort"]
+      and ([.selector.profiles[].profile]
+           == ["Company Codex", "Personal Codex", "Company Claude", "Personal Claude"])
+  ' >/dev/null || fail "selector did not expose a display-only three-step keyboard flow"
+
+  printf '%s' "$out" | jq -e '
+    .selector.preview.state == "ready"
+      and .selector.preview.tuple == "Company Codex · openai-codex/gpt-5.6-sol · high thinking"
+  ' >/dev/null || fail "selector did not preview the guarded target tuple"
+
+  printf '%s' "$out" | jq -e '
+    ([.selector.profiles[] | select(.profile == "Personal Codex")][0]
+      | (.models | index("openai-codex/gpt-5.6-sol")) == null
+        and (.efforts | index("high thinking")) == null
+        and .last_selection.model == "openai-codex/gpt-5.3-codex")
+      and ([.selector.profiles[] | select(.profile == "Company Claude")][0].last_selection == null)
+  ' >/dev/null || fail "selector leaked models or efforts across profile lanes"
+
+  fixture="$TMP_ROOT/selector-unverified.json"
+  jq '.selector.preview = {profile:"Personal Codex", model:"openai-codex/gpt-5.6-sol",
+        effort:"high thinking"}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e '.selector.preview.state == "unverified" and .selector.preview.tuple == null' >/dev/null \
+    || fail "selector previewed a model not verified for the chosen profile"
+
+  fixture="$TMP_ROOT/selector-unsupported.json"
+  jq '.selector.preview = {profile:"Personal Claude", model:"anthropic/claude-sonnet-5",
+        effort:"high thinking"}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e '.selector.preview.state == "unsupported" and .selector.preview.tuple == null' >/dev/null \
+    || fail "selector previewed an effort the profile does not support"
+
+  fixture="$TMP_ROOT/selector-secret.json"
+  jq '.selector.profiles["Company Codex"].last_selection = {model:"/Users/bob/token.txt",
+        effort:"api_key high"}' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e '([.selector.profiles[] | select(.profile == "Company Codex")][0].last_selection) == null' \
+    >/dev/null || fail "selector remembered a secret-shaped selection"
+
+  text=$("$CONSOLE" --fixture "$FIXTURE" --format selector --no-color --now 2026-08-13T12:00:00Z)
+  assert_contains "$text" "Company Codex · openai-codex/gpt-5.6-sol · high thinking" \
+    "selector surface did not preview the exact tuple"
+  assert_contains "$text" "never launches" "selector surface did not disclaim launching"
+  assert_not_contains "$text" "/Users/" "selector surface leaked a private path"
+  if printf '%s' "$text" | grep -qE '[😀-🿿🚀-🛿✅❌🔴🟢🟡]'; then
+    fail "selector surface used an emoji marker"
+  fi
+
+  local width over
+  for width in 20 40 76; do
+    over=$("$CONSOLE" --fixture "$FIXTURE" --format selector --no-color \
+      --now 2026-08-13T12:00:00Z --width "$width" | fm_console_overlong_lines "$width")
+    [ -z "$over" ] || fail "selector surface exceeded --width $width: $over"
+  done
+  pass "profile selector previews verified tuples without launching or copying credentials"
+}
+
 test_motion_is_bounded_and_reduced_motion_aware() {
   local motion reduced
   motion=$("$CONSOLE" --fixture "$FIXTURE" --format json --now 2026-08-13T12:00:00Z --motion)
@@ -576,5 +764,9 @@ test_truncated_history_is_surfaced
 test_fractional_ttl_is_refused_before_any_helper_call
 test_status_panel_uses_accessible_markers_and_required_fields
 test_decision_inbox_is_stable_bounded_and_approval_safe
+test_restriction_survives_truncation_redaction_and_options
+test_option_key_tokens_are_unique_and_readable
+test_chat_visibility_is_reported_honestly
+test_profile_selector_is_display_only_and_verified
 test_motion_is_bounded_and_reduced_motion_aware
 test_fleet_snapshot_exposes_recorded_model_and_effort

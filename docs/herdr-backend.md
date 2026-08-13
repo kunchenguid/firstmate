@@ -215,12 +215,21 @@ Test, commit or version, blocker, and next-action values are displayed only when
 Captain chat keeps a plain-language outcome or a single decision question; this panel owns the routine structured detail.
 `ttl_seconds` must be a whole number of seconds between 1 and 86400, so the published display cache always carries a whole-millisecond expiry bound.
 `--format decisions` renders the durable decision inbox for tasks that explicitly need review.
-Each card carries a stable short alias built from the authoritative Obsidian task identity when the link is supported, for example `D3 · React Library`, plus a one-line question, recommendation, age, blocked task, and readable keyboard tokens such as `[I] Igen` and `[N] Nem`.
+Each card carries a stable short alias built from the task identity plus the authoritative Obsidian stem when the link is supported, for example `D317 · React Library`, together with a one-line question, recommendation, age, blocked task, and readable keyboard tokens such as `[I] Igen` and `[N] Nem`.
+The numeric part is derived from the task id rather than the card's position, so resolving one decision never renumbers the survivors and a resolved card never donates its alias to a different task; if two ids ever produced the same alias the task id is appended to keep aliases unique.
+Option key tokens advance to the first distinguishing character, so options such as `zip` and `zstd` never advertise the same keystroke.
 A card is keyed to its task, so a later notification updates the same card; `evidence_signature` changes only when the question, recommendation, or options change, which is what lets a repeat notification avoid repeating the full text.
 A single focused binary card accepts the bare Hungarian words `Igen` or `Nem` without repeating the alias.
 When more than one card is open, `selection_required` is true, no card is focused, and the surface asks for an explicit selection rather than guessing.
 Multi-option cards use short understandable option names and never bare `A`/`B`/`C` codes.
 Alias shorthand is refused for any decision whose text implies merge, deploy, delete, force-push, credential, production, or installed-app replacement work; those cards report `explicit confirmation required` and `shorthand_allowed` is false.
+That classification reads the raw question, recommendation, option names, blocker, task, and project values before truncation or private-path redaction, so a long or redacted merge question can never be downgraded to shorthand-approvable; the check errs toward demanding explicit confirmation.
+The console cannot see Captain chat, so it reports `chat_visibility` as `unsupported` and `chat_ask_state` as `unknown` rather than asserting that a decision was already asked.
+
+`--format selector` renders a display-only mock of the three-step Profile, Model, Effort keyboard flow.
+It offers exactly Company Codex, Personal Codex, Company Claude, and Personal Claude, lists only the models and effort levels the fixture records as verified for each profile, and remembers only a non-secret last selection per profile.
+The preview reports `ready` with the exact tuple, for example `Company Codex · openai-codex/gpt-5.6-sol · high thinking`, and otherwise reports `incomplete`, `unverified`, or `unsupported` with a reason instead of a tuple.
+The mock never launches, switches accounts, copies credentials or session state, or performs a handoff; real launch, account switching, and handoff remain post-validation work.
 The inbox is display-only: it renders no click-to-approve affordance and approves, applies, and mutates nothing.
 Captain chat still carries only a plain-language outcome or a single concise question; this inbox owns the routine card detail.
 Motion is reduced-motion aware through `--reduced-motion`, which reports no pulse, transition, or spinner.
