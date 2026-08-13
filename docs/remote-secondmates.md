@@ -233,12 +233,15 @@ The lifecycle test covers seeding a registered project that this machine has nev
 bin/fm-test-run.sh tests/fm-on.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
+bin/fm-test-run.sh tests/fm-remote-home-seed.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
+
+The seed test drives the public seed command for a project-less `--no-projects` home and for a project-bearing control, and CI also runs it on stock macOS Bash 3.2 so the project-less path stays covered on the oldest supported shell.
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
 

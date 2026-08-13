@@ -82,6 +82,10 @@ case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be insi
 NO_PROJECTS=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
+# Count projects explicitly instead of reading ${#PROJECT_NAMES[@]}: under
+# Bash 3.2 (stock macOS) with set -u, expanding an empty array is an unbound
+# variable error, so a --no-projects seed would abort here. Every expansion of
+# these arrays stays behind a NO_PROJECTS guard for the same reason.
 PROJECT_COUNT=0
 for arg in "$@"; do
   if [ "$arg" = --no-projects ]; then
