@@ -1488,7 +1488,7 @@ test_teardown_preserves_replaced_omp_evidence_entry_during_clear() {
 }
 
 test_teardown_validates_omp_evidence_generation_and_temps() {
-  local case_dir rc token temp legacy_temp
+  local case_dir rc token temp legacy_temp temp_identity temp_dev temp_ino
   case_dir=$(make_case omp-evidence-generation)
   write_meta "$case_dir" local-only ship
   printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
@@ -1540,6 +1540,12 @@ test_teardown_validates_omp_evidence_generation_and_temps() {
   token='g-current.123.1000.1'
   temp="$case_dir/state/task-x1.omp-session-evidence/$token.incarnation-550e8400-e29b-41d4-a716-446655440000.generation-g-current.pid-456.seq-1.tmp"
   printf 'partial evidence\n' > "$temp"
+  temp_identity=$(stat -f '%d:%i' "$temp" 2>/dev/null || stat -c '%d:%i' "$temp")
+  temp_dev=${temp_identity%:*}
+  temp_ino=${temp_identity#*:}
+  printf 'firstmate-omp-session-evidence-temps-v1\ntask-x1\n%s\nfirstmate-omp-evidence-temp-v1 %s g-current 456 550e8400-e29b-41d4-a716-446655440000 %s %s\n' \
+    "$case_dir/state" "${temp##*/}" "$temp_dev" "$temp_ino" \
+    > "$case_dir/state/task-x1.omp-session-evidence.temps"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"

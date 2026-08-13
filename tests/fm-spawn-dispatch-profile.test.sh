@@ -942,7 +942,7 @@ SH
 test_raw_launch_marker_covers_process_tree_forms() {
   local rec id out status launch raw_omp script sub probe command expected_harness raw_owner
   local direct_id wrapped_id nested_id script_id stdin_id env_id cwd_id no_node_id no_node_env_id
-  local no_node_shell_id no_node_redirect_id no_node_source_id canonical_wrapper
+  local no_node_shell_id no_node_redirect_id no_node_source_id no_node_env_assignment_id canonical_wrapper
   direct_id=profile-raw-marker-direct-z8h
   wrapped_id=profile-raw-marker-wrapped-z8i
   nested_id=profile-raw-marker-nested-z8j
@@ -955,7 +955,8 @@ test_raw_launch_marker_covers_process_tree_forms() {
   no_node_shell_id=profile-raw-marker-no-node-shell-z8q
   no_node_redirect_id=profile-raw-marker-no-node-redirect-z8r
   no_node_source_id=profile-raw-marker-no-node-source-z8s
-  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id" "$no_node_env_id" "$no_node_shell_id" "$no_node_redirect_id" "$no_node_source_id")
+  no_node_env_assignment_id=profile-raw-marker-no-node-env-assignment-z8t
+  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id" "$no_node_env_id" "$no_node_env_assignment_id" "$no_node_shell_id" "$no_node_redirect_id" "$no_node_source_id")
   read_case_record "$rec"
   raw_omp="$FAKEBIN_DIR/omp"
   script="$CASE_DIR/start-omp.sh"
@@ -1004,6 +1005,16 @@ SH
   assert_grep "raw_launch=1" "$HOME_DIR/state/$no_node_id.meta" "policy-runtime-unavailable raw launch lost its marker"
   raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$no_node_id.meta")
   [ -n "$raw_owner" ] || fail "policy-runtime-unavailable raw launch lost its ownership marker"
+
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$no_node_env_assignment_id" "$PROJ_DIR" "env FOO=bar $raw_omp --raw-flag")
+  expect_code 0 "$?" "an env assignment before canonical OMP should retain ownership without Node.js"
+  assert_contains "$out" "spawned $no_node_env_assignment_id harness=env" \
+    "env-dispatched canonical OMP changed its recorded dispatch harness"
+  assert_grep "raw_launch=1" "$HOME_DIR/state/$no_node_env_assignment_id.meta" \
+    "env-dispatched canonical OMP lost its raw-launch marker"
+  raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$no_node_env_assignment_id.meta")
+  [ -n "$raw_owner" ] || fail "env-dispatched canonical OMP lost its ownership marker"
 
   PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$no_node_env_id" "$PROJ_DIR" "env -S '$raw_omp --raw-flag'")
@@ -1063,6 +1074,15 @@ test_no_node_keeps_generic_omp_mentions_generic() {
     "the generic compound mention lost its raw-launch marker"
   raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
   [ -z "$raw_owner" ] || fail "the generic compound mention received OMP ownership '$raw_owner'"
+  id=profile-raw-no-node-env-mention-z8s
+  rec=$(make_spawn_case raw-no-node-env-mention claude "$id")
+  read_case_record "$rec"
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "env FOO=omp echo safe")
+  status=$?
+  expect_code 0 "$status" "an env decoy mention should remain generic without Node.js: $out"
+  raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
+  [ -z "$raw_owner" ] || fail "the env decoy mention received OMP ownership '$raw_owner'"
   pass "no-Node raw fallback keeps generic compound OMP mentions generic"
 }
 

@@ -165,7 +165,7 @@ drive_omp_ext() {
     BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 const extensionUrl = pathToFileURL(process.env.EXT_PATH).href;
 const loadHandlers = async (suffix = "") => {
   const mod = await import(extensionUrl + suffix);
@@ -238,6 +238,7 @@ switch (process.env.MODE) {
   }
   case "owned-partial-evidence-temp": {
     const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const stateDir = realpathSync(process.env.STATE_DIR);
     const runPath = base + ".omp-session-run";
     const evidenceDir = base + ".omp-session-evidence";
     const ownerPath = base + ".omp-session-evidence.owner";
@@ -252,12 +253,52 @@ switch (process.env.MODE) {
     const temp = evidenceDir + "/" + token + ".incarnation-" + fields[3] +
       ".generation-" + fields[1] + ".pid-" + fields[2] + ".seq-1.tmp";
     writeFileSync(temp, "partial evidence\n", { encoding: "utf8", flag: "wx" });
+    const tempStat = lstatSync(temp);
+    const tempRegistry = base + ".omp-session-evidence.temps";
+    writeFileSync(tempRegistry,
+      "firstmate-omp-session-evidence-temps-v1\n" + process.env.TASK_ID + "\n" +
+      stateDir + "\n" +
+      "firstmate-omp-evidence-temp-v1 " + temp.slice(temp.lastIndexOf("/") + 1) + " " +
+      fields[1] + " " + fields[2] + " " + fields[3] + " " +
+      String(tempStat.dev) + " " + String(tempStat.ino) + "\n");
     try { unlinkSync(turnEndPath); } catch {}
     const reloadedHandlers = await loadHandlers("?owned-partial=" + String(Date.now()));
     await fireWith(reloadedHandlers, "agent_end");
     if (busyState().includes("state=busy")) throw new Error("an owned partial evidence temp kept OMP busy");
     if (!markerPresent(turnEndPath)) throw new Error("owned partial evidence recovery omitted turn-end evidence");
     if (!existsSync(temp)) throw new Error("owned partial evidence temp was removed before cleanup");
+    break;
+  }
+  case "unowned-active-incarnation-temp": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const stateDir = realpathSync(process.env.STATE_DIR);
+    const runPath = base + ".omp-session-run";
+    const evidenceDir = base + ".omp-session-evidence";
+    const ownerPath = base + ".omp-session-evidence.owner";
+    await fire("agent_start");
+    const token = readFileSync(runPath, "utf8").trim();
+    const ownerLine = readFileSync(ownerPath, "utf8").trim().split(/\r?\n/)
+      .find((line) => line.startsWith("firstmate-omp-incarnation-v1 "));
+    if (!ownerLine) throw new Error("the extension did not register its active incarnation");
+    const fields = ownerLine.split(/\s+/);
+    const temp = evidenceDir + "/" + token + ".incarnation-" + fields[3] +
+      ".generation-" + fields[1] + ".pid-" + fields[2] + ".seq-99.tmp";
+    writeFileSync(temp, "copied active incarnation\n", { encoding: "utf8", flag: "wx" });
+    const tempStat = lstatSync(temp);
+    const historicalTemp = temp.replace(".seq-99.tmp", ".seq-98.tmp");
+    const tempRegistry = base + ".omp-session-evidence.temps";
+    writeFileSync(tempRegistry,
+      "firstmate-omp-session-evidence-temps-v1\n" + process.env.TASK_ID + "\n" +
+      stateDir + "\n" +
+      "firstmate-omp-evidence-temp-v1 " + historicalTemp.slice(historicalTemp.lastIndexOf("/") + 1) + " " +
+      fields[1] + " " + fields[2] + " " + fields[3] + " " +
+      String(tempStat.dev) + " " + String(tempStat.ino) + "\n");
+    const turnEndPath = base + ".turn-ended";
+    try { unlinkSync(turnEndPath); } catch {}
+    const reloadedHandlers = await loadHandlers("?unowned-active=" + String(Date.now()));
+    await fireWith(reloadedHandlers, "agent_end");
+    if (!busyState().includes("state=busy")) throw new Error("an unowned active-incarnation temp cleared busy");
+    if (!existsSync(temp)) throw new Error("an unowned active-incarnation temp was removed");
     break;
   }
   case "historical-incarnation-temp": {
@@ -1131,6 +1172,24 @@ test_omp_extension_rejects_historical_incarnation_temp() {
   pass "OMP temporary cleanup requires the active incarnation, not registry history"
 }
 
+test_omp_extension_rejects_unowned_active_incarnation_temp() {
+  local rec id=busy-omp-unowned-active-temp out state ext evidence_dir temp
+  rec=$(make_spawn_case omp-unowned-active-temp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp unowned-active-temp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" unowned-active-incarnation-temp "$state" "$id") \
+    || fail "unowned active-incarnation temp drive failed: $out"
+  evidence_dir="$state/$id.omp-session-evidence"
+  temp=$(find "$evidence_dir" -maxdepth 1 -type f -name '*.tmp' -print -quit)
+  [ -n "$temp" ] || fail "unowned active-incarnation temp was not preserved"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "an unowned active-incarnation temp changed busy state, got '$out'"
+  pass "OMP temporary cleanup requires durable creator proof, not copied incarnation state"
+}
+
 test_omp_extension_recovers_owned_partial_evidence_temp() {
   local rec id=busy-omp-owned-partial-temp out state ext evidence_dir
   rec=$(make_spawn_case omp-owned-partial-temp omp "$id")
@@ -1759,6 +1818,7 @@ test_omp_extension_adopts_pending_run_before_new_start
 test_omp_extension_recovers_partial_persistence
 test_omp_extension_preserves_unverified_evidence_temps
 test_omp_extension_rejects_historical_incarnation_temp
+test_omp_extension_rejects_unowned_active_incarnation_temp
 test_omp_extension_recovers_owned_partial_evidence_temp
 test_omp_extension_rejects_evidence_path_collisions
 test_omp_spawn_preserves_unverified_evidence_collisions

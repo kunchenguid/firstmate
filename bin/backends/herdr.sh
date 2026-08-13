@@ -1925,12 +1925,9 @@ fm_backend_herdr_omp_stop_evidence() {
     matched=1
   done
   [ "$matched" -eq 1 ] || return 2
-  [ -f "$state/$id.busy-gen" ] && [ ! -L "$state/$id.busy-gen" ] || return 2
-  [ -f "$state/$id.omp-session-run" ] && [ ! -L "$state/$id.omp-session-run" ] || return 2
-  [ -f "$state/$id.omp-session-stop" ] && [ ! -L "$state/$id.omp-session-stop" ] || return 2
-  generation=$(cat "$state/$id.busy-gen" 2>/dev/null) || return 2
-  run_token=$(cat "$state/$id.omp-session-run" 2>/dev/null) || return 2
-  marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null) || return 2
+  generation=$(fm_harness_read_regular_nofollow "$state/$id.busy-gen" 2>/dev/null) || return 2
+  run_token=$(fm_harness_read_regular_nofollow "$state/$id.omp-session-run" 2>/dev/null) || return 2
+  marker=$(fm_harness_read_regular_nofollow "$state/$id.omp-session-stop" 2>/dev/null) || return 2
   case "$generation:$run_token:$marker" in
     *[!A-Za-z0-9._:-]*|:*) return 2 ;;
   esac

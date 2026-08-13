@@ -217,6 +217,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.omp-session-evidence"
       printf '%s\n' "$state/$id.omp-session-evidence.owner"
       printf '%s\n' "$state/$id.omp-session-evidence.active"
+      printf '%s\n' "$state/$id.omp-session-evidence.temps"
       ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"

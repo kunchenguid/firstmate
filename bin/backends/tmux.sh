@@ -397,12 +397,9 @@ fm_backend_tmux_omp_terminal_stop_observed() {  # <target>
   id=${window#fm-}
   [ -n "$id" ] || return 1
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
-  [ -f "$state/$id.busy-gen" ] && [ ! -L "$state/$id.busy-gen" ] || return 1
-  [ -f "$state/$id.omp-session-run" ] && [ ! -L "$state/$id.omp-session-run" ] || return 1
-  [ -f "$state/$id.omp-session-stop" ] && [ ! -L "$state/$id.omp-session-stop" ] || return 1
-  generation=$(cat "$state/$id.busy-gen" 2>/dev/null) || return 1
-  run_token=$(cat "$state/$id.omp-session-run" 2>/dev/null) || return 1
-  marker=$(cat "$state/$id.omp-session-stop" 2>/dev/null) || return 1
+  generation=$(fm_harness_read_regular_nofollow "$state/$id.busy-gen" 2>/dev/null) || return 1
+  run_token=$(fm_harness_read_regular_nofollow "$state/$id.omp-session-run" 2>/dev/null) || return 1
+  marker=$(fm_harness_read_regular_nofollow "$state/$id.omp-session-stop" 2>/dev/null) || return 1
   case "$generation:$run_token:$marker" in
     *[!A-Za-z0-9._:-]*|:*) return 1 ;;
   esac

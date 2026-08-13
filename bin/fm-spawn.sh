@@ -866,7 +866,8 @@ clear_relaunch_harness_wiring() {
     [ -n "$path" ] || continue
     if [ "$path" = "$state/$id.omp-session-evidence" ] \
       || [ "$path" = "$state/$id.omp-session-evidence.owner" ] \
-      || [ "$path" = "$state/$id.omp-session-evidence.active" ]; then
+      || [ "$path" = "$state/$id.omp-session-evidence.active" ] \
+      || [ "$path" = "$state/$id.omp-session-evidence.temps" ]; then
       fm_omp_session_evidence_clear "$state" "$id" || return 1
     elif [ "$path" = "$state/$id.omp-session-run" ] \
       || [ "$path" = "$state/$id.omp-session-stop" ]; then
@@ -1346,57 +1347,32 @@ raw_launch_tokenize() {
   fi
 }
 
-raw_launch_uses_omp_fallback() {
-  local word first= canonical
-  raw_launch_tokenize "$LAUNCH" || return 1
-  for word in "${RAW_LAUNCH_WORDS[@]}"; do
-    case "$word" in
-      [A-Za-z_]*=*) continue ;;
-      *) first=$word; break ;;
-    esac
-  done
-  [ -n "$first" ] || return 1
-  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
-  [ "$first" = "$canonical" ]
-}
-
-raw_launch_needs_policy_runtime() {
-  local launch=$1 word first= canonical wrapper token target i n
+raw_launch_fallback_first_command() {
+  local launch=$1 token i n
   raw_launch_tokenize "$launch" || return 1
-  for word in "${RAW_LAUNCH_WORDS[@]}"; do
-    case "$word" in
-      [A-Za-z_]*=*) continue ;;
-      *) first=$word; break ;;
-    esac
-  done
-  case "$first" in
-    omp) return 0 ;;
-  esac
-  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
-  wrapper="$(dirname "$canonical")/start-omp.sh"
   local -a words=("${RAW_LAUNCH_WORDS[@]}")
   n=${#words[@]}
   i=0
   while [ "$i" -lt "$n" ]; do
     token=${words[$i]}
     case "$token" in
-      '&&'|';'|'|') i=$((i + 1)); continue ;;
+      '&&'|';'|'|') return 1 ;;
+      [A-Za-z_]*=*) i=$((i + 1)); continue ;;
       env|*/env)
         i=$((i + 1))
         while [ "$i" -lt "$n" ]; do
           token=${words[$i]}
           case "$token" in
             [A-Za-z_]*=*) i=$((i + 1)) ;;
-            -S|--split-string|--split-string=*) return 0 ;;
-            -C|--chdir|-u|--unset)
-              i=$((i + 2))
-              ;;
+            -S|--split-string|--split-string=*) return 2 ;;
+            -C|--chdir|-u|--unset) return 2 ;;
             --) i=$((i + 1)); break ;;
             --ignore-environment|--null|--debug) i=$((i + 1)) ;;
-            -*) return 1 ;;
+            -*) return 2 ;;
             *) break ;;
           esac
         done
+        continue
         ;;
       nice|*/nice|time|*/time|setsid|*/setsid)
         i=$((i + 1))
@@ -1409,7 +1385,74 @@ raw_launch_needs_policy_runtime() {
           esac
         done
         continue
-      ;;
+        ;;
+      *)
+        RAW_LAUNCH_FALLBACK_FIRST=$token
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+raw_launch_uses_omp_fallback() {
+  local canonical
+  RAW_LAUNCH_FALLBACK_FIRST=
+  raw_launch_fallback_first_command "$LAUNCH" || return $?
+  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
+  [ "$RAW_LAUNCH_FALLBACK_FIRST" = "$canonical" ]
+}
+
+raw_launch_needs_policy_runtime() {
+  local launch=$1 canonical wrapper token target i n command_start
+  raw_launch_tokenize "$launch" || return 1
+  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
+  wrapper="$(dirname "$canonical")/start-omp.sh"
+  local -a words=("${RAW_LAUNCH_WORDS[@]}")
+  n=${#words[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    case "${words[$i]}" in
+      '&&'|';'|'|') i=$((i + 1)); continue ;;
+    esac
+    command_start=$i
+    while [ "$i" -lt "$n" ]; do
+      token=${words[$i]}
+      case "$token" in
+        [A-Za-z_]*=*) i=$((i + 1)) ;;
+        env|*/env)
+          i=$((i + 1))
+          while [ "$i" -lt "$n" ]; do
+            token=${words[$i]}
+            case "$token" in
+              [A-Za-z_]*=*) i=$((i + 1)) ;;
+              -S|--split-string|--split-string=*) return 0 ;;
+              -C|--chdir|-u|--unset) return 0 ;;
+              --) i=$((i + 1)); break ;;
+              --ignore-environment|--null|--debug) i=$((i + 1)) ;;
+              -*) return 0 ;;
+              *) break ;;
+            esac
+          done
+          ;;
+        nice|*/nice|time|*/time|setsid|*/setsid)
+          i=$((i + 1))
+          while [ "$i" -lt "$n" ]; do
+            token=${words[$i]}
+            case "$token" in
+              -n|-p|-f|--format|--adjustment) i=$((i + 2)) ;;
+              -*) i=$((i + 1)) ;;
+              *) break ;;
+            esac
+          done
+          ;;
+        *) break ;;
+      esac
+    done
+    [ "$i" -lt "$n" ] || return 1
+    token=${words[$i]}
+    case "$token" in
+      "$canonical"|omp|./omp|start-omp.sh) return 0 ;;
       bash|*/bash|sh|*/sh|zsh|*/zsh)
         target=
         if [ "${words[$((i + 1))]:-}" = '<' ]; then
@@ -1430,9 +1473,7 @@ raw_launch_needs_policy_runtime() {
         fi
         ;;
     esac
-    case "$token" in
-      "$canonical"|omp|./omp|start-omp.sh) return 0 ;;
-    esac
+    i=$command_start
     while [ "$i" -lt "$n" ]; do
       case "${words[$i]}" in
         '&&'|';'|'|') break ;;
@@ -2785,6 +2826,7 @@ const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
 const SESSION_EVIDENCE_OWNER = "$STATE_REAL/$ID.omp-session-evidence.owner";
 const SESSION_EVIDENCE_ACTIVE = "$STATE_REAL/$ID.omp-session-evidence.active";
+const SESSION_EVIDENCE_TEMPS = "$STATE_REAL/$ID.omp-session-evidence.temps";
 const BUSY_GEN_PATH = "$STATE_REAL/$ID.busy-gen";
 const GENERATION_LOCK = "$STATE_REAL/$ID.busy-state.lock";
 const TURNEND = "$TURNEND";
@@ -2801,6 +2843,8 @@ PROCESS_INCARNATIONS[INCARNATION_KEY] = INCARNATION_UUID;
 const INCARNATION_ID = "incarnation-" + INCARNATION_UUID + ".generation-" + "$BUSY_GEN" +
   ".pid-" + process.pid;
 const INCARNATION_RECORD = INCARNATION_MARKER + " $BUSY_GEN " + process.pid + " " + INCARNATION_UUID;
+const TEMP_OWNERSHIP_MARKER = "firstmate-omp-evidence-temp-v1";
+const TEMP_OWNERSHIP_HEADER = "firstmate-omp-session-evidence-temps-v1\\n$ID\\n$STATE_REAL";
 const ownedTemps = new Set<string>();
 let recoveryBlocked = false;
 let ambiguousRecovery = false;
@@ -2828,9 +2872,7 @@ const trimRunHistory = () => {
 };
 const generationIsCurrent = () => {
   try {
-    const stat = lstatSync(BUSY_GEN_PATH);
-    if (!stat.isFile()) return false;
-    return readFileSync(BUSY_GEN_PATH, "utf8").trim() === "$BUSY_GEN";
+    return readRegularFile(BUSY_GEN_PATH).trim() === "$BUSY_GEN";
   } catch {
     return false;
   }
@@ -2980,12 +3022,21 @@ const cleanupOwnedTemp = (path: string) => {
 const atomicWrite = (path: string, value: string) => {
   const ownsLock = !generationLockHeld;
   if (ownsLock) acquireGenerationLock();
-  const temp = path + "." + INCARNATION_ID + "." + String(++tempSequence) + ".tmp";
+  let temp = "";
+  const evidenceTemp = path.startsWith(SESSION_EVIDENCE_DIR + "/");
   let fd = -1;
   try {
     requireCurrentGeneration();
-    fd = openSync(temp, "wx", 0o600);
+    while (fd < 0) {
+      temp = path + "." + INCARNATION_ID + ".seq-" + String(++tempSequence) + ".tmp";
+      try {
+        fd = openSync(temp, "wx", 0o600);
+      } catch (error) {
+        if ((error as any)?.code !== "EEXIST") throw error;
+      }
+    }
     ownedTemps.add(temp);
+    if (evidenceTemp) registerEvidenceTemp(temp, fstatSync(fd));
     writeFileSync(fd, value, { encoding: "utf8" });
     closeSync(fd);
     fd = -1;
@@ -3019,10 +3070,31 @@ const ensureEvidenceDirectory = () => {
   requireCurrentGeneration();
 };
 const evidencePath = (token: string) => SESSION_EVIDENCE_DIR + "/" + token;
-const readRegularFile = (path: string) => {
-  const stat = lstatSync(path);
-  if (!stat.isFile()) throw new Error("OMP state path is not a regular file");
-  return readFileSync(path, "utf8");
+function readRegularFile(path: string) {
+  const noFollow = constants.O_NOFOLLOW;
+  if (typeof noFollow !== "number") throw new Error("OMP state reads cannot enforce no-follow");
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | noFollow);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("OMP state path is not a regular file");
+    return readFileSync(fd, "utf8");
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
+}
+const regularFileIdentity = (path: string) => {
+  const noFollow = constants.O_NOFOLLOW;
+  if (typeof noFollow !== "number") throw new Error("OMP state identity cannot enforce no-follow");
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | noFollow);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("OMP state path is not a regular file");
+    return { dev: String(stat.dev), ino: String(stat.ino) };
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
 };
 const readOptional = (path: string) => {
   try {
@@ -3031,6 +3103,67 @@ const readOptional = (path: string) => {
     if ((error as any)?.code === "ENOENT") return "";
     throw error;
   }
+};
+const parseTempOwnershipRegistry = (content: string) => {
+  const lines = content.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") lines.pop();
+  const header = TEMP_OWNERSHIP_HEADER.split("\\n");
+  if (lines.length < header.length || lines.slice(0, header.length).join("\\n") !== TEMP_OWNERSHIP_HEADER) {
+    return null;
+  }
+  const records: Array<{ name: string; generation: string; processId: string; uuid: string; dev: string; ino: string }> = [];
+  for (const line of lines.slice(header.length)) {
+    const fields = line.split(/\s+/);
+    if (fields.length !== 7 || fields[0] !== TEMP_OWNERSHIP_MARKER ||
+        !/^.+\.incarnation-[0-9a-f-]{36}\.generation-[A-Za-z0-9._-]+\.pid-[0-9]+\.seq-[0-9]+\.tmp$/.test(fields[1]) ||
+        !/^[A-Za-z0-9._-]+$/.test(fields[2]) || !/^[0-9]+$/.test(fields[3]) ||
+        !/^[0-9a-f-]{36}$/.test(fields[4]) || !/^[0-9]+$/.test(fields[5]) ||
+        !/^[0-9]+$/.test(fields[6]) || Number(fields[3]) <= 0 || Number(fields[5]) < 0 ||
+        Number(fields[6]) <= 0) return null;
+    records.push({ name: fields[1], generation: fields[2], processId: fields[3], uuid: fields[4], dev: fields[5], ino: fields[6] });
+  }
+  return records;
+};
+const readTempOwnershipRegistry = () => {
+  let content: string;
+  try {
+    content = readRegularFile(SESSION_EVIDENCE_TEMPS);
+  } catch (error) {
+    if ((error as any)?.code === "ENOENT") return [];
+    throw error;
+  }
+  const records = parseTempOwnershipRegistry(content);
+  if (!records) throw new Error("OMP evidence temporary ownership registry is malformed");
+  return records;
+};
+const registerEvidenceTemp = (path: string, stat: any) => {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const record = TEMP_OWNERSHIP_MARKER + " " + name + " $BUSY_GEN " + process.pid + " " +
+    INCARNATION_UUID + " " + String(stat.dev) + " " + String(stat.ino);
+  let content = "";
+  try {
+    content = readRegularFile(SESSION_EVIDENCE_TEMPS);
+    if (!parseTempOwnershipRegistry(content)) throw new Error("OMP evidence temporary ownership registry is malformed");
+  } catch (error) {
+    if ((error as any)?.code !== "ENOENT") throw error;
+    content = TEMP_OWNERSHIP_HEADER + "\\n";
+  }
+  const records = parseTempOwnershipRegistry(content);
+  if (!records) throw new Error("OMP evidence temporary ownership registry is malformed");
+  if (records.some((candidate) => candidate.name === name && candidate.generation === "$BUSY_GEN" &&
+      candidate.processId === String(process.pid) && candidate.uuid === INCARNATION_UUID &&
+      candidate.dev === String(stat.dev) && candidate.ino === String(stat.ino))) return;
+  const normalized = content.endsWith("\\n") ? content : content + "\\n";
+  atomicWrite(SESSION_EVIDENCE_TEMPS, normalized + record + "\\n");
+};
+const evidenceTempOwnershipMatches = (path: string) => {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
+  if (!current) return false;
+  const stat = regularFileIdentity(path);
+  return readTempOwnershipRegistry().some((record) => record.name === name &&
+    record.generation === current[3] && record.processId === current[4] &&
+    record.uuid === current[2] && record.dev === stat.dev && record.ino === stat.ino);
 };
 const parseIncarnationRegistry = (content: string) => {
   const lines = content.split(/\r?\n/);
@@ -3091,7 +3224,7 @@ const parseRunToken = (token: string) => {
   if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
   return { processId, startedAt, sequence };
 };
-const isAtomicTempName = (name: string) => {
+const isAtomicTempName = (name: string, path: string) => {
   const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
   if (!current || current[3] !== "$BUSY_GEN" || !parseRunToken(current[1])) return false;
   const processId = current[4];
@@ -3099,7 +3232,8 @@ const isAtomicTempName = (name: string) => {
   return Number.isSafeInteger(Number(processId)) && Number(processId) > 0 &&
     Number.isSafeInteger(sequence) && sequence > 0 &&
     incarnationRegistered(current[3], processId, current[2]) &&
-    activeIncarnationMatches(current[3], processId, current[2]);
+    activeIncarnationMatches(current[3], processId, current[2]) &&
+    evidenceTempOwnershipMatches(path);
 };
 const writeRunEvidence = (record: {
   token: string;
@@ -3226,7 +3360,7 @@ const persistedRuns = () => {
     }
     for (const entry of entries) {
       if (entry.name.endsWith(".tmp")) {
-        if (!entry.isFile() || !isAtomicTempName(entry.name)) return blocked();
+        if (!entry.isFile() || !isAtomicTempName(entry.name, evidencePath(entry.name))) return blocked();
         continue;
       }
       if (!entry.isFile() || !parseRunToken(entry.name)) return blocked();

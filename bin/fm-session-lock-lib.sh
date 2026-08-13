@@ -27,6 +27,61 @@ FM_HARNESS_RE='^(claude|codex|opencode|grok|kimi)(-|$)|^pi$|^pi-signed$|^omp$'
 # OMP's Bun shape is matched by its canonical executable or script path below.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
+fm_harness_read_regular_nofollow() {
+  local path=${1:-}
+  [ "$#" -eq 1 ] && [ -n "$path" ] || return 1
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -MFcntl=:DEFAULT -e '
+    my $path = shift @ARGV;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @stat = stat($fh);
+    exit 1 unless @stat && (($stat[2] & 0170000) == 0100000);
+    local $/;
+    my $content = <$fh>;
+    defined($content) or exit 1;
+    print $content;
+  ' "$path"
+}
+
+fm_harness_regular_identity_nofollow() {
+  local path=${1:-}
+  [ "$#" -eq 1 ] && [ -n "$path" ] || return 1
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -MFcntl=:DEFAULT -e '
+    my $path = shift @ARGV;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @stat = stat($fh);
+    exit 1 unless @stat && (($stat[2] & 0170000) == 0100000);
+    print "$stat[0]:$stat[1]\n";
+  ' "$path"
+}
+
+fm_harness_unlink_regular_nofollow_at() {
+  local directory=${1:-} name=${2:-} expected_directory=${3:-} expected_entry=${4:-}
+  [ "$#" -ge 2 ] && [ -n "$directory" ] && [ -n "$name" ] || return 1
+  case "$name" in */*|.|..) return 1 ;; esac
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -MFcntl=:DEFAULT -e '
+    my ($directory, $name, $expected_directory, $expected_entry) = @ARGV;
+    sysopen(my $dirfh, $directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or exit 1;
+    my @dir = stat($dirfh);
+    exit 1 unless @dir && (($dir[2] & 0170000) == 0040000);
+    if ($expected_directory ne "") {
+      my ($dev, $ino) = split /:/, $expected_directory, 2;
+      exit 1 unless defined($ino) && "$dir[0]:$dir[1]" eq "$dev:$ino";
+    }
+    chdir $dirfh or exit 1;
+    my @entry = lstat($name);
+    exit 1 unless @entry && (($entry[2] & 0170000) == 0100000);
+    if ($expected_entry ne "") {
+      my ($dev, $ino) = split /:/, $expected_entry, 2;
+      exit 1 unless defined($ino) && "$entry[0]:$entry[1]" eq "$dev:$ino";
+    }
+    unlink($name) or exit 1;
+    exit 1 if lstat($name);
+  ' "$directory" "$name" "$expected_directory" "$expected_entry"
+}
+
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
 #
