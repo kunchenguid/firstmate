@@ -889,11 +889,27 @@ test_decision_options_are_never_silently_dropped() {
   jq '.tasks["multi-option"].decision.options = ["zip x","zip  x","tarball"]' "$FIXTURE" > "$fixture"
   out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
   printf '%s' "$out" | jq -e "$card_query
-      | .option_count == 3 and .distinct_options == 3 and .duplicate_options == 0
-        and .options_retained == 3
-        and ((.options | length) == (.options | unique | length))
-        and ((.options | map(select(test(\" #[0-9]+\$\"))) | length) == 0)" >/dev/null \
-    || fail "options differing in internal whitespace were wrongly merged or left indistinct"
+      | .option_count == 3 and .distinct_options == 2 and .duplicate_options == 1
+        and .options_retained == 2 and .unsupported_options == 0
+        and .options_complete == true
+        and (.options == [\"zip x\",\"tarball\"])" >/dev/null \
+    || fail "options differing only in internal whitespace were not collapsed as duplicates"
+
+  local run_case
+  for run_case in '["zip  x","zip   x","tarball"]' '["zip  x","zip\t\tx","tarball"]' '["zip\tx","zip x","tarball"]'; do
+    fixture="$TMP_ROOT/options-space-runs.json"
+    jq --argjson opts "$(printf '%s' "$run_case" | jq -c '.')" \
+      '.tasks["multi-option"].decision.options = $opts' "$FIXTURE" > "$fixture"
+    out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+    printf '%s' "$out" | jq -e "$card_query
+        | .option_count == 3 and .distinct_options == 2 and .duplicate_options == 1
+          and .options_retained == 2
+          and ((.options | length) == (.options | unique | length))
+          and ((.options | map(select(test(\" #[0-9]+\$\"))) | length) == 0)" >/dev/null \
+      || fail "whitespace-run variants $run_case were not normalized into one option"
+  done
+  text=$("$CONSOLE" --fixture "$fixture" --format decisions --no-color --now 2026-08-13T12:00:00Z)
+  assert_not_contains "$text" " _ " "collapsed whitespace produced a display marker instead of merging"
 
   local long_a long_b
   long_a=$(printf 'a%.0s' $(seq 1 40))XX
