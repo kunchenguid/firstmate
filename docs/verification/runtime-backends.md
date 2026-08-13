@@ -247,6 +247,8 @@ Bounded output from the lifecycle regression:
 ok - a seeded home in service keeps its identity and operational state
 ok - a successful retirement returns a reusable checkout with no home residue
 ok - a failed return restores the complete home and keeps its registration
+ok - a staging holding unaccounted content is kept and reported, never deleted
+ok - the double-fault path names every location holding the home and rearms nothing under it
 ok - supported home layouts retire through the pooled and the standalone path alike
 ok - unsafe home layouts refuse on both paths with the same reason
 ok - an unrelated reusable checkout in the same pool is untouched
@@ -261,6 +263,8 @@ The clean-checkout case and the next-lease case were both run against the unreti
 The next-lease case caps that pool at one tree and compares the leased path, and the lease id too when a JSON reader is present, so it proves the retired slot was released and reacquired rather than a fresh tree being handed out; without a reader it says so and asserts the reuse by path alone.
 The two seed cases drive the real seeder against the real pool and fail it at a command it reaches only after both markers are on disk, which is the sibling path that returns a leased home without retiring it; the successful one was run against the unfixed rollback first, where the marker survived and went back to the pool.
 The failed-return cases on both paths drive a treehouse whose `return` fails and assert that the home gets its identity, its contents, and its registration back, matching the existing contract that a home whose lease cannot be released is preserved rather than half cleared.
+The staging's manifest is never the sole authority on what it holds: a staging still carrying content the manifest does not name is kept and reported rather than deleted, since deleting it would destroy the only copy of something the transaction moved.
+When the identity cannot be put back at all, the home's process events are deliberately left retired rather than rearmed into a home whose `state/` is still staged, and the diagnostic names the identity staging, the process-event staging, and the retired waits so one hand repair can reach all of it.
 The two parity cases drive each layout through the pooled path and through the standalone path where the home is a plain directory, so neither can quietly hold a different opinion about which homes are retirable.
 Symlinked operational directories, a target nested under another owned path, a target whose name carries a space and a glob character, and a symlinked identity marker retire on both, and each retired case asserts the resolved target came off the returned checkout rather than only the link that named it.
 An escaping target, a dangling link, a link that resolves nowhere, and a target that is the home itself refuse on both with the same reason.

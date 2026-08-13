@@ -42,6 +42,11 @@
 #
 # The lease-identity comparison in the reuse case needs a JSON reader; without
 # one that case says so and asserts slot reuse by path alone rather than failing.
+#
+# Two cases drive the recovery path's own failure modes: a staging that still
+# holds content its manifest never named is kept and reported rather than
+# deleted, and the double fault where the identity could not be put back names
+# every location holding part of the home without rebuilding anything under it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -50,6 +55,8 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 MARKER=.fm-secondmate-home
 PARENT_MARKER=.fm-secondmate-parent
+UNRECORDED=unrecorded-content
+PROCEVENT_SOURCE=wait.source
 
 if ! command -v treehouse >/dev/null 2>&1; then
   echo "# fm-teardown-home-identity tests not run: driving a pooled home lifecycle needs the real treehouse binary"
@@ -114,6 +121,40 @@ SH
   chmod +x "$fakebin/treehouse"
 }
 
+# The same failing return, but it also drops a file into the identity staging
+# first. That is the shape of a staging whose manifest cannot account for
+# everything the staging holds - the state a partial manifest write would leave -
+# reached at the one moment the staging exists and the transaction is about to
+# recover it.
+install_staging_polluting_treehouse() {
+  local fakebin=$1 real
+  real=$(command -v treehouse)
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = return ]; then
+  for tree in "\${FM_FAKE_STAGING_PARENT:?}"/.fm-home-identity.*/tree; do
+    [ -d "\$tree" ] || continue
+    printf 'content no manifest names\n' > "\$tree/$UNRECORDED"
+  done
+  echo "treehouse: refusing to return worktree (simulated)" >&2
+  exit 1
+fi
+exec $(printf '%q' "$real") "\$@"
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
+# Process-event registrations on the home, which is what makes the double-fault
+# branch reachable: without them teardown has nothing to snapshot and nothing to
+# rearm. bin/fm-procevent.sh in the leased checkout is the sweep the cleanup step
+# requires, and it is tracked so every worktree of the throwaway repo has it.
+seed_procevent_state() {
+  local home=$1
+  mkdir -p "$home/state/procevent"
+  printf 'registration\n' > "$home/state/procevent/$PROCEVENT_SOURCE"
+}
+
 # make_pool_case <name> [<max-trees>]: a throwaway firstmate-shaped repository
 # with its own treehouse pool, plus the fleet home that runs the retirement.
 # <max-trees> caps the pool: a case that must prove a slot was REUSED sets it to
@@ -131,6 +172,20 @@ make_pool_case() {
   git -C "$CASE_REPO" init -q -b main .
   printf 'throwaway firstmate home material\n' > "$CASE_REPO/AGENTS.md"
   printf '#!/usr/bin/env bash\n' > "$CASE_REPO/bin/placeholder.sh"
+  # The sweep teardown requires of a home that carries process-event state. It is
+  # tracked, so every leased worktree of this repository has it, and it only ever
+  # touches the home it is pointed at.
+  cat > "$CASE_REPO/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  sweep-home)
+    [ "${2:-}" = --preflight ] || rm -f "${FM_HOME:?}/state/procevent"/*.source
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$CASE_REPO/bin/fm-procevent.sh"
   # A real firstmate checkout gitignores exactly these, which is why the pool's
   # clean-and-reset cannot remove them and retirement has to. The parity layouts'
   # symlink targets are ignored for the same reason: an untracked target would be
@@ -272,6 +327,8 @@ run_teardown() {  # <id> [extra args...]
     FM_FAKE_TMUX_LOG="$CASE_LOG" FM_FAKE_TMUX_CAPTURE="$CASE_DIR/fake/pane.txt" \
     FM_FAKE_TMUX_WINDOW="fm-$id" \
     FM_TEARDOWN_GUARD_DONE=1 \
+    FM_PROCEVENT_CLAIM_ROOT="$CASE_DIR/procevent-claims" \
+    FM_FAKE_STAGING_PARENT="${FM_FAKE_STAGING_PARENT:-$CASE_DIR/pool}" \
     PATH="$CASE_FAKEBIN:$PATH" \
     "$TEARDOWN" "$id" "$@" 2>&1
 }
@@ -679,9 +736,69 @@ test_seed_rollback_failed_return_keeps_identity() {
   pass "a seed rollback whose return fails restores the identity it staged"
 }
 
+# The recovery path's own safety: what the staging holds is not decided by its
+# manifest alone. If the staging still carries content the manifest never named,
+# deleting the staging would destroy the only copy of it, so retirement keeps the
+# staging, says what it could not account for, and reports the failure rather
+# than a success it cannot stand behind.
+test_unaccounted_staging_is_kept_not_deleted() {
+  local id home out status staging
+  id=identity-unaccounted-t11
+  make_pool_case teardown-identity-unaccounted
+  home=$(lease_pool_worktree "$id")
+  seed_pool_home "$home" "$id"
+  register_secondmate "$id" "$home"
+  FM_FAKE_STAGING_PARENT=$(dirname "$home")
+  install_staging_polluting_treehouse "$CASE_FAKEBIN"
+
+  out=$(run_teardown "$id")
+  status=$?
+  FM_FAKE_STAGING_PARENT=
+  [ "$status" -ne 0 ] || fail "teardown reported success after leaving staged content unaccounted for"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "does not account for" \
+    "teardown did not report that the staging held content its manifest never named"
+  assert_contains "$out" "$UNRECORDED" "the refusal did not name the unaccounted content"
+  staging=$(find "$(dirname "$home")" -maxdepth 1 -name '.fm-home-identity.*' -print -quit 2>/dev/null || true)
+  [ -n "$staging" ] || fail "the staging was deleted although it still held unaccounted content"
+  assert_present "$staging/tree/$UNRECORDED" "the unaccounted content was destroyed with the staging"
+  assert_home_identity_intact "$home" "$id" "the home did not get back everything the manifest named"
+  assert_present "$CASE_FLEET/state/$id.meta" \
+    "teardown cleared the task metadata of a home it could not finish restoring"
+  pass "a staging holding unaccounted content is kept and reported, never deleted"
+}
+
+# The double fault, where the return failed and the identity could not be fully
+# restored: the home's real state/ is sitting in the staging, so its process
+# events are not rearmed underneath it, and the diagnostic names every location
+# that holds part of the home.
+test_double_fault_names_every_recovery_location() {
+  local id home out status
+  id=identity-doublefault-t12
+  make_pool_case teardown-identity-doublefault
+  home=$(lease_pool_worktree "$id")
+  seed_pool_home "$home" "$id"
+  seed_procevent_state "$home"
+  register_secondmate "$id" "$home"
+  FM_FAKE_STAGING_PARENT=$(dirname "$home")
+  install_staging_polluting_treehouse "$CASE_FAKEBIN"
+
+  out=$(run_teardown "$id")
+  status=$?
+  FM_FAKE_STAGING_PARENT=
+  [ "$status" -ne 0 ] || fail "teardown reported success on the double-fault path"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" ".fm-home-identity." "the diagnostic did not name the identity staging"
+  assert_contains "$out" ".fm-procevent-restore." "the diagnostic did not name the process-event staging"
+  assert_contains "$out" "stay retired" "the diagnostic did not say the waits were left retired"
+  assert_absent "$home/state/procevent/$PROCEVENT_SOURCE" \
+    "teardown rearmed process events into a home whose state was still staged"
+  pass "the double-fault path names every location holding the home and rearms nothing under it"
+}
+
 test_seeded_identity_survives_ordinary_use
 test_retirement_returns_a_clean_checkout
 test_failed_return_restores_the_home
+test_unaccounted_staging_is_kept_not_deleted
+test_double_fault_names_every_recovery_location
 test_supported_layouts_retire_on_both_paths
 test_rejected_layouts_refuse_on_both_paths
 test_unrelated_checkout_is_untouched

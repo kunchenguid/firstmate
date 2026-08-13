@@ -48,6 +48,10 @@ FM_HOME_RETURN_RESTORE_FAILED=3
 # is intact but its identity was never cleared, so the lease must not be
 # released as though it had been.
 FM_HOME_RETURN_STAGE_FAILED=4
+# Where fm_home_return_with_clean_identity staged this home's identity, so a
+# caller reporting a failure can name it alongside its own staging.
+# shellcheck disable=SC2034 # Output global read by sourcing callers (bin/fm-teardown.sh).
+FM_HOME_RETURN_STAGING=""
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
@@ -209,6 +213,10 @@ EOF
 # back what it already took and reports FM_HOME_RETURN_STAGE_FAILED, or
 # FM_HOME_RETURN_RESTORE_FAILED when that recovery itself could not finish, and
 # both name the staging directory and the artifact that stopped it.
+# Each path is written to the manifest BEFORE it moves, and a manifest write that
+# fails stops the staging then and there, so the manifest can name a path that
+# never moved but can never miss one that did. Restore tolerates the first and
+# would silently lose the second.
 fm_home_identity_stage() {  # <abs-home> <label>
   local home=$1 label=$2 staging rel inventory moved=0
   inventory=$(fm_home_identity_inventory "$home" "$label") || return "$FM_HOME_RETURN_REFUSED"
@@ -220,9 +228,23 @@ fm_home_identity_stage() {  # <abs-home> <label>
     echo "REFUSED: cannot stage the retiring identity of $label $home" >&2
     return "$FM_HOME_RETURN_REFUSED"
   }
-  : > "$staging/manifest"
+  if ! : > "$staging/manifest"; then
+    echo "REFUSED: cannot record what retiring $label $home would stage into $staging; nothing was moved" >&2
+    rm -rf -- "$staging"
+    return "$FM_HOME_RETURN_REFUSED"
+  fi
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
+    if ! printf '%s\n' "$rel" >> "$staging/manifest"; then
+      if [ "$moved" -eq 0 ]; then
+        echo "REFUSED: cannot record $home/$rel in $staging/manifest for $label; nothing was moved" >&2
+        rm -rf -- "$staging"
+        return "$FM_HOME_RETURN_REFUSED"
+      fi
+      echo "error: cannot record $home/$rel in $staging/manifest for $label after already moving $moved of its owned paths aside; recovering them from $staging" >&2
+      fm_home_identity_restore "$home" "$label" "$staging" || return "$FM_HOME_RETURN_RESTORE_FAILED"
+      return "$FM_HOME_RETURN_STAGE_FAILED"
+    fi
     if ! mkdir -p "$staging/tree/$(dirname "$rel")" \
       || ! mv -f -- "$home/$rel" "$staging/tree/$rel"; then
       if [ "$moved" -eq 0 ]; then
@@ -234,7 +256,6 @@ fm_home_identity_stage() {  # <abs-home> <label>
       fm_home_identity_restore "$home" "$label" "$staging" || return "$FM_HOME_RETURN_RESTORE_FAILED"
       return "$FM_HOME_RETURN_STAGE_FAILED"
     fi
-    printf '%s\n' "$rel" >> "$staging/manifest"
     moved=$(( moved + 1 ))
   done <<EOF
 $inventory
@@ -242,11 +263,43 @@ EOF
   printf '%s\n' "$staging"
 }
 
+# Staged content the manifest cannot account for, one staging-relative path per
+# line. Everything the manifest names has already been moved back by the time
+# this runs, so what remains is either a directory the staging created to hold a
+# nested entry or content nobody recorded, and only the second kind is reported.
+fm_home_identity_unaccounted_staging() {  # <staging>
+  local staging=$1 found rel entry accounted
+  [ -d "$staging/tree" ] || return 0
+  while IFS= read -r found; do
+    rel=${found#./}
+    [ -n "$rel" ] && [ "$rel" != "." ] || continue
+    accounted=0
+    if [ -d "$staging/tree/$rel" ] && [ ! -L "$staging/tree/$rel" ] && [ -f "$staging/manifest" ]; then
+      while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        if path_is_ancestor_of "$rel" "$entry"; then
+          accounted=1
+          break
+        fi
+      done < "$staging/manifest"
+    fi
+    [ "$accounted" -eq 0 ] || continue
+    printf '%s\n' "$rel"
+  done <<EOF
+$(cd "$staging/tree" 2>/dev/null && find . -mindepth 1)
+EOF
+}
+
 # Put a staged identity back exactly as it was, link and target and all, so a
-# home whose return failed keeps both its identity and its route. Reruns
-# converge: an entry already back in place is skipped rather than fought over.
+# home whose return failed keeps both its identity and its route. Rerunning this
+# over the same staging converges: an entry already back in place is skipped
+# rather than fought over.
+# The manifest is never the sole authority on what the staging holds. Once every
+# entry it names is back, the staging tree is reconciled against it, and content
+# nobody recorded means the staging is KEPT and the failure reported: deleting it
+# would destroy the only copy of something this transaction moved.
 fm_home_identity_restore() {  # <abs-home> <label> <staging>
-  local home=$1 label=$2 staging=$3 rel src dst reversed=""
+  local home=$1 label=$2 staging=$3 rel src dst reversed="" unaccounted
   [ -n "$staging" ] || return 0
   [ -d "$staging" ] && [ ! -L "$staging" ] || {
     echo "error: identity restoration failed for $label $home; recovery staging is unavailable at $staging" >&2
@@ -272,6 +325,11 @@ fm_home_identity_restore() {  # <abs-home> <label> <staging>
   done <<EOF
 $reversed
 EOF
+  unaccounted=$(fm_home_identity_unaccounted_staging "$staging")
+  if [ -n "$unaccounted" ]; then
+    echo "error: identity restoration for $label $home put back everything its manifest names, but $staging/tree still holds content that manifest does not account for: $(printf '%s' "$unaccounted" | tr '\n' ' '); the staging is kept, and that content has to be placed by hand before the home is whole" >&2
+    return 1
+  fi
   rm -rf -- "$staging"
 }
 
@@ -279,9 +337,11 @@ EOF
 # was. <return_fn> is called with the resolved home and the label and must
 # perform the pool return; each lifecycle keeps its own return mechanics that way
 # (teardown its lock-retry return, seed rollback its plain one).
+# shellcheck disable=SC2034 # FM_HOME_RETURN_STAGING is an output global read by sourcing callers (bin/fm-teardown.sh).
 fm_home_return_with_clean_identity() {  # <home> <label> <expected-id> <return_fn>
   local home=$1 label=$2 expected_id=${3:-} return_fn=$4
   local abs_home marker marker_id staging
+  FM_HOME_RETURN_STAGING=""
   abs_home=$(removal_target_abs_path "$home") || {
     echo "REFUSED: $label $home could not be resolved for retirement" >&2
     return "$FM_HOME_RETURN_REFUSED"
@@ -304,6 +364,7 @@ fm_home_return_with_clean_identity() {  # <home> <label> <expected-id> <return_f
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home" "$label" || return "$FM_HOME_RETURN_REFUSED"
   staging=$(fm_home_identity_stage "$abs_home" "$label") || return $?
+  FM_HOME_RETURN_STAGING="$staging"
   if "$return_fn" "$abs_home" "$label"; then
     [ -z "$staging" ] || rm -rf -- "$staging"
     return 0

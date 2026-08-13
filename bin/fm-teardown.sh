@@ -1965,22 +1965,30 @@ remove_firstmate_home() {
         "$FM_HOME_RETURN_FAILED")
           echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
           ;;
-        "$FM_HOME_RETURN_RESTORE_FAILED")
-          echo "error: the staged identity of $label $abs_home_path could not be put back; its lease was not released and the staging directory named above holds what is missing" >&2
-          ;;
         "$FM_HOME_RETURN_STAGE_FAILED")
           echo "error: the identity of $label $abs_home_path could not be cleared, so its lease was not released; the home is intact, and the artifact named above has to be resolved before a rerun can get further" >&2
           ;;
       esac
-      # Process events are rearmed even when the identity could not be restored:
-      # the two transactions fail independently, and leaving a home's waits
-      # retired because a different recovery failed strands work nothing names.
+      if [ "$return_rc" -eq "$FM_HOME_RETURN_RESTORE_FAILED" ]; then
+        # Part of this home lives in the identity staging, so its process events
+        # are not rearmed here: doing that rebuilds a partial state/ underneath a
+        # home whose real state/ is staged elsewhere, and the hand repair then
+        # collides with what teardown wrote. Name every location instead, so the
+        # operator can put the home back together in one pass.
+        echo "error: the staged identity of $label $abs_home_path could not be put back, so its lease was not released; recover the home from ${FM_HOME_RETURN_STAGING:-the identity staging named above}" >&2
+        if [ -n "$process_event_backup" ]; then
+          echo "error: its process-event registrations stay retired and were not rearmed, because rearming them would rebuild state/procevent under a home whose state is still staged; recover them from $process_event_backup after the home is whole" >&2
+        fi
+        return "$TEARDOWN_HOME_IDENTITY_RESTORE_FAILED"
+      fi
+      # Process events are rearmed whenever the home itself is intact: the two
+      # transactions fail independently, and leaving a home's waits retired
+      # because a different recovery failed strands work nothing names.
       procevent_rc=0
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || procevent_rc=$?
       if [ "$procevent_rc" -ne 0 ]; then
         echo "error: process-event registrations for $label $abs_home_path also remain retired; recover them from ${process_event_backup:-the staging directory named above}" >&2
       fi
-      [ "$return_rc" -ne "$FM_HOME_RETURN_RESTORE_FAILED" ] || return "$TEARDOWN_HOME_IDENTITY_RESTORE_FAILED"
       [ "$procevent_rc" -eq 0 ] || return "$procevent_rc"
       return 1
     fi
