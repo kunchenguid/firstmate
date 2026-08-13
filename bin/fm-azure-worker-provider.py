@@ -1340,12 +1340,20 @@ def wait_absent(controller, resource_id, timeout=180):
 
 def conditional_delete(controller, kind, resource):
     etag = resource.get("etag")
-    if not etag and kind != "role-assignment":
-        raise ProviderError("{} ETag is absent; conditional deletion refuses".format(kind))
     url = "https://management.azure.com{}?api-version={}".format(resource["id"], RESOURCE_API[kind])
     arguments = ["rest", "--method", "delete", "--url", url]
     if etag:
         arguments += ["--headers", "If-Match={}".format(etag)]
+    elif kind != "role-assignment":
+        # Compute, MSI and DevTestLab reads supply no ETag, so If-Match cannot
+        # guard those kinds. The deletion window is narrowed instead by
+        # re-reading the exact resource immediately before an exact-ID delete
+        # and requiring its immutable identity to match the recorded
+        # assignment. Role assignments keep their principal/role identity pair
+        # as before.
+        current = show_full(controller, resource["id"])
+        if immutable_id(kind, current) != resource.get("immutable_id"):
+            raise ProviderError("{} immutable identity changed; conditional deletion refuses".format(kind))
     _, rc, stderr = az(controller, arguments, check=False)
     if rc != 0:
         raise ProviderError("conditional {} deletion failed: {}".format(kind, stderr))

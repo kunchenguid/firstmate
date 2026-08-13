@@ -593,16 +593,28 @@ except module.ProviderError as exc:
 else:
     raise AssertionError("public worker NIC relation accepted")
 
-# Ordinary resources require conditional ETags; exact role assignments use
-# their principal/role immutable pair because Azure may omit an ETag there.
+# ETag-bearing resources delete with If-Match. ETag-less ARM kinds (Compute,
+# MSI, DevTestLab reads supply none) re-read the exact resource and require
+# the recorded immutable identity immediately before an exact-ID delete; a
+# changed identity refuses. Role assignments keep their principal/role pair.
 calls = []
-module.az = lambda controller_arg, args, check=False: calls.append(args) or ({}, 0, "")
+current_disk = {"id": "/disk", "properties": {"uniqueId": "disk-guid"}}
+def az_stub(controller_arg, args, check=False):
+    calls.append(args)
+    if args[0:2] == ["resource", "show"]:
+        return (dict(current_disk), 0, "")
+    return ({}, 0, "")
+module.az = az_stub
+module.conditional_delete(controller, "nic", {"id": "/nic", "etag": "etag-1", "immutable_id": "guid"})
+assert calls[-1][0:3] == ["rest", "--method", "delete"] and "If-Match=etag-1" in calls[-1][-1]
+module.conditional_delete(controller, "task-disk", {"id": "/disk", "etag": None, "immutable_id": "disk-guid"})
+assert calls[-1][0:3] == ["rest", "--method", "delete"] and "--headers" not in calls[-1]
 try:
-    module.conditional_delete(controller, "task-disk", {"id": "/disk", "etag": None})
+    module.conditional_delete(controller, "task-disk", {"id": "/disk", "etag": None, "immutable_id": "other-guid"})
 except module.ProviderError as exc:
-    assert "ETag" in str(exc)
+    assert "immutable identity changed" in str(exc)
 else:
-    raise AssertionError("unfenced task-disk deletion accepted")
+    raise AssertionError("etag-less deletion accepted a changed immutable identity")
 module.conditional_delete(controller, "role-assignment", {"id": "/role", "etag": None})
 assert calls[-1][0:3] == ["rest", "--method", "delete"] and "--headers" not in calls[-1]
 
