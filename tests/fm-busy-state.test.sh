@@ -81,6 +81,36 @@ test_apply_unarmed_refused() {
   pass "apply is refused for a task whose busy contract was never armed"
 }
 
+test_lock_release_cannot_remove_replacement() {
+  local state gen gate lock owner replacement_pid holder_pid i=0
+  state=$(new_state_dir lock-replacement)
+  gen=$($EV arm "$state" t1)
+  gate="$state/lock-gate"
+  lock="$state/t1.busy-state.lock"
+  owner="$lock/owner"
+  FM_BUSY_TEST_LOCK_ACQUIRED_GATE="$gate" \
+    "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop >/dev/null 2>&1 &
+  holder_pid=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$gate.ready" ] || fail "busy writer did not publish its lock ownership gate"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "could not replace the held busy-state lock"
+  mkdir "$lock"
+  replacement_pid=$$
+  printf '%s replacement-token\n' "$replacement_pid" > "$owner"
+  : > "$gate.release"
+  wait "$holder_pid" || fail "busy writer failed while its lock was replaced"
+  [ -d "$lock" ] || fail "the prior busy writer removed a replacement lock"
+  [ "$(cat "$owner")" = "$replacement_pid replacement-token" ] \
+    || fail "the prior busy writer modified a replacement lock owner"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "test replacement lock cleanup failed"
+  pass "busy lock release is bound to its owning incarnation"
+}
+
 test_retire_serializes_and_rejects_stale_gen() {
   local state old_gen new_gen out retire_pid i=0
   state=$(new_state_dir retire)
@@ -416,6 +446,7 @@ test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
 test_apply_unarmed_refused
+test_lock_release_cannot_remove_replacement
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
 test_stale_gen_event_rejected

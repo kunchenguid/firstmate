@@ -1450,6 +1450,43 @@ test_teardown_preserves_foreign_omp_evidence_added_during_clear() {
   pass "teardown revalidates OMP evidence after a foreign entry arrives during cleanup"
 }
 
+test_teardown_preserves_replaced_omp_evidence_entry_during_clear() {
+  local case_dir rc gate evidence_dir token original racer
+  case_dir=$(make_case omp-evidence-entry-race)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  printf 'g-current\n' > "$case_dir/state/task-x1.busy-gen"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  evidence_dir="$case_dir/state/task-x1.omp-session-evidence"
+  mkdir -p "$evidence_dir"
+  token='g-current.123.1000.1'
+  printf '%s 1000 1000 0\n' "$token" > "$evidence_dir/$token"
+  gate="$case_dir/evidence-entry-clear-race"
+  original="$evidence_dir/$token.original"
+  (
+    while [ ! -e "$gate.ready" ]; do sleep 0.01; done
+    mv "$evidence_dir/$token" "$original"
+    printf '%s\n' foreign-entry > "$evidence_dir/$token"
+    : > "$gate.release"
+  ) &
+  racer=$!
+
+  set +e
+  FM_OMP_TEST_EVIDENCE_CLEAR_ENTRY_GATE="$gate" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  wait "$racer" || true
+  set -e
+
+  expect_code 1 "$rc" "omp-evidence-entry-race: teardown must refuse a replaced entry"
+  assert_present "$original" \
+    "omp-evidence-entry-race: cleanup removed the original evidence entry"
+  assert_present "$evidence_dir/$token" \
+    "omp-evidence-entry-race: cleanup removed the replacement evidence entry"
+  pass "teardown revalidates each OMP evidence entry before removal"
+}
+
 test_teardown_validates_omp_evidence_generation_and_temps() {
   local case_dir rc token temp legacy_temp
   case_dir=$(make_case omp-evidence-generation)
@@ -1497,6 +1534,8 @@ test_teardown_validates_omp_evidence_generation_and_temps() {
   printf 'g-current\n' > "$case_dir/state/task-x1.busy-gen"
   printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\nfirstmate-omp-incarnation-v1 g-current 456 550e8400-e29b-41d4-a716-446655440000\n' "$case_dir/state" \
     > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  printf 'firstmate-omp-incarnation-v1 g-current 456 550e8400-e29b-41d4-a716-446655440000\n' \
+    > "$case_dir/state/task-x1.omp-session-evidence.active"
   mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
   token='g-current.123.1000.1'
   temp="$case_dir/state/task-x1.omp-session-evidence/$token.incarnation-550e8400-e29b-41d4-a716-446655440000.generation-g-current.pid-456.seq-1.tmp"
@@ -2790,6 +2829,7 @@ test_teardown_removes_per_task_adapter_extensions
 test_teardown_preserves_foreign_omp_evidence_collision
 test_teardown_preserves_unrecognized_owned_omp_evidence
 test_teardown_preserves_foreign_omp_evidence_added_during_clear
+test_teardown_preserves_replaced_omp_evidence_entry_during_clear
 test_teardown_validates_omp_evidence_generation_and_temps
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

@@ -99,20 +99,62 @@ fi
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
 LOCK="$REC.lock"
+LOCK_OWNER="$LOCK/owner"
+LOCK_TOKEN=
+LOCK_OWNER_PID=
+
+lock_owner_write() {
+  LOCK_OWNER_PID=${BASHPID:-$$}
+  LOCK_TOKEN="$LOCK_OWNER_PID.$RANDOM.$(date +%s)"
+  ( umask 077; set -C; printf '%s %s\n' "$LOCK_OWNER_PID" "$LOCK_TOKEN" > "$LOCK_OWNER" )
+}
+
+lock_owner_status() {
+  local owner owner_pid owner_token extra
+  [ -f "$LOCK_OWNER" ] && [ ! -L "$LOCK_OWNER" ] || { printf 'missing\n'; return 0; }
+  owner=$(<"$LOCK_OWNER") || { printf 'invalid\n'; return 0; }
+  read -r owner_pid owner_token extra <<< "$owner"
+  if [ -z "$owner_pid" ] || [ -z "$owner_token" ] || [ -n "$extra" ]; then
+    printf 'invalid\n'
+    return 0
+  fi
+  case "$owner_pid" in *[!0-9]*) printf 'invalid\n'; return 0 ;; esac
+  if [ "$owner_pid" -le 0 ] 2>/dev/null; then
+    printf 'invalid\n'
+    return 0
+  fi
+  if kill -0 "$owner_pid" 2>/dev/null; then printf 'live\n'; else printf 'dead\n'; fi
+}
 
 # Serialize writers. The lock protects seq advancement and the sidecar/record
 # pair; a holder that died mid-write is broken after FM_BUSY_LOCK_STALE_SECS.
 lock_acquire() {
-  local tries=0 now mtime age
-  while ! mkdir "$LOCK" 2>/dev/null; do
+  local tries=0 now mtime age owner_status
+  while true; do
+    if mkdir "$LOCK" 2>/dev/null; then
+      if lock_owner_write; then
+        if [ -n "${FM_BUSY_TEST_LOCK_ACQUIRED_GATE:-}" ]; then
+          : > "$FM_BUSY_TEST_LOCK_ACQUIRED_GATE.ready" || return 1
+          while [ ! -e "$FM_BUSY_TEST_LOCK_ACQUIRED_GATE.release" ]; do sleep 0.01; done
+        fi
+        return 0
+      fi
+      rmdir "$LOCK" 2>/dev/null || true
+      return 1
+    fi
     tries=$((tries + 1))
     if [ "$tries" -ge 40 ]; then
+      [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 1
       now=$(date +%s)
       mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
       age=$((now - mtime))
-      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
-        [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 1
-        rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null && break
+      owner_status=$(lock_owner_status)
+      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ] && [ "$owner_status" = dead ]; then
+        [ -f "$LOCK_OWNER" ] && [ ! -L "$LOCK_OWNER" ] || return 1
+        rm -f -- "$LOCK_OWNER" || return 1
+        rmdir "$LOCK" 2>/dev/null || return 1
+        tries=0
+        continue
       fi
       echo "error: busy-state lock timeout for $ID" >&2
       return 1
@@ -121,7 +163,17 @@ lock_acquire() {
   done
   return 0
 }
-lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
+
+lock_release() {
+  local owner owner_pid owner_token extra
+  [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 0
+  [ -f "$LOCK_OWNER" ] && [ ! -L "$LOCK_OWNER" ] || return 0
+  owner=$(<"$LOCK_OWNER") || return 0
+  read -r owner_pid owner_token extra <<< "$owner"
+  [ "$owner_pid" = "$LOCK_OWNER_PID" ] && [ "$owner_token" = "$LOCK_TOKEN" ] && [ -z "$extra" ] || return 0
+  rm -f -- "$LOCK_OWNER" || return 1
+  rmdir "$LOCK" 2>/dev/null || true
+}
 
 write_record() {  # <gen> <seq>
   local tmp

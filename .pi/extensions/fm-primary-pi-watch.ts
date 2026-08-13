@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -165,13 +165,24 @@ function pidAlive(pid: string): boolean {
   }
 }
 
+function readNoFollowRegularFile(path: string): string {
+  const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+  if (typeof noFollow !== "number") throw new Error("no-follow file reads are unavailable");
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | noFollow);
+    if (!fstatSync(fd).isFile()) throw new Error("state path is not a regular file");
+    return readFileSync(fd, "utf8");
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
+}
+
 function lockOwnership(): LockOwnership {
   const lockPath = `${state}/.lock`;
   let lockPid = "";
   try {
-    const lockStat = lstatSync(lockPath);
-    if (!lockStat.isFile()) return "other";
-    lockPid = readFileSync(lockPath, "utf8").trim();
+    lockPid = readNoFollowRegularFile(lockPath).trim();
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "other";
   }
@@ -208,11 +219,12 @@ function writeLoadedMarker(): boolean {
   }
   if (!stateDirectoryReady()) return false;
   const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+  if (typeof noFollow !== "number") return false;
   let fd = -1;
   try {
     fd = openSync(
       marker,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (noFollow ?? 0),
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | noFollow,
       0o600,
     );
     writeFileSync(fd, `${extensionVersion}\n${process.pid}\n`, { encoding: "utf8" });

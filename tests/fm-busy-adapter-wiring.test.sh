@@ -161,6 +161,7 @@ drive_omp_ext() {
     ATOMIC_GATE="${ATOMIC_GATE:-}" \
     FM_OMP_TEST_BEFORE_RENAME_GATE="${FM_OMP_TEST_BEFORE_RENAME_GATE:-}" \
     FM_OMP_TEST_BEFORE_RENAME_TARGET="${FM_OMP_TEST_BEFORE_RENAME_TARGET:-}" \
+    FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE="${FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE:-}" \
     BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -259,6 +260,31 @@ switch (process.env.MODE) {
     if (!existsSync(temp)) throw new Error("owned partial evidence temp was removed before cleanup");
     break;
   }
+  case "historical-incarnation-temp": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const runPath = base + ".omp-session-run";
+    const evidenceDir = base + ".omp-session-evidence";
+    const ownerPath = base + ".omp-session-evidence.owner";
+    const turnEndPath = base + ".turn-ended";
+    await fire("agent_start");
+    const token = readFileSync(runPath, "utf8").trim();
+    const ownerLines = readFileSync(ownerPath, "utf8").trim().split(/\r?\n/);
+    const currentLine = ownerLines.find((line) => line.startsWith("firstmate-omp-incarnation-v1 "));
+    if (!currentLine) throw new Error("the extension did not register its active incarnation");
+    const currentFields = currentLine.split(/\s+/);
+    const historicalUuid = "00000000-0000-4000-8000-000000000000";
+    writeFileSync(ownerPath, readFileSync(ownerPath, "utf8") +
+      "firstmate-omp-incarnation-v1 " + currentFields[1] + " " + currentFields[2] + " " + historicalUuid + "\n");
+    const temp = evidenceDir + "/" + token + ".incarnation-" + historicalUuid +
+      ".generation-" + currentFields[1] + ".pid-" + currentFields[2] + ".seq-1.tmp";
+    writeFileSync(temp, "partial evidence\n", { encoding: "utf8", flag: "wx" });
+    try { unlinkSync(turnEndPath); } catch {}
+    const reloadedHandlers = await loadHandlers("?historical-temp=" + String(Date.now()));
+    await fireWith(reloadedHandlers, "agent_end");
+    if (!busyState().includes("state=busy")) throw new Error("a historical incarnation temp cleared busy");
+    if (!existsSync(temp)) throw new Error("a historical incarnation temp was removed");
+    break;
+  }
   case "state-marker-symlinks": {
     const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
     const paths = [
@@ -282,6 +308,20 @@ switch (process.env.MODE) {
       unlinkSync(path);
       renameSync(target, path);
     }
+    break;
+  }
+  case "turn-end-symlink": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const turnEndPath = base + ".turn-ended";
+    const target = turnEndPath + ".collision-target";
+    await fire("agent_start");
+    writeFileSync(target, "foreign turn-end\n", { encoding: "utf8" });
+    symlinkSync(target, turnEndPath);
+    const before = readFileSync(target, "utf8");
+    await fire("agent_end");
+    if (!lstatSync(turnEndPath).isSymbolicLink()) throw new Error("a turn-end symlink was replaced");
+    if (readFileSync(target, "utf8") !== before) throw new Error("a turn-end symlink target was modified");
+    if (!busyState().includes("state=busy")) throw new Error("turn-end collision cleared busy without a marker");
     break;
   }
   case "generation-mutation-guard": {
@@ -783,6 +823,13 @@ test_omp_extension_rejects_overlapping_runs_after_reload() {
   evidence_dir="$state/$id.omp-session-evidence"
   out=$(drive_omp_ext "$ext" overlapping-persisted-runs "$state" "$id") \
     || fail "overlapping persisted-run drive failed: $out"
+  second_token=$(cat "$state/$id.omp-session-run")
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "ambiguous reload start drive failed: $out"
+  [ "$(cat "$state/$id.omp-session-run")" = "$second_token" ] \
+    || fail "ambiguous reload rotated a fresh run instead of requiring explicit tokens"
+  [ ! -e "$state/$id.turn-ended" ] || fail "ambiguous reload start published turn-end evidence"
   rm -f "$state/$id.turn-ended"
   out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
     || fail "ambiguous reload terminal drive failed: $out"
@@ -791,7 +838,6 @@ test_omp_extension_rejects_overlapping_runs_after_reload() {
   [ ! -e "$state/$id.turn-ended" ] || fail "ambiguous persisted runs must not publish turn-end evidence"
 
   first_token=$(find "$evidence_dir" -maxdepth 1 -type f -print | sort | head -n 1 | xargs -n 1 basename)
-  second_token=$(cat "$state/$id.omp-session-run")
   [ "$first_token" != "$second_token" ] || fail "overlap setup did not produce two distinct persisted runs"
   out=$(EVENT_TOKEN="$first_token" drive_omp_ext "$ext" explicit-session-shutdown "$state" "$id") \
     || fail "explicit older persisted-run drive failed: $out"
@@ -805,6 +851,10 @@ test_omp_extension_rejects_overlapping_runs_after_reload() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "explicitly settling both persisted runs must clear busy, got '$out'"
   [ -e "$state/$id.turn-ended" ] || fail "explicitly settling both persisted runs must publish turn-end evidence"
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "fresh run after explicit ambiguity recovery failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "explicit ambiguity recovery permanently blocked a fresh run, got '$out'"
   pass "omp reload rejects ambiguous pending runs until explicit tokens settle both"
 }
 
@@ -1063,6 +1113,24 @@ test_omp_extension_preserves_unverified_evidence_temps() {
   pass "omp reload preserves unverified evidence temporary files"
 }
 
+test_omp_extension_rejects_historical_incarnation_temp() {
+  local rec id=busy-omp-historical-temp out state ext evidence_dir temp
+  rec=$(make_spawn_case omp-historical-temp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp historical-temp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" historical-incarnation-temp "$state" "$id") \
+    || fail "historical incarnation temp drive failed: $out"
+  evidence_dir="$state/$id.omp-session-evidence"
+  temp=$(find "$evidence_dir" -maxdepth 1 -type f -name '*.tmp' -print -quit)
+  [ -n "$temp" ] || fail "historical incarnation temp was not preserved"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "historical incarnation temp changed busy state, got '$out'"
+  pass "OMP temporary cleanup requires the active incarnation, not registry history"
+}
+
 test_omp_extension_recovers_owned_partial_evidence_temp() {
   local rec id=busy-omp-owned-partial-temp out state ext evidence_dir
   rec=$(make_spawn_case omp-owned-partial-temp omp "$id")
@@ -1318,6 +1386,25 @@ test_omp_extension_rejects_state_marker_symlinks() {
   pass "omp rejects symlinked generation, run, stop, and busy-state markers"
 }
 
+test_omp_extension_rejects_turn_end_symlink() {
+  local rec id=busy-omp-turn-end-symlink out state ext turn_end target
+  rec=$(make_spawn_case omp-turn-end-symlink omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp turn-end symlink spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" turn-end-symlink "$state" "$id") \
+    || fail "turn-end symlink drive failed: $out"
+  turn_end="$state/$id.turn-ended"
+  target="$turn_end.collision-target"
+  [ -L "$turn_end" ] || fail "OMP replaced a turn-end symlink"
+  [ "$(cat "$target")" = "foreign turn-end" ] || fail "OMP modified a turn-end symlink target"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "turn-end symlink collision weakened busy safety, got '$out'"
+  pass "OMP turn-end publication rejects symlink collisions"
+}
+
 test_omp_extension_uses_incarnation_unique_marker_temps() {
   local rec id=busy-omp-marker-temp out state ext first_token second_token marker_temp
   rec=$(make_spawn_case omp-marker-temp omp "$id")
@@ -1453,6 +1540,40 @@ test_omp_extension_generation_commit_is_atomic() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "replacement generation must remain busy after the guarded commit, got '$out'"
   pass "OMP generation changes cannot interrupt a multi-file lifecycle commit"
+}
+
+test_omp_generation_lock_release_cannot_remove_replacement() {
+  local rec id=busy-omp-lock-replacement out state ext gate lock owner holder_pid i=0
+  rec=$(make_spawn_case omp-lock-replacement omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  gate="$state/$id.generation-lock"
+  lock="$state/$id.busy-state.lock"
+  owner="$lock/owner"
+  : > "$gate.hold"
+  FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE="$gate" \
+    drive_omp_ext "$ext" agent-start > "$gate.output" 2>&1 &
+  holder_pid=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$gate.ready" ] || fail "OMP lifecycle writer did not publish its lock ownership gate"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "could not replace the OMP lifecycle lock"
+  mkdir "$lock"
+  printf '%s replacement-token\n' "$$" > "$owner"
+  rm -f "$gate.hold"
+  wait "$holder_pid" || fail "OMP lifecycle writer failed after lock replacement: $(cat "$gate.output")"
+  [ -d "$lock" ] || fail "the prior OMP lifecycle writer removed a replacement lock"
+  [ "$(cat "$owner")" = "$$ replacement-token" ] \
+    || fail "the prior OMP lifecycle writer modified a replacement lock owner"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "OMP lifecycle lock replacement cleanup failed"
+  pass "OMP lifecycle lock release is bound to its owning incarnation"
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
@@ -1637,6 +1758,7 @@ test_omp_extension_rejects_unproven_timestamp_after_reload
 test_omp_extension_adopts_pending_run_before_new_start
 test_omp_extension_recovers_partial_persistence
 test_omp_extension_preserves_unverified_evidence_temps
+test_omp_extension_rejects_historical_incarnation_temp
 test_omp_extension_recovers_owned_partial_evidence_temp
 test_omp_extension_rejects_evidence_path_collisions
 test_omp_spawn_preserves_unverified_evidence_collisions
@@ -1647,11 +1769,13 @@ test_omp_extension_blocks_rotation_after_rejected_durable_state
 test_omp_extension_validates_durable_state_before_in_memory_rotation
 test_omp_extension_validates_inactive_durable_state_before_rotation
 test_omp_extension_rejects_state_marker_symlinks
+test_omp_extension_rejects_turn_end_symlink
 test_omp_extension_uses_incarnation_unique_marker_temps
 test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_omp_extension_generation_commit_is_atomic
+test_omp_generation_lock_release_cannot_remove_replacement
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
