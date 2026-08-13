@@ -714,6 +714,13 @@ EOF
   if [ "$grant" = read-only ]; then
     [ -z "$allowed_paths" ] \
       || preflight_fail "$run_id" "a read-only run must declare no writes.allowedPaths"
+    # A read-only grant's whole guarantee is the read boundary, and the read gate
+    # can only bound what the manifest names. An empty list would leave the gate
+    # with nothing to compare against and permit the entire filesystem, so the
+    # run is refused here rather than at the first read that escapes.
+    read_roots=$(fm_run_manifest_get "$run_id" '.source.readRoots')
+    [ -n "$read_roots" ] \
+      || preflight_fail "$run_id" "a read-only run needs a non-empty source.readRoots; the read gate bounds reads to the roots the manifest names, so an unbounded run is refused before it starts"
   else
     [ -n "$allowed_paths" ] \
       || preflight_fail "$run_id" "a $grant run must declare its writes.allowedPaths"
@@ -745,8 +752,6 @@ EOF
     afk-session-review)
       session_lanes=$(fm_run_manifest_get "$run_id" '.source.sessionLanes')
       [ -n "$session_lanes" ] || preflight_fail "$run_id" "afk-session-review needs source.sessionLanes"
-      read_roots=$(fm_run_manifest_get "$run_id" '.source.readRoots')
-      [ -n "$read_roots" ] || preflight_fail "$run_id" "afk-session-review needs explicit source.readRoots"
       while IFS= read -r entry; do
         [ -n "$entry" ] || continue
         fm_run_lane_lookup "$entry" >/dev/null 2>&1 \
@@ -1055,7 +1060,7 @@ command_prove_no_write() {
 # --- checkpoints, stop, resume ----------------------------------------------
 
 command_checkpoint() {
-  local run_id=${1:-} note='' resume_when='' owner='' current index file
+  local run_id=${1:-} note='' resume_when='' owner='' current index
   [ -n "$run_id" ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1074,7 +1079,6 @@ command_checkpoint() {
   require_custody "$run_id" "$owner"
   current=$(fm_run_state_get "$run_id" state)
   index=$(write_checkpoint "$run_id" "$current" "$note" "$resume_when")
-  : "$file"
   if [ "$current" = supervise ]; then
     set_state "$run_id" checkpoint "checkpoint=$index"
     set_state "$run_id" supervise "checkpoint=$index"

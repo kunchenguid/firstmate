@@ -35,7 +35,7 @@ The grant has no alternative: the engine will not build a change-authorized rese
 
 Freeze before dispatch:
 
-- `source.readRoots` for every local root the run may read. Leave it empty only when the question is genuinely about the whole home, and expect every read outside it to be refused.
+- `source.readRoots` for every local root the run may read. At least one is required: preflight refuses a read-only run that froze none, because the read gate bounds reads to the roots the manifest names and has nothing to compare against otherwise. Name the home itself when the question genuinely spans it, and expect every read outside the named roots to be refused.
 - `budgets.wallSeconds` from the captain's budget.
 - The allowed network surface, as the `web:read` allowlist the intake agreed. A host the captain did not name is out of scope.
 

@@ -154,6 +154,40 @@ test_read_gate_partitions_lanes_and_frozen_roots() {
   pass "reads stay inside the frozen roots and never cross into another lane's account"
 }
 
+# The read gate can only bound reads against roots the manifest names, so a
+# read-only run that froze none has to be stopped before it starts rather than
+# reaching a gate with nothing to compare against.
+test_a_read_only_run_without_read_roots_is_refused_at_preflight() {
+  local out mode
+  for mode in afk-research afk-obsidian-projects afk-session-review; do
+    "$RUN" new "noroots-$mode" --mode "$mode" --lane test-personal --grant read-only >/dev/null
+    "$RUN" set "noroots-$mode" account.isolationAsserted true --json
+    "$RUN" freeze "noroots-$mode" >/dev/null
+    "$RUN" claim "noroots-$mode" >/dev/null
+    capture preflight "noroots-$mode"; out=$OUT
+    expect_code 3 "$RC" "$mode preflight with no frozen read roots"
+    assert_contains "$out" 'source.readRoots' "$mode started without a frozen read boundary"
+    assert_grep 'readRoots' "$HOME_DIR/data/runs/noroots-$mode/receipts.jsonl" \
+      "the $mode refusal left no receipt"
+  done
+
+  # The refusal is the missing boundary, not the mode: the same run passes once
+  # it names one, and its reads are then bounded by it.
+  new_research_run roots-declared
+  "$RUN" freeze roots-declared >/dev/null
+  "$RUN" claim roots-declared >/dev/null
+  capture preflight roots-declared; out=$OUT
+  expect_code 0 "$RC" "preflight with a frozen read root"
+
+  capture read-check roots-declared "$SOURCES/paper.md"; out=$OUT
+  expect_code 0 "$RC" "reading inside the declared root"
+
+  capture read-check roots-declared /etc/hosts; out=$OUT
+  expect_code 3 "$RC" "reading the wider filesystem"
+  assert_contains "$out" 'outside this run' "a read outside the declared roots was permitted"
+  pass "a read-only run must freeze its read roots before it starts, and is bounded by them after"
+}
+
 test_preflight_refuses_an_unproven_or_misdeclared_start() {
   local out
   # A run that never asserted profile isolation must not start.
@@ -192,6 +226,7 @@ test_preflight_refuses_an_unproven_or_misdeclared_start() {
   # exists, rather than running on an unproven surface.
   "$RUN" new preflight-jira --mode afk-jira-research --lane test-company --grant read-only >/dev/null
   "$RUN" set preflight-jira account.isolationAsserted true --json
+  "$RUN" add preflight-jira source.readRoots "$SOURCES"
   "$RUN" freeze preflight-jira >/dev/null
   "$RUN" claim preflight-jira >/dev/null
   capture preflight preflight-jira; out=$OUT
@@ -441,6 +476,7 @@ test_stale_authority_needs_a_fresh_stamp_before_resume() {
   "$RUN" new stale-case --mode afk-research --lane test-personal --grant read-only \
     --authorized-at 2020-01-01T00:00:00Z >/dev/null
   "$RUN" set stale-case account.isolationAsserted true --json
+  "$RUN" add stale-case source.readRoots "$SOURCES"
   "$RUN" freeze stale-case >/dev/null
   "$RUN" claim stale-case >/dev/null
   "$RUN" preflight stale-case >/dev/null
@@ -661,6 +697,7 @@ test_tool_allowlist_is_closed
 test_jira_write_tools_are_absent_from_the_read_only_surface
 test_write_area_is_the_evidence_directory
 test_read_gate_partitions_lanes_and_frozen_roots
+test_a_read_only_run_without_read_roots_is_refused_at_preflight
 test_preflight_refuses_an_unproven_or_misdeclared_start
 test_read_only_run_cannot_declare_write_paths
 test_fix_known_writes_only_inside_its_granted_worktree

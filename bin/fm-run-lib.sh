@@ -229,7 +229,9 @@ fm_run_lock_release() {  # <lock-path>
     [ "${held#*:}" = "$lock" ] && continue
     remaining+=("$held")
   done
-  FM_RUN_HELD_LOCKS=("${remaining[@]:-}")
+  # Expand to nothing when the set is empty, rather than to one empty element:
+  # ${remaining[@]:-} would grow the array by a blank entry on every release.
+  FM_RUN_HELD_LOCKS=(${remaining[@]+"${remaining[@]}"})
 }
 
 fm_run_lock_release_all() {
@@ -244,7 +246,7 @@ fm_run_lock_release_all() {
       remaining+=("$held")
     fi
   done
-  FM_RUN_HELD_LOCKS=("${remaining[@]:-}")
+  FM_RUN_HELD_LOCKS=(${remaining[@]+"${remaining[@]}"})
 }
 
 # --- receipts ---------------------------------------------------------------
