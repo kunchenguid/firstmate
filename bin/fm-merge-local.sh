@@ -3,7 +3,8 @@
 # project's checked-out clean target branch to the crewmate's fm/<id> branch.
 # The target defaults to the remote default branch exactly as before. An exact
 # Captain-approved landing may instead name an existing local integration branch
-# with --target-branch; the helper never switches branches.
+# with --target-branch; the helper never switches branches and records the chosen
+# branch as local_merge_target in the task metadata for safe teardown.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -77,6 +78,26 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+META_LOCK=$(fm_meta_lock_path "$META") || { echo "error: invalid task metadata path: $META" >&2; exit 1; }
+META_LOCK_HELD=0
+META_TMP=
+merge_local_cleanup() {
+  local status=$?
+  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+  return "$status"
+}
+trap merge_local_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
@@ -140,4 +161,15 @@ fi
 before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 git -C "$PROJ" merge --ff-only "$TASK_REF" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+META_TMP=$(mktemp "$STATE/.fm-merge-local-meta.XXXXXX") || exit 1
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    local_merge_target=*) ;;
+    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
+  esac
+done < "$META"
+printf 'local_merge_target=%s\n' "$TARGET" >> "$META_TMP" || exit 1
+chmod 0600 "$META_TMP" || exit 1
+mv -f -- "$META_TMP" "$META" || exit 1
+META_TMP=
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

@@ -24,6 +24,7 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
+#   (c2) local-only + merged into recorded integration target  -> ALLOW
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
@@ -651,6 +652,27 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_local_only_merged_to_recorded_target_allows() {
+  local case_dir rc wt_head
+  case_dir=$(make_case merged-recorded-target)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "integration work"
+  git -C "$case_dir/project" branch integration main
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/integration "$wt_head"
+  printf '%s\n' 'local_merge_target=integration' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-recorded-target: teardown should accept the recorded integration target"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "merged-recorded-target: teardown printed a REFUSED line"
+  pass "local-only worktree merged into its recorded integration target is torn down"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -2596,6 +2618,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_merged_to_recorded_target_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
