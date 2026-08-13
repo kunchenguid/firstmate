@@ -45,6 +45,28 @@ lib_eval() {  # <fakebin> <expression>
   " "$LIB"
 }
 
+test_shared_process_classifier_covers_primary_harnesses() {
+  local comm args argv0 expected got
+  while IFS='|' read -r comm args argv0 expected; do
+    [ -n "$expected" ] || continue
+    got=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3" "$4"' \
+      _ "$LIB" "$comm" "$args" "$argv0") \
+      || fail "shared classifier rejected $expected process evidence"
+    [ "$got" = "$expected" ] \
+      || fail "shared classifier resolved '$got' from $comm, expected $expected"
+  done <<'EOF'
+/opt/bin/claude|claude|/opt/bin/claude|claude
+/opt/bin/codex-aarch64-apple-darwin|codex|/opt/bin/codex-aarch64-apple-darwin|codex
+/opt/bin/opencode|opencode|/opt/bin/opencode|opencode
+/opt/bin/grok-1.0.0|grok|/opt/bin/grok-1.0.0|grok
+/opt/bin/kimi|kimi|/opt/bin/kimi|kimi
+/opt/bin/pi-signed|pi-signed|/opt/bin/pi-signed|pi-signed
+/opt/bin/pi|pi|/opt/bin/pi|pi
+/opt/Cursor/bin/cursor-agent|cursor-agent|/opt/Cursor/bin/cursor-agent|cursor
+EOF
+  pass "session-lock: one process classifier covers every supported primary harness"
+}
+
 test_version_named_session_is_identified_on_both_platforms() {
   local dir fakebin shape got
   dir="$TMP_ROOT/version-named"
@@ -357,6 +379,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_shared_process_classifier_covers_primary_harnesses
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

@@ -900,6 +900,12 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-session-lock-lib.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
@@ -946,7 +952,13 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-harness.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-spawn.sh|bin/fm-send.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

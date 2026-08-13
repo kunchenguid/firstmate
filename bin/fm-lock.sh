@@ -17,7 +17,7 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-# Harness identity (FM_HARNESS_RE, ancestry walk, holder liveness) is owned by
+# Harness identity (process classifier, ancestry walk, holder liveness) is owned by
 # the shared session-lock lib so the Claude Stop auto-arm applies the exact
 # same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh

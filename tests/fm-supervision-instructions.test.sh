@@ -27,6 +27,38 @@ test_unknown_fallback() {
   pass "renderer falls back to unknown.md for unverified harness names"
 }
 
+test_deep_codex_hook_ancestry_keeps_completion_protocol() {
+  local dir wrapper out
+  dir="$TMP_ROOT/deep-codex"
+  wrapper="$dir/wrapper.sh"
+  mkdir -p "$dir"
+  cp /bin/bash "$dir/codex"
+  cat > "$wrapper" <<'SH'
+#!/usr/bin/env bash
+set -u
+depth=$1
+shift
+if [ "$depth" -gt 0 ]; then
+  /bin/bash "$0" "$((depth - 1))" "$@"
+else
+  "$@"
+fi
+SH
+  chmod +x "$dir/codex" "$wrapper"
+
+  # Seven ordinary hook-host shells put Codex beyond the historical eight-hop
+  # detector while keeping it inside the session lock's supported ancestry.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    "$dir/codex" "$wrapper" 7 "$RENDER")
+  assert_contains "$out" "primary harness: codex" \
+    "deep Codex hook ancestry fell through to the unknown fallback"
+  assert_contains "$out" "then start the next checkpoint" \
+    "deep Codex hook ancestry lost the post-completion continuation"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." \
+    "deep Codex hook ancestry rendered the delay-causing fallback"
+  pass "deep Codex hook ancestry retains prompt completion handling and the next checkpoint"
+}
+
 test_conditional_stanzas() {
   local home config out
   home="$TMP_ROOT/conditional-home"
@@ -178,6 +210,7 @@ test_pi_snippet_uses_effective_extension_path() {
 
 test_selected_harness_block_only
 test_unknown_fallback
+test_deep_codex_hook_ancestry_keeps_completion_protocol
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix

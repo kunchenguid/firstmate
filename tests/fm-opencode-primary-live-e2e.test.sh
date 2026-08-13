@@ -161,6 +161,8 @@ run_ahoy_transcript_regressions() {
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-cursor-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$AHOY_PROJECT/bin/"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"

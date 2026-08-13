@@ -7,10 +7,10 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, Cursor |
+| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, Codex 0.147.0 (`exec` and interactive TUI), Pi / pi-signed, Cursor |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
-Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
+Codex's interactive TUI gained a verified tracked `SessionStart` channel in 0.147.0, while context reset and re-emit remain uncovered.
 The run tier exists because the nudge can only ask.
 An agent can defer an instruction, including when a first-command skill has its own read-only path.
 Running the digest inside the hook removes that discretion, so even a session whose first command is a skill has already taken the helm.
@@ -58,8 +58,8 @@ The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-pred
 The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases, and its own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.
 
-Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
-If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+Before printing, the nudge wrapper asks `fm_session_lock_owned_by_self()` in `bin/fm-session-lock-lib.sh`, the same process classifier and bounded ancestry owner used to acquire the lock and render the active harness protocol.
+If the live lock names this verified harness ancestry, session start already ran in this harness session and the wrapper stays silent.
 Every path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
 
@@ -68,8 +68,8 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Harness | Tier | Tracked transport | Current compatibility |
 | --- | --- | --- | --- |
 | Claude | Run | `.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout; the wrapper reads `source` from the hook payload. | Native stdout context injection is supported. |
-| Codex exec | Run | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and pipes the hook payload into the wrapper with a 180s timeout. | Native stdout context injection is supported under `codex exec`. |
-| Codex interactive TUI | Uncovered | None. | Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI; Firstmate ships no global hook, has no tracked compaction or re-emit channel, and does not claim instruction-refresh delivery for this surface. |
+| Codex exec | Run | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and pipes the hook payload into the wrapper with a 180s timeout. | Native stdout context injection is supported. |
+| Codex interactive TUI | Run | The same tracked `.codex/hooks.json` `SessionStart` registration runs before the first model turn. | Codex 0.147.0 delivered the whole digest into model context; context reset and re-emit remain uncovered because no tracked source fires for them. |
 | Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, refines a Pi-reported `startup` to `resume` only when a continuation, resume-selection, or explicit-session flag accompanies a session header older than the current process, maps a fork flag to `fork`, handles `session_compact` as the compaction equivalent, and injects the output with `pi.sendMessage`; setup-created entries such as `--name` are not restoration evidence. | The custom message reaches model context without racing an initial positional prompt; Pi's `reload` reason is deliberately unmapped, as it always was. |
 | OpenCode | Nudge | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. That early exit is also why OpenCode cannot use the run tier. |
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
@@ -77,7 +77,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Cursor compaction | Uncovered | None. | Cursor's `preCompact` response can return only `user_message` and is absent from Cursor's `additional_context` step set, so it cannot inject a re-emit digest. Delivering one needs its own design and is deliberately deferred to a follow-up; a Cursor primary does not re-emit its digest after a compaction. |
 
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.
-Cursor's compaction surface is uncovered in the same sense as Codex's interactive TUI above: Firstmate registers nothing for `preCompact`, so a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
+Cursor's compaction surface is uncovered in the same sense as Codex's context-reset surface above: Firstmate registers nothing for `preCompact`, so a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
@@ -91,7 +91,7 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock through both shallow and deep hook ancestry, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, Pi CLI continuation classification, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
@@ -103,5 +103,7 @@ It verifies context-preserving reopen sources for those adapters and context-res
 Cursor uses the separate primary live guard named above because its source-free `sessionStart` and stop-hook park are validated together.
 `tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
+`tests/fm-supervision-instructions.test.sh` runs the renderer behind a real copied Codex process and seven ordinary hook-host shells, proving the named completion-continuation protocol survives the ancestry depth that previously selected `unknown`.
+`tests/fm-session-lock-ancestry.test.sh` pins the shared process-classification matrix for every supported primary harness.
 
 [`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.

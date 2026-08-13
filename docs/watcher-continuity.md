@@ -38,6 +38,7 @@ No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
+Codex 0.147.0 awaits project `Stop` hooks but ignores Claude's `asyncRewake` field, and an unbounded awaited park prevents queued captain input from running until release, so neither automatic shape is a supported replacement.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
@@ -90,5 +91,6 @@ The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Codex startup rendering and session-start nudge suppression share the session lock's process classifier and 16-hop ancestry bound, so a hook-host shell chain cannot silently select the generic fallback after the same session acquired the lock.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

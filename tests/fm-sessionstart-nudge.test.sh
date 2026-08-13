@@ -124,18 +124,55 @@ test_missing_state_is_silent() {
 }
 
 test_owned_lock_is_silent() {
-  local root="$TMP_ROOT/already-ran"
+  local root="$TMP_ROOT/already-ran" lock_pid
   make_primary "$root"
-  printf '%s\n' "$$" > "$root/state/.lock"
+  lock_pid=$(bash -c '. "$1"; fm_harness_ancestry_pid' \
+    _ "$ROOT/bin/fm-session-lock-lib.sh") \
+    || fail "owned-lock fixture could not resolve its harness process"
+  printf '%s\n' "$lock_pid" > "$root/state/.lock"
   expect_silent_zero "owned lock nudge" run_nudge "$root"
-  pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
+  pass "fm-sessionstart-nudge: the harness lock owner is already run"
+}
+
+test_deep_owned_lock_is_silent() {
+  local root="$TMP_ROOT/deep-owned" fixture="$TMP_ROOT/deep-owned-fixture"
+  local out status=0
+  make_primary "$root"
+  mkdir -p "$fixture"
+  cp /bin/bash "$fixture/codex"
+  cat > "$fixture/wrapper.sh" <<'SH'
+#!/usr/bin/env bash
+depth=$1
+shift
+if [ "$depth" -gt 0 ]; then
+  /bin/bash "$0" "$((depth - 1))" "$@"
+else
+  "$@"
+fi
+SH
+  cat > "$fixture/session.sh" <<'SH'
+#!/usr/bin/env bash
+root=$1 nudge=$2 wrapper=$3
+printf '%s\n' "$$" > "$root/state/.lock"
+env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" \
+  "$wrapper" 7 "$nudge"
+SH
+  chmod +x "$fixture/codex" "$fixture/wrapper.sh" "$fixture/session.sh"
+
+  out=$("$fixture/codex" "$fixture/session.sh" "$root" "$NUDGE" "$fixture/wrapper.sh" 2>&1) \
+    || status=$?
+  expect_code 0 "$status" "deep owned-lock nudge"
+  [ -z "$out" ] || fail "deep lock-owning session was redundantly nudged: $out"
+  pass "fm-sessionstart-nudge: deep hook ancestry shares the session-lock owner"
 }
 
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
@@ -419,7 +456,8 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
-    "$ROOT/bin/fm-hook-host-lib.sh" \
+    "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-cursor-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
@@ -540,6 +578,7 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_deep_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit

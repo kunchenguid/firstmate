@@ -16,13 +16,15 @@
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
-# Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+# Maximum ancestry shared by lock ownership and public harness detection.
+# Hook hosts can add several shells between their command and the primary
+# harness; keeping this bound here prevents the detector and lock owner from
+# disagreeing about the same live process tree.
+FM_HARNESS_ANCESTRY_MAX=16
 
-# The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
-# loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
+# Exact executable names used for stricter path evidence below. The loose
+# basename and interpreter matches live in fm_harness_process_name(), the same
+# classification owner used by holder liveness and public harness detection.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
@@ -45,11 +47,11 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
-# True when the process described by command name $1 and full argument string $2
-# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# Print the verified harness name for the process described by command name $1,
+# full argument string $2, and optional argv[0] $3, or return 1.
 #
 # Evidence, in order:
-#   1. the basename of the reported command name, against FM_HARNESS_RE.
+#   1. the basename of the reported command name.
 #   2. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
@@ -57,35 +59,57 @@ fm_harness_path_name() {  # <path>
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
-FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
-  FM_HARNESS_IS_CLAUDE=0
+fm_harness_process_name() {  # <comm> <args> [argv0]
+  local comm=$1 args=$2 argv0=${3-} base name
   base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-    return 0
-  fi
-  argv0=${args%% *}
+  case "$base" in
+    *claude*) printf '%s\n' claude; return 0 ;;
+    *codex*) printf '%s\n' codex; return 0 ;;
+    *opencode*) printf '%s\n' opencode; return 0 ;;
+    *grok*) printf '%s\n' grok; return 0 ;;
+    *kimi*) printf '%s\n' kimi; return 0 ;;
+    pi-signed) printf '%s\n' pi-signed; return 0 ;;
+    pi) printf '%s\n' pi; return 0 ;;
+  esac
+  [ -n "$argv0" ] || argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    printf '%s\n' "$name"
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
-  case "$comm" in
+  case "$base" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-        return 0
-      fi
+      case "$args" in
+        *claude*) printf '%s\n' claude; return 0 ;;
+        *codex*) printf '%s\n' codex; return 0 ;;
+        *opencode*) printf '%s\n' opencode; return 0 ;;
+        *grok*) printf '%s\n' grok; return 0 ;;
+        *kimi*) printf '%s\n' kimi; return 0 ;;
+        *pi-signed*) printf '%s\n' pi-signed; return 0 ;;
+        *" pi "*|*/pi) printf '%s\n' pi; return 0 ;;
+      esac
       ;;
   esac
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
-  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    printf '%s\n' cursor
+    return 0
+  fi
   return 1
+}
+
+# True when the process is a verified harness. Sets FM_HARNESS_IS_CLAUDE for
+# the ancestry walk while delegating every classification to the name owner.
+FM_HARNESS_IS_CLAUDE=0
+fm_harness_process_matches() {  # <comm> <args> [argv0]
+  local name
+  FM_HARNESS_IS_CLAUDE=0
+  name=$(fm_harness_process_name "$@") || return 1
+  [ "$name" = claude ] && FM_HARNESS_IS_CLAUDE=1
+  return 0
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -107,8 +131,8 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  local pid=$$ comm args extending=0 printed=0 hops=0
+  while [ "$hops" -lt "$FM_HARNESS_ANCESTRY_MAX" ]; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     if fm_harness_process_matches "$comm" "$args"; then
@@ -121,6 +145,7 @@ fm_harness_ancestry_pids() {
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+    hops=$((hops + 1))
   done
   [ "$printed" -eq 1 ]
 }

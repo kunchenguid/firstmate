@@ -58,14 +58,14 @@ The third is recorded below.
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
+| Codex | codex-cli 0.147.0 | `source=startup` under `codex exec` and the interactive TUI, with the startup digest quoted back | Not reachable from a tracked project registration | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
-Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
-The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
+Codex 0.147.0 supersedes the earlier 0.145.0 and 0.146.0 interactive findings for session open.
+In an isolated TUI with the tracked project hook, the hook acquired the disposable home's lock, delivered the full digest into model context, and the model repeated `SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex` from that context.
+Codex still exposes no tracked context-reset or re-emit source, so instruction refresh remains uncovered after compaction or clear.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -212,11 +212,33 @@ The blocking and bounded-follow-up mechanisms were validated across six harnesse
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
 | Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
-| Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
+| Codex | 0.147.0 | Blocking `Stop` hook | A synchronous park was awaited and exit 2 produced one continuation with `stop_hook_active=true`; `asyncRewake` was ignored. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+
+### Codex completion-delay diagnosis, 2026-08-14
+
+The visible symptom was completed worker output remaining unsurfaced until the next captain message while the turn-end guard repeatedly reported an unsupervised fleet.
+The initiating trigger was a split identity verdict inside one session start: the 16-hop session-lock owner acquired the live Codex primary, while `bin/fm-harness.sh` stopped after eight parents and rendered the `unknown` protocol.
+The Codex watcher itself remained intentionally one-shot, so each actionable worker event ended one checkpoint; without the named Codex continuation contract, the next checkpoint was not reliably started after the handling turn.
+The smallest counterfactual placed a copied Codex executable behind seven ordinary hook-host shells: the historical detector returned `unknown`, while the shared 16-hop classifier returns `codex` and renders the instruction to start the next checkpoint after handling the completion.
+
+Three observed conditions amplified or obscured the delay without initiating it.
+First, a disappeared recorded backend endpoint made `fm-crew-state.sh` correctly return unknown even while a terminal inventory still showed an orphaned worker process; the recorded endpoint remains the control authority, and an unrelated surviving process is not evidence that the endpoint can be supervised.
+Second, the repeated `turn-ended` wake had a new file signature on each checkpoint, so it was genuine repeated worker activity rather than replay of one unchanged signal; each real wake could consume another one-shot cycle after endpoint authority was lost.
+Third, Bash printed a segmentation-fault diagnostic for the guarded process-event reconciliation child, but the watcher continued past that call as designed.
+The complete process-event suite passed, and 200 reconciliations against an isolated copy of the live registration, claim, and handled inbox shape all returned `published=0 started=0 stopped=0 uncertain=0`, so neither generic reconciliation nor that state shape reproduced the crash.
+That crash remains a production-context anomaly rather than a confirmed notification defect, and the durable result path did not account for the missing worker status wakes.
+
+Codex 0.147.0 was also tested against the tempting Stop-owned replacement.
+A synchronous project `Stop` hook parked until released and exit 2 produced exactly one continuation whose second payload carried `stop_hook_active=true`.
+Adding Claude's `asyncRewake` field did not detach or rewake the hook, and input entered during the park could not run until the hook released.
+Those negative controls rule out an unbounded Cursor-style park or Claude-style asynchronous arm for Codex without delaying captain input indefinitely, so the supported path remains bounded foreground checkpoints with an explicit continuation after every result or timeout.
+
+The shared classifier matrix covers Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Cursor, while the existing Muse-only public detection remains outside session-lock ownership.
+The change is above the runtime provider boundary: tmux, Herdr, Zellij, Orca, and cmux all feed the same watcher result into the selected primary-harness protocol, so no backend endpoint, event wait, or submission behavior changes.
 
 ### Cursor primary park, 2026-08-13
 
@@ -418,7 +440,7 @@ No credential material was copied into a fixture.
 
 ```text
 Claude Code 2.1.219
-codex-cli 0.144.4
+codex-cli 0.147.0
 OpenCode 1.17.18
 Pi 0.80.10
 grok 0.2.103 (89c3d36fb6f1) [stable]
@@ -427,7 +449,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the unsupported arm wrapper; the deep-ancestry portable regression selected the named continuation protocol. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
