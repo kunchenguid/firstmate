@@ -1411,6 +1411,12 @@ def mutate_delete_compute(controller, action):
         resource = remaining.get(kind)
         if resource is None:
             continue
+        if kind in ("task-command", "bootstrap-command", "monitor-extension"):
+            # Azure refuses modifying VM children while the VM is deallocated,
+            # and these child resources cannot outlive their VM: the exact VM
+            # deletion below cascades them, and the post-deletion snapshot
+            # proves their absence.
+            continue
         if kind == "vm":
             if "deallocated" not in str(resource.get("power_state", "")).lower():
                 raise ProviderError("compute deletion requires the exact deallocated worker")
@@ -1422,6 +1428,9 @@ def mutate_delete_compute(controller, action):
             if refreshed is None:
                 raise ProviderError("VM deletion also lost exact retained task/account capacity")
             remaining = refreshed.get("resources") or {}
+            for child in ("task-command", "bootstrap-command", "monitor-extension"):
+                if remaining.get(child) is not None:
+                    raise ProviderError("worker VM deletion left a {} child".format(child))
             continue
         if kind in ("nic", "os-disk"):
             if resource.get("attached_to"):
