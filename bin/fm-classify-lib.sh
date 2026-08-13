@@ -709,6 +709,32 @@ EOF
   return "$rc"
 }
 
+status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
+  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    safe=false
+    case "
+$fully_presented
+" in *$'\n'"$task"$'\n'*) safe=true ;; esac
+    if [ "$safe" = false ]; then
+      f="$state/$task.status"
+      offset=$(status_presentation_cursor_offset "$f") || return 1
+      lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+      safe=true
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in *[![:space:]]*) status_line_is_unread_surface "$line" || { safe=false; break; } ;; esac
+      done <<EOF
+$lines
+EOF
+      if [ "$safe" = false ]; then endpoint=$offset; fi
+    fi
+    printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
+  done <<EOF
+$snapshot
+EOF
+}
+
 status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
   tmp="$state/.status-presentation-cursor.tmp.$$"
@@ -760,8 +786,10 @@ EOF
 # had no other surfacing path.
 # These helpers are the ONE owner of "what is still unread since the last drain
 # presentation": one fleet manifest records each status identity and last-ack
-# byte offset, and one atomic replacement commits a successfully presented
-# snapshot. Missing or invalid cursor state is offset 0 (every current line is
+# byte offset, and one atomic replacement commits only the contiguous status
+# spans that were successfully presented. A quiet fleet scan leaves routine
+# working/done bytes unacknowledged so a subsequently published signal can
+# still annotate them. Missing or invalid cursor state is offset 0 (every current line is
 # unread): fail toward showing more rather than dropping a line that was never
 # presented. That fail-open rule may rarely replay a handled line after an I/O
 # failure or concurrent replacement, but never acknowledges uncertain bytes.

@@ -20,7 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-wake-drain-unread-status-tests)
 # bootstrap line so later appends are "new since last drain".
 prime_cursor() {  # <state> <status-file>
   local state=$1 status=$2
-  printf 'working: bootstrap cursor line\n' > "$status"
+  printf 'note: bootstrap cursor line\n' > "$status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
     || fail "bootstrap drain failed while priming the unread cursor"
 }
@@ -131,8 +131,12 @@ test_pending_reply_resolution_surfaces_once() {
   status="$state/task5.status"
   prime_cursor "$state" "$status"
 
+  printf 'blocked [key=pending-reply-abcdef0123456789]: pending-reply-missed: task=task5 pending-reply-id=abcdef0123456789 request=ship it\n' >> "$status"
+  append_wake "$state" signal task5.status "signal: task5.status" \
+    || fail "queueing the pending-reply request signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "drain failed while acknowledging the pending-reply request"
   {
-    printf 'blocked [key=pending-reply-abcdef0123456789]: pending-reply-missed: task=task5 pending-reply-id=abcdef0123456789 request=ship it\n'
     printf 'resolved [key=pending-reply-abcdef0123456789]: pending-reply-resolved: task=task5 pending-reply-id=abcdef0123456789 via=status\n'
     printf 'note: re-read acknowledgement\n'
   } >> "$status"
@@ -263,6 +267,27 @@ test_open_decisions_fold_is_unchanged() {
   pass "OPEN DECISIONS still folds needs-decision/blocked independently of unread notes"
 }
 
+test_empty_queue_does_not_swallow_later_signal_annotation() {
+  local dir state out status
+  dir=$(make_case delayed-signal-annotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-delayed.status"
+  printf 'done: shipped before watcher published signal\n' > "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "empty-queue drain failed before delayed signal publication"
+  [ ! -s "$out" ] || fail "routine status unexpectedly broke the silent empty-queue contract: $(cat "$out")"
+
+  append_wake "$state" signal task-delayed.status "signal: task-delayed.status" \
+    || fail "publishing the delayed status signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed after delayed signal publication"
+  grep -F 'latest wake-EVENT observed at drain, not current state: task-delayed.status: done: shipped before watcher published signal' "$out" >/dev/null \
+    || fail "the empty-queue drain acknowledged an event before its signal annotation: $(cat "$out")"
+  pass "an empty-queue drain preserves routine status for a later signal annotation"
+}
+
 test_routine_working_lines_stay_silent_on_the_empty_queue() {
   local dir state out
   dir=$(make_case silent-working)
@@ -292,4 +317,5 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged
+test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_lines_stay_silent_on_the_empty_queue
