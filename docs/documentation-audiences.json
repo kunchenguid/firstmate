@@ -109,11 +109,27 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/VENDORED-ENGINEERING-CONTRACT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/VENDORED-ENGINEERING-LICENSE.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/ahoy/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ask-matt/PHASE-BOUNDARIES.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ask-matt/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -129,11 +145,43 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/code-review/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/codebase-design/DEEPENING.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/codebase-design/DESIGN-IT-TWICE.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/codebase-design/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/diagnosing-bugs/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/ADR-FORMAT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/CONTEXT-FORMAT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -153,7 +201,31 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/grill-with-docs/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/grilling/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/handoff/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/implement/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/improve-codebase-architecture/HTML-REPORT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/improve-codebase-architecture/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -165,11 +237,55 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/prototype/LOGIC.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/prototype/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/prototype/UI.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/research/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/resolving-merge-conflicts/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/setup-matt-pocock-skills/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/setup-matt-pocock-skills/domain.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/setup-matt-pocock-skills/issue-tracker-github.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/setup-matt-pocock-skills/issue-tracker-gitlab.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/setup-matt-pocock-skills/issue-tracker-local.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/setup-matt-pocock-skills/triage-labels.md",
       "audience": "agent-runtime"
     },
     {
@@ -181,7 +297,55 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/tdd/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/tdd/mocking.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/tdd/tests.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/to-spec/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/to-tickets/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/triage/AGENT-BRIEF.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/triage/OUT-OF-SCOPE.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/triage/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/wayfinder/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/wizard/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/writing-for-agents/SKILL-MECHANICS.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/writing-for-agents/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -358,6 +522,10 @@
     },
     {
       "path": "docs/verification/trace-context.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/vendored-engineering-skills.md",
       "audience": "maintainer-verification"
     },
     {

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Push declared inherited local material to live secondmate homes.
-# Usage: fm-config-push.sh [--help]
+# Push declared inherited local material to secondmate homes.
+# Usage: fm-config-push.sh [--include-registered] [--help]
 #
 # Mid-session convergence for inherited local material such as
 # config/crew-dispatch.json, config/backend, or data/captain-shared.md updates.
-# This discovers live secondmate homes from state/*.meta, backfills
-# home= from data/secondmates.md for older meta records, and reuses the same
-# propagation machinery as bootstrap, but deliberately does not
-# fast-forward tracked files.
+# This discovers live secondmate homes from state/*.meta and backfills home=
+# from data/secondmates.md for older meta records.
+# --include-registered adds persistent homes that have no live metadata, for
+# callers such as fm-update.sh that have already validated their tracked sync.
+# Every path reuses the same propagation machinery as bootstrap and deliberately
+# does not fast-forward tracked files.
 # After a successful per-home propagation that changes any allowlisted config/*
 # item, local routes receive the generation-specific literal-content pointer from
 # fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
@@ -18,10 +20,13 @@ set -u
 
 usage() {
   cat <<'EOF'
-Usage: fm-config-push.sh [--help]
+Usage: fm-config-push.sh [--include-registered] [--help]
 
 Push the primary firstmate home's declared inherited local material into each
 live secondmate home.
+
+--include-registered also converges registered homes without live metadata.
+Idle homes receive the inherited bytes without a live reread nudge.
 
 This is local-material-only:
   - does not fast-forward tracked files
@@ -33,8 +38,8 @@ This is local-material-only:
   - exits non-zero for real propagation errors or reread-send failures
 
 Live homes come from state/*.meta records with kind=secondmate.
-data/secondmates.md is only a fallback for missing home= fields in older or
-incomplete meta records.
+data/secondmates.md supplies missing home= fields and, with
+--include-registered, registered homes that have no live metadata.
 
 Environment overrides follow the rest of firstmate:
   FM_HOME            active firstmate home
@@ -45,15 +50,19 @@ Environment overrides follow the rest of firstmate:
 EOF
 }
 
+INCLUDE_REGISTERED=0
 case "${1:-}" in
   -h|--help)
     usage
     exit 0
     ;;
+  --include-registered)
+    INCLUDE_REGISTERED=1
+    ;;
   "")
     ;;
   *)
-    echo "usage: fm-config-push.sh [--help]" >&2
+    echo "usage: fm-config-push.sh [--include-registered] [--help]" >&2
     exit 2
     ;;
 esac
@@ -104,12 +113,37 @@ cleanup() {
 trap cleanup EXIT
 
 live_secondmate_meta_records "$STATE" "$SECONDMATES_MD" > "$records"
+if [ "$INCLUDE_REGISTERED" -eq 1 ] && [ -f "$SECONDMATES_MD" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "- "*) ;;
+      *) continue ;;
+    esac
+    if ! secondmate_registry_parse_line "$line"; then
+      printf 'secondmate registry: skipped malformed entry: %s\n' "$line" >&2
+      continue
+    fi
+    id=$SECONDMATE_REGISTRY_ID
+    if cut -d'|' -f1 "$records" | grep -Fqx "$id"; then
+      continue
+    fi
+    printf '%s|%s|||\n' "$id" "$SECONDMATE_REGISTRY_HOME" >> "$records"
+  done < "$SECONDMATES_MD"
+fi
 if [ ! -s "$records" ]; then
-  echo "config-push: no live secondmate homes found"
+  if [ "$INCLUDE_REGISTERED" -eq 1 ]; then
+    echo "config-push: no registered secondmate homes found"
+  else
+    echo "config-push: no live secondmate homes found"
+  fi
   exit 0
 fi
 
-echo "config-push: $FM_HOME -> live secondmate homes"
+if [ "$INCLUDE_REGISTERED" -eq 1 ]; then
+  echo "config-push: $FM_HOME -> registered secondmate homes"
+else
+  echo "config-push: $FM_HOME -> live secondmate homes"
+fi
 
 seen_homes=""
 errors=0
@@ -119,7 +153,12 @@ while IFS='|' read -r id home _window meta; do
     printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"
     continue
   fi
-  remote_host=$(fm_meta_get "$meta" remote_host)
+  remote_host=""
+  if [ -n "$meta" ]; then
+    remote_host=$(fm_meta_get "$meta" remote_host)
+  elif [ "$INCLUDE_REGISTERED" -eq 1 ]; then
+    remote_host=$(secondmate_registry_field "$SECONDMATES_MD" "$id" host 2>/dev/null || true)
+  fi
   if [ -n "$remote_host" ]; then
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
@@ -137,13 +176,15 @@ while IFS='|' read -r id home _window meta; do
     fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
-    if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
-      echo "  config-reread: retry marker failed"
-      errors=1
-      fm_lock_release "$remote_lock" || true
-      continue
+    if [ -n "$meta" ]; then
+      if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+      if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+        "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+        echo "  config-reread: retry marker failed"
+        errors=1
+        fm_lock_release "$remote_lock" || true
+        continue
+      fi
     fi
     if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
@@ -151,7 +192,7 @@ while IFS='|' read -r id home _window meta; do
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
-      if [ "$remote_nudge" -eq 1 ]; then
+      if [ -n "$meta" ] && [ "$remote_nudge" -eq 1 ]; then
         if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
           rm -f -- "$remote_marker"
@@ -160,7 +201,7 @@ while IFS='|' read -r id home _window meta; do
           echo "  config-reread: send failed; retry retained"
           errors=1
         fi
-      else
+      elif [ -n "$meta" ]; then
         rm -f -- "$remote_marker"
       fi
     else
@@ -204,7 +245,7 @@ while IFS='|' read -r id home _window meta; do
     errors=1
     continue
   }
-  if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+  if [ -n "$meta" ] && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
     fm_config_reread_retry_pending "$id" "$home_real" || true
     if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
       echo "  config-reread: error - retry instruction queue is full"
@@ -228,23 +269,25 @@ while IFS='|' read -r id home _window meta; do
     errors=1
   fi
   print_item_report "$report"
-  reread_pending=0
-  if fm_config_reread_has_pending "$home_real" || fm_config_reread_has_staged "$FM_HOME" "$id"; then
-    reread_pending=1
-  fi
-  if reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_STATE_OVERRIDE="$STATE" \
-    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
-    if [ -n "$(fm_config_reread_changed_items "$report")" ] || [ "$reread_pending" -eq 1 ]; then
-      printf '  config-reread: sent\n'
+  if [ -n "$meta" ]; then
+    reread_pending=0
+    if fm_config_reread_has_pending "$home_real" || fm_config_reread_has_staged "$FM_HOME" "$id"; then
+      reread_pending=1
     fi
-    [ -z "$reread_out" ] || printf '%s\n' "$reread_out"
-  else
-    errors=1
-    if [ -n "$reread_out" ]; then
-      printf '%s\n' "$reread_out"
+    if reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$STATE" \
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      if [ -n "$(fm_config_reread_changed_items "$report")" ] || [ "$reread_pending" -eq 1 ]; then
+        printf '  config-reread: sent\n'
+      fi
+      [ -z "$reread_out" ] || printf '%s\n' "$reread_out"
     else
-      printf '  config-reread: send failed\n'
+      errors=1
+      if [ -n "$reread_out" ]; then
+        printf '%s\n' "$reread_out"
+      else
+        printf '  config-reread: send failed\n'
+      fi
     fi
   fi
   fm_lock_release "$home_lock" || true

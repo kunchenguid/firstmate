@@ -145,7 +145,7 @@ family_for_basename() {
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
-    fm-transition-lib.test.sh|\
+    fm-transition-lib.test.sh|fm-skills-lock.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
@@ -838,6 +838,24 @@ families_for_test_reference() {
 families_for_changed_path() {
   local path=$1 fixture_ref
   case "$path" in
+    bin/fm-skills-lock.sh|skills-lock.json|tests/fm-skills-lock.test.sh|\
+    .agents/skills/VENDORED-ENGINEERING-CONTRACT.md|\
+    .agents/skills/VENDORED-ENGINEERING-LICENSE.md)
+      printf '%s\n' __script__:tests/fm-skills-lock.test.sh
+      ;;
+    .agents/skills/ask-matt/*|.agents/skills/code-review/*|\
+    .agents/skills/codebase-design/*|.agents/skills/diagnosing-bugs/*|\
+    .agents/skills/domain-modeling/*|.agents/skills/grill-with-docs/*|\
+    .agents/skills/grilling/*|.agents/skills/handoff/*|\
+    .agents/skills/implement/*|.agents/skills/improve-codebase-architecture/*|\
+    .agents/skills/prototype/*|.agents/skills/research/*|\
+    .agents/skills/resolving-merge-conflicts/*|\
+    .agents/skills/setup-matt-pocock-skills/*|.agents/skills/tdd/*|\
+    .agents/skills/to-spec/*|.agents/skills/to-tickets/*|\
+    .agents/skills/triage/*|.agents/skills/wayfinder/*|\
+    .agents/skills/wizard/*|.agents/skills/writing-for-agents/*)
+      printf '%s\n' __script__:tests/fm-skills-lock.test.sh
+      ;;
     tests/fm-test-run.test.sh)
       printf '%s\n' pure-contract-unit
       ;;

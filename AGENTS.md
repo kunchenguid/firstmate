@@ -38,7 +38,7 @@ Hard rules, in priority order:
    If work failed, say so plainly with the evidence.
 
 You may maintain this repo's private operational state directly.
-Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
+Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, `skills-lock.json`, and public `skills/`.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
@@ -62,6 +62,7 @@ README.md            public overview and development notes
 .agents/skills/      firstmate-loaded internal skills, committed; each carries metadata.internal=true for installers
 .claude/skills       symlink to .agents/skills for claude compatibility
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
+skills-lock.json     tracked provenance and integrity lock for vendored skills under .agents/skills/
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional Relay pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
@@ -531,6 +532,31 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+
+The following vendored skills have provenance pinned by `skills-lock.json`.
+They refine a deliverable without overriding Firstmate's project-write delegation, task lifecycle, outward-consent, or merge-authority contracts.
+
+- `ask-matt` - load when the captain asks which engineering skill or workflow fits the work.
+- `code-review` - load when reviewing a branch, pull request, work-in-progress change, or fixed-point diff against both repository standards and its originating specification.
+- `codebase-design` - load when designing or deepening a module interface, choosing a seam, or improving testability and codebase navigation.
+- `diagnosing-bugs` - load for the execution loop after `diagnostic-reasoning` scopes a hard bug or performance regression.
+- `domain-modeling` - load when defining project terminology, sharpening a ubiquitous language, or recording an architectural decision.
+- `grill-with-docs` - load when the captain asks to sharpen a plan or design through an interview that also maintains project domain documents.
+- `grilling` - load when the captain asks to stress-test a plan, decision, or idea through a structured interview.
+- `handoff` - load when the captain asks for portable session context for another harness, directory, collaborator, or side task.
+- `implement` - load when the captain explicitly invokes the implementation workflow for an existing specification or ticket set.
+- `improve-codebase-architecture` - load when the captain asks for an architectural deepening survey and visual report.
+- `prototype` - load when a throwaway logic or UI artifact can answer a design question.
+- `research` - load when primary-source investigation should produce a durable Markdown report.
+- `resolving-merge-conflicts` - load when resolving an in-progress merge or rebase conflict.
+- `setup-matt-pocock-skills` - load when the captain asks to initialize a project's issue-tracker, triage-label, and domain-document conventions for these engineering workflows.
+- `tdd` - load when the captain requests test-first development, red-green-refactor, or integration tests.
+- `to-spec` - load when the captain asks to synthesize the current discussion into a specification without another interview.
+- `to-tickets` - load when the captain asks to split a plan or specification into dependency-aware tracer-bullet tickets.
+- `triage` - load when the captain asks to classify, verify, and prepare incoming issues or external pull requests.
+- `wayfinder` - load when the captain asks to map a multi-session effort whose major decisions are still unclear.
+- `wizard` - load when a human-only infrastructure, credential, migration, or cutover procedure needs an interactive Bash guide.
+- `writing-for-agents` - load when creating or editing skills, `AGENTS.md`, `CLAUDE.md`, or another agent-consumed document.
 
 ## 14. Relay
 
