@@ -221,10 +221,12 @@ _fm_key_at_note_head() {  # <status-line> -> raw slug
 # appends the tag after already writing the summary. Fails when the line does
 # not end in a complete token there; slug charset validity is the caller's
 # check via _fm_decision_slug_ok, exactly as for the other two positions. A
-# token that is not the line's own last token - i.e. anything followed by more
-# note text - is left as ordinary prose and never reaches this function's
-# match, which is what keeps a summary merely mentioning "[key=x]" mid-line
-# from being read as a stated key.
+# token mentioned mid-line is left as ordinary prose - even when the line
+# happens to end with an unrelated "]" - because the text after the line's
+# last "[key=" must run bracket-free to the closing "]" for the line-terminal
+# bracket group to count as one complete stated token; that is what keeps a
+# summary merely mentioning "[key=x]" mid-line from being read as a stated
+# key.
 _fm_key_trailing() {  # <status-line> -> raw slug
   local line=$1 tail
   line=${line%"${line##*[![:space:]]}"}
@@ -233,10 +235,11 @@ _fm_key_trailing() {  # <status-line> -> raw slug
     *) return 1 ;;
   esac
   tail=${line##*\[key=}
+  tail=${tail%\]}
   case "$tail" in
-    *\]) printf '%s' "${tail%\]}" ;;
-    *) return 1 ;;
+    *\[*|*\]*) return 1 ;;
   esac
+  printf '%s' "$tail"
 }
 # 0 when a stated key slug is well-formed: nonempty, A-Za-z0-9._- only.
 _fm_decision_slug_ok() {  # <slug>
@@ -472,7 +475,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=4
+FM_OPEN_DECISIONS_FOLD_VERSION=5
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

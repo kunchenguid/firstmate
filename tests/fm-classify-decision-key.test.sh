@@ -281,6 +281,22 @@ test_mid_line_bracket_is_not_a_trailing_key() {
   pass "a [key=x] token that is not at the line's own end is never read as a stated key"
 }
 
+test_mid_line_mention_with_unrelated_terminal_bracket_stays_default() {
+  local dir
+  dir=$(case_dir mid-line-terminal-bracket)
+  # A mid-line "[key=x]" mention on a line that happens to END with an
+  # unrelated "]" must still fold as a keyless line - never extract a garbage
+  # slug and silently drop the decision from the open set.
+  printf 'needs-decision: keep [key=alpha] naming or switch to map[beta]\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tkeep [key=alpha] naming or switch to map[beta]\n')" \
+    "mid-line mention with unrelated terminal bracket"
+
+  printf 'resolved: went with the map\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "keyless resolution still closes it"
+  pass "a mid-line [key=x] mention plus an unrelated terminal ']' still folds as default"
+}
+
 test_canonical_position_wins_over_disagreeing_trailing_token() {
   local dir
   dir=$(case_dir canonical-wins)
@@ -331,5 +347,6 @@ test_blocked_and_resolved_are_tag_order_independent
 test_trailing_key_position_is_honored
 test_trailing_key_matches_across_open_and_close_positions
 test_mid_line_bracket_is_not_a_trailing_key
+test_mid_line_mention_with_unrelated_terminal_bracket_stays_default
 test_canonical_position_wins_over_disagreeing_trailing_token
 test_incremental_agrees_with_full_fold_across_appends
