@@ -5,8 +5,8 @@ It routes an incoming captain chat message relative to primary-session open asks
 
 ## Ownership
 
-- Bash owner: `bin/fm-captain-message-router.sh` owns truth (anchors, briefs, classification, ephemeral router spawn, verdict log, pending handoffs).
-- Pi hook: `.pi/extensions/fm-primary-captain-message-router.ts` is a thin trigger only.
+- Bash owner: `bin/fm-captain-message-router.sh` owns primary-home scope, state formats, classification, ephemeral router spawn, verdict normalization and logging, fail-open fallback, and pending handoffs.
+- Pi hook: `.pi/extensions/fm-primary-captain-message-router.ts` owns callback-context session ids, session-lock eligibility, logical-run isolation, operational-input exclusion, and bounded transcript handoff.
 - The Firstmate primary agent never runs continuity.
 
 Primary homes only (main home or a marked secondmate home).
@@ -21,7 +21,7 @@ The router adds no fork-specific Cursor compatibility layer and no Pi provider e
 
 ## Fail-open
 
-Errors allow the message into the current primary and record a failure.
+Errors allow the message into the current primary, and router failures are recorded where possible.
 The captain is never locked out by a broken router.
 Only invalid CLI usage exits non-zero.
 
@@ -41,6 +41,9 @@ Local-only under `state/captain-router/` (gitignored with `state/`):
 | `failures.log` | Append-only fail-open failure rows |
 | `last-handoff.txt` | Hook-side pointer after reroute/new |
 | `hook.log` | Hook bookkeeping notes |
+
+The Pi hook also writes `state/.pi-captain-router-extension-loaded` with its content-derived version and process id.
+Session start accepts that marker only when its version matches the current extension and its process owns the session lock; otherwise it prints the trust-once and explicit `-e` restart paths.
 
 ### Session id assumption
 
@@ -145,7 +148,7 @@ No real model calls in unit tests; `tests/fm-captain-router-live-e2e.test.sh` is
 - `agent_end` retains only a candidate response and bounded transcript; `agent_settled` publishes them only when that same session and run saw captain input and no Firstmate operational input.
 - A mixed captain and operational run publishes no anchors or recent history, including when operational input arrives after an earlier `agent_end`.
 - `same`: allow.
-- `reroute` / `new`: record hook-side `last-handoff.txt`; do not inject continuity into primary context.
+- `reroute` / `new`: record hook-side `last-handoff.txt` only after bash emits a successfully staged decision; normalized self-reroutes and publication failures continue as `same` without claiming a handoff.
 - Always fail-open.
 
 ## Current limits

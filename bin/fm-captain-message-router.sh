@@ -7,11 +7,12 @@
 # per-session briefs so a late or unrelated reply does not silently steer the
 # wrong turn. See docs/captain-message-router.md for current behavior.
 #
-# The Firstmate PRIMARY agent never runs this. The Pi hook calls it; bash owns
-# the truth and the agent owns nothing. Submit ALWAYS spawns an ephemeral router
-# agent: the model decides the verdict, and the deterministic layer survives
-# only as the fail-open fallback. The built-in profile reuses upstream
-# Firstmate's verified Cursor Agent CLI owner.
+# The Firstmate PRIMARY agent never runs this itself. The Pi hook owns eligible
+# callback and session selection; this script owns router state, classification,
+# verdict normalization and staging, and fail-open fallback. Submit ALWAYS spawns
+# an ephemeral router agent: the model decides the verdict, and the deterministic
+# layer survives only as the fail-open fallback. The built-in profile reuses
+# upstream Firstmate's verified Cursor Agent CLI owner.
 #
 # Modes (assistant message or captain message on stdin):
 #   fm-captain-message-router.sh --on-settle [--session-id <id>]

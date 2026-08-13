@@ -20,11 +20,12 @@ import type {
 import { classifyFirstmateOperationalText } from "./lib/fm-operational-input.ts";
 
 // Captain-message continuity router hook wiring - Pi primary only.
-// Thin trigger layer: bin/fm-captain-message-router.sh owns scoping,
-// classification, briefs, ephemeral router spawn, verdict logging, and pending
-// handoff staging. This file only feeds settle/submit text, an optional session
-// id, and a bounded redacted recent-chat excerpt, then observes the
-// machine-readable verdict line.
+// bin/fm-captain-message-router.sh owns primary-home scope, state formats,
+// classification, briefs, the ephemeral router spawn, verdict normalization
+// and logging, fail-open fallback, and pending handoff staging. This hook owns
+// callback-context session ids, session-lock eligibility, logical-run isolation,
+// operational-input exclusion, bounded transcript handoff, and observation of
+// the machine-readable verdict line.
 //
 // NOT watcher continuity: unrelated to fm-primary-pi-watch.ts, the turn-end
 // guard, or bin/fm-continuity-*. See docs/captain-message-router.md.
