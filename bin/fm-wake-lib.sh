@@ -78,6 +78,19 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# fm_watcher_lock_unheld <state>
+# True when the watcher lock or its symlinked owner directory is absent, or when
+# the existing lock records no pid at all. Any non-empty pid remains held here;
+# its syntax, liveness, ownership metadata, and identity are health concerns.
+fm_watcher_lock_unheld() {
+  local state=$1 lockdir pid
+  lockdir="$state/.watch.lock"
+  [ ! -e "$lockdir" ] && return 0
+  [ ! -e "$lockdir/pid" ] && return 0
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  [ -z "$pid" ]
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
@@ -132,9 +145,9 @@ fm_watcher_healthy() {
 #               fresh beacon with no live watcher process is the healthy state.
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
-#               spawns the replacement itself, so the singleton lock is legitimately
-#               unheld between cycles and a live pid alone is not the liveness
-#               signal; extension ownership plus a fresh beacon is.
+#               spawns the replacement itself, so a genuinely unheld singleton lock
+#               is healthy during that hand-off only with extension ownership and a
+#               fresh beacon. Any held but unhealthy lock remains down.
 #   persistent  every other harness (codex foreground checkpoint, opencode/grok
 #               background arm, tmux, unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
@@ -224,13 +237,14 @@ fm_pi_extension_owns_supervision() {
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
-# extension: a live identity-matched watcher is the ordinary healthy state, but an
-# unheld lock is also healthy while the beacon is fresh AND a live Pi session
-# provably owns continuity (fm_pi_extension_owns_supervision) - that is the
+# extension: a live identity-matched watcher is the ordinary healthy state, but a
+# genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
+# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
 # extension's own tear-down-and-respawn hand-off, which it retries and escalates
-# itself. Without that ownership proof an unheld lock is down exactly as before, so
-# an unloaded, version-drifted, or exited Pi session still alarms immediately, and a
-# cycle the extension never restores still alarms once the beacon passes grace.
+# itself. A lock with any recorded pid remains down if the strict health check fails.
+# Without ownership proof an unheld lock is down exactly as before, so an unloaded,
+# version-drifted, or exited Pi session still alarms immediately, and a cycle the
+# extension never restores still alarms once the beacon passes grace.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
@@ -258,7 +272,8 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_pi_extension_owns_supervision "$state" "$root"; then
+    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+      && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else

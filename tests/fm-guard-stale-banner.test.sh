@@ -441,6 +441,81 @@ test_extension_handoff_with_live_session_is_healthy() {
   pass "fm-guard stale banner: extension-owned hand-off with a live session is healthy"
 }
 
+# A released owner may leave the lock directory briefly before cleanup. It is
+# still genuinely unheld when it records no pid, so the hand-off stays benign.
+test_extension_handoff_with_empty_lock_is_healthy() {
+  local dir home out pid
+  dir=$(make_guard_case extension-empty-lock)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
+  mkdir -p "$home/state/.watch.lock"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case_extension "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -z "$out" ] \
+    || fail "an extension-owned hand-off with an empty lock must stay silent, got: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "an empty lock during a healthy hand-off must not open a down-episode"
+  pass "fm-guard stale banner: extension-owned empty lock is genuinely unheld"
+}
+
+# Extension ownership tolerates only a released lock. Every non-empty recorded
+# pid means the lock is held, so any strict watcher-health failure stays loud.
+test_extension_held_unhealthy_locks_stay_alarm() {
+  local dir home out session_pid holder_pid case_name
+  for case_name in dead-pid malformed-pid wrong-home wrong-path identity-mismatch; do
+    dir=$(make_guard_case "extension-held-$case_name")
+    home=$(case_home "$dir")
+    sleep 60 &
+    session_pid=$!
+    record_pi_extension_session "$dir" "$session_pid" \
+      || fail "could not record the Pi extension session for $case_name"
+    holder_pid=
+    case "$case_name" in
+      malformed-pid)
+        mkdir -p "$home/state/.watch.lock"
+        printf '%s\n' not-a-pid > "$home/state/.watch.lock/pid"
+        ;;
+      *)
+        sleep 60 &
+        holder_pid=$!
+        record_live_watcher "$dir" "$holder_pid" \
+          || fail "could not record the watcher lock for $case_name"
+        case "$case_name" in
+          dead-pid)
+            kill "$holder_pid" 2>/dev/null || true
+            wait "$holder_pid" 2>/dev/null || true
+            holder_pid=
+            ;;
+          wrong-home)
+            printf '%s\n' "$home/other" > "$home/state/.watch.lock/fm-home"
+            ;;
+          wrong-path)
+            printf '%s\n' "$home/bin/not-fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+            ;;
+          identity-mismatch)
+            printf '%s\n' mismatched-identity > "$home/state/.watch.lock/pid-identity"
+            ;;
+        esac
+        ;;
+    esac
+    touch "$home/state/.last-watcher-beat"
+    out=$(run_guard_case_extension "$dir")
+    [ -z "$holder_pid" ] || kill "$holder_pid" 2>/dev/null || true
+    [ -z "$holder_pid" ] || wait "$holder_pid" 2>/dev/null || true
+    kill "$session_pid" 2>/dev/null || true
+    wait "$session_pid" 2>/dev/null || true
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "an extension-owned held lock with $case_name must alarm: $out"
+    assert_contains "$out" "no live watcher process holds this home lock" \
+      "a held unhealthy lock with $case_name must report no-watcher"
+  done
+  pass "fm-guard stale banner: held unhealthy extension locks stay loud"
+}
+
 # The same unheld lock and fresh beacon, with NO extension ownership to prove, is
 # the genuinely-down cycle and must stay exactly as loud as before.
 test_extension_without_ownership_evidence_stays_alarm() {
@@ -609,6 +684,8 @@ test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy
+test_extension_handoff_with_empty_lock_is_healthy
+test_extension_held_unhealthy_locks_stay_alarm
 test_extension_without_ownership_evidence_stays_alarm
 test_extension_ownership_needs_every_signal
 test_extension_stale_beacon_alarms_despite_live_session
