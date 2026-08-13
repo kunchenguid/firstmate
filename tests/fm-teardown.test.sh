@@ -1338,6 +1338,8 @@ test_teardown_removes_per_task_adapter_extensions() {
   printf '// generated omp extension\n' > "$case_dir/state/task-x1.omp-ext.ts"
   printf 'g1.test\n' > "$case_dir/state/task-x1.omp-session-run"
   printf 'g1\n' > "$case_dir/state/task-x1.omp-session-stop"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
   mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
   printf 'g1.test 1 1 0\n' > "$case_dir/state/task-x1.omp-session-evidence/g1.test"
 
@@ -1358,6 +1360,29 @@ test_teardown_removes_per_task_adapter_extensions() {
   assert_absent "$case_dir/state/task-x1.omp-session-evidence" \
     "adapter-extensions: teardown left OMP run evidence behind"
   pass "teardown removes the generated per-task adapter extensions from state"
+}
+
+test_teardown_preserves_foreign_omp_evidence_collision() {
+  local case_dir rc
+  case_dir=$(make_case omp-evidence-collision)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
+  printf 'foreign\n' > "$case_dir/state/task-x1.omp-session-evidence/foreign"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "omp-evidence-collision: teardown must refuse unowned evidence"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "omp-evidence-collision: teardown removed task metadata after refusing evidence"
+  assert_present "$case_dir/state/task-x1.omp-session-evidence/foreign" \
+    "omp-evidence-collision: teardown removed foreign evidence"
+  assert_present "$case_dir/wt" \
+    "omp-evidence-collision: teardown removed the worktree before validating evidence"
+  pass "teardown refuses and preserves foreign OMP evidence collisions"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -2635,6 +2660,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_teardown_removes_per_task_adapter_extensions
+test_teardown_preserves_foreign_omp_evidence_collision
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

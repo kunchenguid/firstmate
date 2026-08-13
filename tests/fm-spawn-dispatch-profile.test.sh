@@ -1025,6 +1025,26 @@ test_no_node_rejects_bare_omp_decoy() {
   pass "no-Node raw fallback rejects bare OMP names without assigning ownership"
 }
 
+test_no_node_keeps_generic_omp_mentions_generic() {
+  local rec id out status raw_owner
+  id=profile-raw-no-node-generic-omp-z8r
+  rec=$(make_spawn_case raw-no-node-generic-omp claude "$id")
+  read_case_record "$rec"
+
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "echo omp && myagent")
+  status=$?
+  expect_code 0 "$status" "a generic compound mention must spawn without Node.js: $out"
+  assert_contains "$out" "spawned $id harness=echo" \
+    "the generic compound mention changed its recorded dispatch harness"
+  assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" \
+    "the generic compound mention lost its raw-launch marker"
+  raw_owner=$(awk -F= '$1 == "raw_owner" { print $2 }' "$HOME_DIR/state/$id.meta")
+  [ -z "$raw_owner" ] || fail "the generic compound mention received OMP ownership '$raw_owner'"
+  pass "no-Node raw fallback keeps generic compound OMP mentions generic"
+}
+
 # The raw path is the escape hatch for verifying a new adapter, so it has to keep
 # accepting the shell forms an experimental launcher takes. A command-prefix
 # strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
@@ -1248,6 +1268,7 @@ test_raw_launch_mentions_do_not_receive_omp_owner
 test_generic_raw_launch_sanitizes_inherited_verified_markers
 test_raw_launch_marker_covers_process_tree_forms
 test_no_node_rejects_bare_omp_decoy
+test_no_node_keeps_generic_omp_mentions_generic
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

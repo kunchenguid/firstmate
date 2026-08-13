@@ -251,6 +251,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-omp-state-lib.sh
+. "$SCRIPT_DIR/fm-omp-state-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -815,50 +817,6 @@ spawn_herdr_presentation_order_lock_acquire() {
   return 1
 }
 
-omp_session_evidence_owner_path() {
-  local state=$1 id=$2
-  printf '%s/%s.omp-session-evidence.owner\n' "$state" "$id"
-}
-
-omp_session_evidence_owner_matches() {
-  local state=$1 id=$2 owner expected actual
-  owner=$(omp_session_evidence_owner_path "$state" "$id")
-  [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
-  expected=$(printf 'firstmate-omp-session-evidence-v1\n%s\n%s' "$id" "$state")
-  actual=$(<"$owner") || return 1
-  [ "$actual" = "$expected" ]
-}
-
-clear_omp_session_evidence() {
-  local state=$1 id=$2 evidence_dir owner foreign_entry
-  evidence_dir="$state/$id.omp-session-evidence"
-  owner=$(omp_session_evidence_owner_path "$state" "$id")
-  [ ! -L "$evidence_dir" ] && [ ! -L "$owner" ] || return 1
-  if [ -e "$evidence_dir" ]; then
-    [ -d "$evidence_dir" ] || return 1
-    omp_session_evidence_owner_matches "$state" "$id" || return 1
-    foreign_entry=$(find -P "$evidence_dir" -mindepth 1 ! -type f -print -quit) || return 1
-    [ -z "$foreign_entry" ] || return 1
-    rm -rf -- "$evidence_dir" || return 1
-  fi
-  if [ -e "$owner" ]; then
-    omp_session_evidence_owner_matches "$state" "$id" || return 1
-    rm -f -- "$owner" || return 1
-  fi
-}
-
-claim_omp_session_evidence() {
-  local state=$1 id=$2 owner expected
-  owner=$(omp_session_evidence_owner_path "$state" "$id")
-  if [ -e "$owner" ] || [ -L "$owner" ]; then
-    omp_session_evidence_owner_matches "$state" "$id"
-    return $?
-  fi
-  expected=$(printf 'firstmate-omp-session-evidence-v1\n%s\n%s' "$id" "$state")
-  ( umask 077; set -C; printf '%s\n' "$expected" > "$owner" ) || return 1
-  omp_session_evidence_owner_matches "$state" "$id"
-}
-
 clear_omp_session_marker() {
   local path=$1
   [ ! -L "$path" ] || return 1
@@ -891,7 +849,7 @@ clear_relaunch_harness_wiring() {
     [ -n "$path" ] || continue
     if [ "$path" = "$state/$id.omp-session-evidence" ] \
       || [ "$path" = "$state/$id.omp-session-evidence.owner" ]; then
-      clear_omp_session_evidence "$state" "$id" || return 1
+      fm_omp_session_evidence_clear "$state" "$id" || return 1
     elif [ "$path" = "$state/$id.omp-session-run" ] \
       || [ "$path" = "$state/$id.omp-session-stop" ]; then
       clear_omp_session_marker "$path" || return 1
@@ -1321,7 +1279,7 @@ raw_launch_uses_omp_fallback() {
 }
 
 raw_launch_needs_policy_runtime() {
-  local launch=$1 word first= canonical
+  local launch=$1 word first= canonical token i n
   for word in $launch; do
     case "$word" in
       [A-Za-z_]*=*) continue ;;
@@ -1332,20 +1290,54 @@ raw_launch_needs_policy_runtime() {
     omp) return 0 ;;
   esac
   canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
-  case "$first" in
-    env|*/env|nice|*/nice|time|*/time|setsid|*/setsid|bash|*/bash|sh|*/sh|zsh|*/zsh|cd|*/cd|source|.)
-      case "$launch" in
-        *"$canonical"*|*start-omp.sh*|*" omp "*|*" ./omp "*) return 0 ;;
-      esac
+  local -a words=()
+  read -r -a words <<< "$launch"
+  n=${#words[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    token=${words[$i]}
+    case "$token" in
+      '&&'|';'|'|') i=$((i + 1)); continue ;;
+      env|*/env)
+        i=$((i + 1))
+        while [ "$i" -lt "$n" ]; do
+          token=${words[$i]}
+          case "$token" in
+            [A-Za-z_]*=*) i=$((i + 1)) ;;
+            -S|--split-string|--split-string=*) return 0 ;;
+            -C|--chdir|-u|--unset)
+              i=$((i + 2))
+              ;;
+            --) i=$((i + 1)); break ;;
+            --ignore-environment|--null|--debug) i=$((i + 1)) ;;
+            -*) return 1 ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      nice|*/nice|time|*/time|setsid|*/setsid)
+        i=$((i + 1))
+        while [ "$i" -lt "$n" ]; do
+          token=${words[$i]}
+          case "$token" in
+            -n|-p|-f|--format|--adjustment) i=$((i + 2)) ;;
+            -*) i=$((i + 1)) ;;
+            *) break ;;
+          esac
+        done
+        continue
       ;;
-  esac
-  case "$launch" in
-    *" && "*)
-      case "$launch" in
-        *"$canonical"*|*start-omp.sh*|*" omp "*|*" ./omp "*) return 0 ;;
+    esac
+    case "$token" in
+      "$canonical"|omp|./omp|start-omp.sh) return 0 ;;
+    esac
+    while [ "$i" -lt "$n" ]; do
+      case "${words[$i]}" in
+        '&&'|';'|'|') break ;;
+        *) i=$((i + 1)) ;;
       esac
-      ;;
-  esac
+    done
+  done
   return 1
 }
 
@@ -2503,11 +2495,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$HARNESS" = omp ] && [ "$RAW_LAUNCH" -eq 0 ]; then
-  clear_omp_session_evidence "$STATE_REAL" "$ID" || {
+  fm_omp_session_evidence_clear "$STATE_REAL" "$ID" || {
     echo "error: refusing to replace unverified OMP session evidence for $ID" >&2
     exit 1
   }
-  claim_omp_session_evidence "$STATE_REAL" "$ID" || {
+  fm_omp_session_evidence_claim "$STATE_REAL" "$ID" || {
     echo "error: failed to claim OMP session evidence for $ID" >&2
     exit 1
   }
@@ -3011,6 +3003,18 @@ const persistedRuns = () => {
     return blocked();
   }
 };
+const applyPersistedState = (persisted: any) => {
+  for (const record of persisted.materialize) writeRunEvidence(record);
+  if (persisted.pointerMissing) atomicWrite(SESSION_RUN, persisted.token + "\n");
+  if (persisted.finalizing.length > 0) atomicWrite(SESSION_STOP, persisted.token + "\n");
+  else if (persisted.stopMissing) atomicWrite(SESSION_STOP, "pending\n");
+  if (persisted.needsBusy) {
+    execFileSync("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", "busy", "--gen", "$BUSY_GEN",
+      "--run-token", persisted.token, "--source", "omp-ext", "--event", "recover-busy",
+    ], { stdio: "ignore" });
+  }
+};
 const adoptCurrentRun = () => {
   if (!generationIsCurrent()) {
     runToken = "";
@@ -3031,7 +3035,25 @@ const adoptCurrentRun = () => {
     runToken = "";
     return "";
   }
-  if (runToken) return runToken;
+  if (runToken) {
+    if (!runRecords.some((record) => record.active && record.token === runToken)) return runToken;
+    const persisted = persistedRuns();
+    if (!persisted || "blocked" in persisted || persisted.token !== runToken ||
+        persisted.finalizing.length > 0 ||
+        !persisted.pending.some((record: any) => record.token === runToken)) {
+      recoveryBlocked = true;
+      runToken = "";
+      return "";
+    }
+    try {
+      applyPersistedState(persisted);
+    } catch {
+      recoveryBlocked = true;
+      runToken = "";
+      return "";
+    }
+    return runToken;
+  }
   const persisted = persistedRuns();
   if (!persisted) return "";
   if ("blocked" in persisted) {
@@ -3040,16 +3062,7 @@ const adoptCurrentRun = () => {
     return "";
   }
   try {
-    for (const record of persisted.materialize) writeRunEvidence(record);
-    if (persisted.pointerMissing) atomicWrite(SESSION_RUN, persisted.token + "\n");
-    if (persisted.finalizing.length > 0) atomicWrite(SESSION_STOP, persisted.token + "\n");
-    else if (persisted.stopMissing) atomicWrite(SESSION_STOP, "pending\n");
-    if (persisted.needsBusy) {
-      execFileSync("$FM_ROOT/bin/fm-busy-event.sh", [
-        "apply", "$STATE_REAL", "$ID", "busy", "--gen", "$BUSY_GEN",
-        "--run-token", persisted.token, "--source", "omp-ext", "--event", "recover-busy",
-      ], { stdio: "ignore" });
-    }
+    applyPersistedState(persisted);
   } catch {
     recoveryBlocked = true;
     return "";

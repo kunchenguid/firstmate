@@ -150,6 +150,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-omp-state-lib.sh
+. "$SCRIPT_DIR/fm-omp-state-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -445,9 +447,17 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+TASK_HARNESS=$(fm_meta_get "$META" harness)
+TASK_RAW_LAUNCH=$(fm_meta_get "$META" raw_launch)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
+fi
+if [ "$TASK_HARNESS" = omp ] && [ "$TASK_RAW_LAUNCH" != 1 ]; then
+  fm_omp_session_evidence_validate "$STATE" "$ID" || {
+    echo "error: refusing teardown with unverified OMP session evidence for $ID" >&2
+    exit 1
+  }
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
@@ -2174,7 +2184,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_harness child_raw_launch
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2183,7 +2193,15 @@ cleanup_firstmate_home_children() {
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
+    child_harness=$(meta_value "$child_meta" harness)
+    child_raw_launch=$(meta_value "$child_meta" raw_launch)
     [ -n "$child_kind" ] || child_kind=ship
+    if [ "$child_harness" = omp ] && [ "$child_raw_launch" != 1 ]; then
+      fm_omp_session_evidence_validate "$sub_state" "$child_id" || {
+        echo "error: refusing teardown with unverified OMP session evidence for child $child_id" >&2
+        return 1
+      }
+    fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
@@ -2215,6 +2233,12 @@ cleanup_firstmate_home_children() {
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
+    fi
+    if [ "$child_harness" = omp ] && [ "$child_raw_launch" != 1 ]; then
+      fm_omp_session_evidence_clear "$sub_state" "$child_id" || {
+        echo "error: refusing to remove unverified OMP session evidence for child $child_id" >&2
+        return 1
+      }
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
@@ -2263,11 +2287,9 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.omp-session-run" \
       "$sub_state/$child_id.omp-session-stop" \
-      "$sub_state/$child_id.omp-session-evidence.owner" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
-    rm -rf "$sub_state/$child_id.omp-session-evidence"
   done
 }
 
@@ -2529,6 +2551,12 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+if [ "$TASK_HARNESS" = omp ] && [ "$TASK_RAW_LAUNCH" != 1 ]; then
+  fm_omp_session_evidence_clear "$STATE" "$ID" || {
+    echo "error: refusing to remove unverified OMP session evidence for $ID" >&2
+    exit 1
+  }
+fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
@@ -2547,12 +2575,10 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.omp-session-run" \
   "$STATE/$ID.omp-session-stop" \
-  "$STATE/$ID.omp-session-evidence.owner" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
-rm -rf "$STATE/$ID.omp-session-evidence"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
