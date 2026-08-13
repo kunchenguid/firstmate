@@ -62,7 +62,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture from `data/projects.md` for fleet sync and home seeding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
-| `fm-domain-review-consume.sh` | Delegate exact-head receipt validation to its domain producer and enforce Firstmate's independently resolved repository identity |
+| `fm-domain-review-consume.sh` | Delegate an exact-head domain-review handoff to the selected external consumer and enforce Firstmate's clean exact head and independently resolved repository identity |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and keyed escalation lifecycle |
