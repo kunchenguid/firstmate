@@ -456,6 +456,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+LOCAL_MERGE_TARGET=$(fm_meta_get "$META" local_merge_target)
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -892,8 +893,14 @@ work_is_landed() {
   content_in_default
 }
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path landing_target landing_note
   [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
@@ -903,7 +910,13 @@ backlog_refresh_reminder() {
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          landing_target=$LOCAL_MERGE_TARGET
+          if [ -n "$landing_target" ] && [ "$landing_target" != main ]; then
+            landing_note=$(shell_quote "local $landing_target")
+            done_cmd="tasks-axi done $ID --note $landing_note"
+          else
+            done_cmd="tasks-axi done $ID --note \"local main\""
+          fi
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
@@ -1163,7 +1176,7 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    landing_target=$(fm_meta_get "$META" local_merge_target)
+    landing_target=$LOCAL_MERGE_TARGET
     if [ -z "$landing_target" ]; then
       landing_target=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
     elif ! git -C "$PROJ" check-ref-format --branch "$landing_target" >/dev/null 2>&1; then

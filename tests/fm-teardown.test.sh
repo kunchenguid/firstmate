@@ -636,6 +636,7 @@ test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
   write_meta "$case_dir" local-only ship
+  add_compatible_tasks_axi "$case_dir"
   wt_commit "$case_dir" "merged work"
   # Fast-forward the project's main to the worktree's HEAD commit so HEAD is
   # reachable from main. update-ref works whether or not main is checked out,
@@ -651,6 +652,8 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
+  assert_grep 'tasks-axi done task-x1 --note "local main"' "$case_dir/stdout" \
+    "merged-main: completion reminder did not preserve the default target note"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
@@ -663,6 +666,7 @@ test_local_only_merged_to_recorded_target_allows() {
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/integration "$wt_head"
   printf '%s\n' 'local_merge_target=integration' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -672,6 +676,8 @@ test_local_only_merged_to_recorded_target_allows() {
   expect_code 0 "$rc" "merged-recorded-target: teardown should accept the recorded integration target"
   ! grep -q REFUSED "$case_dir/stderr" \
     || fail "merged-recorded-target: teardown printed a REFUSED line"
+  assert_grep "tasks-axi done task-x1 --note 'local integration'" "$case_dir/stdout" \
+    "merged-recorded-target: completion reminder lost the recorded integration target"
   pass "local-only worktree merged into its recorded integration target is torn down"
 }
 
