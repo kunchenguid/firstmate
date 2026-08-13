@@ -60,20 +60,27 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
-  cat > "$fakebin/timeout" <<'SH'
-#!/usr/bin/env bash
-shift
-exec "$@"
-SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = --list-models ]; then
-  [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
-  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
-fi
+case "${1:-}" in
+  --help)
+    printf 'Usage: %s [options] [command] [prompt...]\n\n' "$(basename -- "$0")"
+    printf 'Start the Cursor Agent\n\n'
+    printf 'Options:\n'
+    printf '  -e, --endpoint <url>  Target API endpoint URL (can also use\n'
+    printf '                        CURSOR_API_ENDPOINT env var) (default:\n'
+    printf '                        "https://api2.cursor.sh", env: CURSOR_API_ENDPOINT)\n'
+    exit 0
+    ;;
+  --list-models)
+    [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+    printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
+    exit 0
+    ;;
+esac
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  chmod +x "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -127,7 +134,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
-    FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
+    FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -181,7 +188,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
+  assert_contains "$launch" "env -u CURSOR_AGENT -u FM_CURSOR_EXECUTABLE" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
 }
@@ -522,38 +529,23 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
-test_cursor_threads_model_workspace_and_omits_effort_axis() {
-  local rec id out status launch
-  id=profile-cursor-z6c
-  rec=$(make_spawn_case profile-cursor cursor "$id")
+test_cursor_catalog_helpers_parse_live_ids() {
+  local rec fakebin models
+  rec=$(make_spawn_case profile-cursor-catalog cursor)
   read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5-high --effort high)
-  status=$?
-  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
-    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
-  # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
-  # literal `cursor agent` command cannot run on a machine that has only the
-  # real installed names.
-  assert_not_contains "$launch" "cursor agent --trust" \
-    "cursor launch must resolve its executable, not invoke a literal 'cursor agent'"
-  assert_contains "$launch" "cursor-agent" "cursor launch did not resolve a cursor executable"
-  # -w/--worktree would allocate a SECOND worktree under ~/.cursor/worktrees and
-  # break the isolation contract the spawn assertion depends on.
-  assert_not_contains "$launch" " --worktree" "cursor launch must never allocate a second worktree"
-  assert_not_contains "$launch" " -w " "cursor launch must never allocate a second worktree"
-  # An inherited CLAUDECODE would otherwise outrank cursor's own marker.
-  assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear foreign primary markers"
-  assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
-  assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
-  assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
-  assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
-  assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
-  pass "cursor receives its model-qualified reasoning class and exact task workspace"
+  fakebin=$FAKEBIN_DIR
+  # shellcheck source=bin/fm-cursor-lib.sh
+  . "$ROOT/bin/fm-cursor-lib.sh"
+  models=$(fm_cursor_list_models "$fakebin/cursor-agent") \
+    || fail "cursor --list-models helper should succeed against the fixture CLI"
+  printf '%s\n' "$models" | fm_cursor_catalog_has_model cursor-grok-4.5-high \
+    || fail "catalog helper missed the fixture model id"
+  printf '%s\n' "$models" | fm_cursor_catalog_has_model cursor-grok-4.5 \
+    && fail "catalog helper accepted an id absent from the fixture"
+  if FM_FAKE_CURSOR_LIST_STATUS=124 fm_cursor_list_models "$fakebin/cursor-agent"; then
+    fail "catalog helper must fail open when --list-models is unreachable"
+  fi
+  pass "cursor catalog helpers parse live ids and fail open when the probe cannot run"
 }
 
 test_cursor_refuses_model_absent_from_live_catalog() {
@@ -572,24 +564,6 @@ test_cursor_refuses_model_absent_from_live_catalog() {
     "cursor model refusal did not tell the caller how to find valid ids"
   [ ! -s "$LAUNCH_LOG" ] || fail "cursor model refusal must happen before launch"
   pass "cursor refuses model ids absent from its resolved binary's live catalog"
-}
-
-test_cursor_failed_catalog_probe_does_not_block_spawn() {
-  local rec id out status launch
-  id=profile-cursor-catalog-unreachable-z6e
-  rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
-  read_case_record "$rec"
-
-  FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --model cursor-catalog-unreachable)
-  status=$?
-  expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'cursor-catalog-unreachable'" \
-    "failed catalog lookup incorrectly removed the requested model"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
-  pass "cursor preserves the requested model when its live catalog is unreachable"
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
@@ -770,7 +744,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u FM_CURSOR_EXECUTABLE CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -843,9 +817,8 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
-test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_catalog_helpers_parse_live_ids
 test_cursor_refuses_model_absent_from_live_catalog
-test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi

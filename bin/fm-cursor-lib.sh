@@ -125,6 +125,28 @@ fm_cursor_resolve_binary() {
   return 1
 }
 
+fm_cursor_list_models() {  # <path>
+  fm_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$1" --list-models
+}
+
+fm_cursor_catalog_has_model() {  # <model>
+  local wanted=$1
+  awk -v wanted="$wanted" '
+    BEGIN { ansi = sprintf("%c\\[[0-9;]*[A-Za-z]", 27) }
+    {
+      line = $0
+      gsub(ansi, "", line)
+      separator = index(line, " - ")
+      if (!separator) next
+      id = substr(line, 1, separator - 1)
+      sub(/^[[:space:]]+/, "", id)
+      sub(/[[:space:]]+$/, "", id)
+      if (id == wanted) found = 1
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
 # Read one argv element without flattening it into a whitespace-delimited command line.
 fm_cursor_ps_arg_at() {  # <args> <index>
   local args=$1 wanted=$2 token='' ch quote='' escaped=0 started=0 index=0 i

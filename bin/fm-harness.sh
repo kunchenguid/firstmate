@@ -45,9 +45,11 @@ detect_own() {
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
   # cursor-agent sets CURSOR_AGENT=1, and it is ordered BEFORE CLAUDECODE because
   # a cursor worker launched from a claude firstmate inherits CLAUDECODE=1 from its
-  # parent. The ordering alone is belt-and-braces: the launch template also unsets
+  # parent. CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself.
+  # The ordering alone is belt-and-braces: the launch template also unsets
   # CLAUDECODE/CLAUDE_CODE_ENTRYPOINT (see fm-spawn.sh), so cursor never sees them.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
+  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi

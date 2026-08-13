@@ -253,8 +253,8 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   [ "$stripped" = P ] \
     || fail "cursor's reverse-video remnant must survive ghost stripping as 'P', got '$stripped'"
 
-  assert_screen "cursor idle on herdr" empty "$CAPS_STYLED" "$screen"
-  assert_screen "cursor idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  FM_COMPOSER_HARNESS=cursor assert_screen "cursor idle on herdr" empty "$CAPS_STYLED" "$screen"
+  FM_COMPOSER_HARNESS=cursor assert_screen "cursor idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
   # An UNSTYLED capture carries no ghost-strip proof, so a bare row matching a
   # placeholder is indistinguishable from typed text and must stay unknown -
   # the same degradation every other bare-row placeholder already takes.
@@ -266,7 +266,7 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   local typed typed_plain
   typed="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244mAdd a follow-up${ESC}[0m"
   typed_plain=$'transcript\n\n  → Add a follow-up'
-  assert_screen "cursor typed placeholder text stays pending" pending \
+  FM_COMPOSER_HARNESS=cursor assert_screen "cursor typed placeholder text stays pending" pending \
     "$CAPS_STYLED" $'transcript\n\n'"$typed"
   # Without styling there is no proof either way, so it must not read empty.
   out=$(fm_composer_classify_screen "$CAPS_PLAIN" "$typed_plain")
@@ -293,7 +293,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
   ESC_LOCAL=$(printf '\033')
   screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  out=$(FM_COMPOSER_HARNESS=cursor fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
   [ "$out" = empty ] \
     || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
   pass "matrix: herdr half-block rules bound a bare composer's wrap region"

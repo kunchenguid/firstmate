@@ -442,25 +442,25 @@ test_mainthread_only_matches_narrowed_cursor_identity() {
   printf 'abc123\n' > "$state_dir/$task_id.cursor-launch-token"
   : > "$state_dir/$task_id.meta"
   printf 'abc123\t%s\n' "$trusted_cursor" > "$identity_file"
-  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
+  out=$(CURSOR_AGENT='' CURSOR_INVOKED_AS='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/claude --foo' \
     PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
   [ "$out" = unknown ] \
     || fail "unverified MainThread with Claude-like args detected as '$out'"
-  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
+  out=$(CURSOR_AGENT='' CURSOR_INVOKED_AS='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/codex --foo' \
     PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
   [ "$out" = unknown ] \
     || fail "unverified MainThread with Codex-like args detected as '$out'"
-  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
+  out=$(CURSOR_AGENT='' CURSOR_INVOKED_AS='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=node \
     FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /opt/cursor-agent/versions/current/cursor-agent --force' \
     FM_PROC_ROOT_OVERRIDE="$proc_root" PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
   [ "$out" = unknown ] \
     || fail "Cursor install path in node script args was treated as '$out'"
-  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
+  out=$(CURSOR_AGENT='' CURSOR_INVOKED_AS='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=MainThread \
     HOME="$trusted_home" FM_FAKE_CURSOR_AGENT_ARGS="$trusted_cursor --force" \
     FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_CURSOR_PROC_ROOT="$proc_root" \

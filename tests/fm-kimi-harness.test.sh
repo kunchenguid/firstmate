@@ -390,6 +390,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   rm "$target"
   fakebin=$(fm_fakebin "$CASE_DIR/no-jq")
   ln -s "$(command -v bash)" "$fakebin/bash"
+  ln -s "$(command -v id)" "$fakebin/id"
   out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
     | HOME="$HOME_DIR" PATH="$fakebin" "$hook" 2>&1)
   rc=$?
@@ -530,7 +531,7 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
-  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
   out=$(env -u CURSOR_AGENT CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")

@@ -34,6 +34,11 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Isolate harness detection from the invoking agent session. Cursor exports
+# CURSOR_AGENT=1 and CURSOR_INVOKED_AS=cursor-agent to child processes; tests
+# that need those markers set them explicitly.
+unset CURSOR_AGENT CURSOR_INVOKED_AS
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -192,6 +197,11 @@ case "${1:-}" in
     printf '                        "https://api2.cursor.sh", env: CURSOR_API_ENDPOINT)\n'
     exit 0
     ;;
+  --list-models)
+    [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+    printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\nsonnet - Sonnet\ncursor-grok-4.5-high - Grok 4.5 High}"
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -215,6 +225,11 @@ case "${1:-}" in
     printf '  -e, --endpoint <url>  Target API endpoint URL (can also use\n'
     printf '                        CURSOR_API_ENDPOINT env var) (default:\n'
     printf '                        "https://api2.cursor.sh", env: CURSOR_API_ENDPOINT)\n'
+    exit 0
+    ;;
+  --list-models)
+    [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+    printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\nsonnet - Sonnet\ncursor-grok-4.5-high - Grok 4.5 High}"
     exit 0
     ;;
 esac
