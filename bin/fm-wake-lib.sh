@@ -1254,7 +1254,10 @@ EOF
     fi
     if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
     if ! fm_wake_unread_events "$path" 0 "$offset" "$endpoint"; then
-      [ -z "$snapshot" ] || return 1
+      # Annotation enrichment is supplemental to the already-printed durable
+      # wake rows. A file that disappears, rotates, or becomes unreadable after
+      # the snapshot must not suppress annotations for other status files; the
+      # presentation commit will reject a changed snapshot identity.
       continue
     fi
     last_event=$FM_WAKE_EVENT_LINE

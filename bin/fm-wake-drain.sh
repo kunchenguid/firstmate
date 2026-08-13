@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, surface unread informational status
-# lines and OPEN DECISIONS, then assert liveness.
+# annotate every unread line for validated signal status keys, surface unread
+# informational status lines and OPEN DECISIONS, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -118,8 +118,9 @@ EOF
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
 # missed. Informational `note:` lines and pending-reply resolutions are not
-# decisions; print_unread_status_section owns their one-shot surface. Runs on every drain - including the empty-queue fast path
-# - because the decision can still be open even when nothing new is queued for
+# decisions; print_unread_status_section owns their one-shot surface. Runs on
+# every drain - including the empty-queue fast path - because the decision can
+# still be open even when nothing new is queued for
 # its task this turn. The incremental wrapper bounds this scan's cost to bytes
 # appended to each task's status log since the LAST drain, not that log's whole
 # lifetime, while still never dropping an old buried decision (see

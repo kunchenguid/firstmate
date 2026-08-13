@@ -617,7 +617,7 @@ status_presentation_snapshot() {  # <state>
   local state=$1 f task size ident
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
-    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     size=$(_fm_status_file_size "$f") || return 1
     size=${size//[[:space:]]/}
@@ -721,9 +721,17 @@ $fully_presented
       f="$state/$task.status"
       offset=$(status_presentation_cursor_offset "$f") || return 1
       lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
-      safe=true
+      # Once any informational line in this span is presented fleet-wide, the
+      # contiguous cursor may advance through the captured endpoint. Routine
+      # lines remain unacknowledged only while they are the sole unread content,
+      # preserving delayed signal annotations without replaying a handled note
+      # that happened to follow a routine line.
       while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in *[![:space:]]*) status_line_is_unread_surface "$line" || { safe=false; break; } ;; esac
+        case "$line" in
+          *[![:space:]]*)
+            if status_line_is_unread_surface "$line"; then safe=true; break; fi
+            ;;
+        esac
       done <<EOF
 $lines
 EOF
@@ -777,7 +785,7 @@ $snapshot
 EOF
 }
 
-# --- unread status lines since the open-decisions cursor --------------------
+# --- unread status lines since the presentation cursor ----------------------
 #
 # The drain annotation historically printed only the newest status line, so a
 # substantive `note:` answer immediately followed by a routine `note:` (or a
@@ -785,25 +793,23 @@ EOF
 # the supervisor. Those verbs also never enter the OPEN DECISIONS fold, so they
 # had no other surfacing path.
 # These helpers are the ONE owner of "what is still unread since the last drain
-# presentation": one fleet manifest records each status identity and last-ack
-# byte offset, and one atomic replacement commits only the contiguous status
-# spans that were successfully presented. A quiet fleet scan leaves routine
-# working/done bytes unacknowledged so a subsequently published signal can
-# still annotate them. Missing or invalid cursor state is offset 0 (every current line is
-# unread): fail toward showing more rather than dropping a line that was never
-# presented. That fail-open rule may rarely replay a handled line after an I/O
-# failure or concurrent replacement, but never acknowledges uncertain bytes.
-# A trusted cursor at EOF prints nothing: already-presented bytes are not
-# replayed as new. Teardown retires a task's manifest row with its status file,
-# so reusing a task ID starts the replacement log unread at byte 0.
-# Informational `note:` lines and reserved-key pending-reply resolutions are
-# the fleet-wide unread surface; they are not open decisions and are not
-# persisted in the folded open-set.
+# presentation": one fleet manifest records each status identity and last-
+# presented byte offset, and one atomic replacement commits only the contiguous
+# status spans that were successfully presented. A quiet fleet scan leaves
+# routine working/done bytes unacknowledged so a subsequently published signal
+# can still annotate them. A missing manifest row or changed file identity is
+# offset 0 for the current file, while malformed or unreadable cursor state
+# aborts presentation without advancing any offset. A trusted cursor at EOF
+# prints nothing, so already-presented bytes are not replayed as new. Teardown
+# retires a task's manifest row with its status file, so reusing a task ID starts
+# the replacement log unread at byte 0. Informational `note:` lines and
+# reserved-key pending-reply resolutions are the fleet-wide unread surface;
+# they are not open decisions and are not persisted in the folded open-set.
 
-# Print the already-presented byte offset for <status-file>, or 0 when the
-# cursor is missing or invalid. Never writes. Invalidation matches the
-# incremental fold: fold-version mismatch, ident mismatch, or offset past
-# current size all fall back to 0.
+# Read the legacy per-task open-decisions cursor used to seed the presentation
+# offset before the fleet manifest exists. A fold-version mismatch, identity
+# mismatch, or offset past the current size falls back to 0. Never writes unless
+# a caller explicitly requests a migration snapshot.
 status_open_decisions_cursor_offset() {  # <status-file>
   local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
   local offset_line ident_line cur_ident size
@@ -869,8 +875,10 @@ status_open_decisions_cursor_offset() {  # <status-file>
 }
 
 # Print every non-blank status line whose bytes begin at or after the persisted
-# cursor offset. Does not write the cursor. A missing or invalid cursor prints
-# the whole current file (offset 0). Symlinks and unreadable files print nothing.
+# presentation offset. Does not write the cursor. A missing manifest row or
+# changed status identity reads the current file from offset 0; malformed or
+# unreadable cursor state fails the scan. Symlinks and unreadable status files
+# print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
