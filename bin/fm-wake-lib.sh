@@ -1130,7 +1130,6 @@ EOF
 }
 
 FM_WAKE_EVENT_LINE=
-FM_WAKE_EVENT_TRUNCATED=false
 FM_WAKE_UNREAD_LINES=
 fm_wake_status_cursor_offset() {  # <validated-status-path> -> already-presented byte offset
   local path=$1 offset
@@ -1148,7 +1147,6 @@ fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min
   local path=$1 min_offset=$3 end_offset=${4:-} result size chunk chunk_start
   local LC_ALL=C
   FM_WAKE_EVENT_LINE=
-  FM_WAKE_EVENT_TRUNCATED=false
   FM_WAKE_UNREAD_LINES=
   case "$min_offset" in ''|*[!0-9]*) min_offset=0 ;; esac
   result=$(perl -MFcntl=:DEFAULT -e '
@@ -1198,7 +1196,7 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # raw queue consumption and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
-  local snapshot_task snapshot_endpoint snapshot_ident offset last_event event_line
+  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
   local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
@@ -1245,7 +1243,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
-      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint snapshot_ident; do
+      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident; do
         if [ "$snapshot_task" = "$task" ]; then endpoint=$snapshot_endpoint; break; fi
       done <<EOF
 $snapshot

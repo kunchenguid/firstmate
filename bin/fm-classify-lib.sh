@@ -880,7 +880,7 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # unreadable cursor state fails the scan. Symlinks and unreadable status files
 # print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line
+  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
@@ -901,11 +901,11 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
     || { rm -f "$chunk_file"; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      *[![:space:]]*) printf '%s\n' "$line" || { rm -f "$chunk_file"; return 1; } ;;
+      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
     esac
   done < "$chunk_file"
   rm -f "$chunk_file"
-  return 0
+  return "$rc"
 }
 
 # 0 when a status line is an informational `note:` or a reserved-key
