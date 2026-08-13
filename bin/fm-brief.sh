@@ -317,6 +317,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   If you use chrome-devtools-axi, set \`CHROME_DEVTOOLS_AXI_SESSION=$ID\` first.
+   A headed session (needed for GPU/WebGL checks - headless Chrome has no GPU) stays open as a real Chrome window until something stops it, so also run \`CHROME_DEVTOOLS_AXI_SESSION=$ID chrome-devtools-axi stop\` yourself once you are done checking; teardown stops that same named session as a backstop, but only because it carries this exact name.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -430,6 +432,8 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   If you use chrome-devtools-axi, set \`CHROME_DEVTOOLS_AXI_SESSION=$ID\` first.
+   A headed session (needed for GPU/WebGL checks - headless Chrome has no GPU) stays open as a real Chrome window until something stops it, so also run \`CHROME_DEVTOOLS_AXI_SESSION=$ID chrome-devtools-axi stop\` yourself once you are done checking; teardown stops that same named session as a backstop, but only because it carries this exact name.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

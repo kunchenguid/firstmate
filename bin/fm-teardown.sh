@@ -133,6 +133,24 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - stop a task-scoped chrome-devtools-axi session. A headed
+#     chrome-devtools-axi session (required for WebGL/GPU manual verification,
+#     since headless Chrome has no GPU) stays running - real Chrome window,
+#     real CPU - until something runs `chrome-devtools-axi stop` with the same
+#     session name; nothing does that automatically (observed 2026-08-12: 34
+#     visible Chrome windows accumulated over ~3h of crewmate validation, one
+#     at 35h CPU). bin/fm-brief.sh tells every crewmate to name its session
+#     after its own task id, so `CHROME_DEVTOOLS_AXI_SESSION=$ID
+#     chrome-devtools-axi stop` deterministically reaches it by construction.
+#     This is the tool's own graceful stop (releases the port and its
+#     ~/.chrome-devtools-axi/sessions/$ID state), not a process kill, and it
+#     is a documented no-op when no such session exists, so it runs
+#     unconditionally rather than only when a session is known to exist. Best
+#     effort: a missing chrome-devtools-axi binary or a stop failure never
+#     blocks this teardown. Fix 2 also reaps a same-cwd chrome-devtools-axi
+#     process tree as an ordinary leaked worktree process, but only when the
+#     browser's cwd still matches the worktree; Fix 4 is authoritative because
+#     it uses the tool's own session registry instead of depending on that.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1512,6 +1530,16 @@ EOF
   return 1
 }
 
+# Fix 4 (see script header): stop the chrome-devtools-axi session named after
+# this task id, if any. bin/fm-brief.sh's convention makes CHROME_DEVTOOLS_AXI_SESSION=$ID
+# the session name every crewmate uses for browser work, so this deterministically
+# reaches it without depending on process cwd or tree shape. `stop` is a documented
+# no-op when no session by that name exists, so this always runs. Best effort only.
+stop_task_chrome_devtools_axi_session() {
+  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  CHROME_DEVTOOLS_AXI_SESSION="$ID" chrome-devtools-axi stop >&2 2>&1 || true
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -2373,15 +2401,16 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
+# them). Fix 1, Fix 2, and Fix 4 (see script header) run here, unconditionally
+# on --force, and before ANY destructive step below - a still-parked run, a
+# leaked process, or a headed browser session can own live work in this exact
+# worktree. Not for kind=secondmate: a secondmate home's own runtime lifecycle
+# is owned by the dedicated process-event and firstmate-home removal machinery
+# further below, not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  stop_task_chrome_devtools_axi_session
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
