@@ -193,8 +193,10 @@ function parseArguments(argumentsList) {
   return { outputPath, width, showAll, section, showRow, watch };
 }
 
-function sectionUsesForge(section) {
-  return section === null || section === "reviewing" || section === "all";
+function sectionForgeMode(section) {
+  if (section === "building") return "none";
+  if (section === "approvals") return "review-requests";
+  return "full";
 }
 
 function skippedForgeState() {
@@ -1014,10 +1016,22 @@ async function fetchGithubStatuses(urls, viewer = null, deadlineMs = null) {
   return { fetchedAtMs: Date.now(), results, error };
 }
 
-async function fetchForgeState(inputs, deadlineMs = null) {
+async function fetchForgeState(inputs, deadlineMs = null, mode = "full") {
   const reviewRequests = inputs.snapshot.backlog?.present === true || inputs.reviews.available
     ? await fetchReviewRequests(deadlineMs)
     : { available: false, fetchedAtMs: Date.now(), viewer: null, items: [], reason: "no fleet sources available" };
+  if (mode === "review-requests") {
+    return {
+      reviewRequests,
+      github: null,
+      quota: {
+        available: false,
+        fetchedAtMs: null,
+        providers: [],
+        reason: "not checked for approvals section",
+      },
+    };
+  }
   const urls = githubPrUrls(inputs, reviewRequests);
   return {
     reviewRequests,
@@ -1026,11 +1040,11 @@ async function fetchForgeState(inputs, deadlineMs = null) {
   };
 }
 
-function fetchForgeStateAsync(inputs) {
+function fetchForgeStateAsync(inputs, mode) {
   return new Promise((resolvePromise, rejectPromise) => {
     const deadlineMs = Date.now() + FORGE_REFRESH_TIMEOUT_MS;
     const worker = new Worker(new URL(import.meta.url), {
-      workerData: { operation: "fetch-forge-state", inputs, deadlineMs },
+      workerData: { operation: "fetch-forge-state", inputs, deadlineMs, mode },
     });
     let settled = false;
     const settle = (callback) => {
@@ -1531,7 +1545,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   }
 
   const localAttention = new Map();
-  for (const item of [...decisions, ...building, ...ours, ...reviewing]) {
+  for (const item of [...decisions, ...ours, ...reviewing]) {
     if (
       item.markerSource === "local" &&
       ["yellow", "red"].includes(item.markerKey) &&
@@ -1539,6 +1553,17 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     ) {
       const identity = `${item.project ?? ""}/${item.id ?? item.name}`;
       if (!localAttention.has(identity)) localAttention.set(identity, item);
+    }
+  }
+  const sectionAttention = new Map(localAttention);
+  for (const item of building) {
+    if (
+      item.markerSource === "local" &&
+      ["yellow", "red"].includes(item.markerKey) &&
+      (item.markerKey === "red" || item.explicitAsk)
+    ) {
+      const identity = `${item.project ?? ""}/${item.id ?? item.name}`;
+      if (!sectionAttention.has(identity)) sectionAttention.set(identity, item);
     }
   }
 
@@ -1559,9 +1584,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     },
     localRecap: {
       available: backlogPresent,
-      needsPedro: [...localAttention.values()].filter((item) => item.markerKey === "yellow"),
-      stuck: [...localAttention.values()].filter((item) => item.markerKey === "red"),
-      obligations: [],
+      needsPedro: [...sectionAttention.values()].filter((item) => item.markerKey === "yellow"),
+      stuck: [...sectionAttention.values()].filter((item) => item.markerKey === "red"),
+      obligations,
     },
     buckets: [
       {
@@ -1772,6 +1797,7 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
       const counts = [
         model.recap.needsPedro.length > 0 ? recapNeedsPedroLabel(model.recap) : null,
         model.recap.stuck.length > 0 ? `${model.recap.stuck.length} stuck` : null,
+        model.recap.obligations.length > 0 ? `${model.recap.obligations.length} review${model.recap.obligations.length === 1 ? "" : "s"} waiting` : null,
       ].filter(Boolean);
       lines.push(`${paint("bold", "ATTENTION NOW")} | ${counts.length > 0 ? counts.join(" | ") : "nothing needs Pedro"}`);
     }
@@ -2558,7 +2584,8 @@ function watchLoop(width, useColor, showAll, section) {
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
 
-  const forgeEnabled = sectionUsesForge(section);
+  const forgeMode = sectionForgeMode(section);
+  const forgeEnabled = forgeMode !== "none";
   const initialForge = forgeEnabled ? { github: null, reviewRequests: null, quota: null } : skippedForgeState();
   let { github, reviewRequests, quota } = initialForge;
   let model = null;
@@ -2612,7 +2639,7 @@ function watchLoop(width, useColor, showAll, section) {
   };
 
   const rebuildModel = (previewOnly = false) => {
-    model = buildModel({ ...inputs, github, reviewRequests, quota, forgeSkipped: !forgeEnabled });
+    model = buildModel({ ...inputs, github, reviewRequests, quota, forgeSkipped: forgeMode !== "full" });
     if (previewOnly) previewNewness(model);
     else applyNewness(model);
     applySectionView(model, section);
@@ -2631,7 +2658,7 @@ function watchLoop(width, useColor, showAll, section) {
     const githubWillBeChecked = inputs.snapshot.backlog?.present === true ||
       inputs.reviews.available ||
       githubPrUrls(inputs).some((url) => /^https:\/\/github\.com\//.test(url));
-    github = githubWillBeChecked
+    github = forgeMode === "full" && githubWillBeChecked
       ? github
         ? { ...github, loading: true }
         : { loading: true, fetchedAtMs: null, results: new Map(), error: null }
@@ -2654,11 +2681,18 @@ function watchLoop(width, useColor, showAll, section) {
             reason: "no fleet sources available",
           };
     }
-    if (quota === null) {
+    if (forgeMode === "full" && quota === null) {
       quota = { available: false, loading: true, fetchedAtMs: null, providers: [], reason: "checking quota…" };
+    } else if (forgeMode !== "full") {
+      quota = {
+        available: false,
+        fetchedAtMs: null,
+        providers: [],
+        reason: "not checked for approvals section",
+      };
     }
     rebuildModel(firstForgeRefresh);
-    fetchForgeStateAsync(inputs).then((forge) => {
+    fetchForgeStateAsync(inputs, forgeMode).then((forge) => {
       ({ github, reviewRequests, quota } = forge);
       forgeRefreshInFlight = false;
       lastForgeRefreshAtMs = Date.now();
@@ -2666,7 +2700,9 @@ function watchLoop(width, useColor, showAll, section) {
       firstForgeRefresh = false;
     }).catch((error) => {
       const fetchedAtMs = Date.now();
-      github = { loading: false, fetchedAtMs, results: new Map(), error: error.message };
+      github = forgeMode === "full"
+        ? { loading: false, fetchedAtMs, results: new Map(), error: error.message }
+        : null;
       reviewRequests = {
         available: false,
         fetchedAtMs,
@@ -2674,7 +2710,9 @@ function watchLoop(width, useColor, showAll, section) {
         items: [],
         reason: error.message,
       };
-      quota = { available: false, fetchedAtMs, providers: [], reason: error.message };
+      quota = forgeMode === "full"
+        ? { available: false, fetchedAtMs, providers: [], reason: error.message }
+        : { available: false, fetchedAtMs: null, providers: [], reason: "not checked for approvals section" };
       forgeRefreshInFlight = false;
       lastForgeRefreshAtMs = fetchedAtMs;
       rebuildModel(false);
@@ -2759,7 +2797,7 @@ if (!isMainThread && workerData?.operation === "fetch-forge-state") {
   try {
     parentPort.postMessage({
       ok: true,
-      value: await fetchForgeState(workerData.inputs, workerData.deadlineMs),
+      value: await fetchForgeState(workerData.inputs, workerData.deadlineMs, workerData.mode),
     });
   } catch (error) {
     parentPort.postMessage({
@@ -2796,9 +2834,9 @@ if (!isMainThread && workerData?.operation === "fetch-forge-state") {
       watchLoop(width, process.env.NO_COLOR ? false : true, showAll, section);
     } else {
       const inputs = await collectLocalInputs();
-      const forgeEnabled = sectionUsesForge(section);
-      const forge = forgeEnabled ? await fetchForgeState(inputs) : skippedForgeState();
-      const model = buildModel({ ...inputs, ...forge, forgeSkipped: !forgeEnabled });
+      const forgeMode = sectionForgeMode(section);
+      const forge = forgeMode === "none" ? skippedForgeState() : await fetchForgeState(inputs, null, forgeMode);
+      const model = buildModel({ ...inputs, ...forge, forgeSkipped: forgeMode !== "full" });
       applyNewness(model);
       applySectionView(model, section);
       if (showRow !== null) {
