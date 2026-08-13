@@ -151,7 +151,19 @@ def account_evidence(values, task, home):
     vendor = "claude" if "claude" in Path(account_home).parts else "codex" if "codex" in Path(account_home).parts else ""
     if not vendor:
         raise AuthorityError("ordinary account authority vendor is ambiguous")
-    script = '. "$1"; root=$(resolve_account_root); vendor_dir=$(real_dir "$root/$2"); valid_account_home "$vendor_dir" "$3"; real_dir "$3"'
+    # The helper's real library API: account_root prints the accounts root,
+    # valid_account_home gates <vendor-dir>/<name> shape, and
+    # fm_account_real_directory is a non-symlink directory predicate.
+    # Positionals are cleared before sourcing so the helper's command dispatch
+    # never sees them.
+    script = (
+        'helper="$1"; vendor="$2"; account="$3"; set --; . "$helper"; '
+        'root=$(account_root) || exit 1; vendor_dir="$root/$vendor"; '
+        'fm_account_real_directory "$vendor_dir" || exit 1; '
+        'valid_account_home "$vendor_dir" "$account" || exit 1; '
+        'fm_account_real_directory "$account" || exit 1; '
+        'cd "$account" && pwd -P'
+    )
     result = subprocess.run(
         ["bash", "-c", script, "_", str(home / "bin" / "fm-account-directory.sh"), vendor, account_home],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,

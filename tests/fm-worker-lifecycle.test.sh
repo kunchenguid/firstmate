@@ -1454,6 +1454,40 @@ PY
   pass "landing authority refreshes and prunes origin before proving reachability"
 }
 
+account_authority_real_helper() {
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-account-authority
+  mkdir -p "$tmp/accounts/claude/3"
+  ln -s "$tmp/accounts/claude/3" "$tmp/accounts/claude/link"
+  FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
+  FM_ACCOUNT_DIRECTORY_ROOT="$tmp/accounts" \
+  python3 - "$AUTHORITY" "$ROOT" "$tmp/accounts/claude/3" "$tmp/accounts/claude/link" <<'PY' || fail "account authority against the real helper failed"
+import importlib.util
+import sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("worker_authority", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+home = Path(sys.argv[2])
+values = {"account_home": [sys.argv[3]], "account_task": ["task-x"]}
+evidence = module.account_evidence(values, "task-x", home)
+assert b"ordinary-account-owner" in evidence
+try:
+    module.account_evidence({"account_home": [sys.argv[3]], "account_task": ["other"]}, "task-x", home)
+except module.AuthorityError as exc:
+    assert "task identity differs" in str(exc)
+else:
+    raise AssertionError("foreign account task was accepted")
+try:
+    module.account_evidence({"account_home": [sys.argv[4]], "account_task": ["task-x"]}, "task-x", home)
+except module.AuthorityError:
+    pass
+else:
+    raise AssertionError("symlinked account home was accepted")
+PY
+  pass "account authority proves the exact home through the real sourceable helper"
+}
+
 restart_idempotency() {
   local tmp provider fixture home
   fm_test_tmproot_into tmp fm-worker-restart
@@ -1521,6 +1555,7 @@ end_to_end_lifecycle
 shared_specialized_cli
 shared_shape_cli
 landing_authority_refresh
+account_authority_real_helper
 restart_idempotency
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

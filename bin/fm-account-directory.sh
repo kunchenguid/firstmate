@@ -1006,27 +1006,32 @@ install_herdr_hook() { # <vendor> <account-home>
   log "Herdr $vendor hook ready at $expected_hook"
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  select)
-    [ "$#" -eq 2 ] || { usage; exit 2; }
-    select_account "$2"
-    ;;
-  install-herdr-hook)
-    [ "$#" -eq 3 ] || { usage; exit 2; }
-    install_herdr_hook "$2" "$3"
-    ;;
-  prepare)
-    [ "$#" -eq 2 ] || { usage; exit 2; }
-    selected_home=$(select_account "$2") || exit 1
-    install_herdr_hook "$2" "$selected_home" || exit 1
-    printf '%s\n' "$selected_home"
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
+# Sourcing consumers (worker authority's account-evidence check) load only the
+# function library; the command dispatch would otherwise read the caller's
+# positional parameters and exit the sourcing shell through usage.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    select)
+      [ "$#" -eq 2 ] || { usage; exit 2; }
+      select_account "$2"
+      ;;
+    install-herdr-hook)
+      [ "$#" -eq 3 ] || { usage; exit 2; }
+      install_herdr_hook "$2" "$3"
+      ;;
+    prepare)
+      [ "$#" -eq 2 ] || { usage; exit 2; }
+      selected_home=$(select_account "$2") || exit 1
+      install_herdr_hook "$2" "$selected_home" || exit 1
+      printf '%s\n' "$selected_home"
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+fi
