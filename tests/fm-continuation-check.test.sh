@@ -66,7 +66,11 @@ run_check() {
 
 run_guard() {
   local dir=$1 fakebin=$2 payload=${3:-'{"stop_hook_active":false,"session_id":"fixture"}'} status
-  [ "$#" -le 3 ] && shift "$#" || shift 3
+  if [ "$#" -le 3 ]; then
+    shift "$#"
+  else
+    shift 3
+  fi
   set +e
   printf '%s' "$payload" | PATH="$fakebin:$PATH" FM_HOME="$dir" \
     "$dir/bin/fm-turnend-guard.sh" "$@" 2>&1
