@@ -290,6 +290,152 @@ test_one_mutable_owner_and_idempotent_resume() {
   pass "exactly one owner mutates a run, takeover needs a quiesced run, and resume is idempotent per generation"
 }
 
+test_concurrent_claims_leave_exactly_one_owner() {
+  local i rc winners=0 owner
+  new_research_run race-case
+  "$RUN" freeze race-case >/dev/null
+
+  # Eight primaries claim the same run at once. Reading the owner, deciding, and
+  # writing it is one compare-and-swap, so exactly one may win. Without the run
+  # lock every contender reads generation 0, every one decides the run is free,
+  # and every one writes: the run ends up with as many "owners" as contenders,
+  # each believing it holds custody.
+  for i in 1 2 3 4 5 6 7 8; do
+    (
+      RC=0
+      FM_RUN_OWNER="racer-$i" "$RUN" claim race-case >/dev/null 2>&1 || RC=$?
+      printf '%s\n' "$RC" > "$TMP_ROOT/race.rc.$i"
+    ) &
+  done
+  wait
+
+  for i in 1 2 3 4 5 6 7 8; do
+    rc=$(cat "$TMP_ROOT/race.rc.$i" 2>/dev/null || echo 1)
+    [ "$rc" = 0 ] && winners=$((winners + 1))
+  done
+  [ "$winners" -eq 1 ] || fail "concurrent claims produced $winners owners, expected exactly 1"
+
+  # The survivor is a real owner, not a half-written record: exactly one identity
+  # is recorded, and it is one of the contenders rather than a torn value.
+  owner=$("$RUN" summary race-case | grep '^owner=' | head -1)
+  case "$owner" in
+    owner=racer-[1-8]) ;;
+    *) fail "the winning claim left no single recorded owner: '$owner'" ;;
+  esac
+
+  # A losing contender must be shut out of the run it did not win.
+  RC=0
+  FM_RUN_OWNER=not-the-winner "$RUN" stop race-case --rule deadline >/dev/null 2>&1 || RC=$?
+  expect_code 3 "$RC" "a losing contender mutating the run it did not win"
+  pass "concurrent claims resolve to exactly one owner"
+}
+
+test_a_symlinked_write_target_is_refused_but_a_read_follows_it() {
+  local out evidence
+  new_research_run leaf-case
+  "$RUN" freeze leaf-case >/dev/null
+  evidence="$HOME_DIR/data/runs/leaf-case/evidence"
+  mkdir -p "$evidence"
+
+  # The final component matters as much as the parents. A symlink NAMED inside
+  # the evidence directory but POINTING outside it would otherwise be judged by
+  # its name and send the write anywhere.
+  #
+  # A write target is refused outright rather than resolved, because resolving
+  # answers the question at check time while the caller writes later: the link
+  # can be repointed in between, so only refusal is race-safe.
+  ln -s "$SOURCES/smuggled.txt" "$evidence/decoy.txt"
+  capture write-check leaf-case "$evidence/decoy.txt"; out=$OUT
+  expect_code 3 "$RC" "writing through a symlinked leaf"
+  assert_contains "$out" 'is a symlink' "a symlinked write target was not refused as one"
+
+  # A dangling link is refused on the same grounds: what it would point at later
+  # is not knowable now.
+  ln -s "$SOURCES/never-created.txt" "$evidence/dangling.txt"
+  capture write-check leaf-case "$evidence/dangling.txt"; out=$OUT
+  expect_code 3 "$RC" "writing through a dangling symlinked leaf"
+
+  # Reads are the opposite case: following a link is ordinary, so the gate judges
+  # the file the read would actually open. A link inside the evidence area that
+  # points into the frozen read roots is allowed on the target's merits.
+  : > "$SOURCES/paper.md"
+  ln -s "$SOURCES/paper.md" "$evidence/paper-link.md"
+  capture read-check leaf-case "$evidence/paper-link.md"; out=$OUT
+  expect_code 0 "$RC" "reading through a symlink into the frozen read roots"
+
+  # And a link whose target lies in another lane is refused on the target, not
+  # excused by the innocent-looking name it was reached through.
+  ln -s "$LANE_COMPANY/secrets.txt" "$evidence/innocent.md"
+  capture read-check leaf-case "$evidence/innocent.md"; out=$OUT
+  expect_code 3 "$RC" "reading a cross-lane target through a symlink"
+  assert_contains "$out" 'belongs to lane test-company' "a symlink laundered a cross-lane read"
+
+  rm -f "$evidence/decoy.txt" "$evidence/dangling.txt" "$evidence/paper-link.md" \
+    "$evidence/innocent.md"
+  pass "a symlinked write target is refused while a read is judged on its real target"
+}
+
+test_stop_records_a_durable_checkpoint() {
+  local out before after
+  new_research_run stopckpt-case
+  "$RUN" freeze stopckpt-case >/dev/null
+  "$RUN" claim stopckpt-case >/dev/null
+  "$RUN" preflight stopckpt-case >/dev/null
+
+  before=$(find "$HOME_DIR/data/runs/stopckpt-case/checkpoints" -name '*.json' 2>/dev/null | grep -c . || true)
+  [ "$before" = 0 ] || fail "the run had checkpoints before it stopped"
+
+  # Stopping IS reaching a durable point. Leaving the checkpoint to a separate
+  # command the operator had to remember made restart safety depend on memory,
+  # so the stop writes one itself and names its index.
+  capture stop stopckpt-case --rule deadline --note "budget reached"; out=$OUT
+  expect_code 0 "$RC" "stopping on a frozen rule"
+  assert_contains "$out" 'checkpoint=1' "stop did not report the checkpoint it wrote"
+
+  after=$(find "$HOME_DIR/data/runs/stopckpt-case/checkpoints" -name '*.json' | grep -c . || true)
+  [ "$after" = 1 ] || fail "stop wrote $after checkpoints, expected exactly 1"
+
+  # The checkpoint must carry why it exists, so a resuming primary can tell a
+  # deadline stop from a no-progress one without re-deriving it.
+  assert_grep 'stop:deadline' "$HOME_DIR/data/runs/stopckpt-case/checkpoints/1.json" \
+    "the stop checkpoint did not record the rule that fired"
+  assert_grep 'budget reached' "$HOME_DIR/data/runs/stopckpt-case/checkpoints/1.json" \
+    "the stop checkpoint did not record the operator's note"
+  pass "stopping a run writes the durable checkpoint its own restart needs"
+}
+
+test_resume_revalidates_every_start_assertion() {
+  local out lanes
+  new_research_run revalidate-case
+  "$RUN" freeze revalidate-case >/dev/null
+  "$RUN" claim revalidate-case >/dev/null
+  "$RUN" preflight revalidate-case >/dev/null
+  "$RUN" stop revalidate-case --rule deadline >/dev/null
+
+  # Time passes while a run is stopped, and the world moves under it: a lane can
+  # be de-registered, a read root can vanish. A gate worth checking before the
+  # first dispatch is worth checking before the next one, so resume re-runs the
+  # whole preflight set instead of trusting that it passed once.
+  lanes="$HOME_DIR/config/run-lanes.conf"
+  cp "$lanes" "$TMP_ROOT/lanes.bak"
+  : > "$lanes"
+  capture resume revalidate-case; out=$OUT
+  expect_code 3 "$RC" "resuming after the lane registration disappeared"
+  assert_contains "$out" 'not registered' "resume did not re-check the lane registration"
+  assert_contains "$out" 'resume-revalidation' "the failure was not attributed to the resume re-check"
+
+  # The refusal is recorded under its own phase, so the receipt log distinguishes
+  # a first-dispatch refusal from one that fired on the way back in.
+  assert_grep 'resume-revalidation' "$HOME_DIR/data/runs/revalidate-case/receipts.jsonl" \
+    "the revalidation refusal left no receipt"
+
+  cp "$TMP_ROOT/lanes.bak" "$lanes"
+  capture resume revalidate-case; out=$OUT
+  expect_code 0 "$RC" "resuming once the assertions hold again"
+  assert_contains "$out" 'revalidated=yes' "a successful resume did not report that it revalidated"
+  pass "resume re-runs every start assertion before re-entering supervision"
+}
+
 test_stale_authority_needs_a_fresh_stamp_before_resume() {
   local out
   "$RUN" new stale-case --mode afk-research --lane test-personal --grant read-only \
@@ -343,7 +489,14 @@ test_receipts_record_both_verdicts_and_prove_no_write() {
 
   capture prove-no-write receipt-case; out=$OUT
   expect_code 0 "$RC" "proving no write for a read-only run"
-  assert_contains "$out" 'no write outside the evidence directory' "prove-no-write did not report cleanly"
+  # The claim must match what the command actually checked: it reads receipts, so
+  # it can only speak for writes that came through the gate.
+  assert_contains "$out" 'no outside write recorded through fm-run gates' \
+    "prove-no-write did not report cleanly"
+  assert_contains "$out" 'a write that never called the write gate leaves no record here' \
+    "prove-no-write did not state the scope of its claim"
+  assert_not_contains "$out" 'no write outside the evidence directory' \
+    "prove-no-write still claims more than a receipt scan can establish"
 
   # A recorded write outside the evidence area breaks the proof, which is what
   # makes the proof worth anything.
@@ -461,16 +614,31 @@ test_check_stop_names_what_it_cannot_judge() {
   local out
   new_research_run checkstop-case
   "$RUN" set checkstop-case budgets.wallSeconds 1 --json
+  # Backdate the run rather than racing the clock. Elapsed time is whole seconds
+  # of `now - createdAt`, so a run created and checked inside the same second is
+  # legitimately at elapsed=0: asserting the deadline fired would then depend on
+  # how long the preceding cases happened to take.
+  "$RUN" set checkstop-case createdAt 2020-01-01T00:00:00Z
   "$RUN" freeze checkstop-case >/dev/null
 
   capture check-stop checkstop-case; out=$OUT
   expect_code 0 "$RC" "checking stop rules"
   assert_contains "$out" 'rule=deadline' "an elapsed wall-clock budget did not fire the deadline rule"
+
   # The clock is the only rule decidable from the run's own record, so the rest
   # must be named rather than silently reported as not firing.
   assert_contains "$out" 'unevaluated=' "check-stop did not name the rules it cannot judge"
   assert_contains "$out" 'reserve-threshold' "the quota reserve rule was not named as unevaluated"
   assert_not_contains "$out" 'unevaluated=none' "every frozen rule was claimed as evaluated"
+
+  # The opposite case must hold too, otherwise "the deadline fired" proves only
+  # that the rule is always on.
+  new_research_run checkstop-live
+  "$RUN" set checkstop-live budgets.wallSeconds 86400 --json
+  "$RUN" freeze checkstop-live >/dev/null
+  capture check-stop checkstop-live; out=$OUT
+  expect_code 0 "$RC" "checking stop rules on a run inside its budget"
+  assert_contains "$out" 'rule=none' "a run inside its wall-clock budget was told to stop"
   pass "check-stop decides the wall-clock budget and names every rule it cannot judge itself"
 }
 
@@ -497,6 +665,10 @@ test_preflight_refuses_an_unproven_or_misdeclared_start
 test_read_only_run_cannot_declare_write_paths
 test_fix_known_writes_only_inside_its_granted_worktree
 test_one_mutable_owner_and_idempotent_resume
+test_concurrent_claims_leave_exactly_one_owner
+test_a_symlinked_write_target_is_refused_but_a_read_follows_it
+test_stop_records_a_durable_checkpoint
+test_resume_revalidates_every_start_assertion
 test_stale_authority_needs_a_fresh_stamp_before_resume
 test_stop_rules_come_from_the_frozen_set
 test_receipts_record_both_verdicts_and_prove_no_write

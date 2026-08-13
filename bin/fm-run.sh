@@ -87,6 +87,20 @@ refuse() {
   exit 3
 }
 
+# Every exit path, including a refusal and a failed assertion, releases whatever
+# this process still holds. A command that dies inside a critical section must
+# not leave the next one waiting on a lock nobody owns.
+trap fm_run_lock_release_all EXIT
+
+# hold_run_lock <run-id>: serialize one run's state-changing commands.
+# Two concurrent claims previously each read generation 0, each decided they
+# could take the run, and each wrote - producing two owners for one run. Reading,
+# deciding, and writing under this lock is what makes the claim a real
+# compare-and-swap instead of three independent writes.
+hold_run_lock() {  # <run-id>
+  fm_run_lock_acquire "$(fm_run_lock_path "$1")"
+}
+
 # --- known vocabularies -----------------------------------------------------
 
 FM_RUN_MODES='afk-research afk-app afk-obsidian-projects afk-session-review afk-jira-research'
@@ -378,6 +392,7 @@ command_set() {
   done
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
+  hold_run_lock "$run_id"
   require_unfrozen "$run_id"
   manifest=$(fm_run_manifest_path "$run_id")
   tmp="$manifest.tmp.$$"
@@ -395,6 +410,7 @@ command_add() {
   [ "$#" -eq 3 ] || { usage >&2; exit 2; }
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
+  hold_run_lock "$run_id"
   require_unfrozen "$run_id"
   manifest=$(fm_run_manifest_path "$run_id")
   tmp="$manifest.tmp.$$"
@@ -410,6 +426,7 @@ command_freeze() {
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
   fm_run_exists "$run_id" || fail "run $run_id does not exist"
+  hold_run_lock "$run_id"
   if fm_run_frozen "$run_id"; then
     fm_run_manifest_verify "$run_id" || exit 1
     printf 'freeze: %s already frozen (%s)\n' "$run_id" "$(cat "$(fm_run_hash_path "$run_id")")"
@@ -502,6 +519,8 @@ command_claim() {
   fm_run_validate_id "$run_id" || exit 1
   fm_run_exists "$run_id" || fail "run $run_id does not exist"
   owner=$(owner_token "$owner")
+  # Read, decide, and write inside the lock: this is the compare-and-swap.
+  hold_run_lock "$run_id"
   recorded=$(fm_run_state_get "$run_id" owner)
   state=$(fm_run_state_get "$run_id" state)
   generation=$(fm_run_state_get "$run_id" generation)
@@ -578,6 +597,7 @@ command_advance() {
   fm_run_exists "$run_id" || fail "run $run_id does not exist"
   fm_run_manifest_verify "$run_id" || exit 1
   owner=$(owner_token "$owner")
+  hold_run_lock "$run_id"
   require_custody "$run_id" "$owner"
   current=$(fm_run_state_get "$run_id" state)
   transition_ok "$current" "$target" || refuse "run $run_id cannot go from $current to $target"
@@ -587,34 +607,35 @@ command_advance() {
 
 # --- preflight --------------------------------------------------------------
 
+# Which pass is asserting: the run's own preflight, or the revalidation a resume
+# performs before it re-enters supervision. Only the wording differs; the
+# assertions are deliberately identical, because a gate worth checking before the
+# first dispatch is worth checking again before the next one.
+FM_RUN_ASSERT_PHASE=preflight
+
 preflight_fail() {  # <run-id> <reason>
-  fm_run_receipt_append "$1" preflight assertion failed "$2"
-  printf 'fm-run: preflight failed: %s\n' "$2" >&2
+  fm_run_receipt_append "$1" "$FM_RUN_ASSERT_PHASE" assertion failed "$2"
+  printf 'fm-run: %s failed: %s\n' "$FM_RUN_ASSERT_PHASE" "$2" >&2
   exit 3
 }
 
-command_preflight() {
-  local run_id=${1:-} owner='' mode submode grant lane lane_class config_root registered_class registered_root
-  local current allowlist denylist protected rules rule entry evidence authorized_at authorized_epoch now
+# The four identity facts run_assertions establishes, published as globals rather
+# than printed. Printing them would force the caller into a command
+# substitution, and a failed assertion's `exit` inside one kills only the
+# subshell: preflight would then report success on a run that failed its checks.
+FM_RUN_FACT_MODE=
+FM_RUN_FACT_SUBMODE=
+FM_RUN_FACT_LANE=
+FM_RUN_FACT_GRANT=
+
+# Every start assertion, with no state change of its own, so both the preflight
+# command and resume's revalidation run exactly the same set.
+run_assertions() {  # <run-id>
+  local run_id=$1
+  local mode submode grant lane lane_class config_root registered_class registered_root
+  local allowlist denylist protected rules rule entry evidence authorized_at authorized_epoch now
   local project_count task_paths read_roots session_lanes surface_proof self_analysis vault_writer
   local cross_lane allowed_paths resolved
-  [ -n "$run_id" ] || { usage >&2; exit 2; }
-  shift
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --owner) shift; owner=${1:-} ;;
-      *) usage >&2; exit 2 ;;
-    esac
-    shift
-  done
-  fm_run_require_jq || exit 1
-  fm_run_validate_id "$run_id" || exit 1
-  fm_run_exists "$run_id" || fail "run $run_id does not exist"
-  fm_run_manifest_verify "$run_id" || exit 1
-  owner=$(owner_token "$owner")
-  require_custody "$run_id" "$owner"
-  current=$(fm_run_state_get "$run_id" state)
-  [ "$current" = intake ] || refuse "preflight runs from intake, not $current"
 
   [ "$(fm_run_manifest_get "$run_id" '.schemaVersion')" = "$FM_RUN_SCHEMA_VERSION" ] \
     || preflight_fail "$run_id" "manifest schemaVersion is not $FM_RUN_SCHEMA_VERSION"
@@ -679,10 +700,15 @@ EOF
 
   evidence=$(fm_run_manifest_get "$run_id" '.writes.evidenceDir')
   [ -n "$evidence" ] || preflight_fail "$run_id" "writes.evidenceDir is absent"
-  mkdir -p "$evidence"
+  # Resolve and validate BEFORE creating anything. Creating first meant a manifest
+  # naming a path through a symlink to somewhere else got the refusal it deserved
+  # and left a directory behind outside the run root anyway: a refusal that still
+  # writes is not a refusal.
   resolved=$(fm_run_resolve_path "$evidence")
   fm_run_path_within "$(fm_run_resolve_path "$(fm_run_root "$run_id")")" "$resolved" \
     || preflight_fail "$run_id" "writes.evidenceDir must live inside the run root: $evidence"
+  mkdir -p "$resolved" \
+    || preflight_fail "$run_id" "could not create the evidence directory: $resolved"
 
   allowed_paths=$(fm_run_manifest_get "$run_id" '.writes.allowedPaths')
   if [ "$grant" = read-only ]; then
@@ -759,9 +785,40 @@ EOF
       || preflight_fail "$run_id" "a company-facing run never enables self-analysis"
   fi
 
-  fm_run_receipt_append "$run_id" preflight assertions passed "mode=$mode submode=$submode lane=$lane grant=$grant"
+  fm_run_receipt_append "$run_id" "$FM_RUN_ASSERT_PHASE" assertions passed \
+    "mode=$mode submode=$submode lane=$lane grant=$grant"
+  FM_RUN_FACT_MODE=$mode
+  FM_RUN_FACT_SUBMODE=$submode
+  FM_RUN_FACT_LANE=$lane
+  FM_RUN_FACT_GRANT=$grant
+}
+
+command_preflight() {
+  local run_id=${1:-} owner='' current
+  [ -n "$run_id" ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --owner) shift; owner=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  fm_run_require_jq || exit 1
+  fm_run_validate_id "$run_id" || exit 1
+  fm_run_exists "$run_id" || fail "run $run_id does not exist"
+  fm_run_manifest_verify "$run_id" || exit 1
+  owner=$(owner_token "$owner")
+  hold_run_lock "$run_id"
+  require_custody "$run_id" "$owner"
+  current=$(fm_run_state_get "$run_id" state)
+  [ "$current" = intake ] || refuse "preflight runs from intake, not $current"
+
+  FM_RUN_ASSERT_PHASE=preflight
+  run_assertions "$run_id"
   set_state "$run_id" preflight "assertions=passed"
-  printf 'preflight: %s passed (mode=%s submode=%s lane=%s grant=%s)\n' "$run_id" "$mode" "$submode" "$lane" "$grant"
+  printf 'preflight: %s passed (mode=%s submode=%s lane=%s grant=%s)\n' \
+    "$run_id" "$FM_RUN_FACT_MODE" "$FM_RUN_FACT_SUBMODE" "$FM_RUN_FACT_LANE" "$FM_RUN_FACT_GRANT"
 }
 
 # --- gates ------------------------------------------------------------------
@@ -823,6 +880,17 @@ command_write_check() {
   gate_manifest_ready "$run_id"
   [ -n "$path" ] || fail "a path is required"
   grant=$(fm_run_manifest_get "$run_id" '.authority.grant')
+
+  # A write target whose final component is a symlink is refused outright rather
+  # than resolved. Resolving it would answer the question about the link's target
+  # at this instant, and the caller writes later: the link can be repointed in
+  # between, so an "allowed" verdict would be a verdict about a path that no
+  # longer exists. Refusing is the race-safe answer, and a write through a
+  # symlink has no legitimate use inside an evidence or worktree area.
+  if fm_run_symlink_leaf "$path"; then
+    fm_run_receipt_append "$run_id" write "$path" refused "symlink-leaf"
+    refuse "$path is a symlink; a write target must be a real path inside this run's write area"
+  fi
   resolved=$(fm_run_resolve_path "$path")
 
   while IFS= read -r pattern; do
@@ -862,6 +930,10 @@ command_read_check() {
   [ "$#" -eq 2 ] || { usage >&2; exit 2; }
   gate_manifest_ready "$run_id"
   [ -n "$path" ] || fail "a path is required"
+  # A read follows its final component rather than refusing it: reading through a
+  # symlink is ordinary, and the resolver now yields the physical target, so the
+  # containment checks below judge the file the read would actually open instead
+  # of the name it was reached by.
   resolved=$(fm_run_resolve_path "$path")
   lane=$(fm_run_manifest_get "$run_id" '.account.lane')
 
@@ -971,8 +1043,13 @@ command_prove_no_write() {
     exit 3
   fi
   refusals=$(jq -r 'select(.verdict == "refused") | .subject' "$file" | grep -c . || true)
-  printf 'prove-no-write: %s no write outside the evidence directory (refusals recorded: %s)\n' \
+  # Say exactly what was proved. This reads the receipt log, so it can only speak
+  # for writes that came through these gates; a process that wrote directly is
+  # invisible here, and claiming "no write outside the evidence directory" implied
+  # a filesystem audit this command never performs.
+  printf 'prove-no-write: %s no outside write recorded through fm-run gates (refusals recorded: %s)\n' \
     "$run_id" "$refusals"
+  printf 'prove-no-write: scope: receipts only; a write that never called the write gate leaves no record here\n'
 }
 
 # --- checkpoints, stop, resume ----------------------------------------------
@@ -993,19 +1070,11 @@ command_checkpoint() {
   gate_manifest_ready "$run_id"
   [ -n "$note" ] || fail "--note is required; a checkpoint records what is durable"
   owner=$(owner_token "$owner")
+  hold_run_lock "$run_id"
   require_custody "$run_id" "$owner"
   current=$(fm_run_state_get "$run_id" state)
-  index=$(fm_run_state_get "$run_id" checkpoints)
-  case "$index" in ''|*[!0-9]*) index=0 ;; esac
-  index=$((index + 1))
-  file="$(fm_run_root "$run_id")/checkpoints/$index.json"
-  mkdir -p "$(dirname "$file")"
-  jq -n --arg at "$(fm_run_now_iso)" --arg state "$current" --arg note "$note" \
-    --arg resumeWhen "$resume_when" --argjson index "$index" \
-    '{index: $index, at: $at, state: $state, note: $note, resumeWhen: $resumeWhen}' > "$file"
-  fm_run_state_set "$run_id" checkpoints "$index"
-  [ -z "$resume_when" ] || fm_run_state_set "$run_id" resume_when "$resume_when"
-  fm_run_receipt_append "$run_id" checkpoint "$index" recorded "$note"
+  index=$(write_checkpoint "$run_id" "$current" "$note" "$resume_when")
+  : "$file"
   if [ "$current" = supervise ]; then
     set_state "$run_id" checkpoint "checkpoint=$index"
     set_state "$run_id" supervise "checkpoint=$index"
@@ -1013,8 +1082,26 @@ command_checkpoint() {
   printf 'checkpoint: %s #%s\n' "$run_id" "$index"
 }
 
+# Write one durable checkpoint and print its index. Callers hold the run lock, so
+# the read-increment-write of the checkpoint counter is atomic.
+write_checkpoint() {  # <run-id> <state> <note> <resume-when>
+  local run_id=$1 state=$2 note=$3 resume_when=$4 index file
+  index=$(fm_run_state_get "$run_id" checkpoints)
+  case "$index" in ''|*[!0-9]*) index=0 ;; esac
+  index=$((index + 1))
+  file="$(fm_run_root "$run_id")/checkpoints/$index.json"
+  mkdir -p "$(dirname "$file")"
+  jq -n --arg at "$(fm_run_now_iso)" --arg state "$state" --arg note "$note" \
+    --arg resumeWhen "$resume_when" --argjson index "$index" \
+    '{index: $index, at: $at, state: $state, note: $note, resumeWhen: $resumeWhen}' > "$file"
+  fm_run_state_set "$run_id" checkpoints "$index"
+  [ -z "$resume_when" ] || fm_run_state_set "$run_id" resume_when "$resume_when"
+  fm_run_receipt_append "$run_id" checkpoint "$index" recorded "$note"
+  printf '%s\n' "$index"
+}
+
 command_stop() {
-  local run_id=${1:-} rule='' note='' resume_when='' owner='' current
+  local run_id=${1:-} rule='' note='' resume_when='' owner='' current index
   [ -n "$run_id" ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1030,15 +1117,20 @@ command_stop() {
   gate_manifest_ready "$run_id"
   [ -n "$rule" ] || fail "--rule is required (one of the manifest's frozen stop.rules)"
   owner=$(owner_token "$owner")
+  hold_run_lock "$run_id"
   require_custody "$run_id" "$owner"
   fm_run_manifest_get "$run_id" '.stop.rules' | grep -Fxq -- "$rule" \
     || refuse "stop rule $rule is not in this run's frozen stop.rules"
   current=$(fm_run_state_get "$run_id" state)
   transition_ok "$current" stop || refuse "run $run_id cannot stop from $current"
   fm_run_state_set "$run_id" stop_rule "$rule"
-  [ -z "$resume_when" ] || fm_run_state_set "$run_id" resume_when "$resume_when"
-  set_state "$run_id" stop "rule=$rule ${note:+note=$note}"
-  printf 'stop: %s rule=%s\n' "$run_id" "$rule"
+  # Stopping means reaching a durable checkpoint, not just recording that a rule
+  # fired. Leaving the checkpoint to a separate command the caller had to remember
+  # made the safety procedure depend on memory; the stop writes it.
+  index=$(write_checkpoint "$run_id" "$current" \
+    "stop:$rule${note:+ - $note}" "$resume_when")
+  set_state "$run_id" stop "rule=$rule checkpoint=$index ${note:+note=$note}"
+  printf 'stop: %s rule=%s checkpoint=%s\n' "$run_id" "$rule" "$index"
 }
 
 command_cancel() {
@@ -1056,6 +1148,7 @@ command_cancel() {
   gate_manifest_ready "$run_id"
   [ -n "$note" ] || fail "--note is required; a cancellation records why"
   owner=$(owner_token "$owner")
+  hold_run_lock "$run_id"
   require_custody "$run_id" "$owner"
   current=$(fm_run_state_get "$run_id" state)
   transition_ok "$current" cancel || refuse "run $run_id cannot cancel from $current"
@@ -1077,6 +1170,7 @@ command_resume() {
   done
   gate_manifest_ready "$run_id"
   owner=$(owner_token "$owner")
+  hold_run_lock "$run_id"
   require_custody "$run_id" "$owner"
   generation=$(fm_run_state_get "$run_id" generation)
   resumed=$(fm_run_state_get "$run_id" resumed_generation)
@@ -1105,18 +1199,30 @@ command_resume() {
   fi
 
   case "$current" in
+    report|stop|cancel|resume|supervise) ;;
+    *) refuse "run $run_id cannot resume from $current" ;;
+  esac
+
+  # Re-run every start assertion before re-entering supervision. Time passed
+  # while the run was stopped: a lane can be de-registered, a config root can
+  # disappear, an evidence directory can be moved onto a symlink. A gate worth
+  # checking before the first dispatch is worth checking before the next one, so
+  # resume revalidates rather than trusting that preflight once passed.
+  FM_RUN_ASSERT_PHASE=resume-revalidation
+  run_assertions "$run_id"
+  FM_RUN_ASSERT_PHASE=preflight
+
+  case "$current" in
     report) set_state "$run_id" resume "generation=$generation" ;;
     stop|cancel)
       set_state "$run_id" report "from=$current"
       set_state "$run_id" resume "generation=$generation"
       ;;
-    resume|supervise) ;;
-    *) refuse "run $run_id cannot resume from $current" ;;
   esac
   [ "$(fm_run_state_get "$run_id" state)" = supervise ] || set_state "$run_id" supervise "resumed=$generation"
   fm_run_state_set "$run_id" resumed_generation "$generation"
-  fm_run_receipt_append "$run_id" lifecycle resume entered "generation=$generation"
-  printf 'resume: %s generation=%s state=supervise\n' "$run_id" "$generation"
+  fm_run_receipt_append "$run_id" lifecycle resume entered "generation=$generation revalidated=yes"
+  printf 'resume: %s generation=%s state=supervise revalidated=yes\n' "$run_id" "$generation"
 }
 
 # Only the wall-clock budget is decidable from the run's own durable record. The
