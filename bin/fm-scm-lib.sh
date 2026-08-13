@@ -13,6 +13,10 @@
 # after an empty one left.
 
 FM_SCM_FS=$'\037'
+FM_SCM_PR_PROVIDER=
+FM_SCM_PR_STATE=
+FM_SCM_PR_HEAD=
+FM_SCM_PR_SOURCE_REF=
 
 fm_scm_github_repo_path_safe() {
   local path=$1 owner repo
@@ -359,6 +363,29 @@ $info
 EOF
   [ -n "$provider" ] && [ -n "$state" ] || return 1
   printf '%s\n' "$state"
+}
+
+# Read a PR/MR once and classify its merge state for every lifecycle caller.
+# Returns 0 for merged, 1 for a known unmerged state, and 2 when provider state
+# cannot be confirmed. The parsed facts remain in FM_SCM_PR_* for callers such
+# as teardown that also need to prove the provider head contains local work.
+fm_scm_pr_merge_status() {
+  local worktree=$1 target=$2 info
+  FM_SCM_PR_PROVIDER=
+  FM_SCM_PR_STATE=
+  FM_SCM_PR_HEAD=
+  FM_SCM_PR_SOURCE_REF=
+  info=$(fm_scm_pr_info "$worktree" "$target") || return 2
+  IFS=$FM_SCM_FS read -r FM_SCM_PR_PROVIDER FM_SCM_PR_STATE \
+    FM_SCM_PR_HEAD FM_SCM_PR_SOURCE_REF <<EOF
+$info
+EOF
+  [ -n "$FM_SCM_PR_PROVIDER" ] && [ -n "$FM_SCM_PR_STATE" ] || return 2
+  case "$FM_SCM_PR_STATE" in
+    MERGED|merged) return 0 ;;
+    OPEN|open|OPENED|opened|CLOSED|closed) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 fm_scm_pr_head() {
