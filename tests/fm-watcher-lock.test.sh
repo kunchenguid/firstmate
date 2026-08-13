@@ -902,14 +902,19 @@ SH
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 
-test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
-  local dir state fakebin armout armpid watcher_pid i status
+test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
+  local dir state fakebin armout recovery_out healthy_out armpid watcher_pid i status
+  local recovery_arm healthy_arm healthy_pid beat_before beat_after token
   dir=$(make_case stopped-watcher)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
+  recovery_out="$dir/recovery.out"
+  healthy_out="$dir/healthy.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=3 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -928,14 +933,76 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
     fail "SIGSTOP watcher with a stale beacon was classified healthy"
   fi
 
-  kill -CONT "$watcher_pid" 2>/dev/null || true
-  kill -TERM "$watcher_pid" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  i=0
+  while [ "$i" -lt 80 ] && is_live_non_zombie "$armpid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$armpid"; then
+    # Pre-fix cleanup: a raw wait on the stopped child held this arm forever.
+    # Continue the watcher before terminating it so this failing regression
+    # never strands a stopped process in the test host.
+    kill -CONT "$watcher_pid" 2>/dev/null || true
+    kill -TERM "$watcher_pid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "arm stayed wedged behind a live watcher whose beacon was stale"
+  fi
+  wait "$armpid"
   status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "terminated stopped-watcher cycle did not surface nonzero (status $status)"
-  grep -Eq 'reason=(nonzero-exit|signal-exit)' "$state/.watch-cycle-exits.log" \
-    || fail "terminated watcher exit was not classified in the lifecycle ledger"
-  pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
+  [ "$status" -ne 0 ] || fail "stale-beacon retirement did not fail the owned arm loudly"
+  grep -F 'watcher: FAILED - watcher pid=' "$armout" >/dev/null \
+    || fail "stale-beacon retirement omitted its typed watcher failure: $(cat "$armout")"
+  grep -F 'stopped advancing its beacon' "$armout" >/dev/null \
+    || fail "stale-beacon retirement did not name the liveness failure: $(cat "$armout")"
+  ! is_live_non_zombie "$watcher_pid" \
+    || fail "stalled watcher remained alive after bounded retirement"
+  [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
+    || fail "stalled watcher retained singleton ownership after retirement"
+  grep -q 'reason=stale-beacon-retired' "$state/.watch-cycle-exits.log" \
+    || fail "stale-beacon retirement was not classified in the lifecycle ledger"
+  token=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$token" in
+    pending:downtime:*) ;;
+    *) fail "stale-beacon retirement did not publish watcher-down recovery state: '$token'" ;;
+  esac
+
+  # A fresh arm in the same primary session must take ownership and surface the
+  # accepted downtime episode. No Pi/Herdr process is involved in this fixture.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=3 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$recovery_out" &
+  recovery_arm=$!
+  wait_for_exit "$recovery_arm" 80
+  status=$?
+  expect_code 0 "$status" "same-session recovery arm must surface accepted watcher downtime"
+  grep -F 'check: rearm-resurface' "$recovery_out" >/dev/null \
+    || fail "same-session recovery arm did not surface the watcher-down episode: $(cat "$recovery_out")"
+  drain_and_ack "$state" || fail "same-session watcher recovery acknowledgement failed"
+
+  # Once the recovery episode is acknowledged, the next healthy cycle stays
+  # live and keeps advancing its real watcher-owned beacon beyond the grace.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=3 FM_ARM_ATTACH_POLL=0.05 FM_POLL=0.1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$healthy_out" &
+  healthy_arm=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$healthy_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  healthy_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$healthy_pid" "$healthy_out" \
+    || fail "healthy recovery cycle did not establish: $(cat "$healthy_out")"
+  beat_before=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_mtime "$2"' _ "$LIB" "$state/.last-watcher-beat")
+  sleep 4
+  beat_after=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_mtime "$2"' _ "$LIB" "$state/.last-watcher-beat")
+  is_live_non_zombie "$healthy_arm" || fail "healthy arm was retired by the stale-beacon watchdog"
+  [ "$beat_after" -gt "$beat_before" ] \
+    || fail "healthy watcher did not advance its beacon ($beat_before -> $beat_after)"
+  kill -HUP "$healthy_arm" 2>/dev/null || true
+  wait "$healthy_arm" 2>/dev/null || true
+  pass "owned arm retires a live stale watcher, releases recovery state, and preserves a healthy successor"
 }
 
 test_pid_identity_is_locale_invariant() {
@@ -1126,4 +1193,4 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
-test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_stopped_watcher_is_retired_and_rearms_without_session_restart
