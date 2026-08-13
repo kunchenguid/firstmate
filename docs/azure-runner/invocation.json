@@ -38,7 +38,9 @@
         "Standard_D4ds_v6",
         "Standard_D4s_v7",
         "Standard_D4ds_v7",
-        "Standard_D4ads_v6"
+        "Standard_D4ads_v6",
+        "Standard_E4as_v7",
+        "Standard_E4as_v6"
       ]
     },
     "ubuntuImageVersion": {

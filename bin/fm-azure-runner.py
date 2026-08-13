@@ -20,6 +20,7 @@ import email.utils
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -58,6 +59,8 @@ MAX_BOOTSTRAP_NETWORK_BYTES = 16 * 1024**3
 MAX_RESULT_UPLOAD_BYTES = 600 * 1024**2
 BOOTSTRAP_RATE_BITS_PER_SECOND = 1_000_000
 MAX_BILLABLE_LIFETIME_HOURS = 24
+STRICT_COST_ADMISSION_MODE = "strict"
+COMMISSIONING_COST_ADMISSION_MODE = "commissioning-bounded"
 TTL_SCHEDULE_HOURS_AFTER_PREPARATION = 23
 AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS = 30 * 60
 SHELLCHECK_ARCHIVE_BYTES = 2_559_196
@@ -130,9 +133,21 @@ SKU_FAMILY = {
     "Standard_D4s_v7": "StandardDsv7Family",
     "Standard_D4ds_v7": "StandardDdsv7Family",
     "Standard_D4ads_v6": "standardDadv6Family",
+    "Standard_E4as_v7": "StandardEasv7Family",
+    "Standard_E4as_v6": "standardEav6Family",
 }
 SKU_VCPUS = {sku: 4 for sku in SKU_FAMILY}
-SKU_MEMORY_GIB = {sku: 16 for sku in SKU_FAMILY}
+SKU_MEMORY_GIB = {sku: (32 if sku.startswith("Standard_E") else 16) for sku in SKU_FAMILY}
+COMMISSIONING_SKU_POOL = (
+    "Standard_D4as_v7",
+    "Standard_D4as_v6",
+    "Standard_D4s_v6",
+    "Standard_D4ads_v7",
+    "Standard_D4ads_v6",
+    "Standard_E4as_v7",
+    "Standard_E4as_v6",
+    "Standard_D4ds_v6",
+)
 
 
 class RunnerError(RuntimeError):
@@ -295,11 +310,21 @@ def environment():
         raise RunnerError("FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID must be the explicitly accepted Azure resourceGuid")
     resource_group = os.environ.get("FM_AZURE_RESOURCE_GROUP", "rg-firstmate-pilot-eastus-001")
     max_concurrency = int(os.environ.get("FM_AZURE_RUNNER_MAX_CONCURRENCY", "4"))
-    if max_concurrency < 1 or max_concurrency > 8:
-        raise RunnerError("FM_AZURE_RUNNER_MAX_CONCURRENCY must be between 1 and 8")
+    if max_concurrency < 1 or max_concurrency > 16:
+        raise RunnerError("FM_AZURE_RUNNER_MAX_CONCURRENCY must be between 1 and 16")
     budget_limit = int(os.environ.get("FM_AZURE_RUNNER_BUDGET_LIMIT_USD", "1000"))
     if budget_limit not in (1000, 1500):
         raise RunnerError("FM_AZURE_RUNNER_BUDGET_LIMIT_USD must be 1000 or 1500")
+    cost_admission_mode = os.environ.get("FM_AZURE_RUNNER_COST_ADMISSION_MODE", STRICT_COST_ADMISSION_MODE)
+    if cost_admission_mode not in {STRICT_COST_ADMISSION_MODE, COMMISSIONING_COST_ADMISSION_MODE}:
+        raise RunnerError("FM_AZURE_RUNNER_COST_ADMISSION_MODE must be strict or commissioning-bounded")
+    cell_ordinal_text = os.environ.get("FM_AZURE_RUNNER_CELL_ORDINAL")
+    try:
+        cell_ordinal = int(cell_ordinal_text) if cell_ordinal_text is not None else None
+    except ValueError:
+        raise RunnerError("FM_AZURE_RUNNER_CELL_ORDINAL must be an integer from 1 through 16")
+    if cell_ordinal is not None and not 1 <= cell_ordinal <= 16:
+        raise RunnerError("FM_AZURE_RUNNER_CELL_ORDINAL must be an integer from 1 through 16")
     home = Path(os.environ["FM_HOME"]).resolve()
     state_dir = Path(os.environ.get("FM_AZURE_RUNNER_STATE_DIR", str(home / "state" / "azure-runner"))).resolve()
     return {
@@ -314,6 +339,8 @@ def environment():
         "resource_group": resource_group,
         "max_concurrency": max_concurrency,
         "budget_limit": budget_limit,
+        "cost_admission_mode": cost_admission_mode,
+        "cell_ordinal": cell_ordinal,
         "home": home,
         "home_binding": "sha256:" + sha256_bytes(str(home).encode("utf-8")),
         "state_dir": state_dir,
@@ -577,6 +604,20 @@ def tree_digest(repo, relative):
     return "sha256:" + digest.hexdigest(), total
 
 
+def runner_sku_for_environment(env):
+    configured_sku = os.environ.get("FM_AZURE_RUNNER_SKU")
+    if env["cost_admission_mode"] == COMMISSIONING_COST_ADMISSION_MODE:
+        if env["cell_ordinal"] is None:
+            raise RunnerError("commissioning-bounded requires FM_AZURE_RUNNER_CELL_ORDINAL from 1 through 16")
+        selected_sku = COMMISSIONING_SKU_POOL[(env["cell_ordinal"] - 1) // 2]
+        if configured_sku is not None and configured_sku != selected_sku:
+            raise RunnerError("FM_AZURE_RUNNER_SKU differs from the deterministic commissioning cell allocation")
+        return selected_sku
+    if env["cell_ordinal"] is not None:
+        raise RunnerError("FM_AZURE_RUNNER_CELL_ORDINAL is accepted only for commissioning-bounded")
+    return configured_sku or "Standard_D4as_v6"
+
+
 def prepare(env, args, parent_state=None):
     repo = Path(args.repo or os.getcwd()).resolve()
     top = Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
@@ -599,7 +640,7 @@ def prepare(env, args, parent_state=None):
     if resource_class not in RESOURCE_CLASSES:
         raise RunnerError("unknown resource class: {}".format(resource_class))
     limits = dict(RESOURCE_CLASSES[resource_class])
-    selected_sku = os.environ.get("FM_AZURE_RUNNER_SKU", "Standard_D4as_v6")
+    selected_sku = runner_sku_for_environment(env)
     if selected_sku not in SKU_FAMILY:
         raise RunnerError("runner SKU is not reviewed")
     limits["sku"] = selected_sku
@@ -660,6 +701,8 @@ def prepare(env, args, parent_state=None):
         "task": task,
         "generation": generation,
         "deployment_generation": env["deployment_generation"],
+        "cost_admission_mode": env["cost_admission_mode"],
+        "cell_ordinal": env["cell_ordinal"],
         "invocation": invocation,
         "attempt": attempt,
         "parent_invocation": parent_state["invocation"] if parent_state else None,
@@ -1059,35 +1102,74 @@ def foundation_gate(env):
         raise RunnerError("foundation blob private-DNS binding is not exact")
 
 
-def sku_quota_gate(env, limits):
-    skus, _, _ = az_command(env, ["vm", "list-skus", "--location", "eastus", "--resource-type", "virtualMachines", "--all"])
-    matching = [item for item in skus if item.get("name") == limits["sku"]]
-    if len(matching) != 1 or matching[0].get("restrictions"):
+def validate_runner_sku_record(item, sku):
+    if item.get("restrictions"):
         raise RunnerError("runner SKU is unavailable or restricted")
-    capabilities = {item.get("name"): item.get("value") for item in matching[0].get("capabilities", [])}
-    if int(capabilities.get("vCPUsAvailable", "0")) < SKU_VCPUS[limits["sku"]] or float(capabilities.get("MemoryGB", "0")) < SKU_MEMORY_GIB[limits["sku"]]:
+    capabilities = {entry.get("name"): entry.get("value") for entry in item.get("capabilities", [])}
+    if int(capabilities.get("vCPUsAvailable", "0")) < SKU_VCPUS[sku] or float(capabilities.get("MemoryGB", "0")) < SKU_MEMORY_GIB[sku]:
         raise RunnerError("runner SKU no longer satisfies the reviewed CPU/memory class")
     if capabilities.get("CpuArchitectureType") != "x64" or "V2" not in capabilities.get("HyperVGenerations", ""):
         raise RunnerError("runner SKU no longer satisfies x64 Gen2")
     if capabilities.get("TrustedLaunchDisabled") == "True" or capabilities.get("EncryptionAtHostSupported") != "True":
         raise RunnerError("runner SKU no longer satisfies Trusted Launch/encryption-at-host")
+
+
+def runner_quota_snapshot(env, selected_skus):
+    selected_skus = tuple(selected_skus)
+    if not selected_skus or any(sku not in SKU_FAMILY for sku in selected_skus):
+        raise RunnerError("runner quota snapshot requested an unreviewed SKU")
+    skus, _, _ = az_command(env, ["vm", "list-skus", "--location", "eastus", "--resource-type", "virtualMachines", "--all"])
+    if not isinstance(skus, list):
+        raise RunnerError("runner SKU inventory is unreadable")
+    for sku in selected_skus:
+        matching = [item for item in skus if item.get("name") == sku]
+        if len(matching) != 1:
+            raise RunnerError("runner SKU is unavailable or ambiguous")
+        validate_runner_sku_record(matching[0], sku)
     usage, _, _ = az_command(env, ["vm", "list-usage", "--location", "eastus"])
-    wanted = ("cores", SKU_FAMILY[limits["sku"]].lower())
-    free = {}
+    if not isinstance(usage, list):
+        raise RunnerError("runner quota usage is unreadable")
+    wanted = {"cores"} | {SKU_FAMILY[sku].lower() for sku in selected_skus}
+    matching_usage = {name: [] for name in wanted}
     for item in usage:
         name = str(item.get("name", {}).get("value", "")).lower()
-        free[name] = int(item.get("limit", 0)) - int(item.get("currentValue", 0))
+        if name in matching_usage:
+            matching_usage[name].append(item)
+    if any(len(entries) != 1 for entries in matching_usage.values()):
+        raise RunnerError("regional or exact runner-family quota identity is unavailable or ambiguous")
+    quota = {}
+    for name, entries in matching_usage.items():
+        limit = int(entries[0].get("limit", 0))
+        current = int(entries[0].get("currentValue", 0))
+        if limit < 0 or current < 0 or current > limit:
+            raise RunnerError("regional or exact runner-family quota values are invalid")
+        quota[name] = {"limit": limit, "current": current, "free": limit - current}
+    return {
+        "regional": quota["cores"],
+        "families": {sku: quota[SKU_FAMILY[sku].lower()] for sku in selected_skus},
+    }
+
+
+def sku_quota_gate(env, limits):
+    snapshot = runner_quota_snapshot(env, (limits["sku"],))
     required = SKU_VCPUS[limits["sku"]]
     current_active = active_runner_vms(env)
     same_family_active = sum(
         1
         for vm in current_active
-        if (vm.get("tags") or {}).get("sku-family") == SKU_FAMILY[limits["sku"]]
+        if str((vm.get("tags") or {}).get("sku-family", "")).lower() == SKU_FAMILY[limits["sku"]].lower()
     )
-    remaining_slots = free.get(wanted[1], 0) // required
-    if free.get("cores", 0) < required or free.get(wanted[1], 0) < required or remaining_slots < 1:
+    regional = snapshot["regional"]
+    family = snapshot["families"][limits["sku"]]
+    if regional["free"] < required or family["free"] < required:
         raise RunnerError("regional or exact runner-family free vCPU quota is insufficient")
-    return {"family_free_vcpus": free.get(wanted[1], 0), "family_active": same_family_active}
+    return {
+        "regional_limit_vcpus": regional["limit"],
+        "regional_free_vcpus": regional["free"],
+        "family_limit_vcpus": family["limit"],
+        "family_free_vcpus": family["free"],
+        "family_active": same_family_active,
+    }
 
 
 def write_private_json(env, prefix, value):
@@ -1297,16 +1379,52 @@ def retail_rate(env, sku):
         "armRegionName%20eq%20%27eastus%27%20and%20armSkuName%20eq%20%27{}%27%20and%20priceType%20eq%20%27Consumption%27"
     ).format(escaped)
     result, _, _ = az_command(env, ["rest", "--method", "get", "--url", url, "--skip-authorization-header"])
-    prices = []
-    for item in result.get("Items", []):
-        product = str(item.get("productName", "")).lower()
-        meter = str(item.get("meterName", "")).lower()
-        if item.get("unitOfMeasure") == "1 Hour" and "windows" not in product and "spot" not in meter:
-            with contextlib.suppress(TypeError, ValueError):
-                prices.append(float(item["retailPrice"]))
+    items = result.get("Items")
+    sku_shape = re.fullmatch(r"Standard_([DE])\d+([a-z]+)_v(\d+)", sku)
+    if not isinstance(items, list) or sku_shape is None:
+        raise RunnerError("current runner retail rate response is unreadable")
+    expected_meter = sku.removeprefix("Standard_").replace("_", " ")
+    expected_product = "Virtual Machines {}{}v{} Series".format(
+        sku_shape.group(1), sku_shape.group(2), sku_shape.group(3)
+    )
+    excluded_offers = ("spot", "low priority", "low-priority", "windows", "dev/test", "dev test", "reservation", "savings")
+    prices = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        offer = " ".join(str(item.get(field, "")) for field in (
+            "productName", "meterName", "skuName", "type", "priceType", "reservationTerm",
+        )).casefold()
+        if any(excluded in offer for excluded in excluded_offers):
+            continue
+        if (
+            str(item.get("armRegionName", "")).casefold() != "eastus"
+            or item.get("armSkuName") != sku
+            or str(item.get("serviceName", "")).casefold() != "virtual machines"
+            or str(item.get("serviceFamily", "")).casefold() != "compute"
+            or str(item.get("type", "")).casefold() != "consumption"
+            or item.get("unitOfMeasure") != "1 Hour"
+            or str(item.get("currencyCode", "")).upper() != "USD"
+            or str(item.get("productName", "")).casefold() != expected_product.casefold()
+            or str(item.get("skuName", "")).casefold() != expected_meter.casefold()
+            or str(item.get("meterName", "")).casefold() != expected_meter.casefold()
+            or item.get("isPrimaryMeterRegion") is not True
+        ):
+            continue
+        try:
+            price = float(item["retailPrice"])
+            unit_price = float(item["unitPrice"])
+            tier_minimum = float(item["tierMinimumUnits"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price <= 0 or price != unit_price or tier_minimum != 0:
+            continue
+        prices.add(price)
     if not prices:
-        raise RunnerError("current runner retail rate is unreadable")
-    return min(prices)
+        raise RunnerError("exact Linux on-demand consumption retail rate is unreadable")
+    if len(prices) != 1:
+        raise RunnerError("exact Linux on-demand consumption retail rate is ambiguous")
+    return prices.pop()
 
 
 def itemized_cost_bound(rate, hours, limits):
@@ -1383,6 +1501,346 @@ def budget_gate(env, limits, outstanding_reservations=0.0):
         "max_increment": maximum_increment,
         "outstanding_reservations": outstanding_reservations,
         "admission_pressure": pressure,
+        "cost_admission_mode": STRICT_COST_ADMISSION_MODE,
+    }
+
+
+def exact_commissioning_budget(env):
+    budget_name = "bud-{}-monthly".format(env["prefix"])
+    budget_id = "/subscriptions/{}/providers/Microsoft.Consumption/budgets/{}".format(
+        env["subscription"], budget_name
+    )
+    budget, _, _ = az_command(env, [
+        "rest", "--method", "get", "--url",
+        "https://management.azure.com{}?api-version=2024-08-01".format(budget_id),
+    ])
+    properties = budget.get("properties", budget)
+    exact_filter = {
+        "dimensions": {
+            "name": "ResourceGroupName", "operator": "In", "values": [env["resource_group"]],
+        }
+    }
+    expected_notifications = {
+        "actual750": (50, "Actual"), "actual1000": (66.67, "Actual"),
+        "actual1250": (83.33, "Actual"), "actual1500": (100, "Actual"),
+        "forecast750": (50, "Forecasted"), "forecast1000": (66.67, "Forecasted"),
+        "forecast1250": (83.33, "Forecasted"), "forecast1500": (100, "Forecasted"),
+    }
+    notifications = {
+        str(name).lower(): value for name, value in (properties.get("notifications") or {}).items()
+    }
+    notifications_exact = set(notifications) == set(expected_notifications)
+    if notifications_exact:
+        for name, (threshold, threshold_type) in expected_notifications.items():
+            value = notifications[name]
+            if (
+                value.get("enabled") is not True
+                or value.get("operator") != "GreaterThanOrEqualTo"
+                or float(value.get("threshold", -1)) != threshold
+                or value.get("thresholdType") != threshold_type
+                or len(value.get("contactEmails") or []) != 1
+            ):
+                notifications_exact = False
+                break
+    if (
+        str(budget.get("id", "")).lower() != budget_id.lower()
+        or budget.get("name") != budget_name
+        or budget.get("type") != "Microsoft.Consumption/budgets"
+        or properties.get("category") != "Cost"
+        or float(properties.get("amount", -1)) != 1500.0
+        or properties.get("timeGrain") != "Monthly"
+        or properties.get("filter") != exact_filter
+        or not notifications_exact
+        or not (budget.get("eTag") or budget.get("etag"))
+    ):
+        raise RunnerError("commissioning budget identity/amount/filter/alerts are not exact")
+    return {"id": budget_id, "etag": budget.get("eTag") or budget.get("etag")}
+
+
+def commissioning_inventory_gate(env, state):
+    resources, _, _ = az_command(env, ["resource", "list", "--resource-group", env["resource_group"]])
+    vault_endpoints = [
+        item for item in resources
+        if str(item.get("type", "")).lower() == "microsoft.network/privateendpoints"
+        and item.get("name") == "pe-{}-vault".format(env["prefix"])
+    ]
+    if len(vault_endpoints) != 1:
+        raise RunnerError("commissioning vault private endpoint inventory is not exact")
+    vault_endpoint, _, _ = az_command(env, [
+        "resource", "show", "--ids", vault_endpoints[0]["id"], "--api-version", "2023-09-01",
+    ])
+    vault_nics = vault_endpoint.get("properties", {}).get("networkInterfaces", [])
+    deployment, _, _ = az_command(env, [
+        "deployment", "sub", "show", "--name", "fm-azure-pilot-{}".format(env["deployment_generation"]),
+    ])
+    parameters = (deployment.get("properties") or {}).get("parameters") or {}
+    key_vault_name = (parameters.get("keyVaultName") or {}).get("value")
+    if len(vault_nics) != 1 or not key_vault_name:
+        raise RunnerError("commissioning generated foundation inventory is ambiguous")
+    vault_nic_name = str(vault_nics[0].get("id", "")).rsplit("/", 1)[-1]
+    expected = {
+        ("microsoft.insights/actiongroups", "ag-{}-ops".format(env["prefix"])),
+        ("microsoft.insights/datacollectionrules", "dcr-{}-linux".format(env["prefix"])),
+        ("microsoft.insights/metricalerts", "alert-{}-storage-availability".format(env["prefix"])),
+        ("microsoft.insights/scheduledqueryrules", "alert-{}-disk-usage".format(env["prefix"])),
+        ("microsoft.insights/scheduledqueryrules", "alert-{}-sync-age".format(env["prefix"])),
+        ("microsoft.keyvault/vaults", key_vault_name),
+        ("microsoft.operationalinsights/workspaces", "log-{}-eus".format(env["prefix"])),
+        ("microsoft.network/natgateways", "nat-{}-eus".format(env["prefix"])),
+        ("microsoft.network/networkinterfaces", env["blob_private_endpoint_nic"]),
+        ("microsoft.network/networkinterfaces", vault_nic_name),
+        ("microsoft.network/privateendpoints", env["blob_private_endpoint"]),
+        ("microsoft.network/privateendpoints", "pe-{}-vault".format(env["prefix"])),
+        ("microsoft.network/publicipaddresses", "pip-{}-nat-eus".format(env["prefix"])),
+        ("microsoft.network/virtualnetworks", env["vnet"]),
+        ("microsoft.network/privatednszones", "privatelink.blob.core.windows.net"),
+        ("microsoft.network/privatednszones", "privatelink.vaultcore.azure.net"),
+        ("microsoft.network/privatednszones/virtualnetworklinks", "privatelink.blob.core.windows.net/firstmate-vnet"),
+        ("microsoft.network/privatednszones/virtualnetworklinks", "privatelink.vaultcore.azure.net/firstmate-vnet"),
+        ("microsoft.storage/storageaccounts", env["storage"]),
+        ("microsoft.storage/storageaccounts", env["control_storage"]),
+    }
+    expected.update(
+        ("microsoft.network/networksecuritygroups", "nsg-{}-{}".format(env["prefix"], suffix))
+        for suffix in ("elastic-isolated", "networkless-verifier", "supervisor", "workers")
+    )
+    expected.update(
+        ("microsoft.managedidentity/userassignedidentities", "id-{}-{}".format(env["prefix"], suffix))
+        for suffix in ("validation", "policy-review", "crosscheck-tools", "validation-shards", "networkless-verifier")
+    )
+    disposable = []
+    reservation_resources = []
+    foundation_resources = []
+    for item in resources:
+        role = (item.get("tags") or {}).get("firstmate-role")
+        if role == "validation-shard":
+            disposable.append(item)
+        elif role == "runner-cost-reservation":
+            reservation_resources.append(item)
+        else:
+            foundation_resources.append(item)
+    actual = {(str(item.get("type", "")).lower(), item.get("name")) for item in foundation_resources}
+    if actual != expected:
+        raise RunnerError("commissioning requires the exact 29-resource foundation and zero foreign resources")
+    ensure_state_dirs(env)
+    for path in sorted(env["state_dir"].glob("azr-*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunnerError("commissioning local queue is unreadable: {}".format(exc))
+        if record.get("invocation") == state["invocation"]:
+            continue
+    for item in disposable:
+        invocation = (item.get("tags") or {}).get("invocation-binding", "")
+        if not SAFE_INVOCATION.match(invocation):
+            raise RunnerError("commissioning disposable resource invocation is malformed")
+        invocation_state = load_state(env, invocation)
+        verify_resource_tags(env, invocation_state, item, "commissioning disposable resource")
+        resource_id = str(item.get("id", "")).lower()
+        planned = invocation_state.get("resources") or {}
+        planned_resources = {
+            str(planned.get("vm_id", "")).lower(): ("vm", "vm"),
+            str(planned.get("nic_id", "")).lower(): ("nic", "nic"),
+            str(planned.get("os_disk_id", "")).lower(): ("disk", "disk"),
+            str(planned.get("ttl_schedule_id", "")).lower(): ("ttl-schedule", "ttl-schedule"),
+            str(planned.get("vm_id", "") + "/runCommands/execute").lower(): ("run-command", "run-command-execute"),
+            str(planned.get("vm_id", "") + "/runCommands/safety-shutdown").lower(): ("run-command", "run-command-safety"),
+        }
+        if resource_id not in planned_resources:
+            raise RunnerError("commissioning disposable resource is outside its exact invocation plan")
+        kind, identity_key = planned_resources[resource_id]
+        exists, exact_resource = verify_live_resource_identity(
+            env, invocation_state, kind, item["id"], identity_key=identity_key
+        )
+        if not exists:
+            raise RunnerError("commissioning disposable resource disappeared during exact revalidation")
+        if kind == "vm":
+            hardware = exact_resource.get("hardwareProfile") or exact_resource.get("properties", {}).get("hardwareProfile", {})
+            if hardware.get("vmSize") != invocation_state["request"]["limits"]["sku"]:
+                raise RunnerError("commissioning retained VM size differs from its exact capacity slot")
+    for item in reservation_resources:
+        tags = item.get("tags") or {}
+        invocation = tags.get("invocation-binding", "")
+        if (
+            not SAFE_INVOCATION.match(invocation)
+            or str(item.get("id", "")).lower() != reservation_id(env, invocation).lower()
+            or tags.get("workload") != "firstmate"
+            or tags.get("deployment-generation") != env["deployment_generation"]
+            or tags.get("cleanup-owner") != env["owner"]
+        ):
+            raise RunnerError("commissioning reservation resource is not exact")
+    return {str(item.get("id", "")).lower() for item in reservation_resources}
+
+
+def commissioning_slot(request):
+    if request.get("cost_admission_mode") != COMMISSIONING_COST_ADMISSION_MODE:
+        raise RunnerError("commissioning capacity contains a non-commissioning invocation")
+    ordinal = request.get("cell_ordinal")
+    limits = request.get("limits") or {}
+    if (
+        not isinstance(ordinal, int)
+        or not 1 <= ordinal <= 16
+        or limits.get("sku") != COMMISSIONING_SKU_POOL[(ordinal - 1) // 2]
+        or limits.get("sku_family") != SKU_FAMILY.get(limits.get("sku"))
+    ):
+        raise RunnerError("commissioning invocation is not bound to its exact reviewed capacity slot")
+    return ordinal, limits["sku"], limits["sku_family"]
+
+
+def commissioning_capacity_gate(env, state, reservations, active):
+    current_ordinal, current_sku, _ = commissioning_slot(state["request"])
+    if current_ordinal > env["max_concurrency"]:
+        raise RunnerError("commissioning cell ordinal exceeds configured concurrency")
+    by_invocation = {}
+    by_ordinal = {}
+    for reservation in reservations:
+        invocation = reservation["invocation-binding"]
+        reservation_state = load_state(env, invocation)
+        ordinal, sku, family = commissioning_slot(reservation_state["request"])
+        if (
+            reservation.get("cell_ordinal") != ordinal
+            or reservation.get("selected-sku") != sku
+            or reservation.get("sku-family") != family
+            or ordinal > env["max_concurrency"]
+        ):
+            raise RunnerError("commissioning reservation differs from its exact state capacity slot")
+        if invocation in by_invocation or ordinal in by_ordinal:
+            raise RunnerError("commissioning reservation duplicates an invocation or capacity slot")
+        by_invocation[invocation] = {"ordinal": ordinal, "sku": sku, "family": family}
+        by_ordinal[ordinal] = invocation
+    current_invocation = state["invocation"]
+    if current_invocation in by_invocation:
+        if by_invocation[current_invocation]["ordinal"] != current_ordinal:
+            raise RunnerError("current commissioning reservation changed capacity slot")
+    else:
+        if current_ordinal in by_ordinal:
+            raise RunnerError("commissioning capacity slot is already reserved")
+        by_invocation[current_invocation] = {
+            "ordinal": current_ordinal,
+            "sku": current_sku,
+            "family": SKU_FAMILY[current_sku],
+        }
+    active_invocations = set()
+    active_by_sku = {sku: 0 for sku in COMMISSIONING_SKU_POOL}
+    for vm in active:
+        tags = vm.get("tags") or {}
+        invocation = tags.get("invocation-binding", "")
+        slot = by_invocation.get(invocation)
+        hardware = vm.get("hardwareProfile") or vm.get("properties", {}).get("hardwareProfile", {})
+        if (
+            slot is None
+            or invocation in active_invocations
+            or tags.get("cell-ordinal") != str(slot["ordinal"])
+            or tags.get("selected-sku") != slot["sku"]
+            or tags.get("sku-family") != slot["family"]
+            or hardware.get("vmSize") != slot["sku"]
+        ):
+            raise RunnerError("commissioning active VM differs from its exact reservation capacity slot")
+        active_invocations.add(invocation)
+        active_by_sku[slot["sku"]] += 1
+    pending_by_sku = {sku: 0 for sku in COMMISSIONING_SKU_POOL}
+    for invocation, slot in by_invocation.items():
+        if invocation not in active_invocations:
+            pending_by_sku[slot["sku"]] += 1
+    snapshot = runner_quota_snapshot(env, COMMISSIONING_SKU_POOL)
+    for sku in COMMISSIONING_SKU_POOL:
+        quota = snapshot["families"][sku]
+        active_vcpus = active_by_sku[sku] * SKU_VCPUS[sku]
+        pending_vcpus = pending_by_sku[sku] * SKU_VCPUS[sku]
+        if max(quota["current"], active_vcpus) + pending_vcpus > quota["limit"]:
+            raise RunnerError("commissioning exact runner-family live quota and reservations are exhausted")
+    regional_active_vcpus = sum(active_by_sku[sku] * SKU_VCPUS[sku] for sku in COMMISSIONING_SKU_POOL)
+    regional_pending_vcpus = sum(pending_by_sku[sku] * SKU_VCPUS[sku] for sku in COMMISSIONING_SKU_POOL)
+    regional = snapshot["regional"]
+    if max(regional["current"], regional_active_vcpus) + regional_pending_vcpus > regional["limit"]:
+        raise RunnerError("commissioning regional live quota and reservations are exhausted")
+    return {
+        "cell_ordinal": current_ordinal,
+        "selected_sku": current_sku,
+        "reserved_slots": len(by_invocation),
+        "active_vcpus": regional_active_vcpus,
+        "pending_vcpus": regional_pending_vcpus,
+        "regional_limit_vcpus": regional["limit"],
+    }
+
+
+def commissioning_cost_gate(env, state, limits):
+    if not 1 <= env["max_concurrency"] <= 16 or env["budget_limit"] != 1500:
+        raise RunnerError("commissioning-bounded requires configured concurrency 1..16 and the exact $1500 alert budget")
+    if limits != state.get("request", {}).get("limits"):
+        raise RunnerError("commissioning cost limits differ from the exact prepared capacity slot")
+    exact_commissioning_budget(env)
+    inventory_reservation_ids = commissioning_inventory_gate(env, state)
+    rate = retail_rate(env, limits["sku"])
+    first_hour = itemized_cost_bound(rate, 1, limits)
+    first_day = itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits)
+    if not 0 < first_day["total"] < float("inf"):
+        raise RunnerError("commissioning-bounded full 24-hour itemized maximum is not finite and positive")
+    reservations = list_management_reservations(env)
+    if {str(item["id"]).lower() for item in reservations} != inventory_reservation_ids:
+        raise RunnerError("commissioning reservation inventory differs across exact ARM boundaries")
+    seen_reservation_invocations = set()
+    reservation_invocations = set()
+    outstanding_reservations = []
+    reserved_total = 0.0
+    for reservation in reservations:
+        invocation = reservation["invocation-binding"]
+        if invocation in seen_reservation_invocations:
+            raise RunnerError("commissioning reservation invocation is duplicated")
+        seen_reservation_invocations.add(invocation)
+        reservation_state = load_state(env, invocation)
+        recorded_cost = reservation_state.get("cost") or {}
+        if (
+            recorded_cost.get("max_billable_lifetime_hours") != MAX_BILLABLE_LIFETIME_HOURS
+            or float(recorded_cost.get("max_increment", -1)) != reservation["amount_usd"]
+            or not reservation["amount_usd"] > 0
+            or reservation.get("selected-sku") != reservation_state.get("request", {}).get("limits", {}).get("sku")
+            or reservation.get("sku-family") != reservation_state.get("request", {}).get("limits", {}).get("sku_family")
+            or reservation.get("cell_ordinal") != reservation_state.get("request", {}).get("cell_ordinal")
+        ):
+            raise RunnerError("commissioning reservation is not bound to an exact full 24-hour maximum")
+        cleanup_verified_at = reservation.get("cleanup-verified-at", "none")
+        if cleanup_verified_at == "none":
+            reservation_invocations.add(invocation)
+            outstanding_reservations.append(reservation)
+            reserved_total += reservation["amount_usd"]
+        else:
+            try:
+                dt.datetime.fromisoformat(cleanup_verified_at.replace("Z", "+00:00"))
+            except (AttributeError, ValueError):
+                raise RunnerError("commissioning retained reservation cleanup marker is malformed")
+            if reservation_state.get("phase") not in ("complete", "absent-fenced"):
+                raise RunnerError("commissioning retained reservation claims cleanup before exact completion")
+    active = active_runner_vms(env)
+    active_invocations = set()
+    for vm in active:
+        invocation = (vm.get("tags") or {}).get("invocation-binding", "")
+        if not SAFE_INVOCATION.match(invocation) or invocation in active_invocations:
+            raise RunnerError("commissioning active VM invocation inventory is ambiguous")
+        if invocation not in reservation_invocations:
+            raise RunnerError("commissioning active VM has no exact durable full-day reservation")
+        active_invocations.add(invocation)
+    capacity = commissioning_capacity_gate(env, state, outstanding_reservations, active)
+    current_reserved = state["invocation"] in reservation_invocations
+    occupied = len(reservation_invocations)
+    if occupied > env["max_concurrency"] or (not current_reserved and occupied >= env["max_concurrency"]):
+        raise RunnerError("commissioning runner queue is at its bounded concurrency limit ({})".format(env["max_concurrency"]))
+    return {
+        "actual": None,
+        "forecast": None,
+        "hourly_rate": rate,
+        "first_hour": first_hour,
+        "first_day": first_day,
+        "max_network_bytes": limits["network_bytes"],
+        "max_billable_lifetime_hours": MAX_BILLABLE_LIFETIME_HOURS,
+        "max_increment": first_day["total"],
+        "outstanding_reservations": reserved_total,
+        "reserved_invocations": occupied,
+        "retained_reservations": len(reservations),
+        "active_runner_vms": len(active_invocations),
+        "capacity": capacity,
+        "admission_pressure": None,
+        "cost_admission_mode": COMMISSIONING_COST_ADMISSION_MODE,
     }
 
 
@@ -1404,6 +1862,7 @@ def reservation_id(env, invocation):
 
 def reservation_tags(env, state, amount_usd, reserved_at):
     request = state["request"]
+    limits = request["limits"]
     return {
         "workload": "firstmate",
         "firstmate-role": "runner-cost-reservation",
@@ -1414,6 +1873,10 @@ def reservation_tags(env, state, amount_usd, reserved_at):
         "lineage-root": request["lineage_root_invocation"],
         "parent-invocation": state.get("parent_invocation") or "none",
         "amount-microusd": str(int(round(amount_usd * 1_000_000))),
+        "cost-admission-mode": request.get("cost_admission_mode", STRICT_COST_ADMISSION_MODE),
+        "cell-ordinal": str(request.get("cell_ordinal") or "none"),
+        "selected-sku": limits["sku"],
+        "sku-family": limits["sku_family"],
         "reserved-at": reserved_at,
         "compute-deadline": request["compute_deallocation_deadline"],
         "cleanup-verified-at": "none",
@@ -1430,6 +1893,17 @@ def parse_management_reservation(env, identity):
     parent = tags.get("parent-invocation", "")
     properties = identity.get("properties", identity)
     principal_id = properties.get("principalId") or identity.get("principalId")
+    selected_sku = tags.get("selected-sku", "")
+    cell_ordinal = tags.get("cell-ordinal", "")
+    mode = tags.get("cost-admission-mode")
+    if mode == COMMISSIONING_COST_ADMISSION_MODE:
+        try:
+            ordinal = int(cell_ordinal)
+        except (TypeError, ValueError):
+            ordinal = 0
+        exact_slot = 1 <= ordinal <= 16 and selected_sku == COMMISSIONING_SKU_POOL[(ordinal - 1) // 2]
+    else:
+        exact_slot = cell_ordinal == "none"
     if (
         str(identity.get("id", "")).lower() != expected_id.lower()
         or identity.get("location") != "eastus"
@@ -1440,6 +1914,12 @@ def parse_management_reservation(env, identity):
         or not SAFE_INVOCATION.match(tags.get("lineage-root", ""))
         or (parent != "none" and not SAFE_INVOCATION.match(parent))
         or not tags.get("amount-microusd", "").isdigit()
+        or mode not in {
+            STRICT_COST_ADMISSION_MODE, COMMISSIONING_COST_ADMISSION_MODE,
+        }
+        or selected_sku not in SKU_FAMILY
+        or tags.get("sku-family") != SKU_FAMILY.get(selected_sku)
+        or not exact_slot
         or not principal_id
         or tags.get("reservation-principal") != principal_id
     ):
@@ -1449,6 +1929,7 @@ def parse_management_reservation(env, identity):
     result["etag"] = identity.get("etag")
     result["principal_id"] = principal_id
     result["amount_usd"] = int(tags["amount-microusd"]) / 1_000_000
+    result["cell_ordinal"] = None if cell_ordinal == "none" else int(cell_ordinal)
     return result
 
 
@@ -1499,7 +1980,7 @@ def reconcile_management_reservations(env, reservations):
     return retained
 
 
-def reserve_budget_management(env, state, lease, limits):
+def reserve_budget_management(env, state, lease, limits, admitted_cost=None):
     lease.assert_held()
     reservations = reconcile_management_reservations(env, list_management_reservations(env))
     existing = [item for item in reservations if item["invocation-binding"] == state["invocation"]]
@@ -1507,14 +1988,27 @@ def reserve_budget_management(env, state, lease, limits):
         raise RunnerError("durable cost reservation identity is ambiguous")
     if existing:
         expected_fence = state["request"]["fence"].split(":", 1)[1]
-        if existing[0]["fence-digest"] != expected_fence or existing[0]["lineage-root"] != state["request"]["lineage_root_invocation"]:
+        if (
+            existing[0]["fence-digest"] != expected_fence
+            or existing[0]["lineage-root"] != state["request"]["lineage_root_invocation"]
+            or existing[0]["cost-admission-mode"]
+            != state["request"].get("cost_admission_mode", STRICT_COST_ADMISSION_MODE)
+        ):
             raise RunnerError("cost reservation invocation/fence lineage is not exact")
         lease.assert_held()
-        return state.get("cost") or budget_gate(
+        existing_cost = state.get("cost")
+        if existing_cost:
+            return existing_cost
+        if admitted_cost is not None:
+            return admitted_cost
+        return budget_gate(
             env, limits, outstanding_reservations=sum(item["amount_usd"] for item in reservations if item["id"] != existing[0]["id"])
         )
     outstanding = sum(item["amount_usd"] for item in reservations)
-    cost = budget_gate(env, limits, outstanding_reservations=outstanding)
+    if admitted_cost is not None:
+        cost = admitted_cost
+    else:
+        cost = budget_gate(env, limits, outstanding_reservations=outstanding)
     tags = reservation_tags(env, state, cost["max_increment"], iso_utc())
     az_command(env, [
         "identity", "create", "--resource-group", env["resource_group"], "--name", reservation_name(env, state["invocation"]),
@@ -1533,7 +2027,11 @@ def reserve_budget_management(env, state, lease, limits):
     ])
     reread, _, _ = az_command(env, ["resource", "show", "--ids", reservation_id(env, state["invocation"]), "--api-version", "2023-01-31"])
     parsed = parse_management_reservation(env, reread)
-    if parsed is None or parsed["fence-digest"] != tags["fence-digest"]:
+    if (
+        parsed is None
+        or parsed["fence-digest"] != tags["fence-digest"]
+        or parsed["cost-admission-mode"] != tags["cost-admission-mode"]
+    ):
         raise RunnerError("durable cost reservation changed before compute admission")
     require_zero_effective_rbac(env, parsed["principal_id"], "new cost reservation principal")
     lease.assert_held()
@@ -1547,7 +2045,13 @@ def mark_management_reservation_cleanup_verified(env, state):
         ])
         entry = parse_management_reservation(env, identity)
         expected_fence = state["request"]["fence"].split(":", 1)[1]
-        if entry is None or entry["fence-digest"] != expected_fence or entry["cleanup-verified-at"] != "none":
+        expected_mode = state["request"].get("cost_admission_mode", STRICT_COST_ADMISSION_MODE)
+        if (
+            entry is None
+            or entry["fence-digest"] != expected_fence
+            or entry["cost-admission-mode"] != expected_mode
+            or entry["cleanup-verified-at"] != "none"
+        ):
             raise RunnerError("cost reservation cleanup binding is not exact")
         require_zero_effective_rbac(env, entry["principal_id"], "cleanup cost reservation principal")
         tags = dict(identity.get("tags") or {})
@@ -1748,6 +2252,7 @@ def ownership_tags(env, state):
         "resource-class": request["resource_class"],
         "selected-sku": request["limits"]["sku"],
         "sku-family": request["limits"]["sku_family"],
+        "cell-ordinal": str(request.get("cell_ordinal") or "none"),
         "cost-attribution": "validation-shard",
         "expiry-utc": request["compute_deallocation_deadline"],
         "cleanup-token": token,
@@ -2097,7 +2602,7 @@ def verify_resource_tags(env, state, resource, label):
         "workload", "firstmate-role", "lifecycle", "deployment-generation", "cleanup-owner",
         "home-binding", "task-binding", "task-generation", "invocation-binding", "attempt", "fence",
         "snapshot-digest", "command-digest", "resource-class", "selected-sku", "sku-family",
-        "cost-attribution", "cleanup-token",
+        "cell-ordinal", "cost-attribution", "cleanup-token",
     ):
         if tags.get(key) != expected[key]:
             raise RunnerError("live {} cleanup tag mismatch: {}".format(label, key))
@@ -2251,10 +2756,25 @@ def cleanup(env, state):
     transition(env, state, "complete", "verified bounded result retained locally; private result archive retained; invocation compute is zero")
 
 
-def dispatch_prepared(env, state, confirm_subscription):
+def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_mode=None):
     bind_operation_context(env, state)
     if confirm_subscription != env["subscription"]:
         raise RunnerError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    mode = state["request"].get("cost_admission_mode", STRICT_COST_ADMISSION_MODE)
+    if mode != env["cost_admission_mode"]:
+        raise RunnerError("prepared cost admission mode differs from current operator configuration")
+    if mode == COMMISSIONING_COST_ADMISSION_MODE:
+        if confirm_cost_admission_mode != COMMISSIONING_COST_ADMISSION_MODE:
+            raise RunnerError("commissioning-bounded requires --confirm-cost-admission-mode commissioning-bounded")
+        if env.get("cell_ordinal") != state["request"].get("cell_ordinal"):
+            raise RunnerError("current commissioning cell ordinal differs from the exact prepared request")
+        configured_sku = os.environ.get("FM_AZURE_RUNNER_SKU")
+        if configured_sku is not None and configured_sku != state["request"].get("limits", {}).get("sku"):
+            raise RunnerError("current commissioning SKU override differs from the exact prepared request")
+    elif confirm_cost_admission_mode is not None:
+        raise RunnerError("--confirm-cost-admission-mode is accepted only for commissioning-bounded")
+    elif env.get("cell_ordinal") is not None:
+        raise RunnerError("FM_AZURE_RUNNER_CELL_ORDINAL is accepted only for commissioning-bounded")
     try:
         deadline = dt.datetime.fromisoformat(
             state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
@@ -2264,21 +2784,37 @@ def dispatch_prepared(env, state, confirm_subscription):
         scope_gate(env)
         limits = state["request"]["limits"]
         sku_quota_gate(env, limits)
-        cost = budget_gate(env, limits)
+        cost = (
+            commissioning_cost_gate(env, state, limits)
+            if mode == COMMISSIONING_COST_ADMISSION_MODE
+            else budget_gate(env, limits)
+        )
         foundation_gate(env)
-        transition(env, state, "admission-checked", "scope, quota, SKU, budget, and exact foundation gates passed", cost=cost)
+        transition(
+            env, state, "admission-checked",
+            "scope, quota, SKU, exact foundation, and {} cost admission gates passed".format(mode),
+            cost=cost,
+        )
         with ManagementAdmissionLease(env, state) as lease:
             foundation_gate(env)
             sku_quota_gate(env, limits)
             active = active_runner_vms(env)
             if len(active) >= env["max_concurrency"]:
                 raise RunnerError("runner queue is at its bounded concurrency limit ({})".format(env["max_concurrency"]))
-            cost = reserve_budget_management(env, state, lease, limits)
+            if mode == COMMISSIONING_COST_ADMISSION_MODE:
+                commissioning_cost_gate(env, state, limits)
+            cost = reserve_budget_management(
+                env, state, lease, limits,
+                admitted_cost=cost if mode == COMMISSIONING_COST_ADMISSION_MODE else None,
+            )
             transition(
                 env, state, "cost-reserved",
                 "durable worst-case cost reserved under the admission lease",
                 cost=cost, reservation_recorded=True,
             )
+            if mode == COMMISSIONING_COST_ADMISSION_MODE:
+                commissioning_cost_gate(env, state, limits)
+                sku_quota_gate(env, limits)
             foundation_gate(env)
             reprove_public_request(state)
             verify_all_reservation_rbac_zero(env)
@@ -2376,7 +2912,7 @@ def retry(env, old_state, args):
         state = prepare(env, args, parent_state=old_state)
     bind_operation_context(env, state)
     with invocation_lock(env, state["invocation"]):
-        return dispatch_prepared(env, state, args.confirm_subscription)
+        return dispatch_prepared(env, state, args.confirm_subscription, args.confirm_cost_admission_mode)
 
 
 def local_queue(env):
@@ -2433,12 +2969,14 @@ def parser():
     add_request_arguments(run_parser)
     run_parser.add_argument("--confirm-run", action="store_true")
     run_parser.add_argument("--confirm-subscription")
+    run_parser.add_argument("--confirm-cost-admission-mode")
     resume_parser = sub.add_parser("resume", help="resume collection/cleanup without duplicating execution")
     resume_parser.add_argument("--invocation", required=True)
     retry_parser = sub.add_parser("retry", help="create a new fenced attempt after proven old-lease absence")
     retry_parser.add_argument("--invocation", required=True)
     retry_parser.add_argument("--confirm-run", action="store_true")
     retry_parser.add_argument("--confirm-subscription")
+    retry_parser.add_argument("--confirm-cost-admission-mode")
     queue_parser = sub.add_parser("queue", help="show concise local invocation queue state")
     cost_parser = sub.add_parser("cost", help="show concise Azure cost/concurrency admission state")
     status_parser = sub.add_parser("status", help="show one invocation identity and outcome")
@@ -2472,7 +3010,7 @@ def main():
         with state_lock(env):
             state = prepare(env, args)
         with invocation_lock(env, state["invocation"]):
-            return dispatch_prepared(env, state, args.confirm_subscription)
+            return dispatch_prepared(env, state, args.confirm_subscription, args.confirm_cost_admission_mode)
     if args.operation == "queue":
         local_queue(env)
         return 0

@@ -75,9 +75,9 @@ Each resource class leaves capacity for root result publication and permits zero
 | `behavior-heavy` | Firstmate behavior and long test suites | 3 cores | 14 GiB | 2,048 | 48 GiB | 16 MiB | 256 MiB | 3 hours |
 | `crosscheck-tool` | Uncredentialed review evidence commands | 3 cores | 12 GiB | 1,024 | 40 GiB | 8 MiB | 128 MiB | 2 hours |
 
-All classes default to `Standard_D4as_v6` at 4 vCPUs/16 GiB.
-Two concurrent default shards fit the existing 10-vCPU Dasv6 allowance without waiting for the unavailable 96-vCPU increase.
-`FM_AZURE_RUNNER_SKU` may select one reviewed current 4-vCPU/16-GiB family for a later mixed-family cell, and every invocation proves that exact family's live free quota before creation.
+Strict mode defaults all classes to `Standard_D4as_v6` at 4 vCPUs/16 GiB and remains backward compatible with the reviewed `FM_AZURE_RUNNER_SKU` override.
+Commissioning mode requires `FM_AZURE_RUNNER_CELL_ORDINAL=1..16`: slots 1-2 use `Standard_D4as_v7`, 3-4 D4as v6, 5-6 D4s v6, 7-8 D4ads v7, 9-10 D4ads v6, 11-12 E4as v7, 13-14 E4as v6, and 15-16 D4ds v6.
+The cell ordinal, selected SKU, and exact quota family are digest-bound into the request and repeated in the reservation and VM tags. An explicit SKU override must equal the deterministic slot mapping.
 
 A caller may lower wall time but may not raise the class maximum.
 A separate reviewed image or future resource class may add tools without weakening these limits.
@@ -115,9 +115,9 @@ An empty local queue means zero runner VMs.
 Every invocation receives a separate VM, so two admitted shards run concurrently without sharing process, memory, disk, temp, or task state.
 
 Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact effective container role including inherited/group expansion, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
-It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, current retail rate, and active runner count.
-The software cap is four active runner VMs and may be configured only from one through eight, while live regional and per-family free-vCPU gates can impose a lower effective cap.
-The current Dasv6 allowance admits two default 4-vCPU runners and refuses a third.
+It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, the exact unambiguous Linux on-demand Consumption retail meter (never Spot, Low Priority, Windows, dev/test, reservation, or savings pricing), and active runner count.
+The software cap is four active runner VMs by default and may be configured from one through 16, while live regional and per-family free-vCPU gates can impose a lower effective cap.
+Each audited mixed-pool family currently has a 10-vCPU limit, so its two deterministic 4-vCPU slots are the maximum even when Azure usage reporting is stale.
 The separate `st<prefix>ctl01` account has public networking, shared keys, and public blobs disabled and stores no payload data.
 Its `runner-control` container is used only as a management resource: an ETag plus `If-Match` CAS fences lock owner, invocation fence, and expiry metadata.
 The 60-second lock has a 10-second call deadline, monotonic last-success certificate, and 15-second safety margin.
@@ -126,10 +126,16 @@ Each invocation reserves its complete first-day worst-case dollar bound as a sep
 Listing and summing those management resources survives controller restart without packed tag ledgers or a reachable storage data plane.
 Every creation, admission list/reread, immediate pre-create proof, cleanup marker, and reconciliation/deletion proves each reservation principal has zero direct, group-derived, or inherited effective RBAC assignments, and runner VM inventory refuses any attached reservation identity.
 The reservation survives controller restart and fenced retry lineage.
-It is marked cleanup-verified only after exact compute absence, and is deleted only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
+It is marked cleanup-verified only after exact compute absence. That exact completed marker releases its commissioning capacity slot while retaining the immutable cost evidence; the reservation resource is deleted only after a 72-hour billing-settlement interval plus an exact invocation-tagged Cost Management reconciliation.
 
 Cost Management 429 responses use a bounded fail-closed retry and honor Azure's QPU, Consumption, or standard retry guidance.
 Only a previously successful response bound to the exact subscription, resource group, endpoint, and body digest, carrying an authoritative server date and younger than four hours, may cover a retry interval beyond the bounded deadline; stale, mismatched, malformed, or absent cache data refuses admission.
+
+`FM_AZURE_RUNNER_COST_ADMISSION_MODE` defaults to `strict`, which always requires the authoritative actual-plus-forecast gate above.
+The explicit `commissioning-bounded` mode additionally requires `--confirm-cost-admission-mode commissioning-bounded`, an operator-selected concurrency from one through 16, an exact shared `FM_AZURE_RUNNER_CELL_ORDINAL` not greater than that concurrency, and `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500`.
+It intentionally does not query, compare, or claim cumulative actual or forecast spend. Instead, it verifies the exact `$1,500` Monthly resource-group Budget and all eight configured alerts case-insensitively, the exact 29-resource private foundation plus only exact invocation-owned disposable resources, and exact active-VM and durable-reservation inventories.
+Under the ARM CAS admission lease, every invocation gets a finite positive complete itemized 24-hour maximum in a mode-tagged zero-RBAC reservation. The controller sums and records existing exact reservation amounts; refuses duplicate ordinals, invocations, or foreign reservations; and refuses a seventeenth occupied slot at a configured cap of 16. For every audited family and the region, admission computes `max(live usage, exact active tagged VM vCPUs) + reservations without an active VM + the candidate`, preventing stale usage from overbooking without double-counting active VMs, and rereads the exact quota immediately before VM creation.
+The normal strict gate remains mandatory whenever the operator has not explicitly selected commissioning mode.
 
 The normal budget limit is the active $1,000 target.
 An operator may select the commissioning ceiling of $1,500 through `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500` only during the approved commissioning window.
@@ -215,6 +221,23 @@ Run one heavy command directly after landed deployment and explicit approval:
 bin/fm-azure-runner.sh run \
   --confirm-run \
   --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID" \
+  --task "$FM_AZURE_RUNNER_TASK" \
+  --generation "$FM_AZURE_RUNNER_GENERATION" \
+  --resource-class behavior-heavy \
+  -- bin/fm-azure-runner-command.sh bash -c 'tests/run.sh --skip-herdr'
+```
+
+For an explicitly approved commissioning window (keep the first live smoke to one runner before scaling the configured pool):
+
+```sh
+export FM_AZURE_RUNNER_COST_ADMISSION_MODE=commissioning-bounded
+export FM_AZURE_RUNNER_MAX_CONCURRENCY=16
+export FM_AZURE_RUNNER_CELL_ORDINAL=1
+export FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500
+bin/fm-azure-runner.sh run \
+  --confirm-run \
+  --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID" \
+  --confirm-cost-admission-mode commissioning-bounded \
   --task "$FM_AZURE_RUNNER_TASK" \
   --generation "$FM_AZURE_RUNNER_GENERATION" \
   --resource-class behavior-heavy \

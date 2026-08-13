@@ -19,14 +19,17 @@
 # Optional bounded policy:
 #   FM_AZURE_RESOURCE_GROUP=rg-firstmate-pilot-eastus-001
 #   FM_AZURE_RUNNER_STATE_DIR=$FM_HOME/state/azure-runner
-#   FM_AZURE_RUNNER_MAX_CONCURRENCY=4            (1..8; live family quota still gates)
+#   FM_AZURE_RUNNER_MAX_CONCURRENCY=4            (1..16; live family quota still gates)
 #   FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1000        (1000 or 1500)
+#   FM_AZURE_RUNNER_COST_ADMISSION_MODE=strict   (or commissioning-bounded with exact flag)
 #   FM_AZURE_RUNNER_SKU=Standard_D4as_v6         (reviewed 4-vCPU current-family SKU)
+#   FM_AZURE_RUNNER_CELL_ORDINAL=1               (commissioning only; exact shared slot 1..16)
 #
 # Usage:
 #   fm-azure-runner.sh prepare --task <id> --generation <id> \
 #     --resource-class <validation-standard|behavior-heavy|crosscheck-tool> -- <argv...>
 #   fm-azure-runner.sh run --confirm-run --confirm-subscription <exact-id> \
+#     [--confirm-cost-admission-mode commissioning-bounded] \
 #     --task <id> --generation <id> --resource-class <class> \
 #     [--wall-seconds N] [--dependency <tracked-relative-path>]... \
 #     [--artifact <relative-output>]... -- <argv...>

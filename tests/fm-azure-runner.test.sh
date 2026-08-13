@@ -33,6 +33,34 @@ runner() {
     FM_AZURE_DEPLOYMENT_GENERATION=gen-one FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID="$PE_GUID" "$RUNNER" "$@"
 }
 
+environment_mode_defaults() {
+  local home
+  home=$(mktemp -d)
+  env FM_HOME="$home" FM_AZURE_TENANT_ID="$TENANT" FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_NAMING_PREFIX=fmtest FM_AZURE_STORAGE_NAME=fmteststorage0001 FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_DEPLOYMENT_GENERATION=gen-one FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID="$PE_GUID" \
+    python3 - "$HOST" <<'PY'
+import importlib.util,os,sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.environment()["cost_admission_mode"]=="strict"
+os.environ["FM_AZURE_RUNNER_MAX_CONCURRENCY"]="16"; assert m.environment()["max_concurrency"]==16
+os.environ["FM_AZURE_RUNNER_COST_ADMISSION_MODE"]="commissioning-bounded"; os.environ["FM_AZURE_RUNNER_CELL_ORDINAL"]="16"
+commissioning=m.environment(); assert commissioning["cell_ordinal"]==16 and m.runner_sku_for_environment(commissioning)=="Standard_D4ds_v6"
+os.environ["FM_AZURE_RUNNER_SKU"]="Standard_D4as_v6"
+try: m.runner_sku_for_environment(commissioning)
+except m.RunnerError: pass
+else: raise AssertionError("commissioning accepted an SKU override outside its exact cell")
+os.environ.pop("FM_AZURE_RUNNER_SKU"); os.environ.pop("FM_AZURE_RUNNER_COST_ADMISSION_MODE")
+os.environ.pop("FM_AZURE_RUNNER_CELL_ORDINAL")
+os.environ["FM_AZURE_RUNNER_MAX_CONCURRENCY"]="17"
+try: m.environment()
+except m.RunnerError: pass
+else: raise AssertionError("environment accepted concurrency above 16")
+PY
+  rm -rf "$home"
+  pass "normal environment defaults to strict without commissioning evidence or confirmation variables"
+}
+
 static_private_controller_contract() {
   python3 - "$TEMPLATE" "$HOST" "$GUEST" <<'PY' || fail "private controller static contract failed"
 import json, pathlib, sys
@@ -40,6 +68,7 @@ template=json.loads(pathlib.Path(sys.argv[1]).read_text()); host=pathlib.Path(sy
 vm=next(r for r in template["resources"] if r["type"]=="Microsoft.Compute/virtualMachines")
 nic=next(r for r in template["resources"] if r["type"]=="Microsoft.Network/networkInterfaces")
 assert template["parameters"]["controllerIdentityId"]["type"] == "string"
+assert set(template["parameters"]["vmSize"]["allowedValues"]) >= {"Standard_D4as_v7","Standard_D4as_v6","Standard_D4s_v6","Standard_D4ads_v7","Standard_D4ads_v6","Standard_E4as_v7","Standard_E4as_v6","Standard_D4ds_v6"}
 assert vm["identity"]["type"] == "UserAssigned"
 assert "controllerIdentityId" in json.dumps(vm["identity"])
 assert "publicipaddress" not in json.dumps(nic).lower()
@@ -203,8 +232,21 @@ assert b.failed.is_set()
 try: b.assert_held()
 except m.RunnerError: pass
 else: raise AssertionError("failed renewal was forgotten")
+# Eight contenders may read one free ETag, but exactly one stale snapshot can win the ARM CAS.
+metadata.clear(); metadata.update({"schema":"fm-azure-runner-control-v1","deploymentgeneration":"gen","lockowner":"","lockfence":"","lockexpiry":""}); etag[0]="E200"
+contenders=[]
+for i in range(8):
+    invocation="azr-{:012x}".format(i+1); fence=("{:x}".format(i+1))*64
+    contender=m.ManagementAdmissionLease(env,{"invocation":invocation,"request":{"fence":"sha256:"+fence}})
+    snapshot,snapshot_etag=contender._read(); snapshot.update({"lockowner":invocation,"lockfence":fence,"lockexpiry":m.iso_utc(m.now_utc()+dt.timedelta(seconds=60))})
+    contenders.append((contender,snapshot_etag,snapshot))
+winners=[]
+for contender,snapshot_etag,snapshot in contenders:
+    try: contender._cas(snapshot_etag,snapshot); winners.append(contender.state["invocation"])
+    except m.RunnerError: pass
+assert len(winners)==1 and metadata["lockowner"]==winners[0]
 PY
-  pass "management ETag CAS rejects stale successor clobber and a hung renewal permanently closes admission"
+  pass "management ETag CAS rejects stale successor clobber, admits one of eight interleaved writers, and fails hung renewal sticky"
 }
 
 effective_rbac_adversaries() {
@@ -227,7 +269,7 @@ try: m.require_zero_effective_rbac(env,"principal","unreadable")
 except m.RunnerError: pass
 else: raise AssertionError("unreadable effective RBAC accepted")
 reservation_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-rsv-aaaaaaaaaaaa"
-identity={"id":reservation_id,"location":"eastus","etag":"E","properties":{"principalId":"p"},"tags":{"workload":"firstmate","firstmate-role":"runner-cost-reservation","deployment-generation":"gen","cleanup-owner":"owner","invocation-binding":"azr-aaaaaaaaaaaa","fence-digest":"a"*64,"lineage-root":"azr-aaaaaaaaaaaa","parent-invocation":"none","amount-microusd":"1","reserved-at":"2026-01-01T00:00:00Z","compute-deadline":"2026-01-02T00:00:00Z","cleanup-verified-at":"none","reservation-principal":"p"}}
+identity={"id":reservation_id,"location":"eastus","etag":"E","properties":{"principalId":"p"},"tags":{"workload":"firstmate","firstmate-role":"runner-cost-reservation","deployment-generation":"gen","cleanup-owner":"owner","invocation-binding":"azr-aaaaaaaaaaaa","fence-digest":"a"*64,"lineage-root":"azr-aaaaaaaaaaaa","parent-invocation":"none","amount-microusd":"1","cost-admission-mode":"strict","cell-ordinal":"none","selected-sku":"Standard_D4as_v6","sku-family":"standardDav6Family","reserved-at":"2026-01-01T00:00:00Z","compute-deadline":"2026-01-02T00:00:00Z","cleanup-verified-at":"none","reservation-principal":"p"}}
 env.update({"deployment_generation":"gen","owner":"owner"})
 calls=[]
 def reservation_az(_env,args,**kwargs):
@@ -279,12 +321,194 @@ PY
   pass "Cost Management retry is bounded, honors both Azure guidance headers, and only permits a short exact authoritative cache"
 }
 
+retail_rate_unit() {
+  python3 - "$HOST" <<'PY'
+import copy, importlib.util, sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env={"azure_operation_count":0}
+on_demand={"currencyCode":"USD","tierMinimumUnits":0,"retailPrice":0.182,"unitPrice":0.182,"armRegionName":"eastus","armSkuName":"Standard_D4as_v6","productName":"Virtual Machines Dasv6 Series","skuName":"D4as v6","meterName":"D4as v6","serviceName":"Virtual Machines","serviceFamily":"Compute","unitOfMeasure":"1 Hour","type":"Consumption","isPrimaryMeterRegion":True}
+low_priority={**on_demand,"retailPrice":0.0363,"unitPrice":0.0363,"meterName":"D4as v6 Low Priority"}
+spot={**on_demand,"retailPrice":0.041,"unitPrice":0.041,"meterName":"D4as v6 Spot"}
+windows={**on_demand,"retailPrice":0.31,"unitPrice":0.31,"productName":"Virtual Machines Dasv6 Series Windows"}
+dev_test={**on_demand,"retailPrice":0.15,"unitPrice":0.15,"productName":"Virtual Machines Dasv6 Series Dev/Test"}
+reservation={**on_demand,"retailPrice":0.09,"unitPrice":0.09,"type":"Reservation","reservationTerm":"1 Year"}
+savings={**on_demand,"retailPrice":0.08,"unitPrice":0.08,"productName":"Virtual Machines Dasv6 Series Savings Plan"}
+rows=[low_priority,spot,windows,dev_test,reservation,savings,on_demand]
+m.az_command=lambda *_a,**_k:({"Items":copy.deepcopy(rows)},0,"")
+assert m.retail_rate(env,"Standard_D4as_v6")==0.182
+# Every audited mixed-family SKU binds its own exact Linux on-demand meter/product.
+rates={"Standard_D4as_v7":0.182,"Standard_D4as_v6":0.182,"Standard_D4s_v6":0.202,"Standard_D4ads_v7":0.228,"Standard_D4ads_v6":0.228,"Standard_E4as_v7":0.238,"Standard_E4as_v6":0.238,"Standard_D4ds_v6":0.249}
+for sku,rate in rates.items():
+    shape=__import__('re').fullmatch(r"Standard_([DE])(\d+)([a-z]+)_v(\d+)",sku); meter=sku.removeprefix("Standard_").replace("_"," "); product="Virtual Machines {}{}v{} Series".format(shape.group(1),shape.group(3),shape.group(4))
+    exact={**on_demand,"armSkuName":sku,"skuName":meter,"meterName":meter,"productName":product,"retailPrice":rate,"unitPrice":rate}
+    m.az_command=lambda *_a,_exact=exact,**_k:({"Items":[copy.deepcopy(_exact)]},0,"")
+    assert m.retail_rate(env,sku)==rate
+m.az_command=lambda *_a,**_k:({"Items":[copy.deepcopy(low_priority)]},0,"")
+try: m.retail_rate(env,"Standard_D4as_v6")
+except m.RunnerError as exc: assert "on-demand" in str(exc) and "unreadable" in str(exc)
+else: raise AssertionError("Low Priority meter was accepted as on-demand")
+ambiguous={**on_demand,"retailPrice":0.183,"unitPrice":0.183,"meterId":"different-current-meter"}
+m.az_command=lambda *_a,**_k:({"Items":[copy.deepcopy(on_demand),ambiguous]},0,"")
+try: m.retail_rate(env,"Standard_D4as_v6")
+except m.RunnerError as exc: assert "ambiguous" in str(exc)
+else: raise AssertionError("distinct eligible on-demand prices were minimized instead of refused")
+PY
+  pass "retail pricing selects exact Linux on-demand consumption and refuses Low Priority or ambiguity"
+}
+
+mixed_pool_capacity_unit() {
+  python3 - "$HOST" <<'PY'
+import importlib.util, pathlib, tempfile, sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env={"subscription":"sub","resource_group":"rg","max_concurrency":16,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
+caps=lambda memory:[{"name":"vCPUsAvailable","value":"4"},{"name":"MemoryGB","value":str(memory)},{"name":"CpuArchitectureType","value":"x64"},{"name":"HyperVGenerations","value":"V1,V2"},{"name":"TrustedLaunchDisabled","value":"False"},{"name":"EncryptionAtHostSupported","value":"True"}]
+skus=[{"name":sku,"restrictions":[],"capabilities":caps(m.SKU_MEMORY_GIB[sku])} for sku in m.COMMISSIONING_SKU_POOL]
+usage=[{"name":{"value":"cores"},"limit":128,"currentValue":0}]+[{"name":{"value":m.SKU_FAMILY[sku]},"limit":10,"currentValue":0} for sku in m.COMMISSIONING_SKU_POOL]
+def az(_env,args,**_kwargs):
+    if args[1]=="list-skus": return skus,0,""
+    if args[1]=="list-usage": return usage,0,""
+    raise AssertionError(args)
+m.az_command=az
+snapshot=m.runner_quota_snapshot(env,m.COMMISSIONING_SKU_POOL)
+assert snapshot["regional"]=={"limit":128,"current":0,"free":128}
+assert all(snapshot["families"][sku]["limit"]==10 for sku in m.COMMISSIONING_SKU_POOL)
+m.runner_quota_snapshot=lambda *_:snapshot
+base=dict(m.RESOURCE_CLASSES["behavior-heavy"])
+def state_for(ordinal,invocation=None):
+    sku=m.COMMISSIONING_SKU_POOL[(ordinal-1)//2]; invocation=invocation or "azr-{:012x}".format(ordinal)
+    limits={**base,"sku":sku,"sku_family":m.SKU_FAMILY[sku]}
+    return {"schema":m.SCHEMA,"invocation":invocation,"request":{"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":ordinal,"limits":limits}}
+def reservation_for(state):
+    request=state["request"]; m.save_state(env,state,create=True)
+    return {"invocation-binding":state["invocation"],"cell_ordinal":request["cell_ordinal"],"selected-sku":request["limits"]["sku"],"sku-family":request["limits"]["sku_family"]}
+reservations=[]; states=[]
+# Simulate eight callers serialized from one stale zero-usage snapshot: every exact slot wins once and no family exceeds two.
+for ordinal in range(1,9):
+    state=state_for(ordinal); m.commissioning_capacity_gate(env,state,reservations,[]); reservations.append(reservation_for(state)); states.append(state)
+assert len(reservations)==8 and all(sum(r["selected-sku"]==sku for r in reservations)<=2 for sku in m.COMMISSIONING_SKU_POOL)
+for ordinal in range(9,17):
+    state=state_for(ordinal); m.commissioning_capacity_gate(env,state,reservations,[]); reservations.append(reservation_for(state)); states.append(state)
+assert m.commissioning_capacity_gate(env,states[-1],reservations,[])["reserved_slots"]==16
+try: m.commissioning_capacity_gate(env,state_for(1,"azr-bbbbbbbbbbbb"),reservations,[])
+except m.RunnerError as exc: assert "already reserved" in str(exc)
+else: raise AssertionError("seventeenth caller reused occupied slot 1")
+# Live usage that already includes two active VMs is not added to those same VMs again.
+active=[]
+for state in states:
+    request=state["request"]; active.append({"tags":{"invocation-binding":state["invocation"],"cell-ordinal":str(request["cell_ordinal"]),"selected-sku":request["limits"]["sku"],"sku-family":request["limits"]["sku_family"]},"hardwareProfile":{"vmSize":request["limits"]["sku"]}})
+used={"regional":{"limit":128,"current":64,"free":64},"families":{sku:{"limit":10,"current":8,"free":2} for sku in m.COMMISSIONING_SKU_POOL}}
+m.runner_quota_snapshot=lambda *_:used
+assert m.commissioning_capacity_gate(env,states[-1],reservations,active)["active_vcpus"]==64
+# One active plus one pending against a live value of eight must refuse at 12, proving max(live, active)+pending.
+try: m.commissioning_capacity_gate(env,states[1],reservations[:2],active[:1])
+except m.RunnerError as exc: assert "live quota" in str(exc)
+else: raise AssertionError("stale/foreign live usage plus a pending reservation overbooked a family")
+PY
+  pass "mixed pool serializes eight stale callers, caps two per family, admits 16, refuses 17, and avoids active double-count"
+}
+
+commissioning_admission_unit() {
+  python3 - "$HOST" <<'PY' || fail "commissioning admission adversaries failed"
+import importlib.util, math, pathlib, tempfile, sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env={"subscription":"sub","resource_group":"rg","prefix":"prefix","max_concurrency":16,"budget_limit":1500,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
+limits=dict(m.RESOURCE_CLASSES["behavior-heavy"]); limits.update({"sku":"Standard_D4ds_v6","sku_family":"StandardDdsv6Family"})
+state={"schema":m.SCHEMA,"invocation":"azr-aaaaaaaaaaaa","request":{"fence":"sha256:"+"a"*64,"lineage_root_invocation":"azr-aaaaaaaaaaaa","cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":16,"limits":limits,"compute_deallocation_deadline":"2026-01-02T00:00:00Z"}}
+seen=[]
+m.cost_query=lambda *_a,**_k: (_ for _ in ()).throw(AssertionError("commissioning queried Cost Management"))
+real_commissioning_budget=m.exact_commissioning_budget
+m.exact_commissioning_budget=lambda _env:seen.append("budget") or {"id":"budget","etag":"E"}
+m.commissioning_inventory_gate=lambda _env,_state:seen.append("inventory") or set()
+m.list_management_reservations=lambda _env:[]
+m.active_runner_vms=lambda _env:[]
+m.retail_rate=lambda _env,_sku:0.10
+m.runner_quota_snapshot=lambda _env,_skus:{"regional":{"limit":128,"current":0,"free":128},"families":{sku:{"limit":10,"current":0,"free":10} for sku in m.COMMISSIONING_SKU_POOL}}
+cost=m.commissioning_cost_gate(env,state,limits)
+assert seen==["budget","inventory"] and cost["actual"] is None and cost["forecast"] is None
+assert cost["cost_admission_mode"]==m.COMMISSIONING_COST_ADMISSION_MODE
+assert cost["max_increment"]==cost["first_day"]["total"] and cost["max_billable_lifetime_hours"]==24
+tags=m.reservation_tags({**env,"deployment_generation":"gen","owner":"owner"},state,cost["max_increment"],"2026-01-01T00:00:00Z")
+assert tags["cost-admission-mode"]==m.COMMISSIONING_COST_ADMISSION_MODE and tags["cell-ordinal"]=="16" and tags["selected-sku"]=="Standard_D4ds_v6"
+# The live Budget contract is exact: $1500 Monthly RG filter and all eight alerts.
+notifications={}
+for prefix,kind in (("Actual","Actual"),("Forecast","Forecasted")):
+    for label,threshold in (("750",50),("1000",66.67),("1250",83.33),("1500",100)):
+        notifications[(prefix+label).lower()]={"enabled":True,"operator":"GreaterThanOrEqualTo","threshold":threshold,"thresholdType":kind,"contactEmails":["operator@example.invalid"]}
+budget={"id":"/subscriptions/sub/providers/Microsoft.Consumption/budgets/bud-prefix-monthly","name":"bud-prefix-monthly","type":"Microsoft.Consumption/budgets","eTag":"E","properties":{"category":"Cost","amount":1500,"timeGrain":"Monthly","filter":{"dimensions":{"name":"ResourceGroupName","operator":"In","values":["rg"]}},"notifications":notifications}}
+m.az_command=lambda *_a,**_k:(budget,0,"")
+m.exact_commissioning_budget=real_commissioning_budget
+assert m.exact_commissioning_budget(env)["etag"]=="E"
+notifications["actual750"]["enabled"]=False
+try: m.exact_commissioning_budget(env)
+except m.RunnerError: pass
+else: raise AssertionError("commissioning accepted a disabled budget alert")
+notifications["actual750"]["enabled"]=True
+m.exact_commissioning_budget=lambda _env:{"id":"budget","etag":"E"}
+for change,text in (({"max_concurrency":17},"1..16"),({"budget_limit":1000},"$1500")):
+    changed=dict(env); changed.update(change)
+    try: m.commissioning_cost_gate(changed,state,limits)
+    except m.RunnerError as exc: assert text in str(exc)
+    else: raise AssertionError("invalid commissioning policy accepted")
+# Fifteen exact mixed-family slots allow the sixteenth; after its reservation the same invocation remains admitted, but a seventeenth cannot collide with slot 1.
+def make_reservation(invocation,ordinal):
+    sku=m.COMMISSIONING_SKU_POOL[(ordinal-1)//2]; slot_limits={**limits,"sku":sku,"sku_family":m.SKU_FAMILY[sku]}
+    record={"schema":m.SCHEMA,"invocation":invocation,"phase":"cost-reserved","cost":{"max_billable_lifetime_hours":24,"max_increment":cost["max_increment"]},"request":{"fence":"sha256:"+"c"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":ordinal,"limits":slot_limits}}
+    m.save_state(env,record,create=True)
+    return {"id":"/reservations/"+invocation,"invocation-binding":invocation,"amount_usd":cost["max_increment"],"cell_ordinal":ordinal,"selected-sku":sku,"sku-family":m.SKU_FAMILY[sku]}
+reservations=[make_reservation("azr-{:012x}".format(i),i) for i in range(1,16)]
+m.list_management_reservations=lambda _env:list(reservations)
+m.commissioning_inventory_gate=lambda _env,_state:{item["id"].lower() for item in reservations}
+sixteenth=m.commissioning_cost_gate(env,state,limits)
+assert sixteenth["reserved_invocations"]==15 and math.isclose(sixteenth["outstanding_reservations"],15*cost["max_increment"])
+state["cost"]={"max_billable_lifetime_hours":24,"max_increment":cost["max_increment"]}; m.save_state(env,state,create=True)
+current={"id":"/reservations/"+state["invocation"],"invocation-binding":state["invocation"],"amount_usd":cost["max_increment"],"cell_ordinal":16,"selected-sku":limits["sku"],"sku-family":limits["sku_family"]}; reservations.append(current)
+assert m.commissioning_cost_gate(env,state,limits)["reserved_invocations"]==16
+first_limits={**limits,"sku":m.COMMISSIONING_SKU_POOL[0],"sku_family":m.SKU_FAMILY[m.COMMISSIONING_SKU_POOL[0]]}
+seventeenth={"schema":m.SCHEMA,"invocation":"azr-bbbbbbbbbbbb","request":{"fence":"sha256:"+"b"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":1,"limits":first_limits}}
+try: m.commissioning_cost_gate(env,seventeenth,first_limits)
+except m.RunnerError as exc: assert "already reserved" in str(exc)
+else: raise AssertionError("seventeenth commissioning runner was admitted")
+# Exact completed cleanup releases slot 1 without deleting its retained audit/cost identity.
+first_state=m.load_state(env,reservations[0]["invocation-binding"]); first_state["phase"]="complete"; m.save_state(env,first_state)
+reservations[0]["cleanup-verified-at"]="2026-01-03T00:00:00Z"
+replacement={"schema":m.SCHEMA,"invocation":"azr-cccccccccccc","request":{"fence":"sha256:"+"d"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":1,"limits":first_limits}}
+replacement_cost=m.commissioning_cost_gate(env,replacement,first_limits)
+assert replacement_cost["reserved_invocations"]==15 and replacement_cost["retained_reservations"]==16
+# Default strict mode calls actual and forecast and propagates an unavailable forecast.
+strict_env=dict(env,cost_admission_mode=m.STRICT_COST_ADMISSION_MODE,budget_limit=1000,max_concurrency=4)
+calls=[]
+def cost_query(_env,forecast=False,**_kwargs):
+    calls.append(forecast)
+    if forecast: raise m.RunnerError("429")
+    return 0.0
+m.cost_query=cost_query
+try: m.budget_gate(strict_env,limits)
+except m.RunnerError: pass
+else: raise AssertionError("strict admission bypassed unavailable Cost Management")
+assert calls==[False,True]
+# Dispatch requires exact explicit confirmation only for commissioning mode.
+minimal={"invocation":"azr-aaaaaaaaaaaa","parent_invocation":None,"request":{"fence":"sha256:"+"a"*64,"lineage_root_invocation":"azr-aaaaaaaaaaaa","cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE}}
+try: m.dispatch_prepared(env,minimal,"sub",None)
+except m.RunnerError as exc: assert "--confirm-cost-admission-mode" in str(exc)
+else: raise AssertionError("commissioning ran without exact confirmation")
+minimal["request"]["cost_admission_mode"]=m.STRICT_COST_ADMISSION_MODE
+try: m.dispatch_prepared(strict_env,minimal,"sub",m.COMMISSIONING_COST_ADMISSION_MODE)
+except m.RunnerError as exc: assert "accepted only" in str(exc)
+else: raise AssertionError("strict mode accepted commissioning confirmation")
+PY
+  pass "strict remains authoritative while commissioning admits the sixteenth, refuses the seventeenth, and records itemized reservations"
+}
+
 static_private_controller_contract
+environment_mode_defaults
 prepare_contract
 executor_credential_adversary
 linux_systemd_drop_integration
 management_fencing_unit
 effective_rbac_adversaries
 cost_retry_unit
+retail_rate_unit
+mixed_pool_capacity_unit
+commissioning_admission_unit
 
 echo "# fm-azure-runner.test.sh: all assertions passed"
