@@ -2381,6 +2381,12 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  # The optional Herdr validation viewer is a visual child only. Retire it
+  # through its focused helper before returning the worktree or closing the
+  # authoritative task pane; missing or ambiguous sidecars are preserved.
+  if [ "$BACKEND" = herdr ]; then
+    "$SCRIPT_DIR/fm-herdr-no-mistakes-observer.sh" retire "$ID" || true
+  fi
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 

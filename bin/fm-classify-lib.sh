@@ -25,8 +25,8 @@
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time.
 
-# Directory of this library, used to locate the sibling fm-crew-state.sh reader.
-# Resolved at source time from BASH_SOURCE so it works whether sourced by a
+# Directory of this library, used to locate sibling current-state and optional
+# Herdr visual-observer helpers. Resolved at source time from BASH_SOURCE so it works whether sourced by a
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
@@ -674,14 +674,21 @@ signal_reason_is_actionable() {  # <file> ...
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src observer_bin
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  # The watcher already obtained a current, branch-and-head-attributed run-step.
+  # Reconcile the optional Herdr observer only on that path, keeping all Herdr
+  # lifecycle operations in its focused helper rather than in watcher logic.
+  if [ "$src" = run-step ]; then
+    observer_bin=${FM_HERDR_NM_OBSERVER_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-herdr-no-mistakes-observer.sh}
+    [ -x "$observer_bin" ] && "$observer_bin" reconcile "$id" >/dev/null 2>&1 || true
+  fi
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'

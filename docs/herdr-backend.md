@@ -308,6 +308,21 @@ Its before/after tripwire requires the live default-session snapshot to remain b
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
 
+## Live no-mistakes observer
+
+Create local `config/herdr-no-mistakes-observer-panes` to opt in to one passive observer beside an ordinary Herdr ship pane during its matching active validation run.
+`bin/fm-herdr-no-mistakes-observer.sh` verifies the task's authoritative Herdr metadata, live task pane, current worktree branch and code identity, and a non-terminal `no-mistakes axi status` result before splitting that exact pane to the right without focus.
+The new pane runs only `no-mistakes attach --run <run-id>` from the task's isolated worktree.
+It cannot start, restart, cancel, answer, approve, fix, or otherwise drive the pipeline.
+
+The helper writes an atomic private sidecar binding task id, run id, session, task pane, observer pane, and worktree.
+A sidecar is reusable only while its complete live binding agrees.
+A missing, unreadable, stale, or conflicting sidecar refuses both duplicate creation and pane closure.
+When the run is terminal, the task pane has disappeared, or normal task cleanup begins, the helper closes only its exact verified observer pane after confirming it differs from the task pane and is not the captain's active tab.
+It retires the sidecar only after structured pane absence confirms that close.
+The observer never contributes endpoint authority, recovery, delivery, or presentation-journal behavior.
+It is disabled by default, local to one home, and unsupported on non-Herdr backends.
+
 ## Active limits
 
 - Herdr remains experimental.
