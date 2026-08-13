@@ -2106,9 +2106,11 @@ spawn_pid_descendants() {  # <root-pid>; bounded depth, root excluded
   done
 }
 spawn_descendant_worktree() {  # <pane-pid> <project-real>
-  local root=$1 proj=$2 pid cwd
+  local root=$1 proj=$2 pid cwd proj_common cwd_common
   [ -n "$root" ] || return 0
   [ -d /proc ] || return 0
+  proj_common=$(git -C "$proj" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  proj_common=$(real_path_or_raw "$proj_common")
   # Scan the root pid as well as its descendants: a shell running the worktree command
   # as its last statement may exec into it rather than fork, leaving the moved process
   # AT the root. The project-cwd filter below makes including the root harmless when it
@@ -2119,6 +2121,8 @@ spawn_descendant_worktree() {  # <pane-pid> <project-real>
     [ "$(real_path_or_raw "$cwd")" != "$proj" ] || continue
     # A worktree checkout always carries a .git entry; anything else is an unrelated cwd.
     [ -e "$cwd/.git" ] || continue
+    cwd_common=$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    [ "$(real_path_or_raw "$cwd_common")" = "$proj_common" ] || continue
     printf '%s\n' "$cwd"
     return 0
   done
