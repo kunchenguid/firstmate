@@ -690,6 +690,46 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# The status-protocol text must show the keyed form with the key BEFORE the
+# colon (the documented shape bin/fm-classify-lib.sh parses) and describe the
+# note-head token as an equivalent accepted fallback, in every scaffold
+# variant that carries the protocol.
+test_keyed_status_form_in_all_scaffolds() {
+  local home kind id brief
+  home="$TMP_ROOT/keyed-form-home"
+  mkdir -p "$home/data"
+  for kind in ship scout secondmate; do
+    id="brief-keyed-form-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep '`needs-decision [key=chosen-slug]: {summary}`' "$brief" \
+      "$kind brief did not show the keyed status form with the key before the colon"
+    assert_grep 'BEFORE the colon' "$brief" \
+      "$kind brief did not state that the key tag goes before the colon"
+    # shellcheck disable=SC2016 # Literal backticks and brackets must remain unexpanded.
+    assert_grep '`needs-decision: [key=slug] ...`' "$brief" \
+      "$kind brief did not show the note-head fallback form"
+    assert_grep 'equivalent fallback since #2202' "$brief" \
+      "$kind brief did not describe the note-head token as an accepted fallback"
+    assert_grep 'before-colon token winning when both are present' "$brief" \
+      "$kind brief did not state that the before-colon token wins when both are present"
+  done
+  pass "fm-brief.sh: every status-protocol scaffold shows the keyed form and its note-head fallback"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -729,4 +769,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_keyed_status_form_in_all_scaffolds
 test_scout_and_secondmate_scaffold
