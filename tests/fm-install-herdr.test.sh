@@ -86,8 +86,19 @@ test_ci_wires_installers_and_required_lane() {
     "portable CI must run parallel shard 1"
   assert_grep 'lane portable-parallel-2' "$CI" \
     "portable CI must run parallel shard 2"
-  assert_grep 'lane portable-serial' "$CI" \
-    "portable CI must run the serial remainder"
+  # shellcheck disable=SC2016 # Ruby compares literal workflow expressions.
+  ruby -ryaml -rshellwords -e '
+    workflow = YAML.safe_load(File.read(ARGV.fetch(0)))
+    job = workflow.fetch("jobs").fetch("tests-portable-serial")
+    abort "serial shard matrix is not 1..4" unless job.dig("strategy", "matrix", "shard") == [1, 2, 3, 4]
+    step = job.fetch("steps").find { |candidate| candidate["name"].to_s.start_with?("Run portable serial shard") }
+    abort "serial shard runner step is missing" unless step
+    expected_lane = "portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}"
+    abort "serial shard lane does not derive from matrix cardinality" unless step.fetch("env").fetch("FM_SERIAL_LANE") == expected_lane
+    tokens = Shellwords.shellsplit(step.fetch("run"))
+    invocation = ["bin/fm-test-run.sh", "--lane", "$FM_SERIAL_LANE"]
+    abort "serial shard does not invoke fm-test-run.sh with its derived lane" unless tokens.each_cons(invocation.length).any? { |slice| slice == invocation }
+  ' "$CI" || fail "portable CI must run all four serial remainder shards"
   assert_grep 'fm-test-run.sh --check-coverage' "$CI" \
     "CI must prove portable lanes and Herdr partition the complete inventory"
   # Live harness credential tests must stay out of the default Herdr lane.

@@ -101,8 +101,19 @@ test_ci_still_runs_broad_behavior_suite() {
     || fail "CI must invoke portable parallel shard 1 through fm-test-run.sh"
   grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
     || fail "CI must invoke portable parallel shard 2 through fm-test-run.sh"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
-    || fail "CI must invoke the portable serial remainder through fm-test-run.sh"
+  # shellcheck disable=SC2016 # Ruby compares literal workflow expressions.
+  ruby -ryaml -rshellwords -e '
+    workflow = YAML.safe_load(File.read(ARGV.fetch(0)))
+    job = workflow.fetch("jobs").fetch("tests-portable-serial")
+    abort "serial shard matrix is not 1..4" unless job.dig("strategy", "matrix", "shard") == [1, 2, 3, 4]
+    step = job.fetch("steps").find { |candidate| candidate["name"].to_s.start_with?("Run portable serial shard") }
+    abort "serial shard runner step is missing" unless step
+    expected_lane = "portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}"
+    abort "serial shard lane does not derive from matrix cardinality" unless step.fetch("env").fetch("FM_SERIAL_LANE") == expected_lane
+    tokens = Shellwords.shellsplit(step.fetch("run"))
+    invocation = ["bin/fm-test-run.sh", "--lane", "$FM_SERIAL_LANE"]
+    abort "serial shard does not invoke fm-test-run.sh with its derived lane" unless tokens.each_cons(invocation.length).any? { |slice| slice == invocation }
+  ' "$CI" || fail "CI must invoke every portable serial shard through fm-test-run.sh"
   grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
     || fail "CI must prove complete lane coverage through fm-test-run.sh"
   # Guard against regression to an uninstrumented inline loop that drops timing.

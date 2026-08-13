@@ -142,9 +142,25 @@ test_codex_ps_denied_still_reports_dead_holder_stale() {
   pass "fm-lock still reports a dead holder stale when ps is denied"
 }
 
+test_malformed_trailing_lock_fragment_is_not_an_owner() {
+  local home fakebin out
+  home="$TMP_ROOT/malformed-trailing-fragment"
+  fakebin=$(fm_fakebin "$TMP_ROOT/malformed-trailing-fragment")
+  mkdir -p "$home/state"
+  make_fake_ps_denied "$fakebin"
+  printf 'codex:other-thread\npartial-write' > "$home/state/.lock"
+
+  out=$(FM_HOME="$home" CODEX_THREAD_ID=test-thread CODEX_SANDBOX=seatbelt PATH="$fakebin:$PATH" "$LOCK" status)
+  assert_contains "$out" "lock: stale" \
+    "a malformed trailing fragment was accepted as a hosted Codex lock owner"
+
+  pass "fm-lock rejects a lock file with a malformed trailing fragment"
+}
+
 test_codex_thread_fallback_acquires_when_ps_is_denied
 test_codex_thread_fallback_acquires_when_parent_lookup_fails
 test_codex_thread_holder_cannot_be_stolen_while_fresh
 test_codex_thread_holder_cannot_be_stolen_when_old
 test_codex_ps_denied_preserves_live_holder
 test_codex_ps_denied_still_reports_dead_holder_stale
+test_malformed_trailing_lock_fragment_is_not_an_owner

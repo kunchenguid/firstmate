@@ -6,10 +6,13 @@
 # work (a state/<id>.meta exists) or an X-mode relay poll
 # (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
-# bin/fm-guard.sh keeps its task-specific grace-based warning predicate;
-# bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
-# its end-of-turn block decision with the live watcher lock check in
-# bin/fm-wake-lib.sh.
+# bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
+# bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
+# fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh): under the Claude
+# Stop auto-arm model, where the watcher only runs between turns, a fresh beacon
+# with no live watcher is healthy; under persistent-watcher harnesses a live
+# identity-matched watcher is still required. The status fields here retain the
+# beacon-age details used in their messages.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -23,14 +26,17 @@ fm_sup_stat_mtime() {
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_NEEDED         true/false - in-flight work or an X-mode relay poll
+#   FM_SUP_SOURCES        count of registered process-to-event sources
+#   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
+#                         registered event source (a source is a wait on an
+#                         external process, not a task, so it has no metadata)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -41,7 +47,14 @@ fm_supervision_status() {
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -f "$state/x-watch.check.sh" ]; then
+  FM_SUP_SOURCES=0
+  for source in "$state"/procevent/*.source; do
+    [ -e "$source" ] || continue
+    FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
+  done
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
+    || [ -f "$state/x-watch.check.sh" ] \
+    || [ "$FM_SUP_SOURCES" -gt 0 ]; then
     FM_SUP_NEEDED=true
   fi
 
@@ -64,17 +77,16 @@ fm_supervision_status() {
 }
 
 # fm_supervision_needed <state-dir> [grace-seconds]
-# Exit 0 (true) exactly when in-flight work or an X-mode relay poll needs a
-# watcher. Exit 1 (false) for an idle home.
+# Exit 0 (true) exactly when the home needs a watcher.
 fm_supervision_needed() {
   fm_supervision_status "$@"
   [ "$FM_SUP_NEEDED" = true ]
 }
 
 # fm_supervision_unhealthy <state-dir> [grace-seconds]
-# Exit 0 (true) exactly in the dangerous state: in-flight work exists and no
-# watcher has a fresh beacon. Exit 1 (false) otherwise, including zero in-flight.
+# Exit 0 (true) exactly when supervision is needed and no watcher has a fresh
+# beacon. Exit 1 (false) otherwise.
 fm_supervision_unhealthy() {
   fm_supervision_status "$@"
-  [ "$FM_SUP_IN_FLIGHT" -gt 0 ] && [ "$FM_SUP_WATCHER_FRESH" = false ]
+  [ "$FM_SUP_NEEDED" = true ] && [ "$FM_SUP_WATCHER_FRESH" = false ]
 }

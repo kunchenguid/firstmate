@@ -1,16 +1,28 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Compatibility boundary: Pi 0.81.1 and 0.82.0 expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons,
-// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
-// setHiddenThinkingLabel(). The focused tests pin those assumptions. Version-bounded
-// presentation adapters cover collapsed assistant thinking and operational user rows;
-// Pi still exposes no global renderer for arbitrary built-in or custom rows.
+// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
+// renderers, renderShell: "self", session_start replacement reasons, agent_start and
+// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
+// with a disposable component factory, and setHiddenThinkingLabel().
+// ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
+// installs. The focused tests pin those assumptions but never reject a
+// newer Pi solely for its version. The collapsed-thinking and operational-user
+// presentation adapters probe the exact API they patch and degrade independently with a
+// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
+// still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
+//
+// Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
+// unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
+// registration synchronous because restored rows capture the registry before
+// session_start; and collision-check only the later first-activation path, when
+// getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
+// and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -19,7 +31,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
+  ExtensionUIContext,
   ToolDefinition,
+  ToolInfo,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -35,6 +49,11 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import {
+  CALM_WORKING_SHIP_WIDGET_KEY,
+  createCalmWorkingShipAnimation,
+  createCalmWorkingShipWidget,
+} from "./lib/fm-calm-working-ship.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -74,12 +93,68 @@ const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 
+// Resolves symlinks before comparing tool-ownership identity below: sourceInfo.path
+// values come from independent path-resolution code paths (this module's own
+// import.meta.url vs. Pi's extension loader), and macOS alone symlinks /tmp and /var
+// to /private/..., so lexical string comparison alone spuriously reads a symlinked
+// self-path as a foreign one. Falls back to the raw path for synthetic, non-file
+// sourceInfo paths such as "<builtin:read>" or "<inline>", which realpathSync rejects.
+const realpathOrSelf = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+const extensionRealFile = realpathOrSelf(extensionFile);
+
+// Each presentation adapter probes the exact Pi API it patches. If a future Pi removes
+// that API, only the affected adapter degrades; the rest of Calm keeps working.
+function installCalmPresentationAdapter(name: string, install: () => void): void {
+  try {
+    install();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`Firstmate Calm: ${name} presentation adapter unavailable, skipping. ${reason}`);
+  }
+}
+
 export default function (pi: ExtensionAPI) {
-  installCalmAssistantLayout();
-  installCalmOperationalUserLayout();
+  installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
+  installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
+  // One logical agent run, tracked from agent_start through agent_settled rather than
+  // from turns or tool calls, so the boat never flickers between tool calls, automatic
+  // continuations, retries, or compaction that stay inside the same run.
+  let agentRunActive = false;
+  let workingShipShown = false;
+  // One animation instance per extension lifetime. Hiding the working widget freezes
+  // this state; the next working period resumes it. session_start resets it so a fresh
+  // Pi session starts at the normal initial position. Never module-global.
+  const workingShipAnimation = createCalmWorkingShipAnimation();
+
+  // Single owner of Calm's working-row presentation choice. The widget is only created
+  // or removed on a real transition, so repeated starts cannot duplicate its timer.
+  const applyWorkingPresentation = (
+    ui: ExtensionUIContext,
+    forceStockVisibility = false,
+  ): void => {
+    const showShip = agentRunActive && calmPresentationIsActive();
+    if (showShip !== workingShipShown) {
+      workingShipShown = showShip;
+      ui.setWidget(
+        CALM_WORKING_SHIP_WIDGET_KEY,
+        showShip
+          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
+          : undefined,
+      );
+      ui.setWorkingVisible(!showShip);
+    } else if (forceStockVisibility && !showShip) {
+      ui.setWorkingVisible(true);
+    }
+  };
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
@@ -115,9 +190,9 @@ export default function (pi: ExtensionAPI) {
 
   registerFirstmateSyntheticPresentation(pi);
 
-  function registerBuiltIn<TParams extends TSchema, TDetails, TState>(
+  function wrapBuiltIn<TParams extends TSchema, TDetails, TState>(
     factory: DefinitionFactory<TParams, TDetails, TState>,
-  ): void {
+  ): ToolDefinition<TParams, TDetails, TState> {
     const definitions = new Map<string, ToolDefinition<TParams, TDetails, TState>>();
     const definitionFor = (cwd: string): ToolDefinition<TParams, TDetails, TState> => {
       let definition = definitions.get(cwd);
@@ -169,7 +244,7 @@ export default function (pi: ExtensionAPI) {
       return shell;
     };
 
-    pi.registerTool<TParams, TDetails, TState>({
+    return {
       ...original,
       renderShell: "self",
 
@@ -212,27 +287,119 @@ export default function (pi: ExtensionAPI) {
         refreshStandardShell(state, theme, context);
         return new Container();
       },
+    };
+  }
+
+  // Each wrapBuiltIn() call below has its own concrete TParams/TDetails/TState; the
+  // array holding all seven has no single sound instantiation, so it is typed the same
+  // way Pi's own ToolDefinition consumers erase this (any, any, any).
+  const wrappedBuiltIns: ToolDefinition<any, any, any>[] = [
+    wrapBuiltIn(createReadToolDefinition),
+    wrapBuiltIn(createBashToolDefinition),
+    wrapBuiltIn(createEditToolDefinition),
+    wrapBuiltIn(createWriteToolDefinition),
+    wrapBuiltIn(createGrepToolDefinition),
+    wrapBuiltIn(createFindToolDefinition),
+    wrapBuiltIn(createLsToolDefinition),
+  ];
+
+  // True once this extension has handled built-in registration for its lifetime:
+  // either all seven synchronously at load, or only the uncontested subset during
+  // first activation.
+  let builtInsRegistered = false;
+
+  // Gate on Calm already being on at load time. This must stay synchronous and
+  // unconditional here (see file header): a foreign-claim check is not reachable at
+  // this point, while deferral would make restored rows capture the wrong definition.
+  // A Calm-off session or reload registers nothing and creates no collision exposure.
+  if (loadCalmPreference()) {
+    for (const tool of wrappedBuiltIns) pi.registerTool(tool);
+    builtInsRegistered = true;
+  }
+
+  // Which of the 7 built-ins are currently owned by a different, non-builtin
+  // extension. Only safe to call once every extension has finished loading (see file
+  // header); never call this during the factory's own synchronous execution above.
+  function contestedBuiltIns(): ToolDefinition<any, any, any>[] {
+    let registered: ToolInfo[];
+    try {
+      registered = pi.getAllTools();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`Firstmate Calm: built-in ownership check unavailable, claiming every built-in unconditionally. ${reason}`);
+      return [];
+    }
+    return wrappedBuiltIns.filter((tool) => {
+      const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
+      return owner !== undefined && owner.source !== "builtin" && realpathOrSelf(owner.path) !== extensionRealFile;
     });
   }
 
-  registerBuiltIn(createReadToolDefinition);
-  registerBuiltIn(createBashToolDefinition);
-  registerBuiltIn(createEditToolDefinition);
-  registerBuiltIn(createWriteToolDefinition);
-  registerBuiltIn(createGrepToolDefinition);
-  registerBuiltIn(createFindToolDefinition);
-  registerBuiltIn(createLsToolDefinition);
+  // The first time Calm turns on in a session that started off, claim every
+  // uncontested built-in and leave each contested tool and its owning extension
+  // untouched. Tell the user which built-in Calm could not take over, since Calm's
+  // presentation does not apply to it.
+  function activateBuiltInsIfNeeded(ui: ExtensionUIContext): void {
+    if (builtInsRegistered) return;
+    const contested = contestedBuiltIns();
+    const contestedNames = new Set(contested.map((tool) => tool.name));
+    for (const tool of wrappedBuiltIns) {
+      if (!contestedNames.has(tool.name)) pi.registerTool(tool);
+    }
+    builtInsRegistered = true;
+    if (contested.length === 0) return;
+    const names = contested.map((tool) => `"${tool.name}"`).join(", ");
+    const plural = contested.length > 1;
+    ui.notify(
+      `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
+      "warning",
+    );
+    for (const tool of contested) {
+      console.error(`Firstmate Calm: skipped claiming built-in "${tool.name}" because another extension already owns it.`);
+    }
+  }
+
+  // Backstop for the one case activateBuiltInsIfNeeded cannot reach: Calm registered
+  // unconditionally at load time because it was already on, without any chance to
+  // check for a foreign claim first, so it can still silently lose a name to an
+  // earlier-loaded extension. Runs on every session_start reason because a reload
+  // rebuilds every extension's registrations from scratch, so last session's clean
+  // bill of health does not carry over.
+  function reportBuiltInLosses(): void {
+    if (!builtInsRegistered) return;
+    let registered: ToolInfo[];
+    try {
+      registered = pi.getAllTools();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`Firstmate Calm: built-in ownership check unavailable. ${reason}`);
+      return;
+    }
+    for (const tool of wrappedBuiltIns) {
+      const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
+      if (owner && owner.source !== "builtin" && realpathOrSelf(owner.path) !== extensionRealFile) {
+        console.error(
+          `Firstmate Calm: another extension (${owner.path}) also claimed the built-in "${tool.name}" tool and won; Calm's presentation for it is unavailable this session.`,
+        );
+      }
+    }
+  }
 
   pi.on("session_start", (_event, ctx) => {
+    reportBuiltInLosses();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
     publishPresentationState();
-    ctx.ui.setWorkingVisible(true);
+    agentRunActive = false;
+    workingShipShown = false;
+    // A genuine new session lifetime starts the boat at the normal initial position.
+    workingShipAnimation.reset();
+    applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
-    removeTerminalInputHandler = ctx.ui.onTerminalInput((data): undefined => {
+    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return;
 
       const input = ctx.ui.getEditorText().trim();
@@ -255,8 +422,23 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setToolsExpanded(!expanded);
         ctx.ui.setToolsExpanded(expanded);
       }, 0);
-      return undefined;
     });
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    agentRunActive = true;
+    applyWorkingPresentation(ctx.ui);
+  });
+
+  // agent_settled is emitted from a finally block, so it also covers abort and failure.
+  pi.on("agent_settled", (_event, ctx) => {
+    agentRunActive = false;
+    applyWorkingPresentation(ctx.ui);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    agentRunActive = false;
+    applyWorkingPresentation(ctx.ui);
   });
 
   pi.registerCommand("calm", {
@@ -265,8 +447,9 @@ export default function (pi: ExtensionAPI) {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);
       setCalmPresentation(active);
+      if (active) activateBuiltInsIfNeeded(ctx.ui);
       publishPresentationState();
-      ctx.ui.setWorkingVisible(true);
+      applyWorkingPresentation(ctx.ui, true);
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
 

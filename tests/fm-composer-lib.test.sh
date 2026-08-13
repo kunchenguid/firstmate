@@ -9,7 +9,7 @@
 #      (unsafe-for-injection), never `empty`. This is the safety fix.
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
-#   3. The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a genuine empty
+#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `⟩` (muse) are a genuine empty
 #      agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
@@ -43,7 +43,10 @@ test_stripped_unbordered_content_uses_plain_content() {
     [ "$out" = unknown ] \
       || fail "stripped unbordered content '$plain' must retain its unknown safety verdict, got '$out'"
   done
-  for plain in '❯' '›'; do
+  # muse draws `⟩` at luminance ~150, the tightest margin over the 128 ghost
+  # threshold in the fleet, so a raised threshold really can strip it to empty
+  # and leave only the plain row. This branch is what keeps that pane readable.
+  for plain in '❯' '›' '⟩'; do
     out=$(classify 0 '' '' sensitive "$plain")
     [ "$out" = empty ] \
       || fail "a stripped agent glyph '$plain' must remain empty, got '$out'"
@@ -79,7 +82,9 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   out=$(classify 0 '›'); [ "$out" = empty ] || fail "bare codex '›' should read empty, got '$out'"
   out=$(classify 1 '❯'); [ "$out" = empty ] || fail "bordered claude '❯' should read empty, got '$out'"
   out=$(classify 1 '›'); [ "$out" = empty ] || fail "bordered codex '›' should read empty, got '$out'"
-  pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
+  out=$(classify 0 '⟩'); [ "$out" = empty ] || fail "bare muse '⟩' should read empty, got '$out'"
+  out=$(classify 1 '⟩'); [ "$out" = empty ] || fail "bordered muse '⟩' should read empty, got '$out'"
+  pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex, ⟩ muse) read empty bordered or bare"
 }
 
 # --- Empty content and idle placeholder -------------------------------------
@@ -120,6 +125,9 @@ test_real_text_is_pending() {
   local out
   out=$(classify 0 '❯ fix findings 1 and 3'); [ "$out" = pending ] || fail "bare '❯ <text>' should be pending, got '$out'"
   out=$(classify 1 '> deploy staging now'); [ "$out" = pending ] || fail "bordered '> <text>' should be pending, got '$out'"
+  # muse restores the interrupted prompt into its composer after Escape, as real
+  # bright text. Reading that as pending is correct - it really is unsubmitted.
+  out=$(classify 0 '⟩ second turn to interrupt'); [ "$out" = pending ] || fail "bare '⟩ <text>' should be pending, got '$out'"
   # A slash-command popup argument-hint placeholder is still unsubmitted text.
   out=$(classify 1 '/compact compaction instructions'); [ "$out" = pending ] || fail "a popup placeholder fill should be pending, got '$out'"
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"

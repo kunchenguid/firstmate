@@ -104,7 +104,7 @@ test_ordinary_claude_worker_launch_sanitizes_parent_session_env() {
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
       FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$BASE_PATH" \
-      "$SPAWN" "$id" "$proj" claude 2>&1
+      "$SPAWN" "$id" "$proj" claude --mode local-only --yolo off 2>&1
   )
   status=$?
   expect_code 0 "$status" "ordinary claude worker spawn should succeed"

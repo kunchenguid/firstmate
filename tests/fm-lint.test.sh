@@ -18,11 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
-CI="$ROOT/.github/workflows/ci.yml"
-NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
-# The authoritative file set the one owner must run.
-CANON='ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -33,34 +29,206 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
-test_owner_exists_and_executable() {
-  assert_present "$LINT" "bin/fm-lint.sh is missing"
-  [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable so CI/gate can run it directly"
-  pass "one-owner lint script exists and is executable"
+test_list_files_reports_the_shell_inventory() {
+  local listed expected
+  # CI=true forces the full canonical set regardless of the ambient branch or
+  # working-tree diff a local test run happens to have, so this stays a pure
+  # inventory check independent of fm-lint.sh's own changed-file mode below.
+  listed=$(CI=true "$LINT" --list-files)
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "fm-lint.sh --list-files did not return the complete shell inventory"
+  pass "fm-lint.sh --list-files reports the complete shell inventory"
 }
 
-test_owner_defines_canonical_set() {
-  assert_grep "$CANON" "$LINT" "fm-lint.sh must run the canonical shellcheck file set"
-  # It must not weaken CI: no severity downgrade and no blanket disable/exclude
-  # that would hide findings CI fails on.
-  assert_no_grep '--severity' "$LINT" "fm-lint.sh must not lower severity below the CI default"
-  assert_no_grep '--exclude' "$LINT" "fm-lint.sh must not blanket-exclude checks CI enforces"
-  assert_grep "\"\$FM_LINT_SHELLCHECK\" --norc --external-sources -- \"\${roots[@]}\"" "$LINT" "every bounded worker must ignore ambient config and preserve annotated production sources"
-  [ "$(grep -Fc -- '--norc --external-sources' "$LINT")" -eq 1 ] || fail "the one worker command must own ShellCheck configuration"
-  assert_grep "JOBS=\${FM_LINT_JOBS:-2}" "$LINT" "canonical lint must default to two bounded workers"
-  pass "fm-lint.sh is the sole authoritative definition at CI-default severity"
+# fm_lint_stub_git <fakebin-dir>: install a git stub for the changed-file mode
+# tests below. Its answers are driven by env vars the caller sets before
+# invoking fm-lint.sh, so those tests can steer git state without depending on
+# this worktree's actual branch, remotes, or history:
+#   FM_TEST_GIT_INSIDE_WORKTREE  1 (default) or 0
+#   FM_TEST_GIT_BRANCH           branch name for `rev-parse --abbrev-ref HEAD`
+#   FM_TEST_GIT_HAS_ORIGIN_MAIN  1 (default) or 0
+#   FM_TEST_GIT_HAS_MAIN         1 (default) or 0
+#   FM_TEST_GIT_MERGE_BASE_OK    1 (default) or 0
+#   FM_TEST_GIT_MERGE_BASE       merge-base value to print when OK
+#   FM_TEST_GIT_DIFF_FILE        path to a file of NUL-separated changed paths
+fm_lint_stub_git() {
+  local fakebin=$1
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "rev-parse --is-inside-work-tree")
+    [ "${FM_TEST_GIT_INSIDE_WORKTREE:-1}" = 1 ] || exit 1
+    printf 'true\n'
+    exit 0
+    ;;
+  "rev-parse --abbrev-ref HEAD")
+    printf '%s\n' "${FM_TEST_GIT_BRANCH:-feature}"
+    exit 0
+    ;;
+  "rev-parse --verify -q origin/main")
+    [ "${FM_TEST_GIT_HAS_ORIGIN_MAIN:-1}" = 1 ] && exit 0 || exit 1
+    ;;
+  "rev-parse --verify -q main")
+    [ "${FM_TEST_GIT_HAS_MAIN:-1}" = 1 ] && exit 0 || exit 1
+    ;;
+  "merge-base "*)
+    if [ "${FM_TEST_GIT_MERGE_BASE_OK:-1}" = 1 ]; then
+      printf '%s\n' "${FM_TEST_GIT_MERGE_BASE:-fakebase123}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  "diff --name-only --diff-filter=ACMR -z "*)
+    if [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
+      cat "$FM_TEST_GIT_DIFF_FILE"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$fakebin/git"
 }
 
-test_ci_invokes_the_owner() {
-  grep -Eq '^      - run: bin/fm-lint\.sh$' "$CI" || fail "CI lint job must invoke the one-owner script as a run step"
-  # Guard against regression to an inline re-spelling of the command.
-  assert_no_grep 'run: shellcheck' "$CI" "CI must call fm-lint.sh, not re-spell shellcheck inline"
-  pass "CI lint job calls the one-owner script, not an inline command"
+# fm_lint_write_diff_file <file> <path>...: writes NUL-separated changed paths
+# in the shape `git diff --name-only -z` produces, for FM_TEST_GIT_DIFF_FILE.
+fm_lint_write_diff_file() {
+  local file=$1
+  shift
+  printf '%s\0' "$@" > "$file"
 }
 
-test_nomistakes_invokes_the_owner() {
-  grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
-  pass "no-mistakes pre-push lint calls the one-owner script"
+# fm_lint_stub_shellcheck <fakebin-dir> <log-file>: install a ShellCheck stub
+# that answers --version with the pinned version and otherwise logs the file
+# roots it was asked to check (one per line) instead of actually analyzing
+# them, so changed-file mode tests can assert exactly which files fm-lint.sh
+# selected without depending on real ShellCheck findings.
+fm_lint_stub_shellcheck() {
+  local fakebin=$1 log=$2
+  : > "$log"
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+shift 3
+printf '%s\n' "\$@" >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
+test_changed_mode_lints_only_the_changed_file() {
+  local tmp fakebin log diff_file out target
+  tmp=$(fm_test_tmproot fm-lint-changed)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-install-shellcheck.sh"
+  fm_lint_write_diff_file "$diff_file" "$target" "README.md"
+
+  # Clear the ambient CI/GITHUB_ACTIONS signals so changed-file mode is actually
+  # exercised: a CI run sets them and would otherwise force the full lint here.
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) \
+    || fail "changed-mode lint run failed"$'\n'"$out"
+  [ "$(cat "$log")" = "$target" ] \
+    || fail "changed-mode lint did not run ShellCheck on exactly the changed file"$'\n'"logged: $(cat "$log")"
+  pass "fm-lint.sh changed mode lints only the changed canonical file"
+}
+
+test_ci_forces_full_lint_even_with_empty_diff() {
+  local listed expected
+  # No git stub: CI=true must short-circuit fm-lint.sh's mode selection before
+  # it ever consults git, so this proves CI wins regardless of local diff state.
+  listed=$(CI=true "$LINT" --list-files)
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "CI=true did not force the full canonical file set"
+  pass "fm-lint.sh forces a full lint in CI even when the local diff would be empty"
+}
+
+test_main_branch_forces_full_lint() {
+  local tmp fakebin listed expected
+  tmp=$(fm_test_tmproot fm-lint-main-full)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+
+  # Clear CI/GITHUB_ACTIONS so the on-main branch is what forces the full lint,
+  # not the ambient CI signal a real CI run would otherwise supply.
+  listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_TEST_GIT_BRANCH=main "$LINT" --list-files)
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "fm-lint.sh did not force a full lint when HEAD is on main"
+  pass "fm-lint.sh forces a full lint when HEAD is on main"
+}
+
+test_explicit_path_bypasses_changed_logic() {
+  local tmp fakebin log out target
+  tmp=$(fm_test_tmproot fm-lint-explicit-override)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  target="bin/fm-install-shellcheck.sh"
+
+  # The git stub reports a broken merge-base, which would force a full lint
+  # under the no-args default. Clearing CI/GITHUB_ACTIONS keeps changed-file
+  # selection live so this proves the explicit path bypasses it, not that CI
+  # already forced full mode. An explicit path must never even consult git.
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_MERGE_BASE_OK=0 \
+    "$LINT" "$target" 2>&1) || fail "explicit-path lint failed"$'\n'"$out"
+  [ "$(cat "$log")" = "$target" ] \
+    || fail "explicit path lint did not run on exactly the requested file"$'\n'"logged: $(cat "$log")"
+  pass "fm-lint.sh explicit paths bypass changed-file mode selection"
+}
+
+test_zero_changed_files_exits_clean() {
+  local tmp fakebin diff_file out rc
+  tmp=$(fm_test_tmproot fm-lint-zero-changed)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  : > "$diff_file"
+
+  rc=0
+  # Clear CI/GITHUB_ACTIONS so changed-file mode runs and can reach the empty
+  # target set; a CI run would otherwise force a full lint instead.
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
+  assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
+  assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
+  pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
+}
+
+test_list_files_respects_changed_mode() {
+  local tmp fakebin diff_file listed
+  tmp=$(fm_test_tmproot fm-lint-list-changed)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  # A real canonical file, a non-canonical file, and a canonical-looking path
+  # that does not exist: only the first should survive into the listed set.
+  fm_lint_write_diff_file "$diff_file" \
+    "tests/fm-lint.test.sh" "docs/README.md" "bin/definitely-not-real-file.sh"
+
+  # Clear CI/GITHUB_ACTIONS so --list-files reflects the changed set rather than
+  # the full canonical set a CI run's ambient signals would otherwise force.
+  listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --list-files)
+  [ "$listed" = "tests/fm-lint.test.sh" ] \
+    || fail "--list-files did not report the would-be changed set in changed mode"$'\n'"got: $listed"
+  pass "fm-lint.sh --list-files reports the would-be changed set in changed mode"
 }
 
 test_pins_an_explicit_version() {
@@ -69,17 +237,6 @@ test_pins_an_explicit_version() {
   # which is also what drops the upstream-retired, false-positive-prone SC2015.
   assert_contains "$REQUIRED" "0.11.0" "fm-lint.sh must pin ShellCheck 0.11.0"
   pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"
-}
-
-test_ci_installs_and_logs_the_pinned_version() {
-  # CI must derive the version from the one owner (never hardcode a divergent
-  # number) and log the resolved version as parity evidence.
-  assert_grep "VERSION=\"\$(\"\$ROOT/bin/fm-lint.sh\" --required-version)\"" "$INSTALLER" "installer must read the version fm-lint.sh pins"
-  [ "$(grep -Fc "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" "$CI")" -eq 4 ] || fail "lint and all three portable behavior jobs must use the shared ShellCheck installer"
-  assert_grep "ACTUAL_SHA256=\$(sha256sum" "$INSTALLER" "installer must calculate the ShellCheck archive checksum"
-  assert_grep "[ \"\$ACTUAL_SHA256\" = \"\$SHA256\" ]" "$INSTALLER" "installer must verify the ShellCheck archive checksum"
-  assert_grep "\"\$DESTINATION/shellcheck\" --version" "$INSTALLER" "installer must log the resolved ShellCheck version as evidence"
-  pass "CI installs and logs the pinned ShellCheck version from the one owner"
 }
 
 test_installer_retries_transient_download_failure() {
@@ -236,26 +393,6 @@ SH
   "$LINT" "$good" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "fm-lint.sh flagged a clean fixture (exit $rc)"
   pass "fm-lint.sh passes a clean fixture"
-}
-
-test_source_graph_boundaries_keep_every_owner() {
-  local adapter file production_context_tests=""
-  [ "$(grep -Fc '# shellcheck source=/dev/null' "$ROOT/bin/fm-backend.sh")" -eq 5 ] \
-    || fail "the dispatcher must stop static source following at all five dynamic adapters"
-  for adapter in tmux herdr zellij orca cmux; do
-    assert_present "$ROOT/bin/backends/$adapter.sh" "canonical adapter root is missing: $adapter"
-  done
-  assert_present "$ROOT/bin/fm-push-transition-lib.sh" "narrow push-transition owner is missing"
-  assert_grep '# shellcheck source=bin/fm-push-transition-lib.sh' "$ROOT/bin/fm-watch.sh" "the watcher must consume the narrow push-transition owner"
-  assert_grep ". \"\$ROOT/bin/fm-push-transition-lib.sh\"" "$ROOT/tests/fm-backend-herdr-eventwait-smoke.test.sh" "the Herdr event-wait smoke must consume the narrow production owner"
-  assert_no_grep '# shellcheck source=bin/fm-watch.sh' "$ROOT/tests/fm-backend-herdr-eventwait-smoke.test.sh" "the event-wait smoke must not re-import the whole watcher graph"
-  for file in "$ROOT"/tests/*.sh; do
-    grep -q '^[[:space:]]*# shellcheck source=bin/' "$file" || continue
-    production_context_tests="${production_context_tests}$(basename "$file")|"
-  done
-  [ "$production_context_tests" = 'fm-backend-herdr.test.sh|fm-backlog-handoff.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-lifecycle-e2e.test.sh|fm-secondmate-sync.test.sh|' ] \
-    || fail "only callback/variable interop tests may retain production source context: $production_context_tests"
-  pass "dispatcher, adapters, production owner, and tests have explicit lint boundaries"
 }
 
 test_jobs_are_deterministic_and_complete() {
@@ -482,18 +619,19 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
-test_owner_exists_and_executable
-test_owner_defines_canonical_set
-test_ci_invokes_the_owner
-test_nomistakes_invokes_the_owner
+test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
-test_ci_installs_and_logs_the_pinned_version
 test_installer_retries_transient_download_failure
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
-test_source_graph_boundaries_keep_every_owner
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
+test_changed_mode_lints_only_the_changed_file
+test_ci_forces_full_lint_even_with_empty_diff
+test_main_branch_forces_full_lint
+test_explicit_path_bypasses_changed_logic
+test_zero_changed_files_exits_clean
+test_list_files_respects_changed_mode

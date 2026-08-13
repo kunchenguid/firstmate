@@ -1,10 +1,14 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
-const ARM_READY_TIMEOUT_MS = Number(process.env.FM_OPENCODE_ARM_READY_TIMEOUT_MS || 12000);
+// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
+// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
+// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
+const ARM_READY_TIMEOUT_DEFAULT_MS = process.platform === "win32" ? 35000 : 12000;
+const ARM_READY_TIMEOUT_MS = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS", ARM_READY_TIMEOUT_DEFAULT_MS);
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -18,6 +22,7 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let armRecovery = new WeakMap();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -179,7 +184,7 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   }
 }
 
-async function sendPrompt(paths, client, sessionID, text) {
+async function sendPrompt(paths, client, sessionID, text, recovery) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
   await client.session.promptAsync({
     path: { id: sessionID },
@@ -187,6 +192,17 @@ async function sendPrompt(paths, client, sessionID, text) {
       parts: [{ type: "text", text: encoded }],
     },
   });
+  if (recovery) {
+    const result = spawnSync(
+      "bash",
+      [`${paths.root}/bin/fm-watch-arm.sh`, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
+      {
+        cwd: paths.root,
+        env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state, FM_ROOT_OVERRIDE: paths.root },
+      },
+    );
+    if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
+  }
 }
 
 function wakePrompt(reason) {
@@ -235,21 +251,21 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return "";
+    if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return "";
+    if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
-      return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms`;
+      return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
     }
     if (status === "read-only" || status === "not-primary" || status === "skipped") break;
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
   }
   setArmStatus("failed");
-  return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries`;
+  return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
@@ -314,12 +330,18 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   const releaseChild = () => {
     if (child === armChild) child = null;
   };
+  const observeRecovery = () => {
+    const recovery = `${stdout}\n${stderr}`.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
+    if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
+  };
   armChild.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
+    observeRecovery();
     observeArmOutput(stdout, stderr, settleReadiness);
   });
   armChild.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
+    observeRecovery();
     observeArmOutput(stdout, stderr, settleReadiness);
   });
   armChild.on("close", (code, signal) => {
@@ -338,10 +360,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
         ? previousRestoration.catch(() => "").then(() => restoreAfterActionableClose(paths, sessionID, client, predecessor))
         : restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
-      void restoration.then((failure) => {
+      void restoration.then((result) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-        return sendPrompt(paths, client, sessionID, wakePrompt(message));
+        const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
+        return sendPrompt(paths, client, sessionID, wakePrompt(message), result.recovery);
       }).catch(() => {
       });
       return;
