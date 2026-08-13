@@ -153,7 +153,7 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 # the PROJECT forever, and a real descendant process sits in the real worktree, so the
 # only way to pass is to read the descendant's cwd from the kernel.
 test_pane_cwd_never_moves_is_detected_via_descendant() {
-  local rec id out status root_pid
+  local rec id out status root_pid child_pid child_pid_file
   if [ ! -d /proc ]; then
     printf 'ok - # SKIP descendant-cwd signal needs /proc (absent on this platform)\n'
     return 0
@@ -162,14 +162,29 @@ test_pane_cwd_never_moves_is_detected_via_descendant() {
   rec=$(make_settle_case settle-never-moves "$id" 0)
   read_settle_record "$rec"
 
-  # A pane shell whose CHILD - not itself - is the process sitting in the worktree,
-  # mirroring treehouse's shell/subshell shape.
-  bash -c 'cd "$1" && sleep 30' _ "$WT_DIR" &
+  child_pid_file="$HOME_DIR/descendant.pid"
+  bash -c '
+    cd "$1" || exit
+    bash -c '\''cd "$1" && exec sleep 30'\'' _ "$2" &
+    child=$!
+    printf "%s\n" "$child" > "$3"
+    wait "$child"
+  ' _ "$PROJ_DIR" "$WT_DIR" "$child_pid_file" &
   root_pid=$!
+  while [ ! -s "$child_pid_file" ]; do
+    kill -0 "$root_pid" 2>/dev/null || fail "pane process exited before creating its descendant"
+  done
+  child_pid=$(cat "$child_pid_file")
+  [ "$(readlink "/proc/$root_pid/cwd")" = "$PROJ_DIR" ] ||
+    fail "pane process did not remain in the project"
+  [ "$(readlink "/proc/$child_pid/cwd")" = "$WT_DIR" ] ||
+    fail "pane descendant did not enter the worktree"
 
   out=$(FM_FAKE_PANE_PID="$root_pid" run_settle_spawn_never_moving "$id")
   status=$?
+  kill "$child_pid" 2>/dev/null
   kill "$root_pid" 2>/dev/null
+  wait "$child_pid" 2>/dev/null
   wait "$root_pid" 2>/dev/null
 
   expect_code 0 "$status" "spawn should succeed via the descendant-cwd signal"
