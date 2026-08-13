@@ -2,7 +2,8 @@
 # tests/fm-classify-decision-key.test.sh - decision-key position tolerance in
 # the open-decisions fold (bin/fm-classify-lib.sh). A "[key=<slug>]" token is
 # documented between the verb and the colon (needs-decision [key=x]: note), but
-# workers commonly write the colon first (needs-decision: [key=x] note); that
+# workers commonly write the colon first (needs-decision: [key=x] note) or
+# append the token after the summary (needs-decision: note [key=x]); each
 # stated key must be honored, never silently folded into the shared "default"
 # bucket where an answer can close the wrong record (issue #2109). Also covers
 # status_line_verb's bracket-tag stripping: a remote secondmate reply prepends
@@ -125,8 +126,9 @@ test_two_colon_form_decisions_stay_distinct() {
 test_mid_note_prose_mention_is_not_a_stated_key() {
   local dir
   dir=$(case_dir prose)
-  # Only a token at the head of the note states a key; a summary merely
-  # mentioning "[key=x]" deeper in must neither open nor close that key.
+  # Only a token at the head of the note (or at the line's own end) states a
+  # key; a summary merely mentioning "[key=x]" deeper in must neither open nor
+  # close that key.
   printf 'needs-decision: pick a [key=red] or [key=blue] theme\n' > "$dir/t.status"
   assert_fold "$dir/t.status" \
     "$(printf 'default\tneeds-decision\tpick a [key=red] or [key=blue] theme\n')" \
