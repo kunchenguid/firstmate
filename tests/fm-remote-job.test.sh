@@ -7,8 +7,6 @@ set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-job)
-mkdir -p "$TMP_ROOT"
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
 ACCOUNT_HOME="$TMP_ROOT/account"
@@ -19,7 +17,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
-trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; fm_test_cleanup' EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"

@@ -35,8 +35,6 @@ set -u
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-parent-binding)
-mkdir -p "$TMP_ROOT"
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 PARENT="$TMP_ROOT/parent"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -62,7 +60,7 @@ cleanup() {
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
     kill "$worker_pid" 2>/dev/null || true
   fi
-  rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup EXIT
 

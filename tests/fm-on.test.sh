@@ -7,11 +7,7 @@ set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-on)
-# The helper is called in command substitution, so recreate the registered path
-# and physicalize macOS's /var -> /private/var alias before transport validation.
-mkdir -p "$TMP_ROOT"
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; fm_test_cleanup' EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"

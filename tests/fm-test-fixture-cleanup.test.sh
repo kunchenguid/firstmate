@@ -97,6 +97,34 @@ test_fixture_registration_failure_rolls_back_root() {
   pass "failed fixture registration rolls back the new root"
 }
 
+test_empty_tmp_root_cannot_delete_working_directory() {
+  local harness case_repo fakebin stock_bash_major
+  stock_bash_major=$(/bin/bash -c 'printf "%s\n" "${BASH_VERSINFO[0]}"')
+  if [ "$stock_bash_major" != 3 ]; then
+    pass "empty TMP_ROOT deletion regression requires macOS stock bash 3.2"
+    return
+  fi
+
+  harness=$(fm_test_tmproot fm-test-empty-root-guard)
+  case_repo="$harness/repo"
+  fakebin="$harness/fakebin"
+  mkdir -p "$case_repo/tests" "$fakebin"
+  cp -R "$ROOT/bin" "$case_repo/bin"
+  cp "$ROOT/tests/lib.sh" "$ROOT/tests/fm-on.test.sh" "$case_repo/tests/"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  (cd "$case_repo" && PATH="$fakebin:$PATH" /bin/bash tests/fm-on.test.sh) \
+    >/dev/null 2>&1 || true
+
+  assert_present "$case_repo" \
+    "an empty TMP_ROOT under macOS stock bash 3.2 deleted the suite's working directory"
+  pass "an empty TMP_ROOT cannot turn suite cleanup into working-directory deletion"
+}
+
 test_orphan_sweep_respects_fixture_ownership() {
   local harness dirfile active_dir stale_dir fresh_dir pid tries
   harness=$(fm_test_tmproot fm-test-cleanup-orphan-harness)
@@ -144,8 +172,15 @@ test_orphan_sweep_respects_fixture_ownership() {
   pass "the orphan sweep reaps only old fixtures without a live owner"
 }
 
-test_fixture_root_gone_after_normal_exit
-test_fixture_root_gone_after_sigterm
-test_cleanup_registry_resists_precreation
-test_fixture_registration_failure_rolls_back_root
-test_orphan_sweep_respects_fixture_ownership
+case "${FM_TEST_CASE:-all}" in
+  empty-root) test_empty_tmp_root_cannot_delete_working_directory ;;
+  all)
+    test_fixture_root_gone_after_normal_exit
+    test_fixture_root_gone_after_sigterm
+    test_cleanup_registry_resists_precreation
+    test_fixture_registration_failure_rolls_back_root
+    test_empty_tmp_root_cannot_delete_working_directory
+    test_orphan_sweep_respects_fixture_ownership
+    ;;
+  *) fail "unknown FM_TEST_CASE: $FM_TEST_CASE" ;;
+esac
