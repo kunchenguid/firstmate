@@ -254,6 +254,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-claude-trust-lib.sh
+. "$SCRIPT_DIR/fm-claude-trust-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -672,6 +674,8 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+CLAUDE_TRUST_LOCK=
+CLAUDE_TRUST_LOCK_HELD=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -782,6 +786,10 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ "$CLAUDE_TRUST_LOCK_HELD" = 1 ]; then
+    CLAUDE_TRUST_LOCK_HELD=0
+    fm_lock_release "$CLAUDE_TRUST_LOCK" || true
   fi
   return "$status"
 }
@@ -2262,6 +2270,37 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# Deterministically pre-accept Claude Code's per-folder workspace-trust dialog
+# for this worktree before launch (bin/fm-claude-trust-lib.sh), covering both
+# a fresh spawn and --relaunch: WT is finalized for every KIND and RELAUNCH
+# state by this point. --dangerously-skip-permissions does not suppress this
+# dialog, so a first-time worktree path would otherwise hang the worker with
+# an empty status log until a supervisor peeks the pane and answers it by
+# hand. Scoped to the verified claude harness only; every other adapter's
+# trust/bypass handling is unrelated and untouched.
+if [ "$HARNESS" = claude ]; then
+  CLAUDE_TRUST_WT=$(real_path_or_raw "$WT")
+  fm_claude_trust_ensure_dir || {
+    echo "error: could not create the claude config directory for $ID" >&2
+    exit 1
+  }
+  CLAUDE_TRUST_LOCK=$(fm_claude_trust_lock_path) || {
+    echo "error: could not resolve the claude trust lock path" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait "$CLAUDE_TRUST_LOCK"; then
+    echo "error: could not acquire the claude trust lock for $ID" >&2
+    exit 1
+  fi
+  CLAUDE_TRUST_LOCK_HELD=1
+  if ! fm_claude_pretrust_worktree "$CLAUDE_TRUST_WT"; then
+    echo "error: could not pre-trust '$CLAUDE_TRUST_WT' for claude; refusing to spawn a worker that would hang on the folder-trust dialog" >&2
+    exit 1
+  fi
+  CLAUDE_TRUST_LOCK_HELD=0
+  fm_lock_release "$CLAUDE_TRUST_LOCK"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

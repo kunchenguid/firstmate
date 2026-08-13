@@ -162,7 +162,12 @@ add_ship_task() {
 
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  # HOME is pinned to this case's isolated home: a relaunch onto claude runs
+  # bin/fm-spawn.sh --relaunch, whose trust pre-accept step
+  # (bin/fm-claude-trust-lib.sh) falls back to $HOME/.claude.json when
+  # CLAUDE_CONFIG_DIR is unset, and this suite must never touch the
+  # developer's real ~/.claude.json.
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -176,7 +181,11 @@ run_control() {  # <case-dir> <args...>
 
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  # HOME is pinned to this case's isolated home: a claude-harness spawn's
+  # trust pre-accept step (bin/fm-claude-trust-lib.sh) falls back to
+  # $HOME/.claude.json when CLAUDE_CONFIG_DIR is unset, and this suite must
+  # never touch the developer's real ~/.claude.json.
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }

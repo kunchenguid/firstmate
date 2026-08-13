@@ -189,9 +189,11 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+The per-folder workspace-trust confirmation ("Is this a project you created or one you trust?") is pre-accepted by `bin/fm-spawn.sh` before every claude launch (`bin/fm-claude-trust-lib.sh` writes the worktree's trust into `<CLAUDE_CONFIG_DIR:-$HOME>/.claude.json` ahead of time), so it should never appear for a firstmate-spawned worktree; `--dangerously-skip-permissions` does NOT suppress this dialog on its own (verified live: it still gated a fresh, never-before-seen worktree on Claude Code 2.1.223).
+A separate bypass-permissions mode warning ("WARNING: Claude Code running in Bypass Permissions mode") is a distinct, later dialog that this pre-accept step does not address; see issue #2325 for its two-dialog sequencing and the destructive default on its second option.
+First ever launch on a machine may still show its own onboarding confirmation.
 After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
+If a dialog is showing, read it before sending any key: accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the exact choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.

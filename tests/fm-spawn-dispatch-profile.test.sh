@@ -120,8 +120,12 @@ run_spawn() {
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR. HOME is
+  # likewise pinned to this case's isolated home: fm-spawn's claude pre-trust
+  # step (bin/fm-claude-trust-lib.sh) falls back to $HOME/.claude.json when
+  # CLAUDE_CONFIG_DIR is unset, and this suite must never touch the
+  # developer's real ~/.claude.json.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -760,18 +764,24 @@ test_batch_forwards_shared_profile_flags() {
 }
 
 test_claude_forwards_firstmate_config_dir_when_set() {
-  local rec id out status launch
+  local rec id out status launch cfgdir
   id=profile-claude-cfgdir-z17
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
+  # A real, writable directory: fm-spawn now pre-trusts the worktree by
+  # writing <CLAUDE_CONFIG_DIR>/.claude.json itself (bin/fm-claude-trust-lib.sh),
+  # so this can no longer be an arbitrary unwritable path like /opt/....
+  cfgdir="$CASE_DIR/claude-work"
 
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$cfgdir" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$cfgdir' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
+  assert_grep '"hasTrustDialogAccepted": true' "$cfgdir/.claude.json" \
+    "fm-spawn did not pre-trust the worktree in the custom CLAUDE_CONFIG_DIR's .claude.json"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
 

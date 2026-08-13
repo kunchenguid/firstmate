@@ -59,7 +59,13 @@ set -u
 # was launched from; every case states the marker it means to test.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+# jq's real directory rides along even when it is not one of the standard
+# system paths below: a claude-resolved secondmate spawn's trust pre-accept
+# step (bin/fm-claude-trust-lib.sh) requires jq, and this suite's narrowed
+# PATH exists to keep harness-ancestry detection deterministic, not to hide a
+# genuine runtime dependency from it.
+JQ_DIR=$(command -v jq >/dev/null 2>&1 && dirname "$(command -v jq)" || true)
+BASE_PATH=${FM_TEST_BASE_PATH:-${JQ_DIR:+$JQ_DIR:}/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
@@ -454,8 +460,12 @@ spawn_secondmate() {
   local spawn_args=("$id" "$home")
   [ -n "$harness" ] && spawn_args+=("$harness")
   spawn_args+=(--secondmate)
+  # HOME is pinned alongside FM_HOME: a claude-resolved secondmate spawn's
+  # trust pre-accept step (bin/fm-claude-trust-lib.sh) falls back to
+  # $HOME/.claude.json when CLAUDE_CONFIG_DIR is unset, and this suite must
+  # never touch the developer's real ~/.claude.json.
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 \
@@ -673,8 +683,12 @@ spawn_secondmate_capture() {
   mkdir -p "$world/home/state" "$world/home/data"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
+  # HOME is pinned alongside FM_HOME: a claude-resolved secondmate spawn's
+  # trust pre-accept step (bin/fm-claude-trust-lib.sh) falls back to
+  # $HOME/.claude.json when CLAUDE_CONFIG_DIR is unset, and this suite must
+  # never touch the developer's real ~/.claude.json.
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
