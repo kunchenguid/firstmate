@@ -820,7 +820,7 @@ test_decision_options_are_never_silently_dropped() {
       | .option_count == 3 and .unsupported_options == 1 and .options_complete == true
         and .binary == false
         and (.options | map(test(\"/Users/bob\")) | any | not)
-        and (.options | index(\"Unsupported option (select explicitly)\")) != null" >/dev/null \
+        and (.options | map(test(\"^Unsupported option [0-9]+\")) | any)" >/dev/null \
     || fail "a private-path option was silently discarded instead of explicitly marked"
   assert_not_contains "$out" "/Users/bob" "decision option leaked a private path"
 
@@ -828,10 +828,100 @@ test_decision_options_are_never_silently_dropped() {
   assert_contains "$text" "unsupported - select explicitly" \
     "decision surface did not disclose an unsupported option"
 
+  fixture="$TMP_ROOT/options-two-unsupported.json"
+  jq '.tasks["multi-option"].decision.options =
+        ["/Users/a/plan-alpha.md","/Users/b/plan-beta.md","zip"]' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 3
+        and .options_retained == 3 and .unsupported_options == 2
+        and .options_complete == true
+        and ((.options | map(select(test(\"^Unsupported option [0-9]+\"))) | unique | length) == 2)" \
+    >/dev/null || fail "two distinct unsupported options collapsed into one card row"
+  assert_not_contains "$out" "/Users/a" "decision option leaked a private path"
+  assert_not_contains "$out" "/Users/b" "decision option leaked a private path"
+
+  fixture="$TMP_ROOT/options-all-unsupported.json"
+  jq '.tasks["multi-option"].decision.options = ["/Users/a/x.md","/Users/b/y.md"]' \
+    "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e "$card_query
+      | .option_count == 2 and .options_retained == 2 and .unsupported_options == 2
+        and .binary == false" >/dev/null \
+    || fail "a fully unsupported option set collapsed to a single row"
+
+  fixture="$TMP_ROOT/options-duplicate.json"
+  jq '.tasks["multi-option"].decision.options = ["zip","zip","tarball"]' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .distinct_options == 2 and .duplicate_options == 1
+        and .options_retained == 2 and .unsupported_options == 0
+        and .options_complete == true
+        and (.options == [\"zip\",\"tarball\"])" >/dev/null \
+    || fail "an exact duplicate option was reported as a lost choice"
+  text=$("$CONSOLE" --fixture "$fixture" --format decisions --no-color --now 2026-08-13T12:00:00Z)
+  assert_not_contains "$text" "unsupported - select explicitly" \
+    "duplicate options produced a false unsupported-option notice"
+  assert_contains "$text" "1 duplicate" "duplicate options were not disclosed"
+
   text=$("$CONSOLE" --fixture "$FIXTURE" --format decisions --no-color --now 2026-08-13T12:00:00Z)
-  assert_contains "$text" "recorded, all shown" \
+  assert_contains "$text" "all shown" \
     "decision surface did not confirm a complete option set"
   pass "decision options are retained, marked, and never collapsed to a false binary"
+}
+
+test_obsidian_decision_id_alias_and_ambiguity() {
+  local fixture out text value
+
+  fixture="$TMP_ROOT/obsidian-alias.json"
+  jq '.tasks["review-merge"].decision.obsidian_id = "D36"' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e '
+    [.decisions.cards[] | select(.task_id == "review-merge")][0]
+      | .alias == "D36 · React Library" and .alias_key == "D36"
+        and .alias_source == "obsidian" and .restricted == true
+  ' >/dev/null || fail "an authoritative obsidian_id did not produce the D36 · Domain header"
+  printf '%s' "$out" | jq -e '.decisions.aliases_unique == true' >/dev/null \
+    || fail "a unique obsidian_id was reported as ambiguous"
+
+  for value in '"d36"' '"D36x"' '"36"' '123' 'null' '{"id":"D36"}'; do
+    fixture="$TMP_ROOT/obsidian-malformed.json"
+    jq --argjson v "$value" '.tasks["review-merge"].decision.obsidian_id = $v' "$FIXTURE" > "$fixture"
+    "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -e '[.decisions.cards[] | select(.task_id == "review-merge")][0]
+          | .alias_source == "task-identity" and (.alias_key | startswith("D-"))' >/dev/null \
+      || fail "malformed obsidian_id $value did not fall back to the task identity alias"
+  done
+
+  fixture="$TMP_ROOT/obsidian-ambiguous.json"
+  jq '.tasks["review-merge"].decision.obsidian_id = "D36"
+      | .tasks["multi-option"].decision.obsidian_id = "D36"' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e '
+    .decisions.aliases_unique == false
+      and (.decisions.ambiguous_aliases == ["D36"])
+      and .decisions.focused == null
+      and .decisions.bare_reply_accepted == false
+      and .decisions.selection_required == true
+      and ([.decisions.cards[] | select(.task_id == "review-merge")][0].restricted) == true
+      and ([.decisions.cards[] | select(.task_id == "multi-option")][0].restricted) == false
+  ' >/dev/null || fail "a duplicated obsidian_id did not force explicit selection"
+  text=$("$CONSOLE" --fixture "$fixture" --format decisions --no-color --now 2026-08-13T12:00:00Z)
+  assert_contains "$text" "Alias is ambiguous" \
+    "ambiguous alias was not disclosed on the decision surface"
+  assert_contains "$text" "no reply is routed" \
+    "ambiguous alias did not refuse to route a reply"
+
+  fixture="$TMP_ROOT/obsidian-ambiguous-single.json"
+  jq 'del(.tasks["company-blocked"]) | del(.tasks["multi-option"])
+      | .snapshot.tasks = [.snapshot.tasks[]
+          | select(.id != "company-blocked" and .id != "multi-option")]
+      | .tasks["review-merge"].decision.obsidian_id = "D36"' "$FIXTURE" > "$fixture"
+  "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z \
+    | jq -e '.decisions.open == 1 and .decisions.aliases_unique == true
+             and .decisions.focused == "D36 · React Library"' >/dev/null \
+    || fail "a single unambiguous obsidian card was not focusable"
+  pass "authoritative obsidian ids alias cleanly and refuse routing when ambiguous"
 }
 
 test_chat_visibility_is_reported_honestly() {
@@ -969,6 +1059,7 @@ test_alias_is_pure_identity_under_collision
 test_restriction_survives_truncation_redaction_and_options
 test_option_key_tokens_are_unique_and_readable
 test_decision_options_are_never_silently_dropped
+test_obsidian_decision_id_alias_and_ambiguity
 test_chat_visibility_is_reported_honestly
 test_profile_selector_is_display_only_and_verified
 test_motion_is_bounded_and_reduced_motion_aware

@@ -419,20 +419,22 @@ NORMALIZED=$(
            | .value as $t
            | (($task_display[$t.id] // {}).decision // {}) as $decision
            | (obsidian_stem($t.link; ($task_display[$t.id] // {}).link)) as $stem
-           | ([$decision.options[]? | select((. | type) == "string")] | length) as $raw_option_count
-           | ([$decision.options[]?
-               | select((. | type) == "string")
-               | . as $raw
-               | (safe($raw; ""; 40)) as $display
-               | if $display != "" and ($display | test("^[A-Za-z0-9][A-Za-z0-9 ()/_.,:+-]*$"))
-                 then {label:$display, supported:true}
-                 else {label:"Unsupported option (select explicitly)", supported:false}
-                 end]
+           | ([$decision.options[]? | select((. | type) == "string")]) as $raw_options
+           | ($raw_options | length) as $raw_option_count
+           | ($raw_options | unique | length) as $distinct_option_count
+           | ($raw_option_count - $distinct_option_count) as $duplicate_option_count
+           | ($raw_options
               | to_entries
-              | map(.value + {order:.key})
-              | unique_by(.label)
-              | sort_by(.order)
-              | map(del(.order))) as $option_entries
+              | unique_by(.value)
+              | sort_by(.key)
+              | to_entries
+              | map(.value.value as $raw
+                    | (safe($raw; ""; 40)) as $display
+                    | if $display != "" and ($display | test("^[A-Za-z0-9][A-Za-z0-9 ()/_.,:+-]*$"))
+                      then {label:$display, supported:true}
+                      else {label:("Unsupported option " + ((.key + 1) | tostring)
+                                   + " (select explicitly)"), supported:false}
+                      end)) as $option_entries
            | ($option_entries | map(.label)) as $named_options
            | ([$option_entries[] | select(.supported | not)] | length) as $unsupported_option_count
            | (safe($decision.question; ""; 120)) as $question
@@ -471,9 +473,11 @@ NORMALIZED=$(
                options:(if $raw_option_count > 0 then $named_options else ["Igen", "Nem"] end),
                binary:($raw_option_count == 0),
                option_count:$raw_option_count,
+               distinct_options:$distinct_option_count,
+               duplicate_options:$duplicate_option_count,
                options_retained:($named_options | length),
                unsupported_options:$unsupported_option_count,
-               options_complete:(($named_options | length) == $raw_option_count),
+               options_complete:(($named_options | length) == $distinct_option_count),
                keys:(if $raw_option_count > 0
                      then ($named_options
                            | reduce .[] as $option
@@ -841,11 +845,17 @@ if [ "$FORMAT" = decisions ] || [ "$FORMAT" = all ]; then
          fit("│ BLOCKED   " + $d.blocked_task),
          fit("│ KEYS      " + ($d.keys | join("  "))),
          fit("│ OPTIONS   " + (if $d.option_count == 0 then "binary Igen/Nem"
-                               elif $d.unsupported_options > 0 or ($d.options_complete | not)
-                               then (($d.options_retained | tostring) + "/" + ($d.option_count | tostring)
-                                     + " shown; " + ($d.unsupported_options | tostring)
-                                     + " unsupported - select explicitly")
-                               else (($d.option_count | tostring) + " recorded, all shown")
+                               else (($d.options_retained | tostring) + "/"
+                                     + ($d.distinct_options | tostring) + " distinct shown"
+                                     + (if $d.duplicate_options > 0
+                                        then ("; " + ($d.duplicate_options | tostring) + " duplicate")
+                                        else "" end)
+                                     + (if $d.unsupported_options > 0
+                                        then ("; " + ($d.unsupported_options | tostring)
+                                              + " unsupported - select explicitly")
+                                        else "" end)
+                                     + (if $d.options_complete and $d.unsupported_options == 0
+                                        then ", all shown" else "" end))
                                end)),
          fit("│ APPROVAL  " + $d.approval_boundary),
          fit("└ " + (if $d.restricted then "explicit confirmation required; shorthand refused"
