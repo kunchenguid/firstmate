@@ -23,10 +23,8 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It records the decision digest, routed task identities, and optional supersession pointer as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
-An exact retry can finish a partial routing operation, while a changed decision, routed-task set, or supersession pointer is rejected.
-A failed intermediate step leaves the hold open.
+The `resolve` subcommand stores its durable resolution record on the captain item and routes dependent work through tasks-axi.
+`bin/fm-decision-hold.sh --help` owns its required inputs, retry identity fields, validation, and close ordering.
 
 ## Structured read surfaces
 

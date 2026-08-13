@@ -35,11 +35,14 @@
 # source before this gate has succeeded.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
-# An optional --supersedes identity must name a prior captain decision already
-# durably resolved by this command. The pointer is recorded in the new hold body
-# and its retry identity without rewriting the prior decision. The command clears
-# routed dependency edges and only then marks the new hold Done. A failure before
-# the final step leaves the new captain hold open.
+# A supplied --supersedes value must be non-empty and name a prior captain
+# decision already durably resolved by this command.
+# The pointer is recorded in the new hold body and its retry identity without
+# rewriting the prior decision.
+# Exact retries compare that identity and remain idempotent after retention moves
+# the prior record to the tasks-axi archive; omitting or changing it is rejected.
+# The command clears routed dependency edges and only then marks the new hold Done.
+# A failure before the final step leaves the new captain hold open.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
