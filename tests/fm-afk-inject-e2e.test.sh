@@ -34,7 +34,6 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 # Skip gracefully if tmux is not installed.
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-command -v perl >/dev/null 2>&1 || { echo "skip: perl not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="afk-e2e-$$"
@@ -70,7 +69,7 @@ LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 
 # Supervisor pane loop: a small deterministic composer that logs each submitted
@@ -85,9 +84,6 @@ use warnings;
 use bytes;
 
 $| = 1;
-# The in-band sentinel is U+2063 INVISIBLE SEPARATOR (UTF-8 e2 81 a3), not the
-# original ASCII unit separator. Under `use bytes` this is a 3-byte string, so
-# every comparison below must use its byte length rather than a single byte.
 my $mark = "\xe2\x81\xa3";
 my $log = shift @ARGV;
 my $old_stty = `stty -g 2>/dev/null`;
@@ -105,10 +101,16 @@ binmode STDIN;
 binmode STDOUT;
 my $buf = '';
 
+# The drawn composer row carries a real agent prompt glyph, matching the
+# production supervisor pane this daemon injects into: under the strict
+# container-proof rule (captain decision blank-row-injection-posture) a bare
+# unidentified row is never a safe injection target, so the fixture must
+# render the shape the classifier positively proves - "❯ " when idle,
+# "❯ <buffer>" while input is pending. The glyph is rendering only; it never
+# enters the buffer, so submitted-content assertions are unchanged.
 sub redraw {
-  print "\r\033[K$buf";
+  print "\r\033[K\xe2\x9d\xaf $buf";
 }
-
 sub submit_line {
   my $class = substr($buf, 0, length($mark)) eq $mark ? 'injection' : 'user';
   my $hex = unpack('H*', $buf);
@@ -214,6 +216,7 @@ reset_state() {
          "$STATE_DIR"/.subsuper-* \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
+         "$STATE_DIR"/.watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \

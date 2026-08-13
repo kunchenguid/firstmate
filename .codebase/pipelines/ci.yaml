@@ -1,29 +1,31 @@
 # Codebase CI (code.byted.org). This is the pipeline that actually runs on MRs.
 #
-# .github/workflows/ci.yml holds the same three jobs for the GitHub mirror,
-# which still owns releases and Pages. Neither file runs on the other's host,
-# so keep the two in step when you change one.
+# .github/workflows/ci.yml holds the same lanes for the GitHub mirror, which
+# still owns releases and Pages. Neither file runs on the other's host, so keep
+# the two in step when you change one.
 #
 # Each job surfaces on the MR as a check run named
 # "[Pipeline] MR CI - <job name>", which is what no-mistakes reads through
 # `bytedcli codebase mr status`.
 #
-# TOOLCHAIN: the ci_nodejs_20 image is Debian 10 (buster), whose apt packages
-# are from 2018 and too old to trust:
-#   - shellcheck 0.5.0 still emits SC1117 (removed upstream in 0.7) and flags
-#     backticks inside single quotes, so it fails on code that is clean under
-#     any current shellcheck.
-#   - jq 1.5 exits 0 from `jq -e` on empty input instead of 4. cmux.sh's
-#     surface_exists is exactly that predicate, so an absent surface reads as
-#     present and tests/fm-backend-cmux.test.sh fails.
-# github.com is not reachable from the runner directly, so both tools are
-# pinned and fetched through the internal relay into /usr/local/bin (ahead of
-# /usr/bin on PATH). Bump the versions here, not in apt.
+# WHY THE BEHAVIOR SUITE IS SHARDED HERE. It used to be one job running every
+# lane back to back under a 30-minute cap. The 2026-08-11 upstream sync grew the
+# suite from ~130 to 160 scripts, and that job then died at the cap with 111 of
+# them started and no summary for the rest - a timeout reported as
+# "job context marshal fail", which says nothing about what was still running.
+# The lanes are now separate jobs, matching the GitHub workflow: each finishes
+# in minutes, each reports its own result, and the per-job cap goes back to
+# being a hang tripwire rather than the expected end of the run.
 #
-# The tests job also installs gawk: buster's default awk is mawk 1.3.3, which
-# predates POSIX character classes, so the [[:space:]] patterns in
-# bin/fm-backlog-handoff.sh never match and its malformed-continuation refusal
-# silently passes. Ubuntu's mawk 1.3.4 and macOS awk both handle it.
+# Lane membership and the serial shard COUNT both belong to bin/fm-test-run.sh
+# (docs/fm-test-portable-shards.md), which refuses a lane whose "ofN" disagrees
+# with it - so dropping a shard job here fails loudly instead of quietly leaving
+# a quarter of the required lane unrun.
+#
+# The image toolchain repair every behavior job needs is owned by
+# bin/fm-ci-codebase-setup.sh, and the non-root plus hermetic-git contract the
+# runner needs is owned by bin/fm-ci-codebase-lane.sh. Read those two headers
+# before changing anything about the environment.
 name: MR CI
 
 trigger:
@@ -42,16 +44,17 @@ jobs:
     runs-on:
       env: boe
     image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 20
     steps:
-      - name: Install shellcheck
+      # The pinned build, its checksum, and its version all belong to
+      # bin/fm-install-shellcheck.sh; only the relay proxy is added here,
+      # because github.com is not directly reachable from this runner.
+      - name: Install pinned ShellCheck
         commands:
           - |
             set -eu
             relay=http://sys-proxy-rd-relay.byted.org:8118
-            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/sc.tar.xz \
-              https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
-            tar -xJf /tmp/sc.tar.xz -C /tmp
-            install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+            https_proxy=$relay http_proxy=$relay bin/fm-install-shellcheck.sh /usr/local/bin
             shellcheck --version
       # Call the one owner of the lint definition rather than re-spelling its
       # globs here. This file's copy had drifted: it omitted control-root/, so
@@ -63,140 +66,135 @@ jobs:
         commands:
           - bin/fm-lint.sh
 
-  tests:
-    name: Behavior tests
+  # Deterministic proof that the portable parallel shards, the portable serial
+  # shards, and the Herdr family together equal the complete tests/*.test.sh
+  # inventory with no missing scripts and no duplicates. Pure listing, so it
+  # needs none of the image repair the lanes below do.
+  coverage:
+    name: Test coverage guard
     runs-on:
       env: boe
     image: hub.byted.org/codebase/ci_nodejs_20:latest
-    # Every lane now runs even when an earlier one fails, so the wall is the
-    # whole suite rather than the first failure; this generous cap fails loudly
-    # on a hung watcher or tmux test instead of riding the 120-minute default.
+    timeout: 10
+    steps:
+      - name: Prove complete regression partition
+        commands:
+          - bin/fm-test-run.sh --check-coverage
+
+  # Two duration-balanced shards of the proven-isolated set (11 and 13 scripts).
+  tests-parallel-1:
+    name: Behavior portable parallel 1
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    # Hang tripwire with margin, not the expected healthy end of the lane.
+    timeout: 20
+    steps:
+      - name: Provision image
+        commands:
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run portable parallel shard 1
+        commands:
+          - bin/fm-ci-codebase-lane.sh --lane portable-parallel-1
+
+  tests-parallel-2:
+    name: Behavior portable parallel 2
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 20
+    steps:
+      - name: Provision image
+        commands:
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run portable parallel shard 2
+        commands:
+          - bin/fm-ci-codebase-lane.sh --lane portable-parallel-2
+
+  # The required portable serial remainder: watcher, lock, AFK, tmux, daemon,
+  # ambiguous, and other stateful scripts (~30 each). Split across separate jobs
+  # so no two of them ever share a machine; each shard is still strictly serial
+  # in itself.
+  tests-serial-1:
+    name: Behavior portable serial 1
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
     timeout: 30
     steps:
-      - name: Install tmux and gawk
+      - name: Provision image
         commands:
-          - |
-            set -eu
-            apt-get update
-            apt-get install -y --no-install-recommends tmux gawk
-            tmux -V
-            # gawk takes over the awk alternative; POSIX classes must work.
-            awk --version | head -1
-            printf '\tx\n' | awk '/^[[:space:]]/ { found = 1 } END { exit found ? 0 : 1 }'
-      - name: Install jq
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run portable serial shard 1
         commands:
-          - |
-            set -eu
-            relay=http://sys-proxy-rd-relay.byted.org:8118
-            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 120 -o /tmp/jq \
-              https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
-            install -m 0755 /tmp/jq /usr/local/bin/jq
-            jq --version
-      - name: Install tasks-axi for backlog-handoff delegation
+          - bin/fm-ci-codebase-lane.sh --lane portable-serial-1of4
+
+  tests-serial-2:
+    name: Behavior portable serial 2
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 30
+    steps:
+      - name: Provision image
         commands:
-          - |
-            set -eu
-            npm install -g tasks-axi
-            tasks-axi --version
-            # bin/fm-backlog-handoff.sh needs atomic multi-ID `mv`, added in 0.2.2.
-            have=$(tasks-axi --version | tr -d '[:space:]')
-            lowest=$(printf '%s\n0.2.2\n' "$have" | sort -V | head -n1)
-            if [ "$lowest" != "0.2.2" ]; then
-              echo "tasks-axi ${have} is older than the required 0.2.2"
-              exit 1
-            fi
-      - name: Install Node 22
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run portable serial shard 2
         commands:
-          # The image ships Node 20, but tests/fm-pi-watch-extension.test.sh
-          # imports the .ts extension directly, which needs Node's native
-          # TypeScript type stripping - default-on only from 22.18.
-          # It goes in its own prefix: unpacking over /usr/local would replace
-          # the image's npm and its internal-registry config, and the
-          # tasks-axi install above needs that npm.
-          - |
-            set -eu
-            relay=http://sys-proxy-rd-relay.byted.org:8118
-            https_proxy=$relay http_proxy=$relay curl -sSfL --max-time 180 -o /tmp/node.tar.xz \
-              https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.xz
-            mkdir -p /opt/node22
-            tar -xJf /tmp/node.tar.xz -C /opt/node22 --strip-components=1
-            /opt/node22/bin/node --version
-      - name: Fetch default-branch history
+          - bin/fm-ci-codebase-lane.sh --lane portable-serial-2of4
+
+  tests-serial-3:
+    name: Behavior portable serial 3
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 30
+    steps:
+      - name: Provision image
         commands:
-          # tests/fm-backend.test.sh resolves a merge-base against main and
-          # hard-fails without it; the MR checkout does not carry that ref.
-          - |
-            set -eu
-            if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
-              git fetch --unshallow origin || git fetch --depth=1000 origin
-            fi
-            git fetch origin "main:refs/remotes/origin/main"
-            git merge-base HEAD origin/main >/dev/null
-      - name: Run suite by lane
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run portable serial shard 3
         commands:
-          # Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md),
-          # the same one-owner runner and the same four partitions
-          # .github/workflows/ci.yml uses, instead of a bare `for` loop over
-          # tests/*.test.sh.
-          #
-          # Why: under `set -eu` that loop aborted at the FIRST failing script,
-          # so one ~14-minute run revealed exactly one failure and hid every
-          # later one behind it. The runner instead runs every selected script,
-          # continues past failures, and reports them all through
-          # FM_TEST_SUMMARY, so a single run yields the complete list.
-          #
-          # All four lanes run inside ONE step on purpose: a separate step per
-          # lane would abort the job at the first failing lane and reintroduce
-          # the same one-failure-at-a-time blindness. Each lane's exit code is
-          # collected and the step fails at the end if any lane failed.
-          #
-          # --check-coverage runs first so a lane partition that no longer
-          # covers every tests/*.test.sh fails loudly, rather than silently
-          # dropping scripts from the gate.
-          #
-          # Two environment requirements, both learned the hard way:
-          #
-          # 1. NOT as root. tests/fm-daemon.test.sh chmods a state dir unwritable
-          #    and asserts the write fails; root ignores permission bits, so as
-          #    root that assertion silently inverts. GitHub's runner is non-root.
-          #
-          # 2. A hermetic git config. The runner ships a global
-          #    url.<...>.insteadOf rewrite for code.byted.org, and
-          #    `git remote get-url` APPLIES insteadOf - so fm-teardown.test.sh's
-          #    Codebase fixture reads back as gitlab@git.byted.org, the provider
-          #    parser stops recognizing it as Codebase, and teardown refuses work
-          #    the test says is landed. GIT_CONFIG_GLOBAL/SYSTEM=/dev/null drops
-          #    that rewrite (and any other runner-local git surprise); the GIT_*
-          #    identity then has to be supplied explicitly, because
-          #    commit_tree_from_wt_head calls git commit-tree without one.
-          - |
-            set -eu
-            id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
-            chown -R ci:ci .
-            runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" \
-              GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-              GIT_AUTHOR_NAME="firstmate ci" GIT_AUTHOR_EMAIL=ci@firstmate.invalid \
-              GIT_COMMITTER_NAME="firstmate ci" GIT_COMMITTER_EMAIL=ci@firstmate.invalid \
-              bash -c '
-                set -eu
-                [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
-                node --version
-                bin/fm-test-run.sh --check-coverage
-                rc=0
-                for lane in portable-parallel-1 portable-parallel-2 portable-serial; do
-                  echo "=== lane: $lane ==="
-                  bin/fm-test-run.sh --lane "$lane" || rc=1
-                done
-                echo "=== family: real-herdr-gated ==="
-                bin/fm-test-run.sh --family real-herdr-gated || rc=1
-                exit "$rc"
-              '
+          - bin/fm-ci-codebase-lane.sh --lane portable-serial-3of4
+
+  tests-serial-4:
+    name: Behavior portable serial 4
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 30
+    steps:
+      - name: Provision image
+        commands:
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run portable serial shard 4
+        commands:
+          - bin/fm-ci-codebase-lane.sh --lane portable-serial-4of4
+
+  # The real-Herdr family. Herdr is not installed on this image, so these
+  # scripts report "skip: herdr not found" and the lane proves only that they
+  # still gate cleanly; the GitHub workflow owns the real-Herdr run with a
+  # pinned install and --fail-on-gate-skip.
+  tests-herdr-gated:
+    name: Behavior Herdr-gated family
+    runs-on:
+      env: boe
+    image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 20
+    steps:
+      - name: Provision image
+        commands:
+          - bin/fm-ci-codebase-setup.sh
+      - name: Run the Herdr-gated family
+        commands:
+          - bin/fm-ci-codebase-lane.sh --family real-herdr-gated
 
   invariants:
     name: Repo invariants
     runs-on:
       env: boe
     image: hub.byted.org/codebase/ci_nodejs_20:latest
+    timeout: 10
     steps:
       - name: Symlinks must stay intact
         commands:

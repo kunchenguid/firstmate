@@ -51,9 +51,9 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  capture-pane) printf '\u256d\u2500\u2500\u2500\u2500\u256e\n\u2502    \u2502\n\u2570\u2500\u2500\u2500\u2500\u256f\n'; exit 0 ;;
   # fm-send verifies an explicit endpoint by ENUMERATING live panes, because
   # tmux answers display-message for a gone target with another window's pane id
   # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). List the explicit

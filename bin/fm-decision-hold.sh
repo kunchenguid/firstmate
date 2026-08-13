@@ -51,6 +51,19 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+DECISION_META_LOCK=
+DECISION_META_LOCK_HELD=0
+decision_hold_cleanup() {
+  if [ "$DECISION_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$DECISION_META_LOCK" || true
+    DECISION_META_LOCK_HELD=0
+  fi
+}
+trap decision_hold_cleanup EXIT
 
 usage() {
   awk '
@@ -292,6 +305,12 @@ command_complete() {
   shift
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] && has_meta=1
+  if [ "$has_meta" = 1 ]; then
+    DECISION_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
+    fm_lock_acquire_wait "$DECISION_META_LOCK"
+    DECISION_META_LOCK_HELD=1
+    [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
+  fi
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
@@ -332,13 +351,22 @@ EOF
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
     fi
+    fm_lock_release "$DECISION_META_LOCK"
+    DECISION_META_LOCK_HELD=0
 
     # Transfer any still-open status decision to its durable backlog owner so the
     # live status fold does not duplicate the same Captain's Call item.
+    # The transfer line is this home's own bookkeeping close, written by the
+    # turn that just reviewed the decision, so it uses the guarded
+    # self-announced append (bin/fm-wake-lib.sh) and does not wake this same
+    # session; an append failure still fails this command loudly.
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
-      printf 'captain-held [key=%s]: tracked by %s\n' "$key" "$(hold_id "$origin" "$key")" >> "$status_file"
+      transfer_rc=0
+      fm_wake_status_append_self_announced "$STATE" "$status_file" \
+        "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
+      [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
       key_seen=1
     done <<EOF
 $raw_open

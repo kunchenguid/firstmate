@@ -103,7 +103,9 @@ binmode STDOUT;
 my $buf = '';
 
 sub redraw {
-  print "\r\033[K$buf";
+  # Render the real Codex bare-composer shape so the production classifier has
+  # positive container proof; an unidentified blank pane must remain unsafe.
+  print "\r\033[K\xe2\x80\xba $buf";
 }
 
 sub submit_line {
@@ -278,8 +280,17 @@ CHK
     || { echo "daemon log:" >&2; cat "$STATE_DIR/.supervise-present.log" >&2 2>/dev/null || true; \
          fail "Event 2: PR check.sh did not auto-inject a check nudge (manual drain would have been required)"; }
   assert_clean_injection "Event 2"
+  # The wake must be DURABLY RECORDED, so nothing is lost if this turn dies.
+  # Since the 2026-08-11 upstream sync that record has two shapes: a queued
+  # record when the wake could not be delivered, and a delivery-ledger entry
+  # (bin/fm-push-transition-lib.sh) when it was pushed - which is exactly what
+  # present mode does by injecting the nudge. Either satisfies the contract.
   grep -q 'check' "$STATE_DIR/.wake-queue" 2>/dev/null \
-    || fail "Event 2: check wake was not recorded in the durable wake queue"
+    || grep -q 'check' "$STATE_DIR/.watch-deliveries.log" 2>/dev/null \
+    || { echo "--- durable wake records ---" >&2; \
+         for f in "$STATE_DIR/.wake-queue" "$STATE_DIR/.watch-deliveries.log"; do \
+           echo "== $f"; cat "$f" 2>/dev/null; done >&2; \
+         fail "Event 2: check wake was recorded in neither the wake queue nor the delivery ledger"; }
   stop_daemon
   pass "Event 2: PR check.sh poll auto-injects a check nudge with no manual drain"
 }
