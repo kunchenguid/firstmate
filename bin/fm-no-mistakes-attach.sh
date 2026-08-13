@@ -85,8 +85,18 @@ fm_nm_attach_status_usable() { # <status-output>
   return 0
 }
 
-fm_nm_attach_status_absent() { # <status-output>
-  [ "$1" = 'No active run. Push through the gate to start a pipeline:' ]
+fm_nm_attach_status_absent() { # <status-output-path>
+  local output_path=$1 canonical first bytes
+  canonical='No active run. Push through the gate to start a pipeline:'
+  bytes=$(wc -c < "$output_path") || return 1
+  IFS= read -r first < "$output_path" || return 1
+  if [ "$bytes" -eq "$((${#canonical} + 1))" ]; then
+    [ "$first" = "$canonical" ]
+  elif [ "$bytes" -eq "$((${#canonical} + 2))" ]; then
+    [ "$first" = "$canonical"$'\r' ]
+  else
+    return 1
+  fi
 }
 
 fm_nm_attach_status_diagnostic() { # <status-output>
@@ -207,7 +217,7 @@ fm_nm_attach_prepare() {
 
 fm_nm_attach_wait() { # <repo-root> <branch> <expected-head> <no-mistakes-executable>
   local repo=$1 branch=$2 expected_head=$3 nm_bin=$4 max_polls poll_seconds status_error_limit
-  local poll=0 status_errors=0 output run run_branch run_head current_branch current_head actual_repo query_rc diagnostic
+  local poll=0 status_errors=0 output run run_branch run_head current_branch current_head actual_repo query_rc diagnostic status_output_path
   max_polls=${FM_NM_ATTACH_MAX_POLLS:-900}
   poll_seconds=${FM_NM_ATTACH_POLL_SECONDS:-1}
   status_error_limit=${FM_NM_ATTACH_STATUS_ERROR_LIMIT:-3}
@@ -229,48 +239,62 @@ fm_nm_attach_wait() { # <repo-root> <branch> <expected-head> <no-mistakes-execut
     fm_nm_attach_error 'wait expected head is unavailable in the implementation repository'
     return 2
   }
+  status_output_path=$(mktemp "${TMPDIR:-/tmp}/fm-no-mistakes-attach-status.XXXXXX") || {
+    fm_nm_attach_error 'cannot create a private status capture'
+    return 2
+  }
 
   while [ "$poll" -lt "$max_polls" ]; do
     current_branch=$(git branch --show-current 2>/dev/null) || current_branch=
     [ "$current_branch" = "$branch" ] || {
+      rm -f "$status_output_path"
       fm_nm_attach_error "branch changed while waiting (expected $branch, found ${current_branch:-detached})"
       return 2
     }
     current_head=$(git rev-parse --verify HEAD 2>/dev/null) || current_head=
     [ "$current_head" = "$expected_head" ] || {
+      rm -f "$status_output_path"
       fm_nm_attach_error 'implementation commit changed while waiting'
       return 2
     }
-    if output=$("$nm_bin" axi status 2>&1); then
-      if fm_nm_attach_status_usable "$output"; then
+    if "$nm_bin" axi status > "$status_output_path" 2>&1; then
+      query_rc=0
+    else
+      query_rc=$?
+    fi
+    if [ "$query_rc" -eq 0 ] && fm_nm_attach_status_absent "$status_output_path"; then
+      status_errors=0
+    else
+      output=$(< "$status_output_path")
+      if [ "$query_rc" -eq 0 ] && fm_nm_attach_status_usable "$output"; then
         status_errors=0
         run=$(fm_nm_strip_quotes "$(fm_nm_field "$output" id)")
         run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$output" branch)")
         run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$output" head)")
         if [ "$run_branch" = "$branch" ] && fm_nm_head_matches_worktree "$repo" "$run_head" \
           && ! fm_nm_attach_terminal "$output"; then
+          rm -f "$status_output_path"
           exec "$nm_bin" attach --run "$run"
         fi
-      elif fm_nm_attach_status_absent "$output"; then
-        status_errors=0
-      else
+      elif [ "$query_rc" -eq 0 ]; then
         status_errors=$((status_errors + 1))
         diagnostic=$(fm_nm_attach_status_diagnostic "$output")
         case "$output" in *run:*) diagnostic='status output is missing required run id, branch, or head' ;; esac
+      else
+        status_errors=$((status_errors + 1))
+        diagnostic=$(fm_nm_attach_status_diagnostic "$output")
+        [ "$diagnostic" = 'empty output' ] && diagnostic="command exited $query_rc with empty output"
       fi
-    else
-      query_rc=$?
-      status_errors=$((status_errors + 1))
-      diagnostic=$(fm_nm_attach_status_diagnostic "$output")
-      [ "$diagnostic" = 'empty output' ] && diagnostic="command exited $query_rc with empty output"
     fi
     if [ "$status_errors" -ge "$status_error_limit" ]; then
+      rm -f "$status_output_path"
       fm_nm_attach_error "axi status failed $status_errors consecutive times: $diagnostic"
       return 2
     fi
     poll=$((poll + 1))
     [ "$poll" -lt "$max_polls" ] && sleep "$poll_seconds"
   done
+  rm -f "$status_output_path"
   printf 'ERROR: no active no-mistakes run appeared for branch %s after %s polls\n' "$branch" "$max_polls" >&2
   return 1
 }

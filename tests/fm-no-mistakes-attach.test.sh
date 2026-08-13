@@ -47,6 +47,12 @@ case "${1:-} ${2:-}" in
       printf '%s\n' 'unexpected leading payload' 'No active run. Push through the gate to start a pipeline:'
     elif [ -e "${FM_FAKE_NM_NO_RUN_TRAILING_MIXED:-}" ]; then
       printf '%s\n' 'No active run. Push through the gate to start a pipeline:' 'unexpected trailing payload'
+    elif [ -e "${FM_FAKE_NM_NO_RUN_LEADING_BLANK:-}" ]; then
+      printf '\n%s\n' 'No active run. Push through the gate to start a pipeline:'
+    elif [ -e "${FM_FAKE_NM_NO_RUN_TRAILING_BLANK:-}" ]; then
+      printf '%s\n\n' 'No active run. Push through the gate to start a pipeline:'
+    elif [ "$count" -le 1 ] && [ -e "${FM_FAKE_NM_NO_RUN_CRLF_FIRST:-}" ]; then
+      printf '%s\r\n' 'No active run. Push through the gate to start a pipeline:'
     elif [ -e "${FM_FAKE_NM_NO_RUN_ALWAYS:-}" ]; then
       printf '%s\n' 'No active run. Push through the gate to start a pipeline:'
     elif [ "$count" -le 1 ] && [ -e "${FM_FAKE_NM_NO_RUN_FIRST:-}" ]; then
@@ -288,8 +294,18 @@ FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_L
   "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" || fail 'explicit no-run response did not continue polling'
 [ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'explicit no-run response did not poll until the matching run appeared'
 assert_grep 'attach --run RUN123' "$FM_FAKE_NM_CALLS" 'explicit no-run response prevented attachment to the matching run'
-pass 'fm-no-mistakes-attach: explicit no-run response polls until the matching run appears'
+pass 'fm-no-mistakes-attach: canonical LF no-run response polls until the matching run appears'
 unset FM_FAKE_NM_NO_RUN_FIRST
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-crlf-first"
+export FM_FAKE_NM_NO_RUN_CRLF_FIRST="$FIXTURE/no-run-crlf-first"
+FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" || fail 'canonical CRLF no-run response did not continue polling'
+[ "$(grep -c '^axi status$' "$FM_FAKE_NM_CALLS")" -eq 2 ] || fail 'canonical CRLF no-run response did not poll until the matching run appeared'
+assert_grep 'attach --run RUN123' "$FM_FAKE_NM_CALLS" 'canonical CRLF no-run response prevented attachment to the matching run'
+pass 'fm-no-mistakes-attach: canonical CRLF no-run response polls until the matching run appears'
+unset FM_FAKE_NM_NO_RUN_CRLF_FIRST
 
 : > "$FM_FAKE_NM_CALLS"
 : > "$FIXTURE/no-run-always"
@@ -306,6 +322,34 @@ assert_contains "$output" 'no active no-mistakes run appeared for branch fm/dash
 assert_no_grep 'attach ' "$FM_FAKE_NM_CALLS" 'explicit no-run response attached a run'
 pass 'fm-no-mistakes-attach: persistent explicit no-run response reaches the normal absence timeout'
 unset FM_FAKE_NM_NO_RUN_ALWAYS
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-leading-blank"
+export FM_FAKE_NM_NO_RUN_LEADING_BLANK="$FIXTURE/no-run-leading-blank"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'leading blank no-run payload bypassed the status error limit' "$output"
+assert_contains "$output" 'axi status failed 1 consecutive times: No active run. Push through the gate to start a pipeline:' \
+  'leading blank no-run payload did not preserve the malformed diagnostic'
+pass 'fm-no-mistakes-attach: leading blank no-run payload is malformed'
+unset FM_FAKE_NM_NO_RUN_LEADING_BLANK
+
+: > "$FM_FAKE_NM_CALLS"
+: > "$FIXTURE/no-run-trailing-blank"
+export FM_FAKE_NM_NO_RUN_TRAILING_BLANK="$FIXTURE/no-run-trailing-blank"
+set +e
+output=$(FM_NM_ATTACH_MAX_POLLS=3 FM_NM_ATTACH_POLL_SECONDS=0 FM_NM_ATTACH_STATUS_ERROR_LIMIT=1 \
+  "$HELPER" wait "$REPO" fm/dashboard-test "$FM_FAKE_NM_RUN_HEAD" "$FAKEBIN/no-mistakes" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail_with_output 'trailing blank no-run payload bypassed the status error limit' "$output"
+assert_contains "$output" 'axi status failed 1 consecutive times: No active run. Push through the gate to start a pipeline:' \
+  'trailing blank no-run payload did not preserve the malformed diagnostic'
+pass 'fm-no-mistakes-attach: trailing blank no-run payload is malformed'
+unset FM_FAKE_NM_NO_RUN_TRAILING_BLANK
 
 : > "$FM_FAKE_NM_CALLS"
 : > "$FIXTURE/no-run-leading-mixed"
