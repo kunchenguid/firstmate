@@ -55,8 +55,10 @@ import {
   createCalmWorkingShipWidget,
 } from "./lib/fm-calm-working-ship.ts";
 import {
+  type CalmPresentationLevel,
   calmPresentationHides,
   calmPresentationIsActive,
+  calmPresentationLevel,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
@@ -119,6 +121,19 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
   }
 }
 
+// /calm keeps its plain no-argument cycle and recognizes one argument, "max", which
+// selects the level that also hides mid-turn assistant working notes. A plain /calm
+// steps max back to ordinary Calm; any other argument keeps the existing on/off cycle
+// rather than failing a command that has always accepted whatever followed it.
+function nextCalmLevel(
+  current: CalmPresentationLevel,
+  args: string,
+): CalmPresentationLevel {
+  if (args.trim().toLowerCase() === "max") return "max";
+  if (current === "max") return "on";
+  return current === "on" ? "off" : "on";
+}
+
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
@@ -159,18 +174,25 @@ export default function (pi: ExtensionAPI) {
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
-  const loadCalmPreference = (): boolean => {
+  // Every level the command can persist round-trips through this reader, so a session
+  // start, resume, fork, or reload restores the stored level instead of dropping an
+  // unrecognized one to off. docs/configuration.md owns the persisted value schema.
+  const loadCalmPreference = (): CalmPresentationLevel => {
+    let stored: string;
     try {
-      return readFileSync(calmPreferencePath, "utf8").trim() === "on";
+      stored = readFileSync(calmPreferencePath, "utf8").trim();
     } catch {
-      return false;
+      return "off";
     }
+    if (stored === "on") return "on";
+    if (stored === "max") return "max";
+    return "off";
   };
-  const persistCalmPreference = (active: boolean): void => {
+  const persistCalmPreference = (level: CalmPresentationLevel): void => {
     mkdirSync(dirname(calmPreferencePath), { recursive: true });
     const temporaryPath = `${calmPreferencePath}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      writeFileSync(temporaryPath, active ? "on\n" : "off\n", {
+      writeFileSync(temporaryPath, `${level}\n`, {
         encoding: "utf8",
         flag: "wx",
         mode: 0o600,
@@ -312,7 +334,7 @@ export default function (pi: ExtensionAPI) {
   // unconditional here (see file header): a foreign-claim check is not reachable at
   // this point, while deferral would make restored rows capture the wrong definition.
   // A Calm-off session or reload registers nothing and creates no collision exposure.
-  if (loadCalmPreference()) {
+  if (loadCalmPreference() !== "off") {
     for (const tool of wrappedBuiltIns) pi.registerTool(tool);
     builtInsRegistered = true;
   }
@@ -443,13 +465,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("calm", {
     description: "Toggle Firstmate's supported conversation-only transcript presentation.",
-    handler: async (_args, ctx) => {
-      const active = !calmPresentationIsActive();
-      persistCalmPreference(active);
-      setCalmPresentation(active);
+    handler: async (args, ctx) => {
+      const level = nextCalmLevel(calmPresentationLevel(), args ?? "");
+      const active = level !== "off";
+      persistCalmPreference(level);
+      setCalmPresentation(level);
       if (active) activateBuiltInsIfNeeded(ctx.ui);
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);
+      // Pi re-runs every assistant row's layout from this call even when the label is
+      // unchanged, which is what makes a level change apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
 
