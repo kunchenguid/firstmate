@@ -26,14 +26,27 @@ wait_for_capture_text() {  # <target> <text> [samples]
   return 1
 }
 
+wait_for_current_path() {  # <target> <path> [samples]
+  local target=$1 path=$2 samples=${3:-100} current i=0
+  while [ "$i" -lt "$samples" ]; do
+    current=$(fm_backend_tmux_current_path "$target" 2>/dev/null || true)
+    [ "$current" = "$path" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-backend-smoke-$$"
+ATELIER_SOCKET="fm-backend-atelier-$$"
 SHIM_DIR=
 trap cleanup_all EXIT
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  "$REAL_TMUX" -L "$ATELIER_SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
 }
 
@@ -168,6 +181,87 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
+
+# --- optional atelier placement ---------------------------------------------
+# A configured atelier is still ordinary tmux, but its socket must travel with
+# each task endpoint so control, capture, liveness, and teardown never fall back
+# to the caller's ambient/default server.
+ATELIER_ROOT="$SHIM_DIR/atelier"
+ATELIER_CONFIG="$SHIM_DIR/config"
+ATELIER_SESSION="gouverneur-atelier"
+mkdir -p "$ATELIER_ROOT/bin" "$ATELIER_CONFIG" "$SHIM_DIR/task-one" "$SHIM_DIR/task-two"
+TASK_ONE_REAL=$(cd "$SHIM_DIR/task-one" && pwd -P)
+TASK_TWO_REAL=$(cd "$SHIM_DIR/task-two" && pwd -P)
+touch "$ATELIER_ROOT/bin/atelier"
+chmod +x "$ATELIER_ROOT/bin/atelier"
+cat > "$ATELIER_CONFIG/tmux-atelier" <<EOF
+root=$ATELIER_ROOT
+socket=$ATELIER_SOCKET
+session=$ATELIER_SESSION
+EOF
+"$REAL_TMUX" -L "$ATELIER_SOCKET" new-session -d -s "$ATELIER_SESSION" -n 10-active -c "$SHIM_DIR" \
+  || fail "real tmux: could not create the configured atelier fixture"
+
+FM_BACKEND_CONFIG_DIR=$ATELIER_CONFIG
+export FM_BACKEND_CONFIG_DIR
+container=$(fm_backend_tmux_container_ensure) \
+  || fail "configured atelier container resolution failed"
+[ "$container" = "tmux+$ATELIER_SOCKET/$ATELIER_SESSION" ] \
+  || fail "configured atelier resolved '$container', expected 'tmux+$ATELIER_SOCKET/$ATELIER_SESSION'"
+
+stable_one=$(fm_backend_tmux_create_task "$container" fm-one "$SHIM_DIR/task-one") \
+  || fail "configured atelier failed to create first isolated task"
+stable_two=$(fm_backend_tmux_create_task "$container" fm-two "$SHIM_DIR/task-two") \
+  || fail "configured atelier failed to create second isolated task"
+case "$stable_one:$stable_two" in
+  "tmux+$ATELIER_SOCKET"/@*:"tmux+$ATELIER_SOCKET"/@*) : ;;
+  *) fail "configured atelier did not return socket-qualified stable targets: '$stable_one' '$stable_two'" ;;
+esac
+[ "$stable_one" != "$stable_two" ] \
+  || fail "configured atelier reused one endpoint for two tasks"
+
+atelier_one="$container:fm-one"
+atelier_two="$container:fm-two"
+wait_for_current_path "$stable_one" "$TASK_ONE_REAL" \
+  || fail "configured atelier first task did not retain its own cwd"
+wait_for_current_path "$stable_two" "$TASK_TWO_REAL" \
+  || fail "configured atelier second task did not retain its own cwd"
+fm_backend_tmux_target_exists "$atelier_one" \
+  || fail "configured atelier endpoint was not reachable through its recorded socket"
+fm_backend_tmux_target_exists "$atelier_two" \
+  || fail "configured atelier sibling endpoint was not reachable through its recorded socket"
+if "$REAL_TMUX" -L "$SOCKET" list-windows -a -F '#{window_name}' | grep -qx fm-one; then
+  fail "configured atelier task leaked onto the ordinary tmux server"
+fi
+
+meta="$SHIM_DIR/atelier.meta"
+cat > "$meta" <<EOF
+window=$atelier_one
+endpoint_task_id=one
+worktree=$SHIM_DIR/task-one
+project=$SHIM_DIR
+EOF
+fm_backend_validate_task_endpoint "$meta" one \
+  || fail "socket-qualified atelier metadata failed task-endpoint validation"
+fm_backend_tmux_kill "$atelier_one"
+if "$REAL_TMUX" -L "$ATELIER_SOCKET" list-windows -t "$ATELIER_SESSION" -F '#{window_name}' | grep -qx fm-one; then
+  fail "configured atelier kill did not remove only the requested task window"
+fi
+"$REAL_TMUX" -L "$ATELIER_SOCKET" list-windows -t "$ATELIER_SESSION" -F '#{window_name}' | grep -qx fm-two \
+  || fail "configured atelier kill removed another task's endpoint"
+pass "real tmux: configured atelier placement keeps socket-qualified endpoints, isolated cwd values, direct control, and exact-task teardown"
+
+# The atelier is optional presentation placement.
+# If its public root or named session is absent, the historical detached
+# `firstmate` session remains fully usable on ordinary tmux.
+rm -f "$ATELIER_ROOT/bin/atelier"
+fallback=$(TMUX='' fm_backend_tmux_container_ensure 2>"$SHIM_DIR/atelier-fallback.err") \
+  || fail "absent atelier should fall back to ordinary tmux"
+[ "$fallback" = firstmate ] \
+  || fail "absent atelier fallback resolved '$fallback', expected historical 'firstmate'"
+grep -q 'configured tmux atelier is absent' "$SHIM_DIR/atelier-fallback.err" \
+  || fail "absent atelier fallback did not explain why ordinary tmux was selected"
+pass "real tmux: absent configured atelier falls back to the historical detached firstmate session"
 
 cleanup_all
 trap - EXIT

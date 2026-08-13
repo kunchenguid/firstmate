@@ -4,9 +4,10 @@
 # Reference backend (AGENTS.md section 8; data/fm-backend-design-d7). P1 moves
 # the tmux command sequences that fm-send.sh, fm-peek.sh, fm-watch.sh,
 # fm-spawn.sh, and fm-teardown.sh already ran inline into named functions
-# here, running the EXACT same commands in the EXACT same order, so the
-# default (tmux, `backend=` absent) path stays byte-identical. Sourced only
-# through bin/fm-backend.sh's fm_backend_source, never directly.
+# here, running the same commands in the same order on the historical path.
+# Optional config/tmux-atelier placement adds only explicit named-socket
+# routing while `backend=` remains absent. Sourced only through
+# bin/fm-backend.sh's fm_backend_source, never directly.
 #
 # Worktree acquisition (running `treehouse get` inside the pane, and polling
 # its cwd) is unchanged by this extraction: P1 scopes only the session
@@ -24,6 +25,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -31,7 +34,18 @@
 # `tmux list-windows -a ... | grep` pipeline that used to live inline in
 # fm-send.sh's and fm-peek.sh's own (until now duplicated) resolve().
 fm_backend_tmux_resolve_bare_selector() {  # <name>
-  local name=$1
+  local name=$1 w config_status socket session
+  if fm_backend_tmux_atelier_config; then config_status=0; else config_status=$?; fi
+  if [ "$config_status" -eq 0 ]; then
+    socket=$FM_BACKEND_TMUX_ATELIER_SOCKET
+    session=$FM_BACKEND_TMUX_ATELIER_SESSION
+    w=$(fm_tmux_exec "$socket" list-windows -t "=$session" -F '#{window_name}' 2>/dev/null \
+      | grep -m1 -x "$name") || w=
+    if [ -n "$w" ]; then
+      printf 'tmux+%s/%s:%s\n' "$socket" "$session" "$w"
+      return 0
+    fi
+  fi
   tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$name\$" \
     || { echo "error: no window named $name" >&2; return 1; }
 }
@@ -39,15 +53,20 @@ fm_backend_tmux_resolve_bare_selector() {  # <name>
 # fm_backend_tmux_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's and fm-watch.sh's `tmux capture-pane -p -t "$T" -S -"$N"`.
 fm_backend_tmux_capture() {  # <target> <lines>
-  tmux capture-pane -p -t "$1" -S -"$2"
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" capture-pane -p -t "$FM_TMUX_TARGET" -S -"$2"
 }
 
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
 fm_backend_tmux_send_key() {  # <target> <key>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
-  tmux send-keys -t "$1" "$2"
+  local key=$2 socket target
+  fm_tmux_target_parse "$1" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  target=$FM_TMUX_TARGET
+  fm_tmux_exec "$socket" display-message -p -t "$target" '#{pane_id}' >/dev/null
+  fm_tmux_exec "$socket" send-keys -t "$target" "$key"
 }
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
@@ -58,11 +77,364 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
-# fm_backend_tmux_container_ensure: reuse the current tmux session when
-# firstmate itself runs inside tmux, else ensure a dedicated detached
-# "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
+# fm_backend_tmux_atelier_config: parse the optional config/tmux-atelier file.
+# The operator-facing schema is owned by docs/configuration.md.
+# This parser never invokes the atelier script and never starts or stops a tmux
+# server; the public script is only a presence/boundary check.
+fm_backend_tmux_atelier_config() {
+  local file="$FM_BACKEND_CONFIG_DIR/tmux-atelier" line key value
+  local root='' socket=firstmate-atelier session=gouverneur-atelier herdr_session=''
+  local root_seen=0 socket_seen=0 session_seen=0 herdr_session_seen=0
+  FM_BACKEND_TMUX_ATELIER_ROOT=
+  FM_BACKEND_TMUX_ATELIER_SOCKET=
+  FM_BACKEND_TMUX_ATELIER_SESSION=
+  FM_BACKEND_TMUX_ATELIER_HERDR_SESSION=
+  [ -e "$file" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || {
+    echo "error: config/tmux-atelier must be a regular file" >&2
+    return 2
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) echo "error: invalid config/tmux-atelier line (expected key=value): $line" >&2; return 2 ;;
+    esac
+    case "$key" in
+      root)
+        [ "$root_seen" -eq 0 ] || { echo "error: duplicate root in config/tmux-atelier" >&2; return 2; }
+        root=$value; root_seen=1
+        ;;
+      socket)
+        [ "$socket_seen" -eq 0 ] || { echo "error: duplicate socket in config/tmux-atelier" >&2; return 2; }
+        socket=$value; socket_seen=1
+        ;;
+      session)
+        [ "$session_seen" -eq 0 ] || { echo "error: duplicate session in config/tmux-atelier" >&2; return 2; }
+        session=$value; session_seen=1
+        ;;
+      herdr_session)
+        [ "$herdr_session_seen" -eq 0 ] || { echo "error: duplicate herdr_session in config/tmux-atelier" >&2; return 2; }
+        herdr_session=$value; herdr_session_seen=1
+        ;;
+      *) echo "error: unknown config/tmux-atelier key '$key'" >&2; return 2 ;;
+    esac
+  done < "$file"
+  [ "$root_seen" -eq 1 ] && [ -n "$root" ] || {
+    echo "error: config/tmux-atelier requires a non-empty root= path" >&2
+    return 2
+  }
+  case "$socket" in
+    ''|*[!A-Za-z0-9._%+@-]*)
+      echo "error: config/tmux-atelier socket and session must use tmux-safe names" >&2
+      return 2
+      ;;
+  esac
+  case "$session" in
+    ''|*[!A-Za-z0-9._%+@-]*)
+      echo "error: config/tmux-atelier socket and session must use tmux-safe names" >&2
+      return 2
+      ;;
+  esac
+  case "$herdr_session" in
+    '') ;;
+    default|*[!A-Za-z0-9_-]*)
+      echo "error: config/tmux-atelier herdr_session must be a named non-default Herdr session using letters, digits, underscores, or dashes" >&2
+      return 2
+      ;;
+  esac
+  FM_BACKEND_TMUX_ATELIER_ROOT=$root
+  FM_BACKEND_TMUX_ATELIER_SOCKET=$socket
+  FM_BACKEND_TMUX_ATELIER_SESSION=$session
+  FM_BACKEND_TMUX_ATELIER_HERDR_SESSION=$herdr_session
+}
+
+# Herdr 0.8.0/protocol 19 is the verified floor for pane.report_agent,
+# pane.report_metadata, and the grouped Agent sidebar used by the optional
+# atelier projection below. The worker itself stays in tmux; Herdr owns only a
+# disposable terminal view attached to a one-window linked tmux session.
+FM_BACKEND_TMUX_ATELIER_HERDR_MIN_PROTOCOL=19
+FM_BACKEND_TMUX_ATELIER_AGENT_SOURCE=firstmate:tmux
+FM_BACKEND_TMUX_ATELIER_METADATA_SOURCE=firstmate:tmux:display
+FM_BACKEND_TMUX_ATELIER_WORKSPACE_SOURCE=firstmate:tmux:workspace
+FM_BACKEND_TMUX_ATELIER_WORKSPACE_LABEL=firstmate-atelier
+FM_BACKEND_TMUX_ATELIER_WORKSPACE_TOKEN=firstmate-atelier
+
+fm_backend_tmux_atelier_herdr_cli() {  # <session> <herdr-args...>
+  local herdr_session=$1 timeout=${FM_TMUX_ATELIER_HERDR_TIMEOUT:-3}
+  shift
+  case "$timeout" in ''|*[!0-9]*|0) timeout=3 ;; esac
+  fm_run_timed "$timeout" herdr "$@" --session "$herdr_session"
+}
+
+fm_backend_tmux_atelier_herdr_ready() {  # <session>
+  local herdr_session=$1 status
+  command -v herdr >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  status=$(fm_backend_tmux_atelier_herdr_cli "$herdr_session" status --json 2>/dev/null) || return 1
+  printf '%s' "$status" | jq -e \
+    --arg herdr_session "$herdr_session" \
+    --argjson floor "$FM_BACKEND_TMUX_ATELIER_HERDR_MIN_PROTOCOL" '
+      .server.running == true
+      and .server.session == $herdr_session
+      and .server.compatible == true
+      and (.client.protocol | type == "number" and . >= $floor)
+      and (.server.protocol | type == "number" and . >= $floor)
+    ' >/dev/null 2>&1
+}
+
+fm_backend_tmux_atelier_proxy_name() {  # <task-id>
+  local id=$1
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#id}" -le 64 ] || return 1
+  printf 'fmh-%s' "$id"
+}
+
+# Create or adopt one linked tmux session containing exactly the authoritative
+# task window. A Herdr tmux client attached to this proxy cannot drift to a
+# sibling task: killing the authoritative window removes its final link,
+# destroys the proxy session, and lets Herdr remove the exited proxy pane.
+fm_backend_tmux_atelier_proxy_ensure() {  # <endpoint> <task-id> <cwd>
+  local endpoint=$1 id=$2 cwd=$3 socket target source_wid proxy windows
+  local recorded_id recorded_target seed_wid
+  FM_BACKEND_TMUX_ATELIER_PROXY=
+  fm_tmux_target_parse "$endpoint" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  target=$FM_TMUX_TARGET
+  [ -n "$socket" ] || return 1
+  case "$target" in
+    *:*:*) return 1 ;;
+    *:fm-"$id") ;;
+    *) return 1 ;;
+  esac
+  source_wid=$(fm_tmux_exec "$socket" display-message -p -t "$target" '#{window_id}' 2>/dev/null) || return 1
+  case "$source_wid" in @*) ;; *) return 1 ;; esac
+  proxy=$(fm_backend_tmux_atelier_proxy_name "$id") || return 1
+
+  if fm_tmux_exec "$socket" has-session -t "=$proxy" 2>/dev/null; then
+    recorded_id=$(fm_tmux_exec "$socket" show-options -v -t "$proxy:" @firstmate-task-id 2>/dev/null) || return 1
+    recorded_target=$(fm_tmux_exec "$socket" show-options -v -t "$proxy:" @firstmate-task-target 2>/dev/null) || return 1
+    windows=$(fm_tmux_exec "$socket" list-windows -t "=$proxy" -F '#{window_id}' 2>/dev/null) || return 1
+    [ "$recorded_id" = "$id" ] && [ "$recorded_target" = "$endpoint" ] \
+      && [ "$windows" = "$source_wid" ] || return 1
+    FM_BACKEND_TMUX_ATELIER_PROXY=$proxy
+    return 0
+  fi
+
+  seed_wid=$(fm_tmux_exec "$socket" new-session -dP -F '#{window_id}' \
+    -s "$proxy" -n fm-herdr-seed -c "$cwd" 2>/dev/null) || return 1
+  case "$seed_wid" in @*) ;; *) return 1 ;; esac
+  if ! fm_tmux_exec "$socket" set-option -t "$proxy:" @firstmate-task-id "$id" \
+     || ! fm_tmux_exec "$socket" set-option -t "$proxy:" @firstmate-task-target "$endpoint" \
+     || ! fm_tmux_exec "$socket" link-window -s "$source_wid" -t "$proxy:" \
+     || ! fm_tmux_exec "$socket" kill-window -t "$seed_wid"; then
+    fm_tmux_exec "$socket" kill-session -t "=$proxy" 2>/dev/null || true
+    return 1
+  fi
+  windows=$(fm_tmux_exec "$socket" list-windows -t "=$proxy" -F '#{window_id}' 2>/dev/null) || return 1
+  [ "$windows" = "$source_wid" ] || return 1
+  FM_BACKEND_TMUX_ATELIER_PROXY=$proxy
+}
+
+fm_backend_tmux_atelier_pane_process_matches() {  # <herdr-session> <pane> <socket> <proxy>
+  local herdr_session=$1 pane=$2 socket=$3 proxy=$4 info
+  info=$(fm_backend_tmux_atelier_herdr_cli "$herdr_session" \
+    pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e \
+    --arg pane "$pane" --arg socket "$socket" --arg proxy "$proxy" '
+      .result.process_info.pane_id == $pane
+      and (.result.process_info.foreground_processes | length) == 1
+      and .result.process_info.foreground_processes[0].argv
+        == ["tmux", "-L", $socket, "attach-session", "-t", $proxy]
+    ' >/dev/null 2>&1
+}
+
+fm_backend_tmux_atelier_state_from_status() {  # <status-line> -> <state>\t<message>
+  local line=$1 verb message state
+  verb=${line%%:*}
+  [ "$verb" != "$line" ] || return 1
+  message=${line#*:}
+  message=${message#"${message%%[![:space:]]*}"}
+  case "$verb" in
+    working|resolved) state=working ;;
+    needs-decision|blocked|failed) state=blocked ;;
+    done|paused) state=idle ;;
+    *) return 1 ;;
+  esac
+  printf '%s\t%s\n' "$state" "$message"
+}
+
+fm_backend_tmux_atelier_report_state() {  # <herdr-session> <pane> <task-id> <project> <state> <message>
+  local herdr_session=$1 pane=$2 id=$3 project=$4 state=$5 message=$6
+  local title="Firstmate: fm-$id" context=$project display_agent="fm-$id"
+  local -a report=(pane report-agent "$pane" --source "$FM_BACKEND_TMUX_ATELIER_AGENT_SOURCE" --agent firstmate --state "$state")
+  [ -z "$message" ] || report+=(--message "$message")
+  [ -z "$message" ] || context=$message
+  [ -z "$project" ] || display_agent="$display_agent / $project"
+  display_agent=${display_agent:0:80}
+  context=${context:0:80}
+  fm_backend_tmux_atelier_herdr_cli "$herdr_session" "${report[@]}" >/dev/null \
+    || return 1
+  fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane report-metadata "$pane" \
+    --source "$FM_BACKEND_TMUX_ATELIER_METADATA_SOURCE" \
+    --agent firstmate --applies-to-source "$FM_BACKEND_TMUX_ATELIER_AGENT_SOURCE" \
+    --display-agent "$display_agent" --title "$title" --token "context=$context" >/dev/null
+}
+
+# Best-effort native Herdr projection for one authoritative tmux task. The
+# config and exact tmux link prove placement; Herdr pane ids, labels, tokens,
+# and lifecycle state never authorize task capture, steering, recovery, or
+# teardown. Returns success when presentation is not configured or temporarily
+# unavailable so optional UI cannot block ordinary tmux work.
+fm_backend_tmux_atelier_presentation_sync() {  # <endpoint> <task-id> <cwd> <project-label> <status-line>
+  local endpoint=$1 id=$2 cwd=$3 project=$4 status_line=$5 config_status
+  local root socket tmux_session herdr_session proxy state_message state message
+  local workspaces workspace_matches workspace_count panes matches count
+  local pane workspace tab created=0 response attach_cmd
+  if fm_backend_tmux_atelier_config; then config_status=0; else config_status=$?; fi
+  [ "$config_status" -eq 0 ] || { [ "$config_status" -eq 1 ] && return 0; return "$config_status"; }
+  root=$FM_BACKEND_TMUX_ATELIER_ROOT
+  socket=$FM_BACKEND_TMUX_ATELIER_SOCKET
+  tmux_session=$FM_BACKEND_TMUX_ATELIER_SESSION
+  herdr_session=$FM_BACKEND_TMUX_ATELIER_HERDR_SESSION
+  [ -n "$herdr_session" ] || return 0
+  [ -x "$root/bin/atelier" ] || return 0
+  fm_tmux_target_parse "$endpoint" || return 0
+  [ "$FM_TMUX_TARGET_SOCKET" = "$socket" ] || return 0
+  case "$FM_TMUX_TARGET" in "$tmux_session:fm-$id") ;; *) return 0 ;; esac
+  fm_backend_tmux_atelier_herdr_ready "$herdr_session" || {
+    echo "warning: named Herdr session $herdr_session is unavailable or older than protocol $FM_BACKEND_TMUX_ATELIER_HERDR_MIN_PROTOCOL; tmux task fm-$id continues without native Herdr presentation" >&2
+    return 0
+  }
+  state_message=$(fm_backend_tmux_atelier_state_from_status "$status_line") || return 0
+  state=${state_message%%$'\t'*}
+  message=${state_message#*$'\t'}
+  workspaces=$(fm_backend_tmux_atelier_herdr_cli "$herdr_session" workspace list 2>/dev/null) || return 0
+  workspace_matches=$(printf '%s' "$workspaces" | jq -r \
+    --arg label "$FM_BACKEND_TMUX_ATELIER_WORKSPACE_LABEL" \
+    --arg token "$FM_BACKEND_TMUX_ATELIER_WORKSPACE_TOKEN" '
+      .result.workspaces[]?
+      | select(.label == $label and .tokens.atelier_id == $token)
+      | .workspace_id
+    ' 2>/dev/null) || return 0
+  workspace_count=$(printf '%s\n' "$workspace_matches" | awk 'NF { n++ } END { print n + 0 }')
+  case "$workspace_count" in
+    0) workspace= ;;
+    1) workspace=$workspace_matches ;;
+    *)
+      echo "warning: multiple Herdr workspaces claim $FM_BACKEND_TMUX_ATELIER_WORKSPACE_LABEL; refusing to choose one" >&2
+      return 0
+      ;;
+  esac
+
+  fm_backend_tmux_atelier_proxy_ensure "$endpoint" "$id" "$cwd" || {
+    echo "warning: exact one-window tmux proxy for fm-$id could not be created or adopted; skipping Herdr presentation" >&2
+    return 0
+  }
+  proxy=$FM_BACKEND_TMUX_ATELIER_PROXY
+
+  panes=$(fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane list 2>/dev/null) || return 0
+  matches=$(printf '%s' "$panes" | jq -r \
+    --arg task "fm-$id" --arg proxy "$proxy" --arg workspace "$workspace" '
+      .result.panes[]?
+      | select(
+          $workspace != ""
+          and .workspace_id == $workspace
+          and .tokens.task_id == $task
+          and .tokens.tmux_proxy == $proxy
+        )
+      | [.pane_id, .workspace_id]
+      | @tsv
+    ' 2>/dev/null) || return 0
+  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n + 0 }')
+  case "$count" in
+    0) ;;
+    1)
+      IFS=$'\t' read -r pane workspace <<EOF
+$matches
+EOF
+      if ! fm_backend_tmux_atelier_pane_process_matches "$herdr_session" "$pane" "$socket" "$proxy"; then
+        echo "warning: Herdr pane $pane for fm-$id no longer runs its exact tmux proxy; preserving it and skipping presentation recovery" >&2
+        return 0
+      fi
+      fm_backend_tmux_atelier_report_state "$herdr_session" "$pane" "$id" "$project" "$state" "$message" || true
+      return 0
+      ;;
+    *)
+      echo "warning: multiple Herdr panes claim fm-$id and proxy $proxy; refusing to choose one" >&2
+      return 0
+      ;;
+  esac
+
+  if [ -z "$workspace" ]; then
+    response=$(fm_backend_tmux_atelier_herdr_cli "$herdr_session" workspace create \
+      --cwd "$cwd" --label "$FM_BACKEND_TMUX_ATELIER_WORKSPACE_LABEL" --no-focus 2>/dev/null) || return 0
+    pane=$(printf '%s' "$response" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) || pane=
+    tab=$(printf '%s' "$response" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) || tab=
+    workspace=$(printf '%s' "$response" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null) || workspace=
+    [ -n "$pane" ] && [ -n "$tab" ] && [ -n "$workspace" ] || return 0
+    if ! fm_backend_tmux_atelier_herdr_cli "$herdr_session" workspace report-metadata "$workspace" \
+         --source "$FM_BACKEND_TMUX_ATELIER_WORKSPACE_SOURCE" \
+         --token "atelier_id=$FM_BACKEND_TMUX_ATELIER_WORKSPACE_TOKEN" >/dev/null \
+       || ! fm_backend_tmux_atelier_herdr_cli "$herdr_session" tab rename "$tab" "fm-$id" >/dev/null; then
+      fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane close "$pane" >/dev/null 2>&1 || true
+      return 0
+    fi
+  else
+    response=$(fm_backend_tmux_atelier_herdr_cli "$herdr_session" tab create \
+      --workspace "$workspace" --cwd "$cwd" --label "fm-$id" --no-focus 2>/dev/null) || return 0
+    pane=$(printf '%s' "$response" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) || pane=
+    tab=$(printf '%s' "$response" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) || tab=
+    [ -n "$pane" ] && [ -n "$tab" ] || return 0
+  fi
+  created=1
+  if ! fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane report-metadata "$pane" \
+       --source "$FM_BACKEND_TMUX_ATELIER_METADATA_SOURCE" \
+       --token "task_id=fm-$id" --token "tmux_proxy=$proxy" >/dev/null; then
+    fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane close "$pane" >/dev/null 2>&1 || true
+    return 0
+  fi
+  attach_cmd="exec tmux -L $socket attach-session -t $proxy"
+  if ! fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane run "$pane" "$attach_cmd" >/dev/null; then
+    fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane close "$pane" >/dev/null 2>&1 || true
+    return 0
+  fi
+  sleep 0.2
+  if ! fm_backend_tmux_atelier_pane_process_matches "$herdr_session" "$pane" "$socket" "$proxy"; then
+    [ "$created" -eq 0 ] || fm_backend_tmux_atelier_herdr_cli "$herdr_session" pane close "$pane" >/dev/null 2>&1 || true
+    return 0
+  fi
+  fm_backend_tmux_atelier_report_state "$herdr_session" "$pane" "$id" "$project" "$state" "$message" || true
+}
+
+# fm_backend_tmux_container_ensure: prefer a configured, already-running
+# atelier session, otherwise preserve the historical ambient/default-server
+# behavior. An absent atelier is a presentation-placement miss, not a runtime
+# failure, so Firstmate warns and safely falls back without starting it.
 fm_backend_tmux_container_ensure() {
+  local config_status root socket session
+  if fm_backend_tmux_atelier_config; then
+    config_status=0
+  else
+    config_status=$?
+  fi
+  if [ "$config_status" -eq 0 ]; then
+    root=$FM_BACKEND_TMUX_ATELIER_ROOT
+    socket=$FM_BACKEND_TMUX_ATELIER_SOCKET
+    session=$FM_BACKEND_TMUX_ATELIER_SESSION
+    if [ ! -x "$root/bin/atelier" ]; then
+      echo "warning: configured tmux atelier is absent at $root; using ordinary tmux placement" >&2
+    elif fm_tmux_exec "$socket" has-session -t "=$session" 2>/dev/null; then
+      printf 'tmux+%s/%s' "$socket" "$session"
+      return 0
+    else
+      echo "warning: configured tmux atelier session $session on socket $socket is not running; using ordinary tmux placement" >&2
+    fi
+  elif [ "$config_status" -ne 1 ]; then
+    return "$config_status"
+  fi
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
@@ -87,22 +459,30 @@ fm_backend_tmux_container_ensure() {
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  local ses=$1 wname=$2 proj_abs=$3 wid socket normalized
+  fm_tmux_target_parse "$ses" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
+  if fm_tmux_exec "$socket" list-windows -t "$normalized" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
-  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
-  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
-  printf '%s\n' "$wid"
+  wid=$(fm_tmux_exec "$socket" new-window -dP -F '#{window_id}' -t "$normalized:" -n "$wname" -c "$proj_abs") || return 1
+  fm_tmux_exec "$socket" set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  fm_tmux_exec "$socket" set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  if [ -n "$socket" ]; then
+    printf 'tmux+%s/%s\n' "$socket" "$wid"
+  else
+    printf '%s\n' "$wid"
+  fi
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.
 fm_backend_tmux_current_path() {  # <target>
-  tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" display-message -p -t "$FM_TMUX_TARGET" '#{pane_current_path}' 2>/dev/null
 }
 
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
@@ -110,7 +490,11 @@ fm_backend_tmux_current_path() {  # <target>
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
 # inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
-  tmux send-keys -t "$1" "$2" Enter
+  local text=$2 socket target
+  fm_tmux_target_parse "$1" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  target=$FM_TMUX_TARGET
+  fm_tmux_exec "$socket" send-keys -t "$target" "$text" Enter
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no
@@ -118,14 +502,21 @@ fm_backend_tmux_send_text_line() {  # <target> <text>
 # send pauses between the literal send and Enter for the harness to settle).
 # Mirrors `tmux send-keys -t "$T" -l "<text>"`.
 fm_backend_tmux_send_literal() {  # <target> <text>
-  tmux send-keys -t "$1" -l "$2"
+  local text=$2 socket target
+  fm_tmux_target_parse "$1" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  target=$FM_TMUX_TARGET
+  fm_tmux_exec "$socket" send-keys -t "$target" -l "$text"
 }
 
 # fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.
 fm_backend_tmux_kill() {  # <target>
-  local target=${1:-} session window
+  local target=${1:-} session window socket
+  fm_tmux_target_parse "$target" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  target=$FM_TMUX_TARGET
   case "$target" in
     *:*)
       session=${target%%:*}
@@ -136,7 +527,7 @@ fm_backend_tmux_kill() {  # <target>
   case "$session:$window" in
     :*|*:|*:*:*) return 1 ;;
   esac
-  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+  fm_tmux_exec "$socket" kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -149,7 +540,8 @@ fm_backend_tmux_kill() {  # <target>
 # own name throughout; the value reverts to the shell's own name only once
 # the foreground command actually exits). Empty on any tmux error.
 fm_backend_tmux_current_command() {  # <target>
-  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" display-message -p -t "$FM_TMUX_TARGET" '#{pane_current_command}' 2>/dev/null
 }
 
 # fm_backend_tmux_classify_process_name: the single owner of the process-name
@@ -220,8 +612,11 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
 # must confirm exact window membership first, exactly as the classifier below
 # does, or they will describe some other pane entirely.
 fm_backend_tmux_foreground_comms() {  # <target>
-  local target=$1 tty pid pgid tpgid comm
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  local target=$1 tty pid pgid tpgid comm socket normalized
+  fm_tmux_target_parse "$target" || return 0
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
+  tty=$(fm_tmux_exec "$socket" display-message -p -t "$normalized" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
   LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
@@ -232,8 +627,11 @@ fm_backend_tmux_foreground_comms() {  # <target>
 }
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  local target=$1 tty pid pgid tpgid comm args argv0 socket normalized
+  fm_tmux_target_parse "$target" || return 0
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
+  tty=$(fm_tmux_exec "$socket" display-message -p -t "$normalized" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
   LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
@@ -263,8 +661,11 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+  local endpoint=$1 target comm session window windows inventory_status socket
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  fm_tmux_target_parse "$endpoint" || { printf 'unreadable'; return 0; }
+  socket=$FM_TMUX_TARGET_SOCKET
+  target=$FM_TMUX_TARGET
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -272,7 +673,7 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C fm_tmux_exec "$socket" list-windows -t "$session" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?
@@ -293,7 +694,7 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   fi
 
-  foreground=$(fm_backend_tmux_foreground_comms "$target")
+  foreground=$(fm_backend_tmux_foreground_comms "$endpoint")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     fg_seen=1
@@ -306,7 +707,7 @@ fm_backend_tmux_agent_state() {  # <target>
 $foreground
 EOF
 
-  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
+  argv0s=$(fm_backend_tmux_foreground_argv0s "$endpoint")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
@@ -317,7 +718,7 @@ EOF
 $argv0s
 EOF
 
-  comm=$(fm_backend_tmux_current_command "$target") || {
+  comm=$(fm_backend_tmux_current_command "$endpoint") || {
     printf 'unreadable'
     return 0
   }
@@ -344,6 +745,16 @@ EOF
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
+}
+
+fm_backend_tmux_target_exists() {  # <target>
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" display-message -p -t "$FM_TMUX_TARGET" '#{pane_id}' >/dev/null 2>&1
+}
+
+fm_backend_tmux_pane_pid() {  # <target>
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" display-message -p -t "$FM_TMUX_TARGET" '#{pane_pid}' 2>/dev/null
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

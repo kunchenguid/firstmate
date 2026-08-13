@@ -172,6 +172,35 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Optional native Herdr atelier projection
+
+The presentation boundary was verified on 2026-08-13 with tmux 3.6a and Herdr 0.8.0 at protocol 19 on macOS.
+Every real Herdr action ran in a generated named non-`default` lab through `bin/fm-herdr-lab.sh`; the helper recorded and rechecked the unchanged live default fleet during guarded teardown.
+
+The documented API accepted this sequence:
+
+```sh
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace create --cwd "$worktree" --label firstmate-atelier --no-focus
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace report-metadata "$workspace" --source firstmate:tmux:workspace --token atelier_id=firstmate-atelier
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab create --workspace "$workspace" --cwd "$worktree" --label "fm-$task" --no-focus
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$pane" "exec tmux -L $socket attach-session -t $proxy"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane report-agent "$pane" --source firstmate:tmux --agent firstmate --state working --message "$note"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane report-metadata "$pane" \
+  --source firstmate:tmux:display --agent firstmate --applies-to-source firstmate:tmux \
+  --display-agent "fm-$task / $project" --title "Firstmate: fm-$task" --token "context=$note"
+```
+
+Bounded `workspace list` and `agent list` output showed two task panes in the same `firstmate-atelier` workspace, one `blocked` and one `working`, with distinct `fm-<id> / firstmate` labels and readable context tokens.
+Changing the semantic report changed the native card state without replacing the pane.
+Killing an authoritative task window removed its single-window linked proxy instead of letting the Herdr client switch to another task.
+Attaching a Herdr pane directly to the multi-window source session was retained as disconfirming evidence because tmux switched that client to a sibling window after target cleanup.
+
+Portable regression coverage uses a private real tmux socket and a protocol-19 Herdr CLI fixture, so CI never touches an operator's Herdr session:
+
+```sh
+tests/fm-tmux-herdr-presentation.test.sh
+```
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

@@ -7,7 +7,8 @@
 # abstraction"). P1 extracted the tmux command sequences that fm-send.sh,
 # fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already ran inline
 # into bin/backends/tmux.sh, with those SAME command sequences, so the default
-# (tmux) path stays byte-identical. P2 adds bin/backends/herdr.sh, an
+# (tmux) path stays byte-identical when no optional atelier placement is
+# configured. P2 adds bin/backends/herdr.sh, an
 # EXPERIMENTAL spawn-capable backend behind `--backend herdr`/`FM_BACKEND=herdr`/
 # `config/backend`, and behind runtime auto-detection when firstmate itself is
 # running inside herdr with no explicit backend setting; see herdr-addendum.md and
@@ -32,9 +33,11 @@
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# default-path metas stay byte-identical unless config/tmux-atelier selects an
+# already-running named-socket session, whose self-contained window endpoint
+# also records that socket. Only a task spawned on a non-tmux spawn-capable
+# backend, currently experimental herdr, zellij, orca, or cmux, carries an
+# explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -443,9 +446,14 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
 
   case "$backend" in
     tmux)
-      session=${window%%:*}
-      pane=${window#*:}
-      if [ "$pane" = "$window" ] || [ "$pane" != "fm-$id" ] \
+      fm_backend_source tmux || return 1
+      fm_tmux_target_parse "$window" || {
+        echo "REFUSED: tmux endpoint '$window' is malformed or does not belong to task $id; preserving task state." >&2
+        return 1
+      }
+      session=${FM_TMUX_TARGET%%:*}
+      pane=${FM_TMUX_TARGET#*:}
+      if [ "$pane" = "$FM_TMUX_TARGET" ] || [ "$pane" != "fm-$id" ] \
         || [ -z "$session" ]; then
         echo "REFUSED: tmux endpoint '$window' is malformed or does not belong to task $id; preserving task state." >&2
         return 1
@@ -835,7 +843,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_target_exists "$target"
       ;;
     herdr)
       fm_backend_source herdr || return 1

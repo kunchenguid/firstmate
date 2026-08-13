@@ -54,7 +54,10 @@
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. Optional config/tmux-atelier placement uses the
+#   same backend with a socket-qualified window endpoint and falls back to the
+#   historical tmux placement when the configured atelier is absent. cmux does
+#   not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1351,8 +1354,20 @@ resolve_muse_binary() {
 # approval...") waiting for a human who is not there, which would look to
 # supervision like a wedged worker rather than a missing credential.
 muse_worker_meta_api_key_present() {
-  local session worker_env
+  local session worker_env config_status
   [ "$BACKEND" = tmux ] || return 1
+  if fm_backend_tmux_atelier_config; then config_status=0; else config_status=$?; fi
+  if [ "$config_status" -eq 0 ] \
+     && [ -x "$FM_BACKEND_TMUX_ATELIER_ROOT/bin/atelier" ] \
+     && fm_tmux_exec "$FM_BACKEND_TMUX_ATELIER_SOCKET" \
+          has-session -t "=$FM_BACKEND_TMUX_ATELIER_SESSION" 2>/dev/null; then
+    worker_env=$(fm_tmux_exec "$FM_BACKEND_TMUX_ATELIER_SOCKET" show-environment \
+      -t "=$FM_BACKEND_TMUX_ATELIER_SESSION" META_API_KEY 2>/dev/null) || return 1
+    case "$worker_env" in
+      META_API_KEY=?*) return 0 ;;
+    esac
+    return 1
+  fi
   if [ -n "${TMUX:-}" ]; then
     session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
   else
@@ -2667,9 +2682,10 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # backend= is written only for a non-default (non-tmux) backend, so absent
+  # backend= still means tmux. With no optional atelier placement, the default
+  # path's meta stays byte-identical; configured named-socket placement changes
+  # only the self-contained window= endpoint.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
@@ -2856,6 +2872,13 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# Optional native Herdr presentation for a configured tmux atelier. This runs
+# only after the authoritative task metadata and agent launch are complete.
+# Any unavailable or failed presentation leaves the ordinary tmux task intact.
+if [ "$BACKEND" = tmux ]; then
+  "$SCRIPT_DIR/fm-tmux-herdr-present.sh" "$ID" "working: worker launched" || true
 fi
 
 SPAWN_DELIVERY=

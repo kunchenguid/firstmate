@@ -193,7 +193,7 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-tmux-agent-liveness.test.sh|\
+    fm-tmux-agent-liveness.test.sh|fm-tmux-herdr-presentation.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
@@ -383,6 +383,7 @@ tests/fm-backend-cmux.test.sh 2349
 tests/fm-backend-herdr-focus-flash-e2e.test.sh 21
 tests/fm-backend-orca.test.sh 12041
 tests/fm-backend-tmux-smoke.test.sh 314
+tests/fm-tmux-herdr-presentation.test.sh 2500
 tests/fm-backend-zellij-smoke.test.sh 21
 tests/fm-backend-zellij.test.sh 4225
 tests/fm-backend.test.sh 16370
@@ -871,7 +872,7 @@ families_for_changed_path() {
       printf '%s\n' cmux
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/orca*|bin/backends/tmux.sh)
+    bin/backends/orca*|bin/backends/tmux.sh|bin/fm-tmux-herdr-present.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;

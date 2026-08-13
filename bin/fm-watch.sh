@@ -955,7 +955,19 @@ while :; do
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
-      case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+      case " $files " in
+        *" $f "*) ;;
+        *)
+          files="$files $f"
+          case "$f" in
+            *.status)
+              task=$(basename "$f"); task=${task%.status}
+              "$SCRIPT_DIR/fm-tmux-herdr-present.sh" \
+                "$task" "$(last_status_line "$f")" >/dev/null 2>&1 || true
+              ;;
+          esac
+          ;;
+      esac
     done <<EOF
 $pending
 EOF

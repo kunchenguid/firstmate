@@ -14,6 +14,79 @@ An explicit selection is also the opt-out from Herdr or cmux runtime auto-detect
 
 No provisioning is required before the first task.
 
+### Optional dedicated atelier
+
+Firstmate can place new tmux-backed tasks in a separately maintained atelier without owning that atelier's lifecycle.
+Start the atelier yourself from its repository:
+
+```sh
+./bin/atelier start
+```
+
+Detach with `Ctrl-b d`, then create `config/tmux-atelier` under the Firstmate home:
+
+```text
+root=/absolute/path/to/firstmate-tmux-herdr
+socket=firstmate-atelier
+session=gouverneur-atelier
+herdr_session=firstmate-atelier
+```
+
+Run `pwd -P` in the atelier repository to obtain the `root` value.
+The complete file schema and fallback contract are in [`configuration.md`](configuration.md#optional-tmux-atelier-placement-configtmux-atelier).
+New agents then appear as task-specific `fm-<id>` windows alongside the atelier's five visual state windows:
+
+- `00-attention` for decisions and alerts.
+- `10-active` for work under way.
+- `20-blocked` for obstacles requiring action.
+- `30-done` for results ready to verify.
+- `40-reports` for summaries and handoffs.
+
+Those five state windows remain an operator presentation convention.
+Firstmate's task metadata, isolated worktree, exact task window, status events, and control paths remain authoritative.
+Firstmate does not automatically move a live task between state windows because moving the authoritative endpoint would make recovery and direct control ambiguous.
+
+If the atelier repository or its named session is absent, Firstmate prints a warning and uses ordinary tmux exactly as before.
+All task behavior remains available there: isolated worktrees, `fm-<id>` windows, direct typing, bounded capture, steering, wake signaling, recovery, and exact-window teardown.
+Only the atelier's five-window organization is missing.
+
+### Optional Herdr presentation
+
+The optional `herdr_session` line points only at a named non-`default` Herdr session that you already run.
+When that session is available at protocol 19 or newer, Firstmate creates or reuses one native Herdr workspace named `firstmate-atelier` and adds one tab per atelier agent.
+Herdr's Agents panel therefore shows the tasks together under `firstmate-atelier`, with a semantic working, blocked, or done state and a label such as `fm-review / firstmate`.
+The tab and agent label preserve the Firstmate task id, while the metadata title and bounded `context` token carry the project and latest status note.
+
+The documented Herdr settings below preserve the currently evaluated presentation: Vesper theme, native agent grouping by spaces, and detected agent labels on pane borders.
+
+```toml
+[ui]
+agent_panel_sort = "spaces"
+show_agent_labels_on_pane_borders = true
+
+[theme]
+name = "vesper"
+auto_switch = false
+```
+
+These settings are reversible by removing the lines or restoring the prior config, and they take effect through Herdr's own normal configuration lifecycle.
+Firstmate neither edits that file nor sends Herdr lifecycle commands.
+They are public Herdr options, not a claim to reproduce any private Kun Chen configuration.
+
+The adapter uses only Herdr's documented workspace, tab, pane, agent-report, and metadata-report commands.
+Each Herdr pane attaches to a one-window linked tmux proxy for the authoritative `fm-<id>` window, so it renders the real agent terminal without moving or duplicating the task.
+When the authoritative window is removed, its final linked window and attached Herdr pane exit with it instead of drifting to a sibling task.
+Firstmate task metadata, isolated worktree, tmux endpoint, status events, steering, recovery, and teardown remain authoritative throughout.
+
+Presentation is best effort and never makes Herdr a Firstmate requirement.
+If `herdr_session` is absent, stopped, incompatible, or temporarily unreachable, Firstmate continues on tmux and reports no native card.
+Firstmate never starts, stops, reloads, updates, or edits the configuration of Herdr, and ordinary tmux operation remains unchanged.
+Status refresh occurs at task launch, on appended status events, or manually with `bin/fm-tmux-herdr-present.sh <task-id> [<status-line>]`.
+A manually repurposed Herdr pane is preserved and not reclaimed; close that stale presentation pane before requesting a fresh projection.
+
+This achieves a documented native Herdr card rather than importing a tmux window as a new Herdr-owned agent process.
+The remaining gap is lifecycle restoration after Herdr itself is restarted: Herdr does not document native restoration of arbitrary external tmux attachments as agent sessions, so Firstmate does not claim or synthesize that private behavior.
+
 ## Watching the crew
 
 For the best visible experience, launch the primary harness inside a tmux session:

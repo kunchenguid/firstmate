@@ -44,6 +44,51 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
+# A task on tmux's default server keeps the historical `session:window`
+# target.
+# A task placed on an explicitly named socket carries the self-contained
+# `tmux+socket/session:window` target instead.
+# Internal stable pane/window ids use the matching `tmux+socket/%id` form.
+# The explicit `tmux+` marker preserves every historical plain target,
+# including unusual session names containing a slash.
+# Keeping the socket in the endpoint makes every later read, steer, recovery,
+# and teardown independent of the caller's ambient tmux server.
+fm_tmux_target_parse() {  # <target-or-container>
+  local raw=${1:-} socket='' target
+  FM_TMUX_TARGET_SOCKET=
+  FM_TMUX_TARGET=
+  [ -n "$raw" ] || return 1
+  case "$raw" in
+    tmux+*/*)
+      socket=${raw%%/*}
+      socket=${socket#tmux+}
+      target=${raw#*/}
+      case "$socket" in
+        ''|*[!A-Za-z0-9._%+@-]*) return 1 ;;
+      esac
+      case "$target" in
+        ''|*/*|*[!A-Za-z0-9._%+@:-]*) return 1 ;;
+      esac
+      ;;
+    *)
+      target=$raw
+      [ -n "$target" ] || return 1
+      ;;
+  esac
+  FM_TMUX_TARGET_SOCKET=$socket
+  FM_TMUX_TARGET=$target
+}
+
+fm_tmux_exec() {  # <socket-or-empty> <tmux-args...>
+  local socket=$1
+  shift
+  if [ -n "$socket" ]; then
+    tmux -L "$socket" "$@"
+  else
+    tmux "$@"
+  fi
+}
+
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -67,13 +112,15 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # capture is consumed internally by the classifier and is NEVER surfaced
 # (fm-peek and every human/LLM-facing path stay plain).
 fm_tmux_composer_capture() {  # <target>
-  tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" capture-pane -e -p -t "$FM_TMUX_TARGET" -S 0 -E - 2>/dev/null
 }
 
 # fm_tmux_composer_cursor_row: the pane's cursor row, zero-based, relative to
 # the visible pane - tmux's genuine primitive that no other backend has.
 fm_tmux_composer_cursor_row() {  # <target>
-  tmux display-message -p -t "$1" '#{cursor_y}' 2>/dev/null
+  fm_tmux_target_parse "$1" || return 1
+  fm_tmux_exec "$FM_TMUX_TARGET_SOCKET" display-message -p -t "$FM_TMUX_TARGET" '#{cursor_y}' 2>/dev/null
 }
 
 # fm_tmux_composer_caps: the tmux capability descriptor - static data, not
@@ -98,8 +145,11 @@ fm_tmux_composer_caps() {
 # Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
 # live pi.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
+  local target=$1 tty pgid tpgid comm found=0 status socket normalized
+  fm_tmux_target_parse "$target" || return 1
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
+  tty=$(fm_tmux_exec "$socket" display-message -p -t "$normalized" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
       while read -r _ pgid tpgid comm; do
@@ -114,7 +164,7 @@ EOF
       ;;
   esac
   if [ "$found" -ne 1 ]; then
-    comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
+    comm=$(fm_tmux_exec "$socket" display-message -p -t "$normalized" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) found=1 ;;
     esac
@@ -160,8 +210,11 @@ fm_pane_input_pending() {  # <target>
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
-  local win=$1 harness=${2:-} tail40 visible
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
+  local win=$1 harness=${2:-} tail40 visible socket normalized
+  fm_tmux_target_parse "$win" || { printf 'unknown'; return 0; }
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
+  tail40=$(fm_tmux_exec "$socket" capture-pane -p -t "$normalized" -S -40 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   visible=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
   [ -n "$visible" ] || { printf 'unknown'; return 0; }
@@ -202,9 +255,12 @@ fm_pane_is_busy() {  # <target> [harness]
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state socket normalized
+  fm_tmux_target_parse "$target" || { printf 'unknown'; return 0; }
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    fm_tmux_exec "$socket" send-keys -t "$normalized" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     case "$state" in
@@ -246,13 +302,16 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state socket normalized
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  fm_tmux_target_parse "$target" || { printf 'send-failed'; return 0; }
+  socket=$FM_TMUX_TARGET_SOCKET
+  normalized=$FM_TMUX_TARGET
+  fm_tmux_exec "$socket" send-keys -t "$normalized" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }

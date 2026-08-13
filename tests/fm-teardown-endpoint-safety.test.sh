@@ -208,6 +208,20 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid tmux endpoint with a spaced session name refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = "team work:fm-$id" ] || fail "tmux validation changed the spaced session identity"
 
+  id=tmux-slash-session
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=team/work:fm-$id" "worktree=$dir/worktree" "project=$dir/project"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "legacy tmux endpoint with a slash in its session name refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = "team/work:fm-$id" ] || fail "tmux validation changed the slash session identity"
+
+  id=tmux-atelier-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=tmux+firstmate-atelier/gouverneur-atelier:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid socket-qualified tmux atelier endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = "tmux+firstmate-atelier/gouverneur-atelier:fm-$id" ] \
+    || fail "tmux validation changed the socket-qualified atelier identity"
+
   id=herdr-task
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=lab:w1:p2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \

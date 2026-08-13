@@ -95,6 +95,29 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+## Optional tmux atelier placement (config/tmux-atelier)
+
+`config/tmux-atelier` is a home-local, gitignored placement preference for the tmux backend.
+It points Firstmate at a compatible atelier repository and its already-running dedicated tmux socket/session without making that repository a dependency.
+The file accepts one `key=value` per line, blank lines and full-line comments, exactly one required `root`, and optional `socket`, `session`, and `herdr_session` values:
+
+```text
+root=/absolute/path/to/firstmate-tmux-herdr
+socket=firstmate-atelier
+session=gouverneur-atelier
+herdr_session=firstmate-atelier
+```
+
+`socket` defaults to `firstmate-atelier`, and `session` defaults to `gouverneur-atelier`.
+Socket and session names use letters, digits, `.`, `_`, `%`, `+`, `@`, and `-`; malformed files are refused instead of guessed around.
+`herdr_session` has no default and must name a non-`default` Herdr session using letters, digits, `_`, or `-`.
+When it is present, a compatible already-running Herdr protocol-19-or-newer session receives a best-effort native visual projection grouped in the `firstmate-atelier` workspace.
+Firstmate never starts, stops, or reconfigures that Herdr session, and an absent or incompatible session leaves the tmux task fully operational.
+The root must contain an executable public `bin/atelier` script, but Firstmate never invokes that script and never starts, stops, restarts, profiles, or otherwise drives Herdr.
+When the root or named tmux session is absent, a warning explains the miss and the spawn follows the unchanged tmux fallback: the current tmux session when one exists, otherwise the detached `firstmate` session on the ordinary socket.
+The preference is not inherited into secondmate homes because a private local root may be invalid on another machine; configure it separately under a secondmate's `FM_HOME` only when that home can reach the same atelier.
+Tasks placed on a named socket record a self-contained `tmux+socket/session:fm-<id>` window endpoint, so later capture, steering, liveness, recovery, and exact-window teardown return to the same server without consulting ambient tmux state.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
