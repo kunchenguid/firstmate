@@ -46,24 +46,31 @@ observer_enabled() {
 }
 
 # Parse exactly one version-1 sidecar.  Values are held in OBS_* globals.
-sidecar_snapshot() { # <path> <task-id>
-  local path=$1 id=$2 version task_id run_id session task_pane observer_pane worktree
-  OBS_VERSION= OBS_TASK_ID= OBS_RUN_ID= OBS_SESSION= OBS_TASK_PANE= OBS_PANE= OBS_WORKTREE=
+sidecar_snapshot_for_state() { # <path> <task-id> <state>
+  local path=$1 id=$2 expected_state=$3 version state attach_state task_id run_id session task_pane observer_pane worktree
+  OBS_VERSION= OBS_STATE= OBS_ATTACH_STATE= OBS_TASK_ID= OBS_RUN_ID= OBS_SESSION= OBS_TASK_PANE= OBS_PANE= OBS_WORKTREE=
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   version=$(meta_exact "$path" version) || return 1
+  state=$(meta_exact "$path" state) || return 1
+  attach_state=$(meta_exact "$path" attach_state) || return 1
   task_id=$(meta_exact "$path" task_id) || return 1
   run_id=$(meta_exact "$path" run_id) || return 1
   session=$(meta_exact "$path" session) || return 1
   task_pane=$(meta_exact "$path" task_pane) || return 1
   observer_pane=$(meta_exact "$path" observer_pane) || return 1
   worktree=$(meta_exact "$path" worktree) || return 1
-  [ "$version" = 1 ] && [ "$task_id" = "$id" ] || return 1
+  [ "$version" = 1 ] && [ "$state" = "$expected_state" ] && [ "$task_id" = "$id" ] || return 1
+  case "$state:$attach_state" in bound:pending|bound:ready|quarantined:quarantined) ;; *) return 1 ;; esac
   case "$run_id$session$task_pane$observer_pane" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
   [ "$task_pane" != "$observer_pane" ] || return 1
   [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
-  OBS_VERSION=$version OBS_TASK_ID=$task_id OBS_RUN_ID=$run_id OBS_SESSION=$session
+  OBS_VERSION=$version OBS_STATE=$state OBS_ATTACH_STATE=$attach_state OBS_TASK_ID=$task_id OBS_RUN_ID=$run_id OBS_SESSION=$session
   OBS_TASK_PANE=$task_pane OBS_PANE=$observer_pane OBS_WORKTREE=$(cd "$worktree" && pwd -P)
 }
+
+sidecar_snapshot() { sidecar_snapshot_for_state "$1" "$2" bound; }
+
+sidecar_reservation_snapshot() { sidecar_snapshot_for_state "$1" "$2" quarantined; }
 
 # Confirm current Herdr identities, including the exact task pane's tab/workspace.
 task_binding() { # <meta> <id>
@@ -144,12 +151,18 @@ observer_close_safe() { # <session> <observer-pane> <task-pane>
   ' >/dev/null 2>&1
 }
 
-sidecar_write() { # <path> <task-id> <run-id> <session> <task-pane> <observer-pane> <worktree>
-  local path=$1 id=$2 run_id=$3 session=$4 task_pane=$5 observer_pane=$6 worktree=$7 tmp
+sidecar_publish() { # <path> <task-id> <run-id> <session> <task-pane> <observer-pane> <worktree> <state> <attach-state> <replace-state>
+  local path=$1 id=$2 run_id=$3 session=$4 task_pane=$5 observer_pane=$6 worktree=$7 state=$8 attach_state=$9 replace_state=${10} tmp
+  case "$state:$attach_state:$replace_state" in
+    bound:pending:reservation|bound:ready:bound|quarantined:quarantined:absent) ;;
+    *) return 1 ;;
+  esac
   tmp=$(umask 077; mktemp "$STATE/.${id}.herdr-no-mistakes-observer.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! {
     printf 'version=1\n'
+    printf 'state=%s\n' "$state"
+    printf 'attach_state=%s\n' "$attach_state"
     printf 'task_id=%s\n' "$id"
     printf 'run_id=%s\n' "$run_id"
     printf 'session=%s\n' "$session"
@@ -157,10 +170,51 @@ sidecar_write() { # <path> <task-id> <run-id> <session> <task-pane> <observer-pa
     printf 'observer_pane=%s\n' "$observer_pane"
     printf 'worktree=%s\n' "$worktree"
   } > "$tmp"; then rm -f -- "$tmp"; return 1; fi
-  # The caller holds the task lock.  Refuse rather than replacing any sidecar
-  # that appeared before publication.
-  if [ -e "$path" ] || [ -L "$path" ]; then rm -f -- "$tmp"; return 1; fi
+  case "$replace_state" in
+    absent) [ ! -e "$path" ] && [ ! -L "$path" ] || { rm -f -- "$tmp"; return 1; } ;;
+    reservation) sidecar_reservation_snapshot "$path" "$id" || { rm -f -- "$tmp"; return 1; } ;;
+    bound) sidecar_snapshot "$path" "$id" || { rm -f -- "$tmp"; return 1; } ;;
+  esac
   mv -f -- "$tmp" "$path"
+}
+
+sidecar_reserve() { # <path> <task-id> <run-id> <session> <task-pane> <worktree>
+  sidecar_publish "$1" "$2" "$3" "$4" "$5" unresolved "$6" quarantined quarantined absent
+}
+
+sidecar_bind_reservation() { # <path> <task-id> <run-id> <session> <task-pane> <observer-pane> <worktree>
+  local path=$1 id=$2 run_id=$3 session=$4 task_pane=$5 observer_pane=$6 worktree=$7
+  sidecar_reservation_snapshot "$path" "$id" \
+    && [ "$OBS_RUN_ID" = "$run_id" ] \
+    && [ "$OBS_SESSION" = "$session" ] \
+    && [ "$OBS_TASK_PANE" = "$task_pane" ] \
+    && [ "$OBS_WORKTREE" = "$worktree" ] \
+    || return 1
+  sidecar_publish "$path" "$id" "$run_id" "$session" "$task_pane" "$observer_pane" "$worktree" bound pending reservation
+}
+
+sidecar_mark_ready() { # <path> <task-id> <run-id> <session> <task-pane> <observer-pane> <worktree>
+  local path=$1 id=$2 run_id=$3 session=$4 task_pane=$5 observer_pane=$6 worktree=$7
+  sidecar_snapshot "$path" "$id" \
+    && [ "$OBS_ATTACH_STATE" = pending ] \
+    && [ "$OBS_RUN_ID" = "$run_id" ] \
+    && [ "$OBS_SESSION" = "$session" ] \
+    && [ "$OBS_TASK_PANE" = "$task_pane" ] \
+    && [ "$OBS_PANE" = "$observer_pane" ] \
+    && [ "$OBS_WORKTREE" = "$worktree" ] \
+    || return 1
+  sidecar_publish "$path" "$id" "$run_id" "$session" "$task_pane" "$observer_pane" "$worktree" bound ready bound
+}
+
+observer_attach() { # <sidecar> <task-id>
+  local sidecar=$1 id=$2
+  sidecar_snapshot "$sidecar" "$id" && [ "$OBS_ATTACH_STATE" = pending ] || return 1
+  if fm_backend_herdr_cli "$OBS_SESSION" pane run "$OBS_PANE" no-mistakes attach --run "$OBS_RUN_ID" >/dev/null 2>&1; then
+    sidecar_mark_ready "$sidecar" "$id" "$OBS_RUN_ID" "$OBS_SESSION" "$OBS_TASK_PANE" "$OBS_PANE" "$OBS_WORKTREE" \
+      || warn "$id observer attach started but its ready state could not be recorded"
+  else
+    warn "$id observer attach command could not start; retaining its exact sidecar for retry"
+  fi
 }
 
 retire_exact() { # <sidecar> <task-id> [<metadata-present>]
@@ -254,6 +308,7 @@ reconcile() { # <task-id>
       && [ "$OBS_TASK_PANE" = "$TASK_PANE" ] \
       && [ "$OBS_WORKTREE" = "$TASK_WORKTREE" ] \
       && observer_pane_matches "$OBS_SESSION" "$OBS_PANE" "$TASK_WORKSPACE" "$TASK_TAB"; then
+      [ "$OBS_ATTACH_STATE" = ready ] || observer_attach "$sidecar" "$id"
       fm_lock_release "$session_lock" || true
       return 0
     fi
@@ -263,21 +318,22 @@ reconcile() { # <task-id>
   fi
   observer_enabled || { fm_lock_release "$session_lock" || true; return 0; }
 
+  sidecar_reserve "$sidecar" "$id" "$ACTIVE_RUN_ID" "$TASK_SESSION" "$TASK_PANE" "$TASK_WORKTREE" || {
+    warn "$id observer reservation could not be published; refusing a split"; fm_lock_release "$session_lock" || true; return 0;
+  }
+
   split=$(fm_backend_herdr_cli "$TASK_SESSION" pane split "$TASK_PANE" --direction right --ratio 0.30 --cwd "$TASK_WORKTREE" --no-focus 2>/dev/null) || {
-    warn "$id split failed"; fm_lock_release "$session_lock" || true; return 0;
+    warn "$id split failed; preserving its quarantine reservation"; fm_lock_release "$session_lock" || true; return 0;
   }
   observer=$(printf '%s' "$split" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
   [ -n "$observer" ] && [ "$observer" != "$TASK_PANE" ] \
     && observer_pane_matches "$TASK_SESSION" "$observer" "$TASK_WORKSPACE" "$TASK_TAB" || {
-      warn "$id split response was ambiguous; refusing sidecar publication"; fm_lock_release "$session_lock" || true; return 0;
+      warn "$id split response was ambiguous; preserving its quarantine reservation"; fm_lock_release "$session_lock" || true; return 0;
     }
-  sidecar_write "$sidecar" "$id" "$ACTIVE_RUN_ID" "$TASK_SESSION" "$TASK_PANE" "$observer" "$TASK_WORKTREE" || {
-    warn "$id observer sidecar could not be published; refusing another viewer"; fm_lock_release "$session_lock" || true; return 0;
+  sidecar_bind_reservation "$sidecar" "$id" "$ACTIVE_RUN_ID" "$TASK_SESSION" "$TASK_PANE" "$observer" "$TASK_WORKTREE" || {
+    warn "$id observer sidecar could not be bound; preserving its quarantine reservation"; fm_lock_release "$session_lock" || true; return 0;
   }
-  # pane run only starts the passive attach display in the already-bound pane.
-  # It cannot start or steer a validation run.
-  fm_backend_herdr_cli "$TASK_SESSION" pane run "$observer" no-mistakes attach --run "$ACTIVE_RUN_ID" >/dev/null 2>&1 \
-    || warn "$id observer attach command could not start; retaining its exact sidecar for safe cleanup"
+  observer_attach "$sidecar" "$id"
   fm_lock_release "$session_lock" || true
 }
 
