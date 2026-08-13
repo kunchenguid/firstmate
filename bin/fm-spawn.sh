@@ -1316,19 +1316,22 @@ raw_launch_uses_omp_fallback() {
     esac
   done
   [ -n "$first" ] || return 1
-  canonical=$(command -v omp 2>/dev/null) || return 1
-  [ "$first" = omp ] || [ "$first" = "$canonical" ]
+  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
+  [ "$first" = "$canonical" ]
 }
 
 raw_launch_needs_policy_runtime() {
   local launch=$1 word first= canonical
-  canonical=$(command -v omp 2>/dev/null) || return 1
   for word in $launch; do
     case "$word" in
       [A-Za-z_]*=*) continue ;;
       *) first=$word; break ;;
     esac
   done
+  case "$first" in
+    omp) return 0 ;;
+  esac
+  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
   case "$first" in
     env|*/env|nice|*/nice|time|*/time|setsid|*/setsid|bash|*/bash|sh|*/sh|zsh|*/zsh|cd|*/cd|source|.)
       case "$launch" in
@@ -3083,11 +3086,6 @@ const adoptCurrentRun = () => {
   }
   for (const record of persisted.pending) {
     runRecords.push({ ...record, active: true, recovered: true, finalizing: false, idlePending: true });
-  }
-  for (const record of persisted.finalizing) {
-    if (record.idlePending) {
-      runRecords.push({ ...record, active: true, recovered: true, finalizing: true });
-    }
   }
   trimRunHistory();
   return runToken;

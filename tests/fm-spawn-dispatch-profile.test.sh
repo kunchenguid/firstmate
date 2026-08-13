@@ -1006,6 +1006,25 @@ SH
   pass "raw launch ownership remains conservative when dispatcher validation lacks Node.js"
 }
 
+test_no_node_rejects_bare_omp_decoy() {
+  local rec id out status
+  id=profile-raw-no-node-bare-omp-z8q
+  rec=$(make_spawn_case raw-no-node-bare-omp claude "$id")
+  read_case_record "$rec"
+
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "omp --raw-flag")
+  status=$?
+  expect_code 1 "$status" "a bare OMP name without Node.js must not claim verified ownership"
+  assert_contains "$out" "requires Node.js" \
+    "bare OMP fallback did not fail explicitly when canonical policy validation was unavailable"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "bare OMP decoy received task metadata despite missing canonical proof"
+  [ ! -s "$LAUNCH_LOG" ] || fail "bare OMP decoy typed a launch before ownership validation"
+  pass "no-Node raw fallback rejects bare OMP names without assigning ownership"
+}
+
 # The raw path is the escape hatch for verifying a new adapter, so it has to keep
 # accepting the shell forms an experimental launcher takes. A command-prefix
 # strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
@@ -1228,6 +1247,7 @@ test_raw_omp_dispatch_policy_is_structural
 test_raw_launch_mentions_do_not_receive_omp_owner
 test_generic_raw_launch_sanitizes_inherited_verified_markers
 test_raw_launch_marker_covers_process_tree_forms
+test_no_node_rejects_bare_omp_decoy
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

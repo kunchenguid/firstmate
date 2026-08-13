@@ -162,14 +162,20 @@ drive_omp_ext() {
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
-const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
-const fire = async (name, event = {}) => {
-  const handler = handlers[name];
+const extensionUrl = pathToFileURL(process.env.EXT_PATH).href;
+const loadHandlers = async (suffix = "") => {
+  const mod = await import(extensionUrl + suffix);
+  const loaded = {};
+  mod.default({ on: (name, fn) => { loaded[name] = fn; } });
+  return loaded;
+};
+const handlers = await loadHandlers();
+const fireWith = async (loaded, name, event = {}) => {
+  const handler = loaded[name];
   if (!handler) throw new Error("missing OMP handler " + name);
   await handler(event, {});
 };
+const fire = async (name, event = {}) => fireWith(handlers, name, event);
 const busyState = () => readFileSync(
   process.env.STATE_DIR + "/" + process.env.TASK_ID + ".busy-state", "utf8");
 const markerPresent = (path) => {
@@ -180,6 +186,32 @@ const removeMarker = (path) => {
 };
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
+  case "finalizing-reload-then-start": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const runPath = base + ".omp-session-run";
+    const stopPath = base + ".omp-session-stop";
+    const evidenceDir = base + ".omp-session-evidence";
+    const turnEndPath = base + ".turn-ended";
+    await fire("agent_start");
+    const fields = readFileSync(runPath, "utf8").trim().split(/\s+/);
+    if (fields.length !== 1) throw new Error("the initial run marker was malformed");
+    const token = fields[0];
+    const evidencePath = evidenceDir + "/" + token;
+    const evidence = readFileSync(evidencePath, "utf8").trim().split(/\s+/);
+    if (evidence.length !== 4) throw new Error("the initial run evidence was malformed");
+    writeFileSync(evidencePath, `${token} ${evidence[1]} ${evidence[2]} ${evidence[2]}\n`);
+    writeFileSync(stopPath, token + "\n");
+    removeMarker(turnEndPath);
+    const reloadedHandlers = await loadHandlers("?reload=" + String(Date.now()));
+    await fireWith(reloadedHandlers, "agent_start");
+    const replacementToken = readFileSync(runPath, "utf8").trim();
+    if (replacementToken === token) throw new Error("reload did not rotate after retiring finalizing state");
+    if (!busyState().includes("state=busy")) throw new Error("fresh run after finalizing recovery did not remain busy");
+    await fireWith(reloadedHandlers, "agent_end");
+    if (busyState().includes("state=busy")) throw new Error("fresh run remained busy after tokenless agent_end");
+    if (!markerPresent(turnEndPath)) throw new Error("fresh run did not publish turn-end evidence");
+    break;
+  }
   case "marker-temp-recovery": {
     const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
     const generation = readFileSync(
@@ -1038,32 +1070,17 @@ test_omp_extension_reconciles_idle_finalizing_before_new_run() {
 }
 
 test_omp_extension_retires_busy_finalizing_before_new_run() {
-  local rec id=busy-omp-busy-finalizing-recovery out state ext run_token evidence \
-    evidence_token started_at last_event_at stopped_at
+  local rec id=busy-omp-busy-finalizing-recovery out state ext
   rec=$(make_spawn_case omp-busy-finalizing-recovery omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "omp busy-finalizing-recovery spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
-  out=$(drive_omp_ext "$ext" agent-start) || fail "busy-finalizing agent_start drive failed: $out"
-  run_token=$(cat "$state/$id.omp-session-run")
-  evidence=$(cat "$state/$id.omp-session-evidence/$run_token")
-  read -r evidence_token started_at last_event_at stopped_at <<< "$evidence"
-  printf '%s %s %s %s\n' "$evidence_token" "$started_at" "$last_event_at" "$last_event_at" \
-    > "$state/$id.omp-session-evidence/$run_token"
-  printf '%s\n' "$run_token" > "$state/$id.omp-session-stop"
-  rm -f "$state/$id.turn-ended"
-
-  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
-    || fail "busy-finalizing reload drive failed: $out"
+  out=$(drive_omp_ext "$ext" finalizing-reload-then-start "$state" "$id") \
+    || fail "busy-finalizing persistent reload drive failed: $out"
   [ -f "$state/$id.turn-ended" ] \
     || fail "busy finalizing recovery did not publish idle turn-end evidence"
-  out=$(classify omp "$id" "$state")
-  [ "$out" = "busy omp-ext" ] \
-    || fail "fresh run after busy finalizing recovery did not remain busy, got '$out'"
-  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
-    || fail "fresh run after busy finalizing recovery did not settle: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] \
     || fail "busy finalizing recovery left a phantom active run, got '$out'"
