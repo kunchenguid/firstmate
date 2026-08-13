@@ -898,7 +898,7 @@ shell_quote() {
 }
 
 backlog_refresh_reminder() {
-  local pr done_cmd report_path landing_target landing_note
+  local pr done_cmd report_path landing_target default_target landing_note
   [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
@@ -909,7 +909,9 @@ backlog_refresh_reminder() {
       *)
         if [ "$MODE" = local-only ]; then
           landing_target=$LOCAL_MERGE_TARGET
-          if [ -n "$landing_target" ] && [ "$landing_target" != main ]; then
+          default_target=$(default_branch || true)
+          if [ -n "$landing_target" ] \
+            && { [ -z "$default_target" ] || [ "$landing_target" != "$default_target" ]; }; then
             landing_note=$(shell_quote "local $landing_target")
             done_cmd="tasks-axi done $ID --note $landing_note"
           else
