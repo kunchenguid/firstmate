@@ -134,6 +134,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/cloud-research-worker/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -343,6 +347,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/aime-cloud-worker.md",
       "audience": "maintainer-verification"
     },
     {

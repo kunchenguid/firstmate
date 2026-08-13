@@ -21,7 +21,8 @@
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
-#     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
+#     executor discriminates local-agent from cloud-worker task records.
+#     current_state is parsed from bin/fm-task-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
@@ -29,7 +30,8 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
-#     endpoint.exists is the cheap backend endpoint-presence read.
+#     endpoint.exists is the cheap backend endpoint-presence read for local
+#     workers and null/not_applicable for cloud workers.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
@@ -206,7 +208,7 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
+      "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
   sep=' · '
@@ -401,9 +403,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind executor provider task_type cloud_state harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json cloud_state_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -412,6 +414,11 @@ task_json_lines() {
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
+    executor=$(meta_value "$meta" executor)
+    [ -n "$executor" ] || executor=local-agent
+    provider=$(meta_value "$meta" provider)
+    task_type=$(meta_value "$meta" task_type)
+    cloud_state=$(meta_value "$meta" cloud_state)
     harness=$(meta_value "$meta" harness)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
@@ -422,7 +429,10 @@ task_json_lines() {
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
     remote_home_present=null
-    if [ -n "$remote_host" ]; then
+    if [ "$executor" = cloud-worker ]; then
+      backend=cloud
+      target=
+    elif [ -n "$remote_host" ]; then
       backend=$(meta_value "$meta" remote_backend)
       [ -n "$backend" ] || backend=unknown
       target=$(meta_value "$meta" remote_target)
@@ -468,7 +478,8 @@ task_json_lines() {
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ] \
+             || [ "$current_source" = cloud-state ] || [ "$current_source" = cloud-readback ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
@@ -482,7 +493,10 @@ task_json_lines() {
 
     endpoint_exists=null
     agent_alive=not_checked
-    if [ -n "$remote_host" ]; then
+    if [ "$executor" = cloud-worker ]; then
+      endpoint_exists=null
+      agent_alive=not_applicable
+    elif [ -n "$remote_host" ]; then
       if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
         "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
@@ -520,6 +534,7 @@ task_json_lines() {
     status_json=$event_json
     report_json=$(path_present_json "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+    if [ -n "$cloud_state" ]; then cloud_state_json=$(path_present_json "$cloud_state"); else cloud_state_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
     elif [ -n "$home" ]; then
@@ -531,6 +546,9 @@ task_json_lines() {
     jq -n \
       --arg id "$id" \
       --arg kind "$kind" \
+      --arg executor "$executor" \
+      --arg provider "$provider" \
+      --arg task_type "$task_type" \
       --arg harness "$harness" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
@@ -552,6 +570,7 @@ task_json_lines() {
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
       --argjson worktree_path "$worktree_json" \
+      --argjson cloud_state_path "$cloud_state_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
@@ -561,6 +580,9 @@ task_json_lines() {
       '{
         id:$id,
         kind:$kind,
+        executor:$executor,
+        provider:($provider | if . == "" then null else . end),
+        task_type:($task_type | if . == "" then null else . end),
         harness:($harness // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
@@ -571,13 +593,15 @@ task_json_lines() {
           meta:$meta_path,
           status_log:$status_log,
           worktree:$worktree_path,
+          cloud_state:$cloud_state_path,
           home:$home_path,
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
-          status:(if $endpoint_exists == false then "absent"
+          status:(if $executor == "cloud-worker" then "not_applicable"
+                  elif $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
@@ -590,7 +614,13 @@ task_json_lines() {
           last_event_text:$last_event_raw
         },
         actions:(
-          if $kind == "secondmate" then
+          if $executor == "cloud-worker" and $provider == "aime" then
+            {watch:"bin/fm-task-state.sh \($id)",
+             adopt:"bin/fm-cloud-research-aime.sh adopt \($id)",
+             cancel:"bin/fm-cloud-research-aime.sh cancel \($id)",
+             retire:"bin/fm-task-retire.sh \($id)",
+             return_channel_note:"AIME results return through deterministic process-event readback and data/<id>/report.md."}
+          elif $kind == "secondmate" then
             {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
              watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
              return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}

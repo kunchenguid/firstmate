@@ -11,11 +11,12 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and opt-in Feishu pairing and binding generations under `data/feishu/`.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated Relay artifacts, opt-in private Feishu delivery state under `state/feishu/`, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as executor-discriminated task metadata, append-only status events, local endpoint signals, private cloud execution state under `state/cloud-tasks/`, watcher and wake-queue coordination, away-mode state, generated Relay artifacts, opt-in private Feishu delivery state under `state/feishu/`, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
-`bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
-The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+`bin/fm-spawn.sh` owns the local-agent task-metadata fields it emits, while `bin/fm-aime-cloud-lib.sh` owns the discriminated cloud-worker/AIME metadata and private task-state schemas.
+The runtime-backend section below owns local backend-specific fields and selector interpretation.
+The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-task-state.sh` owns provider-aware current-state reconciliation while delegating local tasks unchanged to `bin/fm-crew-state.sh`.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
@@ -42,6 +43,52 @@ Malformed content, unsafe ownership, unsafe permissions, another file type, a sy
 
 [`docs/feishu-channel.md`](feishu-channel.md) is the single operator owner for app setup, activation, local controls, supported limits, transport operation, safety, health, and recovery.
 [`bin/fm-feishu-state.mjs`](../bin/fm-feishu-state.mjs) owns the exact private child schemas and mutation mechanics.
+
+## AIME cloud research worker (config/aime-cloud-worker)
+
+The AIME cloud research executor is optional and disabled by default.
+An absent, malformed, unsafe, version-mismatched, or explicitly disabled `config/aime-cloud-worker` leaves ordinary local task routing unchanged and refuses new AIME dispatch before any cloud write.
+It is a task executor above local harness and runtime-backend semantics, not another harness or backend.
+
+`bin/fm-cloud-research-aime.sh sandbox-verify` is the only supported config writer.
+Its `--help` output owns the exact authorization flag, site and space arguments, config fields, and current schema.
+The command is intentionally mutating and must be run only after an operator explicitly authorizes one disposable AIME session.
+It performs the read-only site and space checks first, creates one disposable empty session, reads that same session back, and records the exact installed `bytedcli` version with `enabled=false`.
+Ordinary tests, lint, documentation checks, no-mistakes validation, and CI must never run this mutating verification.
+
+Enabling is a separate local operator action after the disposable-session verification succeeds.
+Change only the generated `enabled=false` line to `enabled=true`, retain mode `0600`, and do not edit the verified site, space, identity, version, timestamp, or verification fields by hand.
+The dispatch path repeats read-only authentication and capability checks and refuses if the current `bytedcli` version differs from the sandbox-verified version.
+The config contains no token or credential.
+Authentication remains in bytedcli-managed user identity state for the explicit configured site, and Firstmate never reads or prints its value.
+
+Before dispatch, create the ordinary private task directory and `brief.md`, then place the exact instruction in a non-symlinked `0600` or `0400` file beneath `data/<id>/`.
+The instruction file is passed through `bytedcli --content-file`; prompt bytes never enter argv, task metadata, status events, tracked files, or reports.
+The maximum instruction size defaults to 262144 bytes and is controlled by `FM_AIME_MAX_INSTRUCTION_BYTES`.
+The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the intake, document-result, wake, adoption, cancellation, and retirement procedure.
+
+A dispatched task records only the cloud discriminator in `state/<id>.meta`: `kind=scout`, `executor=cloud-worker`, `provider=aime`, the research or document task type, and the private cloud-state directory.
+It never fakes `window`, `worktree`, `harness`, `backend`, or local endpoint fields.
+Private state and raw provider artifacts live beneath mode-restricted `state/cloud-tasks/<id>/`.
+`bin/fm-aime-cloud-lib.sh` owns their exact schemas, phases, atomic transition rules, file modes, and allowed error classifications.
+`bin/fm-procevent-aime.sh` owns authoritative event replay, session and output readback, durable cursor advancement, duplicate handling, report generation, and re-arming through the existing process-event runner.
+
+Restart adoption uses the recorded session identity and never creates or sends again after submission.
+Create or send acceptance that cannot be proven remains an explicit blocker and is never retried automatically.
+Disabling or removing the config blocks new dispatch but does not erase an already-recorded cloud task.
+Existing submitted work remains adoptable and readable from its durable state even while new dispatch is disabled.
+
+Rollback is therefore two steps.
+First set `enabled=false`, or remove `config/aime-cloud-worker`, to stop new cloud dispatch immediately while leaving local routing unchanged.
+Then reconcile every existing cloud task to a terminal report, or interrupt only its local waiter while recording that the AIME session may still continue.
+Do not delete a nonterminal cloud record, claim cancellation, or create a replacement session.
+Terminal tasks retire through `bin/fm-task-retire.sh` only after the report and ordinary decision-hold completion gate pass.
+
+Document mode does not activate the local Feishu document integration.
+AIME creates the requested document and returns its canonical URL, identity, and revision.
+Firstmate validates and records that artifact but performs no local create, copy, rewrite, permission, or sharing operation.
+
+Current active evidence, including the pinned CLI version and the non-mutating verification commands, is in [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md).
 
 ## Pi Calm preference (config/calm)
 
@@ -456,7 +503,8 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
-`bin/fm-procevent.sh` owns the generic contract; `bin/fm-procevent-lavish.sh` is the first adapter and wraps only the currently published `lavish-axi poll` interface.
+`bin/fm-procevent.sh` owns the generic contract.
+Current applying adapters include the remote-secondmate reply relay and AIME cloud research readback, while `bin/fm-procevent-lavish.sh` wraps only the currently published `lavish-axi poll` interface.
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before it is published.
@@ -480,6 +528,7 @@ Leaving that to a handler means it can silently not happen, so immediately after
 That call runs strictly after terminal retirement, because a handling adapter re-arms its own next source and retiring afterwards would drop that fresh registration and leave the source silently dead.
 Failed publication skips the call, and exit 0 means the adapter fully applied and acknowledged the result; failed publication, a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement, so a handler receives it exactly as before and an adapter with no such command needs no change.
 The remote-secondmate reply adapter implements it, so a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step; the published wake still reaches firstmate, and handling that wake through the adapter again is idempotent.
+The AIME adapter also implements it, so each captured observation advances or preserves the provider-aware task state, writes a verified terminal report or re-arms readback, then acknowledges the exact generation; handling the wake through the adapter again is idempotent.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
@@ -551,11 +600,18 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
+FM_AIME_MAX_INSTRUCTION_BYTES=262144   # maximum private AIME instruction-file size
+FM_AIME_PROBE_TIMEOUT=20               # seconds allowed for each read-only bytedcli version/space probe
+FM_AIME_WRITE_TIMEOUT=30               # seconds allowed for create or send before acceptance becomes unknown
+FM_AIME_STATE_TIMEOUT=15               # seconds allowed for provider readback in fm-task-state
+FM_AIME_REPLAY_TIMEOUT_MS=5000         # per-stream AIME event replay hard limit
+FM_AIME_REPLAY_MAX_STREAMS=200         # maximum replay streams before the adapter returns unavailable
+FM_AIME_READBACK_TIMEOUT=20            # seconds allowed for each AIME replay/session/output CLI call
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_CREW_STATE_BIN=bin/fm-task-state.sh   # test override for the provider-aware current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
