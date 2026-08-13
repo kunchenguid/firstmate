@@ -904,7 +904,7 @@ SH
 
 test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   local dir state fakebin armout recovery_out healthy_out armpid watcher_pid i status
-  local recovery_arm healthy_arm healthy_pid beat_before beat_after token
+  local recovery_arm healthy_arm healthy_pid beat_before beat_after token wedge_limit
   dir=$(make_case stopped-watcher)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -934,7 +934,9 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   fi
 
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$armpid"; do
+  wedge_limit=80
+  [ "$(uname)" != Linux ] || wedge_limit=160
+  while [ "$i" -lt "$wedge_limit" ] && is_live_non_zombie "$armpid"; do
     sleep 0.1
     i=$((i + 1))
   done
@@ -954,17 +956,37 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
     || fail "stale-beacon retirement omitted its typed watcher failure: $(cat "$armout")"
   grep -F 'stopped advancing its beacon' "$armout" >/dev/null \
     || fail "stale-beacon retirement did not name the liveness failure: $(cat "$armout")"
+  token=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$token" in
+    pending:downtime:*) ;;
+    *) fail "stale-beacon retirement did not publish watcher-down recovery state: '$token'" ;;
+  esac
+  case "$(uname)" in
+    Linux)
+      # SIGKILL stays pending for a stopped process on Linux, so the accepted
+      # WATCH_CHILD_RC=124 retirement takes the release-failed shape: the
+      # stopped watcher survives, the expected-pid hardening retains its lock,
+      # and the ledger records the refused release.
+      is_live_non_zombie "$watcher_pid" \
+        || fail "bounded retirement did not leave the stopped watcher alive on Linux"
+      [ -e "$state/.watch.lock" ] || [ -L "$state/.watch.lock" ] \
+        || fail "expected-pid hardening did not retain the live stopped holder's lock on Linux"
+      grep -q 'reason=stale-beacon-release-failed' "$state/.watch-cycle-exits.log" \
+        || fail "bounded retirement did not record the release-failed outcome in the lifecycle ledger"
+      kill -CONT "$watcher_pid" 2>/dev/null || true
+      wait_for_exit "$watcher_pid" 40 || true
+      ! is_live_non_zombie "$watcher_pid" \
+        || fail "continued Linux watcher did not reap the pending KILL"
+      pass "owned arm bounds its retirement of an unkillable stopped watcher and fails loudly on Linux"
+      return 0
+      ;;
+  esac
   ! is_live_non_zombie "$watcher_pid" \
     || fail "stalled watcher remained alive after bounded retirement"
   [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
     || fail "stalled watcher retained singleton ownership after retirement"
   grep -q 'reason=stale-beacon-retired' "$state/.watch-cycle-exits.log" \
     || fail "stale-beacon retirement was not classified in the lifecycle ledger"
-  token=$(cat "$state/.watcher-down" 2>/dev/null || true)
-  case "$token" in
-    pending:downtime:*) ;;
-    *) fail "stale-beacon retirement did not publish watcher-down recovery state: '$token'" ;;
-  esac
 
   # A fresh arm in the same primary session must take ownership and surface the
   # accepted downtime episode. No Pi/Herdr process is involved in this fixture.

@@ -468,10 +468,18 @@ watchdog_pid=
 watchdog_status=
 
 watch_child_running() {
-  local stat
+  local proc_root stat state_line
+  local -a stat_fields
   [ -n "$child" ] || return 1
   fm_pid_alive "$child" || return 1
-  stat=$(ps -p "$child" -o stat= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$child/stat" ]; then
+    state_line=$(cat "$proc_root/$child/stat" 2>/dev/null) || return 0
+    read -r -a stat_fields <<< "${state_line##*)}"
+    stat=${stat_fields[0]:-}
+  else
+    stat=$(ps -p "$child" -o stat= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
+  fi
   case "$stat" in
     Z*) return 1 ;;
   esac
