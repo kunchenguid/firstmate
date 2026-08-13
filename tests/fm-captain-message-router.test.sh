@@ -6,8 +6,8 @@
 # the verdict/target/explanation contract, explanation recording without
 # forwarding, target validation, session briefs, pending handoffs, verdict
 # logging, primary scoping, gate inertness, and
-# every fail-open error path. The router agent is mocked through
-# FM_CAPTAIN_ROUTER_AGENT_CMD or a fake Cursor CLI; no real model calls.
+# every fail-open error path. Every model call resolves a fake `cursor-agent`
+# from PATH, so unit tests exercise the production resolver and spawn boundary.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -42,9 +42,7 @@ brief_file() { printf '%s/state/captain-router/sessions/%s.brief' "$1" "$2"; }
 pending_dir() { printf '%s/state/captain-router/pending' "$1"; }
 
 # spawn_probe <root> <sink>: put a fake `cursor-agent` on PATH that records the
-# exact argv the router launches, then answers with a valid verdict block. This
-# is the real spawn boundary (no FM_CAPTAIN_ROUTER_AGENT_CMD override), so it
-# proves the owner uses upstream's Cursor resolver and a read-only CLI launch.
+# exact argv the router launches, then answers with a valid verdict block.
 spawn_probe() {
 	local root=$1 sink=$2 fakebin
 	fakebin=$(fm_fakebin "$root")
@@ -67,38 +65,38 @@ run_with_probe() {
 		FM_STATE_OVERRIDE="$root/state" FM_CONFIG_OVERRIDE="$root/config" "$ROUTER" "$@"
 }
 
-# write_verdict_agent <root> <name> <verdict-block>: a mock router agent that
-# discards the prompt and prints a fixed verdict block.
-write_verdict_agent() {
-	local root=$1 name=$2 body=$3 path
-	path="$root/mock-agent-$name.sh"
-	cat >"$path" <<EOF
+# cursor_fixture <root> <name> <verdict-block> [prompt-sink]: create the only
+# model fake used by unit tests. It is resolver-approved by its cursor-agent
+# basename and snapshots the private prompt file when a sink is requested.
+cursor_fixture() {
+	local root=$1 name=$2 body=$3 sink=${4-} fakebin
+	fakebin="$root/fakebin-$name"
+	mkdir -p "$fakebin"
+	cat >"$fakebin/cursor-agent" <<EOF
 #!/usr/bin/env bash
 set -u
-cat >/dev/null
+[ -z "$sink" ] || cat "$root/state/captain-router"/prompt.* >"$sink" 2>/dev/null || true
 cat <<'VERDICT'
 $body
 VERDICT
 EOF
-	chmod +x "$path"
-	printf '%s\n' "$path"
+	chmod +x "$fakebin/cursor-agent"
+	printf '%s\n' "$fakebin"
 }
 
-# write_recording_agent <root> <name> <prompt-sink> <verdict-block>: same, but
-# saves the prompt it received so the test can assert on what the model sees.
-write_recording_agent() {
-	local root=$1 name=$2 sink=$3 body=$4 path
-	path="$root/mock-agent-$name.sh"
-	cat >"$path" <<EOF
+# cursor_exit_fixture <root> <name> <status>: resolver-approved fake that exits
+# with a selected status after the shared timeout owner launches it.
+cursor_exit_fixture() {
+	local root=$1 name=$2 status=$3 fakebin
+	fakebin="$root/fakebin-$name"
+	mkdir -p "$fakebin"
+	cat >"$fakebin/cursor-agent" <<EOF
 #!/usr/bin/env bash
 set -u
-cat >"$sink"
-cat <<'VERDICT'
-$body
-VERDICT
+exit $status
 EOF
-	chmod +x "$path"
-	printf '%s\n' "$path"
+	chmod +x "$fakebin/cursor-agent"
+	printf '%s\n' "$fakebin"
 }
 
 test_settle_extracts_multiple_anchors() {
@@ -154,7 +152,7 @@ test_settle_single_ask_is_silent() {
 }
 
 test_submit_always_spawns_the_model() {
-	local root="$TMP_ROOT/submit-always-model" out status=0 seen mock
+	local root="$TMP_ROOT/submit-always-model" out status=0 seen fakebin
 	make_primary "$root"
 	# A realistic in-conversation reply sharing no literal tokens with the open
 	# anchors. The deterministic layer used to call this `new`/`det` without ever
@@ -162,12 +160,12 @@ test_submit_always_spawns_the_model() {
 	printf 'Do you want me to start the blender glb export pipeline fix now?' |
 		run "$root" --on-settle --session-id primary >/dev/null
 	seen="$root/seen-always.txt"
-	mock=$(write_recording_agent "$root" always "$seen" \
+	fakebin=$(cursor_fixture "$root" always \
 		'verdict=same
 target=primary
-explanation=The captain is questioning how routing works, which continues this session.')
+explanation=The captain is questioning how routing works, which continues this session.' "$seen")
 	out=$(printf 'I thought it was supposed to be classifying my messages to you.' |
-		FM_CAPTAIN_ROUTER_AGENT_CMD="$mock" run "$root" --on-submit --session-id primary) || status=$?
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "always-model submit exit"
 	assert_present "$seen" "every submit must reach the router model"
 	assert_contains "$out" "verdict=same" "the model verdict is honored"
@@ -177,7 +175,7 @@ explanation=The captain is questioning how routing works, which continues this s
 }
 
 test_submit_model_sees_briefs_history_and_message() {
-	local root="$TMP_ROOT/submit-prompt" status=0 seen mock hist
+	local root="$TMP_ROOT/submit-prompt" status=0 seen fakebin hist
 	make_primary "$root"
 	printf 'Do you want me to start the blender glb export pipeline fix now?' |
 		run "$root" --on-settle --session-id primary >/dev/null
@@ -186,12 +184,12 @@ test_submit_model_sees_briefs_history_and_message() {
 	hist="$root/history.txt"
 	printf 'user: can you look at the router again\n\nassistant: sure, which part\n' >"$hist"
 	seen="$root/seen-prompt.txt"
-	mock=$(write_recording_agent "$root" prompt "$seen" \
+	fakebin=$(cursor_fixture "$root" prompt \
 		'verdict=same
 target=primary
-explanation=Continues this session.')
+explanation=Continues this session.' "$seen")
 	printf 'the part that decides where my messages go' |
-		FM_CAPTAIN_ROUTER_AGENT_CMD="$mock" run "$root" --on-submit \
+		run_with_probe "$root" "$fakebin" --on-submit \
 			--session-id primary --chat-history-file "$hist" >/dev/null || status=$?
 	expect_code 0 "$status" "prompt-shape submit exit"
 	assert_grep "Firstmate captain-message continuity router" "$seen" "prompt states the router role"
@@ -209,7 +207,7 @@ explanation=Continues this session.')
 }
 
 test_chat_history_is_bounded_and_redacted() {
-	local root="$TMP_ROOT/submit-history-safety" status=0 seen mock hist bytes
+	local root="$TMP_ROOT/submit-history-safety" status=0 seen fakebin hist bytes
 	make_primary "$root"
 	printf 'Do you want me to proceed?' | run "$root" --on-settle --session-id primary >/dev/null
 	hist="$root/history-dirty.txt"
@@ -222,12 +220,12 @@ test_chat_history_is_bounded_and_redacted() {
 		printf 'user: the surviving newest captain line\n'
 	} >"$hist"
 	seen="$root/seen-history.txt"
-	mock=$(write_recording_agent "$root" hist "$seen" \
+	fakebin=$(cursor_fixture "$root" hist \
 		'verdict=same
 target=primary
-explanation=Continues this session.')
-	printf 'go ahead' | FM_CAPTAIN_ROUTER_HISTORY_CHARS=1500 FM_CAPTAIN_ROUTER_AGENT_CMD="$mock" \
-		run "$root" --on-submit --session-id primary --chat-history-file "$hist" >/dev/null || status=$?
+explanation=Continues this session.' "$seen")
+	printf 'go ahead' | FM_CAPTAIN_ROUTER_HISTORY_CHARS=1500 \
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary --chat-history-file "$hist" >/dev/null || status=$?
 	expect_code 0 "$status" "history-safety submit exit"
 	assert_grep "the surviving newest captain line" "$seen" "the newest history survives the bound"
 	assert_no_grep "FIRSTMATE_OP" "$seen" "operational injections never reach the model"
@@ -242,19 +240,19 @@ explanation=Continues this session.')
 }
 
 test_explanation_recorded_but_never_forwarded() {
-	local root="$TMP_ROOT/submit-explanation" status=0 mock log pending latest
+	local root="$TMP_ROOT/submit-explanation" status=0 fakebin log pending latest
 	local explanation='The captain is redirecting to the blender export work in the other session.'
 	make_primary "$root"
 	printf 'Do you want me to start the blender glb export pipeline fix now?' |
 		run "$root" --on-settle --session-id sess-blender >/dev/null
 	printf 'Shall I merge the captain router PR today?' |
 		run "$root" --on-settle --session-id primary >/dev/null
-	mock=$(write_verdict_agent "$root" explain "verdict=reroute
+	fakebin=$(cursor_fixture "$root" explain "verdict=reroute
 target=sess-blender
 explanation=$explanation")
 	local out=
 	out=$(printf 'lets get back to the exporter' |
-		FM_CAPTAIN_ROUTER_AGENT_CMD="$mock" run "$root" --on-submit --session-id primary) || status=$?
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "explanation submit exit"
 	assert_contains "$out" "verdict=reroute target=sess-blender confidence=model" \
 		"the wire line stays the machine-readable verdict the hook parses"
@@ -283,11 +281,12 @@ explanation=$explanation")
 }
 
 test_submit_model_spawn_failure_fail_open() {
-	local root="$TMP_ROOT/submit-failopen" out status=0 log
+	local root="$TMP_ROOT/submit-failopen" out status=0 log fakebin
 	make_primary "$root"
 	printf 'Do you want me to start P0 implementation now?' |
 		run "$root" --on-settle --session-id primary >/dev/null
-	out=$(printf 'ok' | FM_CAPTAIN_ROUTER_AGENT_CMD='false' run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_exit_fixture "$root" fail 1)
+	out=$(printf 'ok' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "fail-open still exits 0"
 	assert_contains "$out" "verdict=same" "spawn failure allows into current primary"
 	assert_contains "$out" "target=primary" "fail-open targets current session"
@@ -298,25 +297,34 @@ test_submit_model_spawn_failure_fail_open() {
 }
 
 test_submit_model_timeout_fail_open() {
-	local root="$TMP_ROOT/submit-timeout" out status=0
+	local root="$TMP_ROOT/submit-timeout" out status=0 fakebin marker
 	make_primary "$root"
 	printf 'Do you want me to proceed?' | run "$root" --on-settle --session-id primary >/dev/null
-	# Exit 124 is the timeout convention the bounded spawn reports.
-	out=$(printf 'anything' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; exit 124' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	marker="$root/timeout-started"
+	fakebin=$(fm_fakebin "$root")
+	cat >"$fakebin/cursor-agent" <<EOF
+#!/usr/bin/env bash
+set -u
+: >"$marker"
+sleep 300
+EOF
+	chmod +x "$fakebin/cursor-agent"
+	out=$(printf 'anything' | FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_CAPTAIN_ROUTER_TIMEOUT_SECS=1 \
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "timeout fail-open exit"
 	assert_contains "$out" "verdict=same" "a timed-out router allows into current primary"
 	assert_contains "$out" "confidence=det" "timeout falls back to the det label"
+	assert_present "$marker" "the timed-out Cursor fake started"
 	assert_grep "timed out" "$(failures_log "$root")" "failures.log names the timeout"
 	pass "router: a router timeout fail-opens as same"
 }
 
 test_submit_garbage_verdict_fail_open() {
-	local root="$TMP_ROOT/submit-garbage" out status=0
+	local root="$TMP_ROOT/submit-garbage" out status=0 fakebin
 	make_primary "$root"
 	printf 'Do you want me to proceed?' | run "$root" --on-settle --session-id primary >/dev/null
-	out=$(printf 'anything' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "I think it goes to blender\n"' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_fixture "$root" garbage 'I think it goes to blender')
+	out=$(printf 'anything' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "garbage fail-open exit"
 	assert_contains "$out" "verdict=same" "unparseable output allows into current primary"
 	assert_contains "$out" "confidence=det" "unparseable output falls back to det"
@@ -325,22 +333,26 @@ test_submit_garbage_verdict_fail_open() {
 }
 
 test_submit_reroute_target_is_validated() {
-	local root="$TMP_ROOT/submit-target-validation" out status=0
+	local root="$TMP_ROOT/submit-target-validation" out status=0 fakebin
 	make_primary "$root"
 	printf 'Shall I merge the captain router PR today?' |
 		run "$root" --on-settle --session-id primary >/dev/null
 	printf 'Do you want me to start the blender export fix now?' |
 		run "$root" --on-settle --session-id sess-blender >/dev/null
 	# A reroute naming a session with no brief is not routable -> fail open.
-	out=$(printf 'back to the exporter' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=reroute\ntarget=no-such-session\nexplanation=x\n"' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_fixture "$root" invalid-target 'verdict=reroute
+target=no-such-session
+explanation=x')
+	out=$(printf 'back to the exporter' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "invalid reroute target exit"
 	assert_contains "$out" "verdict=same" "a reroute to an unknown session fails open"
 	assert_contains "$out" "confidence=det" "the invalid target uses the fallback label"
 	# A reroute naming the current session is not a handoff, even though its brief exists.
 	status=0
-	out=$(printf 'continue this conversation' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=reroute\ntarget=primary\nexplanation=x\n"' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_fixture "$root" self-target 'verdict=reroute
+target=primary
+explanation=x')
+	out=$(printf 'continue this conversation' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "current-session reroute exit"
 	assert_contains "$out" "verdict=same target=primary confidence=det" \
 		"a self-reroute continues in the current session"
@@ -350,8 +362,10 @@ test_submit_reroute_target_is_validated() {
 		"a self-reroute does not publish pending route state"
 	# A reroute naming a real different brief routes.
 	status=0
-	out=$(printf 'back to the exporter' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=reroute\ntarget=sess-blender\nexplanation=x\n"' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_fixture "$root" valid-target 'verdict=reroute
+target=sess-blender
+explanation=x')
+	out=$(printf 'back to the exporter' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "valid reroute target exit"
 	assert_contains "$out" "verdict=reroute target=sess-blender confidence=model" \
 		"a reroute naming a different existing brief routes"
@@ -359,16 +373,20 @@ test_submit_reroute_target_is_validated() {
 }
 
 test_submit_new_and_same_targets_are_normalized() {
-	local root="$TMP_ROOT/submit-normalize" out status=0
+	local root="$TMP_ROOT/submit-normalize" out status=0 fakebin
 	make_primary "$root"
 	printf 'Do you want me to proceed?' | run "$root" --on-settle --session-id primary >/dev/null
-	out=$(printf 'a brand new topic' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=new\ntarget=primary\nexplanation=x\n"' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_fixture "$root" new-target 'verdict=new
+target=primary
+explanation=x')
+	out=$(printf 'a brand new topic' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "new normalization exit"
 	assert_contains "$out" "verdict=new target=- confidence=model" "new always normalizes to target=-"
 	status=0
-	out=$(printf 'still talking about this' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=same\ntarget=-\nexplanation=x\n"' \
-		run "$root" --on-submit --session-id primary) || status=$?
+	fakebin=$(cursor_fixture "$root" same-target 'verdict=same
+target=-
+explanation=x')
+	out=$(printf 'still talking about this' | run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "same normalization exit"
 	assert_contains "$out" "verdict=same target=primary confidence=model" \
 		"same with a placeholder target resolves to the current session"
@@ -415,7 +433,7 @@ test_builtin_default_uses_cursor_cli_read_only() {
 }
 
 test_submit_prompt_rides_the_file_not_argv() {
-	local root="$TMP_ROOT/argv-privacy" out status=0 argv promptseen fakebin hist
+	local root="$TMP_ROOT/argv-privacy" out status=0 argv promptseen fakebin hist mode stdinseen
 	make_primary "$root"
 	printf 'Do you want me to start the SENTINEL-BRIEF-TOPIC work now?' |
 		run "$root" --on-settle --session-id primary >/dev/null
@@ -423,6 +441,8 @@ test_submit_prompt_rides_the_file_not_argv() {
 	printf 'user: SENTINEL-HISTORY-LINE about the exporter\n' >"$hist"
 	argv="$root/probe-argv.txt"
 	promptseen="$root/probe-promptfile.txt"
+	mode="$root/probe-prompt-mode.txt"
+	stdinseen="$root/probe-stdin.txt"
 	fakebin=$(fm_fakebin "$root")
 	# Like spawn_probe, but also snapshots the prompt file the argv instruction
 	# points at, proving the full context rides the file rather than the argv.
@@ -430,7 +450,10 @@ test_submit_prompt_rides_the_file_not_argv() {
 #!/usr/bin/env bash
 set -u
 printf '%s\\n' "\$@" >"$argv"
-cat "$root/state/captain-router"/prompt.* >"$promptseen" 2>/dev/null || true
+prompt_file=\$(printf '%s\\n' "$root/state/captain-router"/prompt.* | head -n 1)
+cat >"$stdinseen"
+cat "\$prompt_file" >"$promptseen" 2>/dev/null || true
+stat -f '%Lp' "\$prompt_file" >"$mode" 2>/dev/null || stat -c %a "\$prompt_file" >"$mode"
 printf 'verdict=same\\ntarget=-\\nexplanation=probe.\\n'
 EOF
 	chmod +x "$fakebin/cursor-agent"
@@ -448,6 +471,10 @@ EOF
 	assert_grep "SENTINEL-CAPTAIN-MESSAGE" "$promptseen" "the prompt file carries the captain message"
 	assert_grep "SENTINEL-HISTORY-LINE" "$promptseen" "the prompt file carries the redacted history"
 	assert_grep "SENTINEL-BRIEF-TOPIC" "$promptseen" "the prompt file carries the session briefs"
+	local prompt_mode
+	prompt_mode=$(tr -d '[:space:]' <"$mode")
+	[ "$prompt_mode" = 600 ] || fail "the prompt file mode must be 0600, got: $prompt_mode"
+	[ ! -s "$stdinseen" ] || fail "the full prompt must not be duplicated onto Cursor stdin"
 	pass "router: the full prompt rides the temp file, argv only the short instruction"
 }
 
@@ -506,15 +533,17 @@ SH
 }
 
 test_pending_route_publication_failure_falls_back_to_same() {
-	local root="$TMP_ROOT/pending-publication-failure" out status=0 pending log
+	local root="$TMP_ROOT/pending-publication-failure" out status=0 pending log fakebin
 	make_primary "$root"
 	printf 'Do you want me to start the blender export fix?' |
 		run "$root" --on-settle --session-id primary >/dev/null
 	pending=$(pending_dir "$root")
 	printf 'not a directory\n' >"$pending"
+	fakebin=$(cursor_fixture "$root" publication-fail 'verdict=new
+target=-
+explanation=new topic')
 	out=$(printf 'a new unrelated topic' |
-		FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=new\ntarget=-\nexplanation=new topic\n"' \
-			run "$root" --on-submit --session-id primary) || status=$?
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
 	expect_code 0 "$status" "pending publication failure exit"
 	assert_contains "$out" "verdict=same target=primary confidence=det" \
 		"a route that cannot be published fails open to the current session"
@@ -542,14 +571,6 @@ import { mock } from "node:test";
 const ownerCalls = [];
 let lockOwned = true;
 mock.module("node:child_process", { namedExports: {
-  spawn(command, args, options) {
-    const call = { kind: "settle", command, args, options, input: "" };
-    ownerCalls.push(call);
-    return {
-      on() {},
-      stdin: { on() {}, end(input) { call.input = input; } },
-    };
-  },
   spawnSync(command, args, options) {
     if (command === "bash" && args?.[3]?.endsWith("fm-session-lock-lib.sh")) {
       return { status: lockOwned ? 0 : 1, stdout: "", stderr: "" };
@@ -557,7 +578,8 @@ mock.module("node:child_process", { namedExports: {
     if (String(command).endsWith("fm-operational-input.sh")) {
       return { status: 1, stdout: "", stderr: "" };
     }
-    ownerCalls.push({ kind: "submit", command, args, options });
+    const kind = args?.[0] === "--on-settle" ? "settle" : "submit";
+    ownerCalls.push({ kind, command, args, options });
     return {
       status: 0,
       stdout: `verdict=same target=${args[2]} confidence=model\n`,
@@ -569,6 +591,10 @@ const extension = await import(`./.pi/extensions/fm-primary-captain-message-rout
 const handlers = new Map();
 extension.default({ on: (event, handler) => handlers.set(event, handler) });
 const context = (id) => ({ sessionManager: { getSessionId: () => id } });
+await handlers.get("input")(
+  { type: "input", text: "first captain message", source: "interactive" },
+  context("session-alpha"),
+);
 await handlers.get("before_agent_start")(
   { type: "before_agent_start", prompt: "first captain message", sessionId: "wrong-event-id" },
   context("session-alpha"),
@@ -597,6 +623,10 @@ await handlers.get("agent_end")(
 );
 await handlers.get("agent_settled")(
   { type: "agent_settled" },
+  context("session-beta"),
+);
+await handlers.get("session_start")(
+  { type: "session_start", reason: "resume" },
   context("session-beta"),
 );
 await handlers.get("before_agent_start")(
@@ -634,7 +664,7 @@ await handlers.get("before_agent_start")(
   { type: "before_agent_start", prompt: "unowned captain message" },
   context("session-beta"),
 );
-const calls = ownerCalls.map(({ kind, args, input, options }) => ({ kind, args, input: input || options?.input, timeout: options?.timeout }));
+const calls = ownerCalls.map(({ kind, args, options }) => ({ kind, args, input: options?.input, timeout: options?.timeout }));
 console.log(JSON.stringify(calls));
 JS
 	) || status=$?
@@ -659,14 +689,140 @@ JS
 	pass "router: the Pi hook uses context session ids and requires lock ownership"
 }
 
+test_pi_hook_classifies_queued_input_and_rejects_mixed_runs() {
+	local fixture out status=0
+	if ! command -v node >/dev/null 2>&1; then
+		echo "skip: node not found for the Pi hook queued-input test"
+		return 0
+	fi
+	fixture="$TMP_ROOT/hook-queued-input"
+	mkdir -p "$fixture/state"
+	out=$(FM_STATE_OVERRIDE="$fixture/state" FM_OPERATIONAL_INPUT_SCRIPT=/probe/fm-operational-input.sh \
+		node --experimental-test-module-mocks --experimental-strip-types --no-warnings \
+		--input-type=module 2>&1 <<'JS'
+import { mock } from "node:test";
+const calls = [];
+let lockOwned = true;
+mock.module("node:child_process", { namedExports: {
+  spawnSync(command, args, options) {
+    if (command === "bash" && args?.[3]?.endsWith("fm-session-lock-lib.sh")) {
+      return { status: lockOwned ? 0 : 1, stdout: "", stderr: "" };
+    }
+    if (String(command).endsWith("fm-operational-input.sh")) {
+      const text = String(options?.input ?? "");
+      return text.includes("FIRSTMATE_OP:")
+        ? { status: 0, stdout: text, stderr: "" }
+        : { status: 1, stdout: "", stderr: "" };
+    }
+    calls.push({ mode: args[0], args, input: options?.input });
+    return {
+      status: 0,
+      stdout: `verdict=same target=${args[2]} confidence=model\n`,
+      stderr: "",
+    };
+  },
+} });
+const extension = await import(`./.pi/extensions/fm-primary-captain-message-router.ts?queued-test=${Date.now()}`);
+const handlers = new Map();
+extension.default({ on: (event, handler) => handlers.set(event, handler) });
+const context = (id) => ({ sessionManager: { getSessionId: () => id } });
+const end = (text) => handlers.get("agent_end")({
+  type: "agent_end",
+  messages: [{ role: "assistant", content: [{ type: "text", text }] }],
+}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "idle captain", source: "interactive" },
+  context("session-alpha"),
+);
+await handlers.get("before_agent_start")(
+  { type: "before_agent_start", prompt: "idle captain" },
+  context("session-alpha"),
+);
+await end("idle response");
+await handlers.get("agent_settled")({}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "queued captain", source: "rpc", streamingBehavior: "followUp" },
+  context("session-alpha"),
+);
+await end("queued response");
+await handlers.get("agent_settled")({}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "extension captain", source: "extension", streamingBehavior: "steer" },
+  context("session-alpha"),
+);
+await end("extension response");
+await handlers.get("agent_settled")({}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "captain before watcher", source: "interactive" },
+  context("session-alpha"),
+);
+await end("candidate before watcher");
+await handlers.get("input")(
+  { type: "input", text: "\u2063FIRSTMATE_OP: v1 watcher", source: "extension", streamingBehavior: "followUp" },
+  context("session-alpha"),
+);
+await handlers.get("agent_settled")({}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "\u2063FIRSTMATE_OP: v1 turn-end", source: "extension" },
+  context("session-alpha"),
+);
+await end("operational response");
+await handlers.get("agent_settled")({}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "replacement captain", source: "interactive" },
+  context("session-alpha"),
+);
+await end("replacement candidate");
+await handlers.get("session_start")({}, context("session-beta"));
+await handlers.get("agent_settled")({}, context("session-alpha"));
+
+await handlers.get("input")(
+  { type: "input", text: "lock-loss captain", source: "interactive" },
+  context("session-beta"),
+);
+await handlers.get("agent_end")({
+  type: "agent_end",
+  messages: [{ role: "assistant", content: [{ type: "text", text: "lock-loss candidate" }] }],
+}, context("session-beta"));
+lockOwned = false;
+await handlers.get("agent_settled")({}, context("session-beta"));
+
+console.log(JSON.stringify(calls));
+JS
+	) || status=$?
+	expect_code 0 "$status" "hook queued-input test exit ($out)"
+	local submits settles
+	submits=$(printf '%s\n' "$out" | grep -o '"mode":"--on-submit"' | wc -l | tr -d ' ')
+	settles=$(printf '%s\n' "$out" | grep -o '"mode":"--on-settle"' | wc -l | tr -d ' ')
+	[ "$submits" -eq 6 ] || fail "expected exactly 6 captain classifications, got $submits ($out)"
+	[ "$settles" -eq 3 ] || fail "expected idle, queued, and extension captain settlement, got $settles ($out)"
+	assert_contains "$out" '"input":"queued captain"' "queued captain input is classified"
+	assert_contains "$out" '"input":"extension captain"' "extension-delivered captain input is classified"
+	assert_not_contains "$out" 'candidate before watcher' "late operational input invalidates an earlier candidate"
+	assert_not_contains "$out" 'operational response' "operational-only runs do not settle"
+	assert_not_contains "$out" 'replacement candidate' "session replacement drops the old candidate"
+	assert_not_contains "$out" 'lock-loss candidate' "lock ownership loss drops the candidate"
+	pass "router: Pi input records classify queued captain messages and isolate mixed runs"
+}
+
 test_verdict_is_logged() {
-	local root="$TMP_ROOT/verdict-log" log
+	local root="$TMP_ROOT/verdict-log" log fakebin
 	make_primary "$root"
 	printf 'Do you want me to start P0 now?' | run "$root" --on-settle >/dev/null
-	printf 'yes start P0 now' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=same\ntarget=-\nexplanation=x\n"' \
-		run "$root" --on-submit >/dev/null
-	printf 'unrelated blender thing' | FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=new\ntarget=-\nexplanation=y\n"' \
-		run "$root" --on-submit >/dev/null
+	fakebin=$(cursor_fixture "$root" log-same 'verdict=same
+target=-
+explanation=x')
+	printf 'yes start P0 now' | run_with_probe "$root" "$fakebin" --on-submit >/dev/null
+	fakebin=$(cursor_fixture "$root" log-new 'verdict=new
+target=-
+explanation=y')
+	printf 'unrelated blender thing' | run_with_probe "$root" "$fakebin" --on-submit >/dev/null
 	log=$(verdicts_log "$root")
 	assert_present "$log" "verdict log must exist after submits"
 	local lines
@@ -723,7 +879,6 @@ import { mock } from "node:test";
 import { pathToFileURL } from "node:url";
 const childProcess = await import("node:child_process");
 mock.module("node:child_process", { namedExports: {
-  spawn: childProcess.spawn,
   spawnSync(command, args, options) {
     if (command === "bash" && args?.[3]?.endsWith("fm-session-lock-lib.sh")) {
       return { status: 0, stdout: "", stderr: "" };
@@ -738,6 +893,10 @@ const handlers = new Map();
 extension.default({ on: (event, handler) => handlers.set(event, handler) });
 const say = (role, text) => ({ role, content: [{ type: "text", text }] });
 const context = (id) => ({ sessionManager: { getSessionId: () => id } });
+await handlers.get("input")(
+  { type: "input", text: "session alpha captain turn", source: "interactive" },
+  context("session-alpha"),
+);
 await handlers.get("before_agent_start")(
   {
     type: "before_agent_start",
@@ -754,6 +913,14 @@ await handlers.get("agent_end")(
     ],
   },
   context("session-alpha"),
+);
+await handlers.get("session_start")(
+  { type: "session_start", reason: "resume" },
+  context("session-beta"),
+);
+await handlers.get("input")(
+  { type: "input", text: "first session beta captain turn", source: "interactive" },
+  context("session-beta"),
 );
 await handlers.get("before_agent_start")(
   {
@@ -773,6 +940,14 @@ await handlers.get("agent_end")(
   context("session-beta"),
 );
 await handlers.get("agent_settled")({}, context("session-beta"));
+await handlers.get("input")(
+  {
+    type: "input",
+    text: "\u2063FIRSTMATE_OP: v1 watcher: run bin/fm-wake-drain.sh now",
+    source: "extension",
+  },
+  context("session-beta"),
+);
 await handlers.get("before_agent_start")(
   {
     type: "before_agent_start",
@@ -791,6 +966,10 @@ await handlers.get("agent_end")(
   context("session-beta"),
 );
 await handlers.get("agent_settled")({}, context("session-beta"));
+await handlers.get("input")(
+  { type: "input", text: "first eligible session beta turn", source: "interactive" },
+  context("session-beta"),
+);
 await handlers.get("before_agent_start")(
   {
     type: "before_agent_start",
@@ -809,6 +988,10 @@ await handlers.get("agent_end")(
   context("session-beta"),
 );
 await handlers.get("agent_settled")({}, context("session-beta"));
+await handlers.get("input")(
+  { type: "input", text: "second session beta captain turn", source: "interactive" },
+  context("session-beta"),
+);
 await handlers.get("before_agent_start")(
   {
     type: "before_agent_start",
@@ -860,15 +1043,17 @@ test_inert_in_child_worktree() {
 }
 
 test_marked_secondmate_home_is_active() {
-	local base="$TMP_ROOT/sm-base" root="$TMP_ROOT/sm-home" out status=0
+	local base="$TMP_ROOT/sm-base" root="$TMP_ROOT/sm-home" out status=0 fakebin
 	fm_git_worktree "$base" "$root" fm/captain-router-sm
 	mkdir -p "$root/bin" "$root/state"
 	: >"$root/AGENTS.md"
 	printf 'captain-router-sm\n' >"$root/.fm-secondmate-home"
 	printf 'Do you want me to proceed now?' | run "$root" --on-settle >/dev/null
+	fakebin=$(cursor_fixture "$root" secondmate 'verdict=same
+target=-
+explanation=x')
 	out=$(printf 'yes proceed now' |
-		FM_CAPTAIN_ROUTER_AGENT_CMD='cat >/dev/null; printf "verdict=same\ntarget=-\nexplanation=x\n"' \
-			run "$root" --on-submit) || status=$?
+		run_with_probe "$root" "$fakebin" --on-submit) || status=$?
 	expect_code 0 "$status" "secondmate home exit"
 	assert_contains "$out" "verdict=same" "a marked secondmate home is an active primary"
 	pass "router: a marked secondmate home is treated as a primary"
@@ -927,6 +1112,7 @@ test_submit_dependency_free_timeout_terminates_hung_spawn
 test_submit_large_timeout_override_reaches_shared_owner
 test_pending_route_publication_failure_falls_back_to_same
 test_pi_hook_uses_context_session_ids_without_outer_timeout
+test_pi_hook_classifies_queued_input_and_rejects_mixed_runs
 test_verdict_is_logged
 test_pi_hook_threads_bounded_redacted_history
 test_inert_in_child_worktree

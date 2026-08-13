@@ -66,9 +66,6 @@
 #                           forwarded into any session prompt)
 #   failures.log          - append-only fail-open failure rows
 #
-# Router agent override (tests): FM_CAPTAIN_ROUTER_AGENT_CMD, when set, is
-# executed instead of the configured CLI. The command receives the prompt on stdin and must
-# print a parseable verdict block on stdout. No real model calls in unit tests.
 # FM_CAPTAIN_ROUTER_TIMEOUT_SECS (default 90) hard-bounds the Cursor spawn
 # through bin/fm-timeout-lib.sh (whole process group, exit 124 on the bound,
 # dependency-free fallback included), so the bound holds on stock macOS too.
@@ -357,7 +354,8 @@ build_router_prompt() { # <current-id> <message-file> [history-file]
 	printf '\n'
 }
 
-# Spawn the ephemeral router agent. Prompt on stdin of the agent command.
+# Spawn the ephemeral router agent. The assembled prompt enters this function
+# on stdin and is handed to Cursor only through the private prompt file.
 # Prints agent stdout. Returns 0 on spawn success (even if verdict is bad).
 # The Cursor spawn is hard-bounded by FM_CAPTAIN_ROUTER_TIMEOUT_SECS through
 # fm_run_timed (whole process group, exit 124 on the bound), so a hung model
@@ -368,29 +366,28 @@ build_router_prompt() { # <current-id> <message-file> [history-file]
 spawn_router_agent() { # prompt on stdin
 	local prompt_file out status=0 cmd
 	prompt_file=$(mktemp "$ROUTER_DIR/prompt.XXXXXX" 2>/dev/null) || return 1
+	chmod 600 "$prompt_file" 2>/dev/null || {
+		rm -f "$prompt_file"
+		return 1
+	}
 	cat >"$prompt_file" || {
 		rm -f "$prompt_file"
 		return 1
 	}
-	if [ -n "${FM_CAPTAIN_ROUTER_AGENT_CMD-}" ]; then
-		# shellcheck disable=SC2086 # intentional word-split of override command
-		out=$(eval "$FM_CAPTAIN_ROUTER_AGENT_CMD" <"$prompt_file" 2>/dev/null) || status=$?
-	else
-		# Reuse upstream's verified resolver instead of carrying another Cursor
-		# executable rule in the fork. Ask mode is read-only; --trust only skips
-		# the headless workspace prompt and grants no write-capable mode.
-		cmd=$(fm_cursor_resolve_binary 2>/dev/null || true)
-		if [ -z "$cmd" ]; then
-			rm -f "$prompt_file"
-			record_failure "Cursor Agent CLI not found"
-			return 1
-		fi
-		out=$(fm_run_timed "$ROUTER_TIMEOUT_SECS" env \
-			-u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS \
-			"$cmd" --print --output-format text --mode ask --trust \
-			--workspace "$FM_HOME" --model "$ROUTER_MODEL" \
-			"Read the prompt file at $prompt_file and follow its instructions exactly. It carries your role, the conversation context, and the captain message to classify. Reply with ONLY the three-line verdict block it specifies (verdict=/target=/explanation=) and nothing else." 2>/dev/null) || status=$?
+	# Reuse upstream's verified resolver instead of carrying another Cursor
+	# executable rule in the fork. Ask mode is read-only; --trust only skips
+	# the headless workspace prompt and grants no write-capable mode.
+	cmd=$(fm_cursor_resolve_binary 2>/dev/null || true)
+	if [ -z "$cmd" ]; then
+		rm -f "$prompt_file"
+		record_failure "Cursor Agent CLI not found"
+		return 1
 	fi
+	out=$(fm_run_timed "$ROUTER_TIMEOUT_SECS" env \
+		-u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS \
+		"$cmd" --print --output-format text --mode ask --trust \
+		--workspace "$FM_HOME" --model "$ROUTER_MODEL" \
+		"Read the prompt file at $prompt_file and follow its instructions exactly. It carries your role, the conversation context, and the captain message to classify. Reply with ONLY the three-line verdict block it specifies (verdict=/target=/explanation=) and nothing else." 2>/dev/null) || status=$?
 	rm -f "$prompt_file"
 	if [ "$status" -ne 0 ]; then
 		if [ "$status" -eq 124 ]; then

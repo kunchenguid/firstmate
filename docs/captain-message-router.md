@@ -132,16 +132,18 @@ The owner always uses upstream Firstmate's Cursor Agent CLI resolver and default
 Set `FM_CAPTAIN_ROUTER_MODEL` to another model id exposed by the current Cursor account.
 The Cursor model id carries the reasoning level because Cursor exposes no separate effort flag.
 Launch is non-interactive Cursor `--print --mode ask`, pinned to the Firstmate home as its workspace.
-Unit tests mock the agent through `FM_CAPTAIN_ROUTER_AGENT_CMD` (prompt on stdin, verdict block on stdout), or put a recording fake Cursor CLI on `PATH` to assert the real spawn argv.
+Unit tests put a recording fake `cursor-agent` executable on `PATH`, so every test crosses the verified resolver, shared timeout owner, private prompt-file handoff, and read-only Cursor argv boundary.
 No real model calls in unit tests; `tests/fm-captain-router-live-e2e.test.sh` is the opt-in live proof.
 
 ## Hook behavior
 
-- Settle: fire-and-forget.
+- Settle: synchronous at `agent_settled`, so session replacement cannot overtake publication.
 - Submit: synchronous so bash can stage pending routes before the primary turn proceeds.
 - Both paths run only while this Pi process owns the Firstmate session lock.
-- A run participates only when its `before_agent_start` prompt is eligible captain input; Firstmate operational runs neither settle anchors nor replace recent captain history.
-- The hook captures a bounded transcript excerpt on `agent_end` and hands it to the owner on the next submit through `--chat-history-file`, dropping Firstmate's own operational injections first.
+- Every accepted Pi `input` is bound to its callback-context session and logical run before classification, including queued steering, follow-up, RPC, interactive, and extension-delivered input.
+- `before_agent_start` is only a deduplicated fallback for an accepted prompt path that emitted no `input` event.
+- `agent_end` retains only a candidate response and bounded transcript; `agent_settled` publishes them only when that same session and run saw captain input and no Firstmate operational input.
+- A mixed captain and operational run publishes no anchors or recent history, including when operational input arrives after an earlier `agent_end`.
 - `same`: allow.
 - `reroute` / `new`: record hook-side `last-handoff.txt`; do not inject continuity into primary context.
 - Always fail-open.

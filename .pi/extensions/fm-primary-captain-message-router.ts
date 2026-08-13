@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	appendFileSync,
@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import type {
 	AgentEndEvent,
 	ExtensionAPI,
+	InputEvent,
 } from "@earendil-works/pi-coding-agent";
 import { classifyFirstmateOperationalText } from "./lib/fm-operational-input.ts";
 
@@ -28,8 +29,9 @@ import { classifyFirstmateOperationalText } from "./lib/fm-operational-input.ts"
 // guard, or bin/fm-continuity-*. See docs/captain-message-router.md.
 //
 // Submit is synchronous so the hook can observe the verdict and so bash can
-// stage pending routes before the primary turn proceeds. Settle stays
-// fire-and-forget. Fail-open: spawn/parse errors never block the captain.
+// stage pending routes before the primary turn proceeds. Settle is synchronous
+// so session replacement cannot overtake its publication. Fail-open:
+// spawn/parse errors never block the captain.
 // Submit always reaches the configured router model; bash owns the bound and
 // the fail-open fallback.
 // Cross-session compact+inject is not implemented; this hook does not spend
@@ -126,16 +128,14 @@ function sessionLockOwned(): boolean {
 	}
 }
 
-// Fire-and-forget settle path (anchors + brief refresh). stdout discarded.
+// Synchronous settle path (anchors + brief refresh). stdout discarded.
 function runRouterSettle(text: string, sessionId?: string): void {
 	if (!text.trim()) return;
 	try {
-		const child = spawn(router, ["--on-settle", ...sessionArgs(sessionId)], {
+		spawnSync(router, ["--on-settle", ...sessionArgs(sessionId)], {
+			input: text,
 			stdio: ["pipe", "ignore", "ignore"],
 		});
-		child.on("error", () => {});
-		child.stdin.on("error", () => {});
-		child.stdin.end(text);
 	} catch {
 		// Fail-open.
 	}
@@ -307,40 +307,78 @@ function newestAssistantText(event: AgentEndEvent): string {
 }
 
 export default function (pi: ExtensionAPI) {
+	type RunState = {
+		sessionId: string | undefined;
+		generation: number;
+		hasCaptainInput: boolean;
+		hasOperationalInput: boolean;
+		intakeRecords: Array<{
+			prompt: string;
+			sessionId: string | undefined;
+			generation: number;
+			operational: boolean;
+		}>;
+		fallbackPrompts: Set<string>;
+		candidateAssistantText: string;
+		candidateRecentChatHistory: string;
+	};
+
 	let activeSessionId: string | undefined;
 	let sessionBound = false;
-	let currentRunEligible = false;
-	let lastAssistantText = "";
+	let nextRunGeneration = 0;
+	let activeRunGeneration = 0;
+	let currentRun: RunState | undefined;
 	let recentChatHistory = "";
 
-	function bindSession(context: unknown): string | undefined {
+	function newRun(sessionId: string | undefined): RunState {
+		nextRunGeneration += 1;
+		activeRunGeneration = nextRunGeneration;
+		return {
+			sessionId,
+			generation: nextRunGeneration,
+			hasCaptainInput: false,
+			hasOperationalInput: false,
+			intakeRecords: [],
+			fallbackPrompts: new Set(),
+			candidateAssistantText: "",
+			candidateRecentChatHistory: "",
+		};
+	}
+
+	function bindSession(
+		context: unknown,
+		allowReplacement = false,
+	): string | undefined {
 		const sessionId = contextSessionId(context);
-		if (!sessionBound || sessionId !== activeSessionId) {
+		if (!sessionBound || (allowReplacement && sessionId !== activeSessionId)) {
 			activeSessionId = sessionId;
-			currentRunEligible = false;
-			lastAssistantText = "";
+			currentRun = undefined;
 			recentChatHistory = "";
 			sessionBound = true;
 		}
 		return sessionId;
 	}
 
-	pi.on?.("session_start", (_event, context) => {
-		bindSession(context);
-		markLoaded();
-	});
+	function runForInput(
+		sessionId: string | undefined,
+		streamingBehavior: unknown,
+	): RunState {
+		if (
+			!currentRun ||
+			currentRun.sessionId !== sessionId ||
+			streamingBehavior === undefined
+		) {
+			currentRun = newRun(sessionId);
+		}
+		return currentRun;
+	}
 
-	// Submit side: the raw captain prompt, after expansion, before the agent loop.
-	// Firstmate's own operational injections are not captain messages.
-	pi.on("before_agent_start", (event, context) => {
-		const sessionId = bindSession(context);
-		currentRunEligible = false;
-		lastAssistantText = "";
-		const prompt = String((event as { prompt?: unknown }).prompt ?? "");
-		if (!prompt.trim()) return;
-		if (classifyFirstmateOperationalText(prompt) !== undefined) return;
-		if (!sessionLockOwned()) return;
-		currentRunEligible = true;
+	function classifyCaptainInput(
+		prompt: string,
+		sessionId: string | undefined,
+		run: RunState,
+	): void {
+		run.hasCaptainInput = true;
 		const stdout = runRouterSubmit(prompt, sessionId, recentChatHistory);
 		const parsed = parseVerdict(stdout);
 		if (!parsed) {
@@ -349,30 +387,87 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (parsed.verdict === "same") return;
-		// reroute | new: bash staged pending/; record a hook-side handoff pointer.
 		surfaceHandoff(parsed.verdict, parsed.target, parsed.confidence);
+	}
+
+	pi.on?.("session_start", (_event, context) => {
+		bindSession(context, true);
+		markLoaded();
+	});
+
+	pi.on("input", (event, context) => {
+		const sessionId = bindSession(context);
+		if (sessionId !== activeSessionId) return { action: "continue" };
+		const input = event as InputEvent;
+		const prompt = String(input.text ?? "");
+		if (!prompt.trim()) return { action: "continue" };
+		if (!sessionLockOwned()) return { action: "continue" };
+		const run = runForInput(sessionId, input.streamingBehavior);
+		const operational = classifyFirstmateOperationalText(prompt) !== undefined;
+		run.intakeRecords.push({
+			prompt,
+			sessionId,
+			generation: run.generation,
+			operational,
+		});
+		if (operational) {
+			run.hasOperationalInput = true;
+			run.candidateAssistantText = "";
+			run.candidateRecentChatHistory = "";
+			return { action: "continue" };
+		}
+		classifyCaptainInput(prompt, sessionId, run);
+		return { action: "continue" };
+	});
+
+	// Fallback for a genuine accepted prompt path that did not emit `input`.
+	// Ordinary idle input is deduplicated by exact prompt within the run.
+	pi.on("before_agent_start", (event, context) => {
+		const sessionId = bindSession(context);
+		if (sessionId !== activeSessionId) return;
+		const prompt = String((event as { prompt?: unknown }).prompt ?? "");
+		if (!prompt.trim()) return;
+		if (!sessionLockOwned()) return;
+		const run = currentRun?.sessionId === sessionId
+			? currentRun
+			: (currentRun = newRun(sessionId));
+		if (run.intakeRecords.length > 0 || run.fallbackPrompts.has(prompt)) return;
+		run.fallbackPrompts.add(prompt);
+		if (classifyFirstmateOperationalText(prompt) !== undefined) {
+			run.hasOperationalInput = true;
+			run.candidateAssistantText = "";
+			run.candidateRecentChatHistory = "";
+			return;
+		}
+		classifyCaptainInput(prompt, sessionId, run);
 	});
 
 	pi.on("agent_end", (event, context) => {
-		bindSession(context);
-		if (!currentRunEligible) return;
+		const sessionId = bindSession(context);
+		if (sessionId !== activeSessionId) return;
+		const run = currentRun;
+		if (!run || run.sessionId !== sessionId) return;
+		if (!run.hasCaptainInput || run.hasOperationalInput) return;
 		if (!sessionLockOwned()) {
-			currentRunEligible = false;
-			lastAssistantText = "";
+			currentRun = undefined;
 			return;
 		}
-		lastAssistantText = newestAssistantText(event as AgentEndEvent);
-		recentChatHistory = recentTranscript(event as AgentEndEvent);
+		run.candidateAssistantText = newestAssistantText(event as AgentEndEvent);
+		run.candidateRecentChatHistory = recentTranscript(event as AgentEndEvent);
 	});
 
 	pi.on("agent_settled", (_event, context) => {
 		const sessionId = bindSession(context);
-		const eligible = currentRunEligible;
-		const text = lastAssistantText;
-		currentRunEligible = false;
-		lastAssistantText = "";
-		if (!eligible || !sessionLockOwned()) return;
-		runRouterSettle(text, sessionId);
+		if (sessionId !== activeSessionId) return;
+		const run = currentRun;
+		if (!run || run.sessionId !== sessionId) return;
+		const generation = run.generation;
+		currentRun = undefined;
+		if (!run.hasCaptainInput || run.hasOperationalInput) return;
+		if (!sessionLockOwned()) return;
+		if (activeSessionId !== sessionId || activeRunGeneration !== generation) return;
+		runRouterSettle(run.candidateAssistantText, sessionId);
+		recentChatHistory = run.candidateRecentChatHistory;
 	});
 
 	markLoaded();
