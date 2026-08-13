@@ -77,7 +77,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 
 Cursor is the only adapter whose two session-open steps differ in capability, so `bin/fm-sessionstart-cursor.sh` owns only that routing while `bin/fm-sessionstart-run.sh` remains the single owner of the digest and its sources.
 Cursor's `preCompact` response type carries `user_message` alone and the step is absent from Cursor's `additional_context` set, so a compaction digest cannot be injected there.
-It is staged in `state/.cursor-pending-context` and delivered by the next `stop` hook as one `session-start`-typed follow-up, which is the first model turn after the compaction; a stale stage is replaced rather than appended, so a session never receives two digests.
+It is staged in the session owner's `state/.cursor-pending-context.<session-owner-pid>` file and delivered by the next `stop` hook as one `session-start`-typed follow-up, which is the first model turn after the compaction; atomic rename commits consumption before output, and a concurrent replacement remains available for the next delivery.
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.

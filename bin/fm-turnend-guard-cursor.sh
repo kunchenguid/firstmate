@@ -62,12 +62,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.cursor-park-owner"
-OWNER_LOCK="$STATE/.cursor-park-owner.lock"
 CLAIM="$STATE/.cursor-park-claim"
 CLAIM_LOCK="$STATE/.cursor-park-claim.lock"
 BUDGET_FILE="$STATE/.turnend-cursor-blocks"
-PENDING_CONTEXT="$STATE/.cursor-pending-context"
-PENDING_CONTEXT_LOCK="$STATE/.cursor-pending-context.lock"
+PENDING_CONTEXT_PREFIX="$STATE/.cursor-pending-context"
 
 LOOP_CEILING=${FM_CURSOR_TURNEND_LOOP_CEILING:-180}
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
@@ -120,18 +118,23 @@ lock_acquire_bounded() {  # <lock>
   return 1
 }
 
-commit_locks_acquire() {
-  lock_acquire_bounded "$CLAIM_LOCK" || return 1
-  if ! lock_acquire_bounded "$OWNER_LOCK"; then
-    fm_lock_release "$CLAIM_LOCK"
-    return 1
-  fi
-  return 0
+claim_restore() {  # <private-claim>
+  local private=$1
+  [ -e "$CLAIM" ] || ln "$private" "$CLAIM" 2>/dev/null || true
+  rm -f "$private" 2>/dev/null || true
 }
 
-commit_locks_release() {
-  fm_lock_release "$OWNER_LOCK"
-  fm_lock_release "$CLAIM_LOCK"
+claim_commit() {
+  local private seq
+  private="$CLAIM.commit.$PARK_SEQ.${BASHPID:-$$}"
+  mv "$CLAIM" "$private" 2>/dev/null || return 1
+  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$private" 2>/dev/null || true)
+  if [ "$seq" != "$PARK_SEQ" ]; then
+    claim_restore "$private"
+    return 1
+  fi
+  rm -f "$private" 2>/dev/null || true
+  return 0
 }
 
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
@@ -140,13 +143,9 @@ emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
-  commit_locks_acquire || exit 0
-  if ! park_still_ours || ! printf '%s\n' "$response"; then
-    commit_locks_release
-    exit 0
-  fi
+  claim_commit || exit 0
+  printf '%s\n' "$response" || exit 0
   [ "$reset_budget" = reset-budget ] && budget_reset
-  commit_locks_release
   exit 0
 }
 
@@ -173,82 +172,53 @@ budget_reset() {
 }
 
 budget_reset_if_ours() {
-  commit_locks_acquire || exit 0
-  if ! park_still_ours; then
-    commit_locks_release
-    exit 0
-  fi
+  claim_commit || exit 0
   budget_reset
-  commit_locks_release
 }
 
 emit_staged_context() {
-  local snapshot current staged_session staged encoded response remaining tmp
-  lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || exit 0
-  if [ ! -s "$PENDING_CONTEXT" ] || [ -L "$PENDING_CONTEXT" ] || [ "$SESSION_ID" = unknown ]; then
-    fm_lock_release "$PENDING_CONTEXT_LOCK"
-    return 0
-  fi
-  snapshot=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
-  if ! printf '%s' "$snapshot" | jq -e '(.contexts | type) == "object"' >/dev/null 2>&1; then
-    rm -f "$PENDING_CONTEXT" 2>/dev/null || true
-    fm_lock_release "$PENDING_CONTEXT_LOCK"
-    return 0
-  fi
-  fm_lock_release "$PENDING_CONTEXT_LOCK"
-  staged_session=$(printf '%s' "$snapshot" | jq -r --arg owner "$OWNER_ID" \
-    '.contexts[$owner].session_id // empty' 2>/dev/null || true)
-  staged=$(printf '%s' "$snapshot" | jq -r --arg owner "$OWNER_ID" \
-    '.contexts[$owner].digest // empty' 2>/dev/null || true)
-  [ "$staged_session" = "$SESSION_ID" ] && [ -n "$staged" ] || return 0
-  fm_operational_input_encode session-start "$staged" encoded || exit 0
-  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
-
-  commit_locks_acquire || exit 0
-  lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || {
-    commit_locks_release
-    exit 0
-  }
-  current=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
-  if ! park_still_ours || [ "$current" != "$snapshot" ] || ! printf '%s\n' "$response"; then
-    fm_lock_release "$PENDING_CONTEXT_LOCK"
-    commit_locks_release
-    exit 0
-  fi
-  tmp=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
-    fm_lock_release "$PENDING_CONTEXT_LOCK"
-    commit_locks_release
-    exit 0
-  }
-  if printf '%s' "$current" | jq --arg owner "$OWNER_ID" 'del(.contexts[$owner])' > "$tmp" 2>/dev/null; then
-    remaining=$(jq -r '.contexts | length' "$tmp" 2>/dev/null || printf 1)
-    if [ "$remaining" = 0 ]; then
-      rm -f "$PENDING_CONTEXT" 2>/dev/null || true
-    else
-      mv -f "$tmp" "$PENDING_CONTEXT" 2>/dev/null || true
+  local staged_file claimed staged_session staged encoded response
+  [ "$SESSION_ID" != unknown ] || return 0
+  staged_file="$PENDING_CONTEXT_PREFIX.$OWNER_ID"
+  [ -f "$staged_file" ] && [ ! -L "$staged_file" ] || return 0
+  claimed="$staged_file.claim.$PARK_SEQ.${BASHPID:-$$}"
+  mv "$staged_file" "$claimed" 2>/dev/null || return 0
+  staged_session=$(jq -r '.session_id // empty' "$claimed" 2>/dev/null || true)
+  staged=$(jq -r '.digest // empty' "$claimed" 2>/dev/null || true)
+  if [ "$staged_session" != "$SESSION_ID" ] || [ -z "$staged" ]; then
+    if [ "$staged_session" != "$SESSION_ID" ] && [ -n "$staged_session" ]; then
+      [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
     fi
+    rm -f "$claimed" 2>/dev/null || true
+    return 0
   fi
-  rm -f "$tmp" 2>/dev/null || true
-  fm_lock_release "$PENDING_CONTEXT_LOCK"
-  commit_locks_release
+  fm_operational_input_encode session-start "$staged" encoded || {
+    [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
+    rm -f "$claimed" 2>/dev/null || true
+    exit 0
+  }
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || {
+    [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
+    rm -f "$claimed" 2>/dev/null || true
+    exit 0
+  }
+  if ! claim_commit; then
+    [ -e "$staged_file" ] || ln "$claimed" "$staged_file" 2>/dev/null || true
+    rm -f "$claimed" 2>/dev/null || true
+    exit 0
+  fi
+  rm -f "$claimed" 2>/dev/null || exit 0
+  printf '%s\n' "$response" || exit 0
   exit 0
 }
 
 emit_repair_followup() {  # <reason> <arm-tail> <attempt>
   local reason=$1 arm_tail=$2 attempt_count=$3 prior count body encoded response
-  commit_locks_acquire || exit 0
-  if ! park_still_ours; then
-    commit_locks_release
-    exit 0
-  fi
+  park_still_ours || exit 0
   budget_read
-  [ "$BUDGET_COUNT" -lt "$BLOCK_BUDGET" ] || {
-    commit_locks_release
-    exit 0
-  }
+  [ "$BUDGET_COUNT" -lt "$BLOCK_BUDGET" ] || exit 0
   prior=$BUDGET_COUNT
   count=$((prior + 1))
-  commit_locks_release
 
   body="TURN WOULD END BLIND - supervision is off. The hook-owned watcher park could not establish a live cycle after $attempt_count bounded attempts (nag $count of $BLOCK_BUDGET).
 $arm_tail
@@ -257,20 +227,17 @@ $reason"
   fm_operational_input_encode turn-end-guard "$body" encoded || exit 0
   response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
 
-  commit_locks_acquire || exit 0
+  claim_commit || exit 0
   budget_read
-  if ! park_still_ours || [ "$BUDGET_COUNT" -ne "$prior" ] || ! printf '%s\n' "$response"; then
-    commit_locks_release
-    exit 0
-  fi
+  [ "$BUDGET_COUNT" -eq "$prior" ] || exit 0
   budget_write "$count"
-  commit_locks_release
+  printf '%s\n' "$response" || exit 0
   exit 0
 }
 
 # --- park ownership ----------------------------------------------------------
-# Last arrival wins. A claim ticket is published before waiting for an older
-# output commit, so that older park can stand down before writing its response.
+# Last arrival wins. Publication uses only the short claim-writer lock; output
+# commits never hold it, so a newer stop can always supersede a parked writer.
 claim_park() {
   local seq owner_seq tmp
   lock_acquire_bounded "$CLAIM_LOCK" || return 1
@@ -280,8 +247,9 @@ claim_park() {
   case "$owner_seq" in ''|*[!0-9]*) owner_seq=0 ;; esac
   [ "$owner_seq" -le "$seq" ] || seq=$owner_seq
   PARK_SEQ=$((seq + 1))
-  tmp="$CLAIM.tmp.$$"
+  tmp="$CLAIM.tmp.${BASHPID:-$$}"
   if ! printf 'seq=%s pid=%s updated_at=%s\n' "$PARK_SEQ" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
+    || ! cp "$tmp" "$OWNER" 2>/dev/null \
     || ! mv -f "$tmp" "$CLAIM" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$CLAIM_LOCK"
@@ -289,21 +257,6 @@ claim_park() {
   fi
   rm -f "$tmp" 2>/dev/null || true
   fm_lock_release "$CLAIM_LOCK"
-
-  lock_acquire_bounded "$OWNER_LOCK" || return 1
-  if ! claim_still_ours; then
-    fm_lock_release "$OWNER_LOCK"
-    return 1
-  fi
-  tmp="$OWNER.tmp.$$"
-  if ! printf 'seq=%s pid=%s updated_at=%s\n' "$PARK_SEQ" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
-    || ! mv -f "$tmp" "$OWNER" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    fm_lock_release "$OWNER_LOCK"
-    return 1
-  fi
-  rm -f "$tmp" 2>/dev/null || true
-  fm_lock_release "$OWNER_LOCK"
   return 0
 }
 
@@ -314,10 +267,7 @@ claim_still_ours() {
 }
 
 park_still_ours() {
-  local seq
-  claim_still_ours || return 1
-  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
-  [ "$seq" = "$PARK_SEQ" ]
+  claim_still_ours
 }
 
 # Only the lock-owning session may consume staged context, arm, or wake. A prior

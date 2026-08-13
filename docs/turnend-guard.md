@@ -115,10 +115,11 @@ The follow-up loop is bounded TWICE, because either bound alone is insufficient.
 `loop_count` is Cursor's richer analogue of `stop_hook_active`: verified live as 0 on the first stop after a real user message, +1 per follow-up-driven stop, and reset to 0 by the next real user message.
 
 A captain message typed while the hook is parked is accepted and runs its turn immediately, and Cursor does NOT terminate the parked hook, so its follow-up would still be delivered when the park finally closes.
-Each invocation first publishes its sequence in `state/.cursor-park-claim` under `state/.cursor-park-claim.lock`, then commits that sequence to `state/.cursor-park-owner` under `state/.cursor-park-owner.lock`.
-A park whose claim or owner record no longer names it stands down without emitting, and the arm's own singleton keeps the brief overlap from starting a second watcher.
+Each invocation publishes its sequence in `state/.cursor-park-claim` under the short writer lock `state/.cursor-park-claim.lock` and mirrors it to `state/.cursor-park-owner` for inspection.
+A park atomically claims the current baton by rename immediately before its output and state commit, so a newer sequence published before that point makes the older park stand down without emitting or mutating shared state.
+The writer lock is never held by an output commit, while the arm is sleeping, or while the hook is polling.
 Without those records every captain message during a park would leak one process and one duplicate wake.
-Staged compaction context is serialized through `state/.cursor-pending-context.lock` so replacement and exactly-once consumption cannot delete a newer digest.
+Staged compaction context uses one owner-scoped `state/.cursor-pending-context.<session-owner-pid>` file whose atomic rename commits exactly-once consumption before output, so concurrent replacement creates a new file that the prior consumer cannot delete.
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
