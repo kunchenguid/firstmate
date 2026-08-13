@@ -401,6 +401,7 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+BASE_COMMIT=$(fm_meta_get "$META" base_commit)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -1296,8 +1297,8 @@ observe_telemetry_gate_facts() {  # <worktree>
   fi
 
   # Delivery acceptance is a property, not a status-file wording check. A
-  # local-only ship is accepted only after it made a commit beyond its branch
-  # point and its exact HEAD reached local main;
+  # local-only ship is accepted only after it made a content-changing commit
+  # beyond its recorded task base and its exact HEAD reached local main;
   # a PR ship is accepted only when the forge proves that exact work merged;
   # and a scout is accepted only after the report and decision gates above.
   if [ "$FORCE" != --force ]; then
@@ -1306,13 +1307,13 @@ observe_telemetry_gate_facts() {  # <worktree>
       return 0
     fi
     if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
-      local default_name task_base task_commits
-      # The oldest per-worktree HEAD reflog entry is this task's branch point.
-      # Require a commit beyond it so a no-op branch cannot prove delivery.
+      local default_name task_commits
       if default_name=$(default_branch) \
-        && task_base=$(git -C "$wt" reflog show --format=%H HEAD 2>/dev/null | tail -1) \
-        && task_commits=$(git -C "$wt" rev-list --count "$task_base..HEAD" 2>/dev/null) \
+        && [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        && git -C "$wt" cat-file -e "$BASE_COMMIT^{commit}" 2>/dev/null \
+        && task_commits=$(git -C "$wt" rev-list --count "$BASE_COMMIT..HEAD" 2>/dev/null) \
         && [ "$task_commits" -gt 0 ] \
+        && ! git -C "$wt" diff --quiet "$BASE_COMMIT" HEAD -- \
         && git -C "$wt" merge-base --is-ancestor HEAD "refs/heads/$default_name" 2>/dev/null; then
         TELEMETRY_GATE_RESULT=green
         return 0

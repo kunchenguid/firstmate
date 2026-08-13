@@ -162,6 +162,10 @@
 # teardown seals the attempt against them. A refused intake exits without submitting
 # the launch command, so no model attempt runs unrecorded; that owner's header owns
 # the refusal reasons and their repair route.
+# Ship/scout metadata also records base_commit= from the exact worktree HEAD before
+# the worker launches. A same-worktree relaunch preserves the original value. This
+# task-scoped fact, not the recycled lane's retained reflog, bounds local-only
+# delivery to work produced after this task started.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -1931,6 +1935,24 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+TASK_BASE_COMMIT=
+if [ "$KIND" != secondmate ]; then
+  EXISTING_META="$STATE/$ID.meta"
+  if [ -f "$EXISTING_META" ] && [ "$(fm_meta_get "$EXISTING_META" worktree)" = "$WT" ]; then
+    TASK_BASE_COMMIT=$(fm_meta_get "$EXISTING_META" base_commit)
+  fi
+  if [ -z "$TASK_BASE_COMMIT" ]; then
+    TASK_BASE_COMMIT=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
+      echo "error: could not record the task base commit before launch" >&2
+      exit 1
+    }
+  elif ! [[ "$TASK_BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+    || ! git -C "$WT" cat-file -e "$TASK_BASE_COMMIT^{commit}" 2>/dev/null; then
+    echo "error: existing task base commit is invalid; refusing to replace its launch boundary" >&2
+    exit 1
+  fi
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2260,6 +2282,7 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   echo "effort=${EFFORT:-default}"
   echo "telemetry_attempt=$TELEMETRY_ATTEMPT"
   echo "telemetry_task_root=$TELEMETRY_TASK_ROOT"
+  [ -z "$TASK_BASE_COMMIT" ] || echo "base_commit=$TASK_BASE_COMMIT"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the

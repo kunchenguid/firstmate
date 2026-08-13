@@ -2530,6 +2530,12 @@ seed_teardown_telemetry() {
   printf 'telemetry_task_root=%s\n' "$(printf '%s' "$result" | jq -r .taskRootId)" >> "$case_dir/state/task-x1.meta"
 }
 
+record_task_base() {
+  local case_dir=$1 base
+  base=$(git -C "$case_dir/wt" rev-parse HEAD) || return 1
+  printf 'base_commit=%s\n' "$base" >> "$case_dir/state/task-x1.meta"
+}
+
 test_teardown_derives_quality_and_cost_from_observable_facts() {
   local case_dir terminal ledger head sheet stderr
   case_dir=$(make_case telemetry-mechanical-scoreboard)
@@ -2556,11 +2562,15 @@ test_teardown_derives_quality_and_cost_from_observable_facts() {
 }
 
 test_local_only_delivery_seals_true_outcome_and_usage() {
-  local case_dir ledger wt_head session_dir sheet
+  local case_dir ledger task_base wt_head session_dir sheet
   case_dir=$(make_case telemetry-local-only-delivery)
   write_meta "$case_dir" local-only ship
   printf 'harness=codex\n' >> "$case_dir/state/task-x1.meta"
-  wt_commit "$case_dir" "accepted local delivery"
+  record_task_base "$case_dir" || fail "could not record the local delivery task base"
+  task_base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt_commit_file "$case_dir" delivered.txt real-delivery "accepted local delivery"
+  git -C "$case_dir/wt" diff --quiet "$task_base" HEAD -- &&
+    fail "local delivery fixture produced no content"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   seed_teardown_telemetry "$case_dir" || fail "could not seed local-only delivery telemetry"
@@ -2603,9 +2613,22 @@ EOF
 }
 
 test_local_only_zero_work_does_not_seal_accepted() {
-  local case_dir
+  local case_dir previous_head task_base lane_base stale_count
   case_dir=$(make_case telemetry-local-only-zero-work)
+  git -C "$case_dir/wt" branch -m fm/prior-task
+  wt_commit_file "$case_dir" prior.txt prior-task "prior lane task"
+  previous_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$previous_head"
+  git -C "$case_dir/wt" checkout -q -B fm/task-x1 main
+
   write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the reused-lane task base"
+  task_base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  lane_base=$(git -C "$case_dir/wt" reflog show --format=%H HEAD | tail -1)
+  stale_count=$(git -C "$case_dir/wt" rev-list --count "$lane_base..HEAD")
+  [ "$stale_count" -gt 0 ] || fail "zero-work fixture did not retain prior lane reflog history"
+  [ "$(git -C "$case_dir/wt" rev-list --count "$task_base..HEAD")" -eq 0 ] ||
+    fail "zero-work fixture accidentally created a current-task commit"
   seed_teardown_telemetry "$case_dir" || fail "could not seed zero-work telemetry"
 
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
@@ -2618,7 +2641,30 @@ test_local_only_zero_work_does_not_seal_accepted() {
     .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
   ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
     fail "a zero-work local-only task falsely sealed accepted"
-  pass "a zero-work local-only task seals classification=incomplete oracle=not-run gate=delivery/incomplete"
+  pass "a reused-lane zero-work task seals classification=incomplete oracle=not-run gate=delivery/incomplete"
+}
+
+test_local_only_empty_commit_does_not_seal_accepted() {
+  local case_dir wt_head
+  case_dir=$(make_case telemetry-local-only-empty-commit)
+  write_meta "$case_dir" local-only ship
+  record_task_base "$case_dir" || fail "could not record the empty-commit task base"
+  wt_commit "$case_dir" "empty task checkpoint"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed empty-commit telemetry"
+
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" >/dev/null || fail "empty-commit local-only teardown failed"
+
+  jq -e '
+    select(.eventType=="attempt-terminal") and
+    .terminal.classification=="incomplete" and
+    .terminal.evidence.oracle=="not-run" and
+    .terminal.gateFacts.result=="incomplete"
+  ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null ||
+    fail "a content-less local-only commit falsely sealed accepted"
+  pass "a content-less local-only commit seals incomplete instead of false acceptance"
 }
 
 test_teardown_notes_gate_observation_branch_mismatch() {
@@ -2721,6 +2767,7 @@ test_forced_teardown_still_requires_ledger_repair() {
 }
 
 test_local_only_zero_work_does_not_seal_accepted
+test_local_only_empty_commit_does_not_seal_accepted
 test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible

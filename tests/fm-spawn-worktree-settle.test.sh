@@ -104,7 +104,7 @@ run_settle_spawn() {
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
 test_single_stale_first_read_is_not_accepted() {
-  local rec id out status
+  local rec id out status expected_base
   id=settle-single-stale-z1
   rec=$(make_settle_case settle-single "$id" 1)
   read_settle_record "$rec"
@@ -117,6 +117,9 @@ test_single_stale_first_read_is_not_accepted() {
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
+  expected_base=$(git -C "$WT_DIR" rev-parse HEAD)
+  assert_grep "base_commit=$expected_base" "$HOME_DIR/state/$id.meta" \
+    "meta did not bind the task to its exact pre-launch base commit"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 
@@ -141,7 +144,35 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_same_worktree_relaunch_preserves_original_task_base() {
+  local rec id out status original_base current_head recorded_base
+  id=settle-relaunch-base-z3
+  rec=$(make_settle_case settle-relaunch-base "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "initial spawn should record a task base"
+  original_base=$(sed -n 's/^base_commit=//p' "$HOME_DIR/state/$id.meta")
+  [ -n "$original_base" ] || fail "initial spawn recorded no task base"
+
+  printf 'task work\n' > "$WT_DIR/task.txt"
+  git -C "$WT_DIR" add task.txt
+  git -C "$WT_DIR" -c user.name=test -c user.email=test@example.com commit -q -m "task work"
+  current_head=$(git -C "$WT_DIR" rev-parse HEAD)
+  [ "$current_head" != "$original_base" ] || fail "relaunch fixture did not advance the task worktree"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "same-worktree relaunch should succeed"
+  recorded_base=$(sed -n 's/^base_commit=//p' "$HOME_DIR/state/$id.meta")
+  [ "$recorded_base" = "$original_base" ] ||
+    fail "same-worktree relaunch replaced the original task base with current HEAD"
+  pass "a same-worktree relaunch preserves the original pre-launch task base"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_same_worktree_relaunch_preserves_original_task_base
 
 echo "# all fm-spawn-worktree-settle tests passed"
