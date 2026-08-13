@@ -361,6 +361,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/autonomous-runs.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },

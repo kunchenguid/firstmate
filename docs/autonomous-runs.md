@@ -128,3 +128,5 @@ A job with a real duration also needs a projected runway that covers finishing a
 - `/afk-jira-research` stops at preflight until `tools.surfaceProof` names a verified record that every Atlassian write tool is absent from the worker's surface. Firstmate has no prover for that yet, so the mode refuses rather than running on an unproven surface.
 - `bounded-improvement` is refused at preflight until the `fix-known` pilots pass.
 - The engine gates calls that are routed through it. It bounds what a run may do with declared paths, lanes, and tools; it does not intercept a tool the worker's runtime hands it directly.
+
+Dated failure and recovery evidence for custody, resume, manifest integrity, and the governor's live-provider behavior lives in [`verification/autonomous-runs.md`](verification/autonomous-runs.md).
