@@ -105,6 +105,7 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const armRetireRetryMs = positiveInteger("FM_PI_ARM_RETIRE_RETRY_MS", 50);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 const awayModeMessage = "watcher: stood down - away mode owns supervision; Pi will resume automatically when away mode ends";
@@ -116,6 +117,10 @@ const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 const armTreeTokens = new WeakMap<ChildProcess, string>();
 const awayYieldedArms = new WeakSet<ChildProcess>();
+const retainedArmTrees = new Set<ChildProcess>();
+const armRetirementTimers = new Map<ChildProcess, ReturnType<typeof setTimeout>>();
+const armRetirementConfirmedHandlers = new WeakMap<ChildProcess, () => void>();
+const armRetirementWaiters = new Map<SessionGeneration, () => void>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -169,10 +174,16 @@ function clearArmTreePidFile(armChild: ChildProcess): void {
   }
 }
 
+function armTreeIdentityPublished(armChild: ChildProcess): boolean {
+  if (process.platform !== "win32") return false;
+  const token = armTreeTokens.get(armChild);
+  if (!token) return false;
+  return existsSync(`${state}/.pi-arm-wrapper-${token}.pid`) || existsSync(`${state}/.pi-arm-retirement-${token}`);
+}
+
 function terminateArmTree(armChild: ChildProcess): boolean {
   const pid = armChild.pid;
   if (process.platform === "win32" && pid) {
-    if (armChild.exitCode !== null || armChild.signalCode !== null) return true;
     const token = armTreeTokens.get(armChild);
     if (!token) return false;
     const result = spawnSync("bash", [armTreeRetireScript, String(pid), token, state, watchScript, fmHome], {
@@ -194,6 +205,36 @@ function terminateArmTree(armChild: ChildProcess): boolean {
     }
   }
   return armChild.kill("SIGTERM");
+}
+
+function completeArmTreeRetirement(armChild: ChildProcess): void {
+  const timer = armRetirementTimers.get(armChild);
+  if (timer) clearTimeout(timer);
+  armRetirementTimers.delete(armChild);
+  retainedArmTrees.delete(armChild);
+  clearArmTreePidFile(armChild);
+  armRetirementConfirmedHandlers.get(armChild)?.();
+  if (retainedArmTrees.size !== 0) return;
+  const waiters = [...armRetirementWaiters.values()];
+  armRetirementWaiters.clear();
+  for (const resume of waiters) resume();
+}
+
+function requestArmTreeRetirement(armChild: ChildProcess): boolean {
+  if (terminateArmTree(armChild)) {
+    completeArmTreeRetirement(armChild);
+    return true;
+  }
+  if (process.platform !== "win32") return false;
+  retainedArmTrees.add(armChild);
+  if (!armRetirementTimers.has(armChild)) {
+    const timer = setTimeout(() => {
+      armRetirementTimers.delete(armChild);
+      requestArmTreeRetirement(armChild);
+    }, armRetireRetryMs);
+    armRetirementTimers.set(armChild, timer);
+  }
+  return false;
 }
 
 function markLoaded(): void {
@@ -269,11 +310,12 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.awayMonitor = null;
   generation.awayResumePending = false;
   generation.awayResumePredecessor = "";
+  armRetirementWaiters.delete(generation);
   if (generation.child) {
-    terminateArmTree(generation.child);
-    clearArmTreePidFile(generation.child);
+    const armChild = generation.child;
+    const retired = requestArmTreeRetirement(armChild);
+    if ((process.platform !== "win32" || retired) && generation.child === armChild) generation.child = null;
   }
-  generation.child = null;
 }
 
 const cleanupOnProcessExit = () => {
@@ -313,7 +355,8 @@ export default function (pi: ExtensionAPI) {
     // This exact ChildProcess is the extension's home-scoped arm. The arm owns
     // and retires its watcher child on TERM, so no process scan or broad kill is
     // needed and another Firstmate home cannot be affected.
-    if (terminateArmTree(armChild)) awayYieldedArms.add(armChild);
+    const retired = requestArmTreeRetirement(armChild);
+    if (process.platform === "win32" || retired) awayYieldedArms.add(armChild);
   }
 
   function resumeAfterAway(owner: SessionGeneration): void {
@@ -410,7 +453,7 @@ export default function (pi: ExtensionAPI) {
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
     if (!armChild) return true;
-    terminateArmTree(armChild);
+    requestArmTreeRetirement(armChild);
     const closed = armClose.get(armChild);
     if (!closed) return false;
     return new Promise((resolveRetired) => {
@@ -496,6 +539,19 @@ export default function (pi: ExtensionAPI) {
       yieldToAway(owner, predecessorArmPid);
       return { ok: true, message: awayModeMessage };
     }
+    if (process.platform === "win32" && retainedArmTrees.size !== 0) {
+      armRetirementWaiters.set(owner, () => {
+        if (!generationIsLive(owner)) return;
+        const result = startArm(owner, predecessorArmPid);
+        if (!result.ok) {
+          scheduleRetry(owner, `watcher: FAILED - Pi extension could not resume after exact predecessor retirement\n${result.message}`, predecessorArmPid);
+        }
+      });
+      return {
+        ok: true,
+        message: "watcher: waiting - exact prior Windows arm retirement is still converging; automatic re-arm pending",
+      };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -543,6 +599,7 @@ export default function (pi: ExtensionAPI) {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let finishSettledArm: (() => void) | null = null;
     let readinessSettled = false;
     let resolveReadiness: (ready: boolean) => void = () => {};
     let resolveClosed: () => void = () => {};
@@ -570,6 +627,13 @@ export default function (pi: ExtensionAPI) {
     const releaseChild = (): void => {
       if (owner.child === armChild) owner.child = null;
     };
+    const finishArmEvent = (): void => {
+      if (!finishSettledArm || retainedArmTrees.has(armChild)) return;
+      const finish = finishSettledArm;
+      finishSettledArm = null;
+      finish();
+    };
+    armRetirementConfirmedHandlers.set(armChild, finishArmEvent);
     armChild.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
       observeEstablishedArm();
@@ -581,62 +645,76 @@ export default function (pi: ExtensionAPI) {
     armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
-      clearArmTreePidFile(armChild);
-      resolveClosed();
-      settleReadiness(false);
-      const yieldedToAway = awayYieldedArms.delete(armChild);
-      releaseChild();
-      if (!generationIsLive(owner)) return;
-      const classification = classifyClose(stdout, stderr, code, signal);
-      const predecessor = String(armChild.pid ?? "");
-      if (yieldedToAway || awayModeActive()) {
-        owner.retryFailures = 0;
-        owner.restoring = false;
-        owner.awayResumePending = true;
-        owner.awayResumePredecessor = predecessor;
-        if (awayModeActive()) yieldToAway(owner, predecessor);
-        else resumeAfterAway(owner);
-        return;
+      finishSettledArm = () => {
+        clearArmTreePidFile(armChild);
+        resolveClosed();
+        settleReadiness(false);
+        const yieldedToAway = awayYieldedArms.delete(armChild);
+        releaseChild();
+        if (!generationIsLive(owner)) return;
+        const classification = classifyClose(stdout, stderr, code, signal);
+        const predecessor = String(armChild.pid ?? "");
+        if (yieldedToAway || awayModeActive()) {
+          owner.retryFailures = 0;
+          owner.restoring = false;
+          owner.awayResumePending = true;
+          owner.awayResumePredecessor = predecessor;
+          if (awayModeActive()) yieldToAway(owner, predecessor);
+          else resumeAfterAway(owner);
+          return;
+        }
+        if (classification.kind === "actionable") {
+          owner.retryFailures = 0;
+          owner.restoring = true;
+          void (async () => {
+            const restoration = await restoreAfterActionableClose(owner, predecessor);
+            if (generationIsLive(owner)) owner.restoring = false;
+            if (!generationIsLive(owner)) return;
+            if (awayModeActive() || owner.awayResumePending) {
+              yieldToAway(owner, predecessor);
+              return;
+            }
+            const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
+            await sendWake(owner, message, restoration.recovery);
+          })().catch(() => {
+          });
+          return;
+        }
+        if (owner.restoring) return;
+        scheduleRetry(owner, classification.message, predecessor);
+      };
+      if (retainedArmTrees.has(armChild) && !armTreeIdentityPublished(armChild)) {
+        completeArmTreeRetirement(armChild);
+      } else {
+        finishArmEvent();
       }
-      if (classification.kind === "actionable") {
-        owner.retryFailures = 0;
-        owner.restoring = true;
-        void (async () => {
-          const restoration = await restoreAfterActionableClose(owner, predecessor);
-          if (generationIsLive(owner)) owner.restoring = false;
-          if (!generationIsLive(owner)) return;
-          if (awayModeActive() || owner.awayResumePending) {
-            yieldToAway(owner, predecessor);
-            return;
-          }
-          const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-          await sendWake(owner, message, restoration.recovery);
-        })().catch(() => {
-        });
-        return;
-      }
-      if (owner.restoring) return;
-      scheduleRetry(owner, classification.message, predecessor);
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
       settled = true;
-      clearArmTreePidFile(armChild);
-      resolveClosed();
-      settleReadiness(false);
-      releaseChild();
-      if (!generationIsLive(owner)) return;
-      if (awayYieldedArms.delete(armChild) || awayModeActive()) {
-        owner.retryFailures = 0;
-        owner.restoring = false;
-        owner.awayResumePending = true;
-        owner.awayResumePredecessor = String(armChild.pid ?? "");
-        if (awayModeActive()) yieldToAway(owner, owner.awayResumePredecessor);
-        else resumeAfterAway(owner);
-        return;
+      finishSettledArm = () => {
+        clearArmTreePidFile(armChild);
+        resolveClosed();
+        settleReadiness(false);
+        releaseChild();
+        if (!generationIsLive(owner)) return;
+        if (awayYieldedArms.delete(armChild) || awayModeActive()) {
+          owner.retryFailures = 0;
+          owner.restoring = false;
+          owner.awayResumePending = true;
+          owner.awayResumePredecessor = String(armChild.pid ?? "");
+          if (awayModeActive()) yieldToAway(owner, owner.awayResumePredecessor);
+          else resumeAfterAway(owner);
+          return;
+        }
+        if (owner.restoring) return;
+        scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      };
+      if (retainedArmTrees.has(armChild) && !armTreeIdentityPublished(armChild)) {
+        completeArmTreeRetirement(armChild);
+      } else {
+        finishArmEvent();
       }
-      if (owner.restoring) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
     return {
       ok: true,
@@ -649,6 +727,7 @@ export default function (pi: ExtensionAPI) {
     activateGeneration(generation);
     markLoaded();
     startAwayMonitor(generation);
+    if (process.platform === "win32" && retainedArmTrees.size !== 0) startArm(generation);
   });
   pi.on?.("session_shutdown", () => {
     stopGeneration(generation);
