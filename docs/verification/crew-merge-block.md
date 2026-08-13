@@ -12,7 +12,8 @@ First verified on 2026-07-25 with Claude Code 2.1.220 (native, commit `4073f5959
 The evidence below was not all captured in that one session, so each section names the run it came from and no claim here rests on a run other than the one printed beside it.
 
 The two `claude doctor` sections were re-run on 2026-08-13 with Claude Code 2.1.231 (native, commit `bbff368ec698`, darwin-arm64) after the settings document grew the semantic busy-state hooks, so the loads-clean evidence matches the document the library emits today.
-The `--dangerously-skip-permissions` session table was itself re-run when `Bash(gh-axi pr merge:*)` and `Bash(gh api graphql*mergePullRequest*)` were added to the rule list, because neither rule existed in the first session; its commands and its refusal wording therefore differ from the `permissions.deny` matching run that preceded it, and both runs are kept because neither covers the other's patterns.
+The `--dangerously-skip-permissions` session table was itself re-run later on 2026-07-25, when `Bash(gh-axi pr merge:*)` and `Bash(gh api graphql*mergePullRequest*)` were added to the rule list, because neither rule existed earlier that day; its commands and its refusal wording therefore differ from the `permissions.deny` matching run that preceded it, and both runs are kept because neither covers the other's patterns.
+That later run is the one section here whose Claude Code build is not pinned - the reason is recorded with the table itself rather than summarized away here.
 
 ## Rule syntax is validated, and an invalid rule is skipped
 
@@ -55,7 +56,10 @@ The negative control was re-run in the same session: a directory carrying the ma
 
 ## `permissions.ask` stops a crewmate that runs under `--dangerously-skip-permissions`
 
-Captured after `Bash(gh-axi pr merge:*)` and `Bash(gh api graphql*mergePullRequest*)` joined the rule list, against the seven-rule document quoted above.
+Captured on 2026-07-25, after `Bash(gh-axi pr merge:*)` and `Bash(gh api graphql*mergePullRequest*)` joined the rule list, against the seven-rule document quoted above.
+The Claude Code build for this run was not captured when it was taken, and nothing in the repository records it, so it is left unstated rather than guessed.
+The date is the only pin this table has: it is the same day as the 2.1.220 session named in Conditions, which makes 2.1.220 the likeliest build, but that is read off the date rather than observed.
+Since the `was skipped` behavior above shows this engine's rule handling is version-sensitive, treat this table as evidence for the mechanism and not for any particular release, and re-run it if a specific build ever has to be established.
 
 This is the load-bearing premise of the whole guard, so it was exercised against the live permission engine rather than argued from documentation.
 A session was launched with exactly the flag `bin/fm-spawn.sh` uses, in a directory holding the generated file above, and asked to run each command and report whether the tool call executed:
