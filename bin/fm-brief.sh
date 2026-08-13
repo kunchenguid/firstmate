@@ -377,7 +377,7 @@ Keep your branch a clean fast-forward onto the approved landing target, which is
 If that target has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 Unless this task names an exact Captain-approved alternate target, the default landing applies.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into the approved local target through the guarded fast-forward path.
 EOF
     ;;
   *)  # no-mistakes
