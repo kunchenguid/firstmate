@@ -833,7 +833,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Workspace trust | `--trust` suppressed the prompt; `--yolo` alone did NOT, and the prompt blocks a fresh worktree |
 | Autonomy | `--yolo` (alias of `--force`); the footer renders `Run Everything` |
 | Worktree | `-w/--worktree` allocates a SECOND worktree under `~/.cursor/worktrees` and is never passed |
-| Effort | no effort flag exists; requested effort stays in task metadata |
+| Effort | No separate effort flag exists; [Harness support](../configuration.md#harness-support) owns Firstmate's omission warning and verified-delivery metadata. |
 | Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
 | Exit | `/exit` |
 | Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |

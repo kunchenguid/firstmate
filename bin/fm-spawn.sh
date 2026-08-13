@@ -1200,8 +1200,9 @@ launch_template() {
     # `cursor` is not the CLI (the installed names are cursor-agent and the
     # legacy alias agent), and the foreign primary markers are cleared so an
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
-    # only reads the environment. Cursor exposes no effort flag, so the shared
-    # effort axis is deliberately omitted and stays in task metadata only.
+    # only reads the environment. Cursor exposes no separate effort flag.
+    # The common profile path warns when it omits a requested effort and records
+    # its default delivery outside this template.
     cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
@@ -1521,8 +1522,9 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # Kimi likewise has no reasoning-effort flag. Both use the common
+    # unsupported-axis path, which warns and records default delivery instead of
+    # inserting the requested effort into the launch command.
     opencode|kimi)
       echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: no supported values; omitting effort flag" >&2
       ;;

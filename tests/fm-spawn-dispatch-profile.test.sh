@@ -204,6 +204,27 @@ test_no_profile_keeps_claude_profile_defaults() {
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
+test_shared_effort_axis_excludes_none_and_minimal() {
+  local rec id effort out status launch
+  for effort in none minimal; do
+    id="profile-codex-${effort}-outside-axis-z1a"
+    rec=$(make_spawn_case "profile-codex-${effort}-outside-axis" codex "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness codex --model gpt-5.6-terra --effort "$effort")
+    status=$?
+    expect_code 1 "$status" "shared effort axis must reject codex-only '$effort'"
+    assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
+      "shared effort-axis refusal did not name the supported values"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "shared effort-axis refusal published metadata for codex-only '$effort'"
+    launch=$(cat "$LAUNCH_LOG")
+    [ -z "$launch" ] || fail "shared effort-axis refusal launched codex-only '$effort'"$'\n'"actual: $launch"
+  done
+  pass "none and minimal stay outside the shared fm-spawn effort axis"
+}
+
 test_non_cursor_launch_clears_inherited_cursor_markers() {
   local rec id out status launch
   id=profile-claude-cursor-markers-z1b
@@ -915,6 +936,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_shared_effort_axis_excludes_none_and_minimal
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
