@@ -1141,12 +1141,6 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent CLI: --trust suppresses the fresh-worktree trust prompt,
-    # --yolo is the --force alias whose TUI label is "Run Everything", and an
-    # explicit workspace keeps Cursor on the exact treehouse worktree even when
-    # its launcher is reached through the Cursor application shim. Cursor's
-    # model ids already encode effort (for example cursor-grok-4.5-high), so the
-    # shared effort axis is deliberately omitted.
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the

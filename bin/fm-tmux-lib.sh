@@ -47,7 +47,7 @@
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
-# ghost/placeholder runs - dim/faint (SGR 2, claude's/codex's ghost) AND a
+# ghost/placeholder runs - dim/faint (SGR 2, claude's/codex's/cursor's ghost) AND a
 # dark/muted truecolor foreground (grok's placeholder) - from one captured,
 # styled composer line and prints the plain, real-typed text. Kept as a named
 # tmux entry point (and for existing callers/tests) but owns no logic of its own,

@@ -56,7 +56,7 @@
 #                still starts and ends with the family's rule glyph is
 #                tolerated, not ambiguity.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`). The agent glyph is itself the container
+#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
@@ -72,13 +72,15 @@
 # what a pane shows once its agent has exited to a plain login shell - is a
 # genuine empty agent composer ONLY inside a bordered container. On a bare row
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
-# target). The AGENT glyphs `❯` (claude), `›` (codex), and `⟩` (U+27E9, muse)
-# are a genuine empty agent composer either way. Both glyph sets are declared
+# target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
+# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
+# Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
 # GHOST/PLACEHOLDER TEXT (task afk-herdr-false-pending): a harness fills an
 # otherwise-empty composer with de-emphasized ghost text - claude's rotating
-# prompt suggestion, codex's idle suggestion, grok's placeholder - which a
+# prompt suggestion, codex's idle suggestion, grok's placeholder, or cursor's
+# idle placeholder - which a
 # plain capture cannot tell apart from text a human typed.
 # fm_composer_strip_ghost is the ONE ANSI-aware extractor of "real typed
 # content": it drops every de-emphasized run - dim/faint (SGR 2) AND a
