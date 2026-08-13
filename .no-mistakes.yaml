@@ -35,9 +35,13 @@ disable_project_settings: true
 # The dispatch wrapper is local by default.
 # An operator may opt an exact command class into the private Azure runner; once
 # selected remote, a cloud or result failure is returned without local fallback.
+# Inside an admitted validation cell, the trusted default-branch command string
+# bypasses worktree scripts and delegates lint plus every behavior shard to the
+# root-owned bridge, so command children receive neither provider nor GitHub
+# credentials and never execute on the credentialed coordinator VM.
 commands:
-  lint: 'bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .'''
-  test: 'bin/fm-no-mistakes-test-command.sh'
+  lint: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .''; else exec bin/fm-azure-runner-dispatch.sh lint -- bin/fm-azure-runner-command.sh bash -c ''bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .''; fi'
+  test: 'if [ "${FM_AZURE_VALIDATION_CELL:-0}" = 1 ]; then exec "$FM_AZURE_VALIDATION_SHARD_BRIDGE" behavior --count "${FM_AZURE_VALIDATION_SHARD_COUNT:-8}"; else exec bin/fm-no-mistakes-test-command.sh; fi'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

@@ -1724,10 +1724,21 @@ def command_capacity_reserve(env, args):
         readmission_id = None
         identity_fields = (
             "schema", "reservation_id", "fence_binding", "role", "workload_role", "sku",
-            "sku_family", "vcpus", "amount_usd", "discretionary",
+            "sku_family", "vcpus", "discretionary",
         )
         if existing is not None:
-            if any(existing.get(field) != candidate.get(field) for field in identity_fields):
+            # A shape constituent is reserved by its parent with a cushioned
+            # worst-case amount; the child's exact bound may re-admit at or
+            # below that cushion without weakening the held accounting. A
+            # reservation outside a shape still requires the exact amount.
+            if existing.get("shape_id"):
+                amount_exact = candidate["amount_usd"] <= existing.get("amount_usd", -1.0) + 1e-6
+            else:
+                amount_exact = math.isclose(
+                    float(existing.get("amount_usd", -1.0)), float(candidate["amount_usd"]),
+                    rel_tol=0.0, abs_tol=1e-6,
+                )
+            if any(existing.get(field) != candidate.get(field) for field in identity_fields) or not amount_exact:
                 raise LifecycleError("capacity reservation id already has a different exact identity")
             if existing.get("status") == "released":
                 raise LifecycleError("released capacity reservation identity cannot be reused")

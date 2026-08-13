@@ -9,7 +9,8 @@ The runner offloads one uncredentialed repository command to one disposable priv
 It is suitable for review-independent test, lint, documentation checks, behavior suites, and Crosscheck evidence commands whose complete dependency closure is available in the exact repository snapshot or the selected runner image.
 It does not run Firstmate, an author agent, a model reviewer, a browser, a no-mistakes coordinator, a fixer, branch mutation, push, CI control, or merge authority.
 It does not make uncredentialed execution alone a complete Azure no-mistakes or policy-grade Crosscheck environment.
-Those credentialed control and reviewer compartments remain separate follow-ups and consume this substrate through its snapshot, request, result, identity, and cleanup contract.
+The credentialed no-mistakes control compartment is implemented by [`docs/azure-validation.md`](azure-validation.md) and consumes this substrate through its snapshot, request, result, identity, and cleanup contract.
+The policy reviewer compartment remains separate.
 
 The tracked no-mistakes command entries call the dispatch wrapper.
 The wrapper executes locally by default.
@@ -21,23 +22,29 @@ The first live invocation remains blocked until the foundation and this code are
 
 ## Request and snapshot contract
 
-`prepare` refuses a detached HEAD, tracked changes, untracked files, any origin other than a credential-free public GitHub HTTPS URL, and any commit not reachable from a freshly advertised and fetched `refs/heads/main` default head.
-The proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; it binds the remote, default ref/head, candidate commit, and tree and repeats immediately before compute creation and retry.
+`prepare` refuses a detached HEAD, tracked changes, untracked files, and any origin other than a credential-free public GitHub HTTPS URL.
+By default it also refuses any commit not reachable from a freshly advertised and fetched `refs/heads/main` default head.
+The explicit `--source-ref refs/heads/<branch>` seam alone requires the candidate commit to be the exact freshly advertised and fetched head of that public branch; it never accepts an ancestor, stale tracking ref, tag, pull-request pseudo-ref, or changed remote head.
+An Azure validation cell additionally supplies `--private-snapshot-bundle` with its parent-cell reservation so an unpushed pipeline-fix head can execute without prematurely changing the task branch on GitHub.
+That private mode binds one exact source ref/head, a one-ref Git bundle, digest, size, parent cell, and private staging object while still freshly proving the public origin's trusted default ref/head.
+The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; all modes repeat their exact public/private source proof immediately before compute creation and retry.
 No live worktree, primary home, provider account home, browser profile, or peer storage is mounted or copied.
 
 The canonical `fm.azure-command/v1` request binds these fields:
 
 - SHA-256 home binding derived from the canonical `FM_HOME` path, without sending that path to Azure.
 - Task, task generation, deployment generation, invocation, fenced attempt, and optional parent attempt.
-- Exact public origin, commit, tree, source-identity digest, command argv digest, and complete request digest.
+- Exact public origin, trusted default ref/head, selected source ref/head, optional private bundle blob/digest/size, commit, tree, source-identity digest, command argv digest, and complete request digest.
 - Resource class, reviewed VM SKU, CPU, memory, PID, disk, per-stream log, artifact, network, and wall-time limits.
 - Declared repository-relative dependency paths and their file or tree digests.
 - Declared repository-relative result artifact paths.
 - Trusted guest-bootstrap and executor digests.
 
 The bounded request and trusted executor travel only as ordinary Managed Run Command parameters.
-Trusted root fetches the exact public commit and checksum-pinned ShellCheck, uv, and locked Linux wheels through the VNet NAT path, then verifies every digest before repository code starts.
-There is no staged input object, SAS, shared key, Git credential, or operator-host data-plane dependency.
+Public mode fetches the exact public commit directly.
+Private parent mode stages only the exact credential-free Git bundle in the foundation's private `validation-shards` container, where the guest UAMI downloads and verifies it before deleting its token and starting repository code.
+Trusted root fetches checksum-pinned ShellCheck, uv, and locked Linux wheels through the VNet NAT path, then verifies every digest before repository code starts.
+There is no SAS, shared key, Git credential, control-home payload, provider credential, or command-child data-plane authority.
 
 Declared dependency paths are rehashed after the VM clones the bundle.
 Package installation performed by a repository command must remain rootless and derive from committed lockfiles or the selected reviewed image.
@@ -112,7 +119,11 @@ This distinction prevents remote failure from becoming a pass.
 
 There is no queue daemon and no warm runner compute.
 An empty local queue means zero runner VMs.
-Every invocation receives a separate VM, so two admitted shards run concurrently without sharing process, memory, disk, temp, or task state.
+Every invocation receives a separate VM, so admitted shards run concurrently without sharing process, memory, disk, temp, ports, locks, terminal servers, or task state.
+The validation-cell dispatcher may request up to eight mixed-family invocations for the long behavior suite, while each invocation still passes this runner's own global admission, exact-family quota, cost, identity, and cleanup gates.
+A validation-owned invocation carries an exact `capacity-parent` cell id and complete parent vCPU reservation so the cell's pre-reserved processor shape and the child VM inventory cannot be double-counted or mistaken for unrelated capacity.
+Before admission and again before VM creation, the runner proves one live parent cell with the exact owner, deployment generation, home, lifecycle, id, and processor-reservation tags, then refuses a child beyond the reserved `(vCPUs - 8) / 4` slots.
+Each child still receives its own durable first-day reservation for its direct compute, storage, network, monitoring, and control meters; only the already-accounted $210 shared foundation reserve is omitted from that child reservation.
 
 Immediately before reservation and again immediately before VM creation, the controller proves the exact subscription/resource-group IDs and owner/generation tags for the named foundation storage account, zero-data admission-control account/container and ETag, controller UAMI and its sole exact effective container role including inherited/group expansion, VNet and address space, validation and private-endpoint subnets, complete NSG rule set, NAT and bound Standard public IP, blob private endpoint and endpoint NIC, named approved blob connection, private-DNS zone, VNet link, zone group/config names, and private-access properties.
 It also proves current SKU capabilities and restrictions, current East US regional and selected-family free vCPU quota, month-to-date actual cost, forecast cost, the exact unambiguous Linux on-demand Consumption retail meter (never Spot, Low Priority, Windows, dev/test, reservation, or savings pricing), and active runner count.
@@ -190,7 +201,8 @@ Cleanup removes resources in this exact scope and order:
 3. The exact recorded NIC, after a stable-identity detached transition is recorded.
 4. The exact recorded OS disk, after a stable-identity detached transition is recorded.
 5. The exact Azure-native TTL schedule, only after exact VM absence and detached capacity cleanup are proven.
-6. The local transient request payload, while retaining local verified result/state and the private digest-bound output archive.
+6. The exact private input snapshot blob, when parent-cell private mode supplied one.
+7. The local transient request payload, while retaining local verified result/state and the private digest-bound output archive.
 
 A VM deletion failure, timeout, unreadable response, or ambiguous absence proof retains the TTL schedule untouched so the independent deallocation deadline remains enforceable while cleanup is reconciled.
 
@@ -257,6 +269,8 @@ no-mistakes axi run --intent '<captain goal and implementation context>'
 ```
 
 The lint payload preserves the tracked shell owner and locked Agent Fleet command unchanged inside the dispatched argv.
+For a validation-owned feature branch, the caller passes its exact current `refs/heads/<branch>` identity plus the one-ref private snapshot bundle.
+The runner binds and privately stages that unpushed commit, while a changed local bundle/head/tree or public default base refuses before compute creation.
 The ordinary test path preserves the existing complete local command.
 When the `test` class is explicitly remote, `bin/fm-no-mistakes-test-command.sh` runs the sealed non-Herdr behavior inventory plus locked Agent Fleet checks on one Azure VM while every real-Herdr declaration runs through owned guarded labs on the Mac; a failed Azure shard is never replayed locally.
 Model review, document generation that requires a model, fixes, Git mutation, push, PR creation, CI monitoring, and gate decisions remain in no-mistakes' existing owner.

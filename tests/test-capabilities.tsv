@@ -13,6 +13,7 @@ fm-auto-reap.test.sh	hermetic
 fm-autocompact.test.sh	hermetic
 fm-azure-pilot.test.sh	hermetic
 fm-azure-runner.test.sh	hermetic
+fm-azure-validation.test.sh	hermetic
 fm-backend-autodetect-smoke.test.sh	herdr-lab
 fm-backend-cmux-smoke.test.sh	hermetic
 fm-backend-cmux.test.sh	hermetic

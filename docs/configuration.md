@@ -94,7 +94,8 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` through `bin/fm-no-mistakes-test-command.sh`; that helper preserves the complete local suite by default and owns the explicitly selected Azure/Linux plus local-Herdr split described in `docs/azure-runner.md`.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and preserves `bin/fm-no-mistakes-test-command.sh` as the complete ordinary local test owner.
+Inside an admitted Azure validation cell, the trusted default-branch command string instead invokes the root-owned bridge from `docs/azure-validation.md`, which runs lint and requested behavior shards on separate credential-free Azure command VMs without exposing the cell's provider or GitHub lease.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 That command requires `tmux` on `PATH`, prints `tmux -V`, routes behavior tests through `tests/run.sh`, and fails if any script exits non-zero.
 It intentionally runs the complete behavior-test inventory serially while [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uses the duration-balanced sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh); both routes cross the same sealed admission boundary instead of delegating the test step to an agent, so local-CI parity holds on what admission a test receives.

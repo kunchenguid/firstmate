@@ -77,8 +77,9 @@ assert "customdata" not in json.dumps(template).lower()
 for value in ("PrivateNetwork=yes","RestrictAddressFamilies=AF_UNIX","IPAddressDeny=any","CapabilityBoundingSet=CAP_SETUID CAP_SETGID","AmbientCapabilities=","NoNewPrivileges=yes"):
     assert value in guest
 run_at=guest.index("systemd-run --quiet")
-token_at=guest.index("metadata/identity/oauth2/token")
-assert token_at > run_at
+input_token_at=guest.index("metadata/identity/oauth2/token")
+output_token_at=guest.rindex("metadata/identity/oauth2/token")
+assert input_token_at < guest.index('rm -f "$TOKEN_FILE"',input_token_at) < run_at < output_token_at
 assert '/usr/bin/python3 "$EXECUTOR"' in guest
 assert "https://files.pythonhosted.org/packages/*.whl" in guest
 assert 'fetch_exact "$url"' in guest and '--location' not in guest[guest.index('while IFS=$\'\\t\' read -r url'):guest.index('done <"$BASE/wheels.tsv"')]
@@ -107,20 +108,67 @@ def public_git(_repo,*args,check=True):
     calls.append(args)
     if args[:2]==("init","--bare"): return Result()
     if args[:2]==("ls-remote","--symref"): return Result("ref: refs/heads/main\tHEAD\n{}\tHEAD\n".format(head))
-    if args[:1]==("ls-remote",): return Result("{}\trefs/heads/main\n".format(head))
+    if args[:1]==("ls-remote",):
+        ref=args[-1]
+        if ref=="refs/heads/main": return Result("{}\t{}\n".format(head,ref))
+        if ref=="refs/heads/fm/feature": return Result("{}\t{}\n".format(candidate,ref))
     if args[:1]==("fetch",): return Result()
-    if args[:2]==("rev-parse","--verify"): return Result(head+"\n")
+    if args[:2]==("rev-parse","--verify"):
+        return Result((candidate if args[-1].endswith("public-source") else head)+"\n")
     if args[:2]==("merge-base","--is-ancestor"): return Result(returncode=1)
+    if args[:2]==("cat-file","-t"): return Result(("commit" if args[-1]==candidate else "tree")+"\n")
+    if args[:1]==("rev-parse",) and args[-1]==candidate+"^{tree}": return Result(tree+"\n")
     raise AssertionError(args)
 m.public_git=public_git
 try: m.public_origin_proof(pathlib.Path("/repo"),remote,candidate)
 except m.RunnerError as exc: assert "not reachable" in str(exc)
-else: raise AssertionError("unmerged branch accepted")
+else: raise AssertionError("unmerged branch accepted without an exact source ref")
+proof=m.public_origin_proof(pathlib.Path("/repo"),remote,candidate,source_ref="refs/heads/fm/feature")
+assert proof["source_ref"]=="refs/heads/fm/feature" and proof["source_head"]==candidate and proof["tree"]==tree
+def local_git(_repo,*args,check=True):
+    if args[:2]==("cat-file","-t"): return Result(("commit" if args[-1]==candidate else "tree")+"\n")
+    if args[:1]==("rev-parse",): return Result(tree+"\n")
+    raise AssertionError(args)
+m.git=local_git
+private=m.public_origin_proof(pathlib.Path("/repo"),remote,candidate,source_ref="refs/heads/fm/unpushed",private_source=True)
+assert private["source_ref"]=="refs/heads/fm/unpushed" and private["source_head"]==candidate and private["tree"]==tree
 assert ("fetch","--no-tags","--force",remote,"+refs/heads/main:refs/fm-azure-runner/public-main") in calls
+assert ("fetch","--no-tags","--force",remote,"+refs/heads/fm/feature:refs/fm-azure-runner/public-source") in calls
 # A stale tracking ref is irrelevant; proof uses fresh advertisement/fetch.
 assert not any("origin/main" in part for call in calls for part in call)
 PY
-  pass "prepare binds freshly fetched public main and rejects a clean attached unmerged branch"
+  pass "prepare binds fresh public main and admits a feature branch only at its exact advertised source-ref head"
+}
+
+private_snapshot_prepare_contract() {
+  local tmp repo bundle
+  fm_test_tmproot_into tmp fm-azure-private-snapshot
+  repo="$tmp/repo"
+  make_repo "$repo"
+  bundle="$tmp/snapshot.bundle"
+  git -C "$repo" bundle create "$bundle" refs/heads/topic
+  python3 - "$HOST" "$repo" "$bundle" "$tmp/state" <<'PY' || fail "private parent snapshot prepare failed"
+import argparse,importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+repo=pathlib.Path(sys.argv[2]); bundle=pathlib.Path(sys.argv[3]); state_dir=pathlib.Path(sys.argv[4])
+env={"state_dir":state_dir,"home_binding":"sha256:"+"a"*64,"deployment_generation":"gen","prefix":"fmtest","subscription":"11111111-1111-4111-8111-111111111111","resource_group":"rg","owner":"owner","cost_admission_mode":m.STRICT_COST_ADMISSION_MODE,"cell_ordinal":None}
+m.ensure_state_dirs(env)
+head=m.git(repo,"rev-parse","HEAD").stdout.strip(); tree=m.git(repo,"rev-parse","HEAD^{tree}").stdout.strip()
+m.public_origin_proof=lambda *_a,**_k:{"remote":"https://github.com/Ruby-Labs/cloud-host-owner.git","default_ref":"refs/heads/main","default_head":"d"*40,"source_ref":"refs/heads/topic","source_head":head,"tree":tree}
+args=argparse.Namespace(repo=str(repo),task="azv-aaaaaaaaaaaa-s1",generation="round-aaaaaaaaaaaa",resource_class="behavior-heavy",source_ref="refs/heads/topic",private_snapshot_bundle=str(bundle),capacity_parent="azv-aaaaaaaaaaaa",capacity_reservation_vcpus=40,wall_seconds=None,dependency=[],artifact=[],command=["true"],invocation="azr-aaaaaaaaaaaa")
+state=m.prepare(env,args)
+r=state["request"]["repository"]
+assert r["source_mode"]=="private-parent-bundle" and r["source_head"]==head and r["tree"]==tree
+assert r["snapshot_bytes"]==bundle.stat().st_size and r["input_blob"].endswith("/snapshot.bundle")
+assert pathlib.Path(state["input_path"]).parent.joinpath("snapshot.bundle").read_bytes()==bundle.read_bytes()
+# A bundle with any source ref other than the exact declared one refuses.
+bad=repo.parent/"bad.bundle"; m.run(["git","-C",str(repo),"branch","extra","HEAD"]); m.run(["git","-C",str(repo),"bundle","create",str(bad),"refs/heads/topic","refs/heads/extra"])
+args.invocation="azr-bbbbbbbbbbbb"; args.private_snapshot_bundle=str(bad)
+try: m.prepare(env,args)
+except m.RunnerError as exc: assert "only the exact source-ref head" in str(exc)
+else: raise AssertionError("multi-ref private snapshot accepted")
+PY
+  pass "private parent prepare binds one exact source ref/head/tree/bundle/blob without requiring an early push"
 }
 
 executor_credential_adversary() {
@@ -291,6 +339,29 @@ except m.RunnerError: pass
 else: raise AssertionError("VM-attached reservation identity accepted")
 PY
   pass "direct, inherited, group, unreadable, replacement, and VM-attached reservation RBAC adversaries refuse"
+}
+
+validation_parent_capacity_contract() {
+  python3 - "$HOST" <<'PY'
+import importlib.util,sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env={"subscription":"sub","resource_group":"rg","deployment_generation":"gen","owner":"owner"}
+state={"request":{"capacity_parent":"azv-aaaaaaaaaaaa","capacity_reservation_vcpus":40,"home_binding":"sha256:"+"a"*64}}
+parent={"powerState":"VM running","tags":{"workload":"firstmate","firstmate-role":"validation-cell","lifecycle":"elastic-scale-to-zero","deployment-generation":"gen","cleanup-owner":"owner","home-binding":"sha256:"+"a"*64,"validation-cell":"azv-aaaaaaaaaaaa","reserved-vcpus":"40"}}
+children=[{"powerState":"VM running","tags":{"firstmate-role":"validation-shard","capacity-parent":"azv-aaaaaaaaaaaa"}} for _ in range(7)]
+m.az_command=lambda *_a,**_k: ([parent]+children,0,"")
+m.validation_capacity_parent_gate(env,state)
+children.append({"powerState":"VM running","tags":{"firstmate-role":"validation-shard","capacity-parent":"azv-aaaaaaaaaaaa"}})
+try: m.validation_capacity_parent_gate(env,state)
+except m.RunnerError as exc: assert "no reserved processor slot" in str(exc)
+else: raise AssertionError("ninth child exceeded the exact 40-vCPU parent shape")
+base=m.itemized_cost_bound(.25,24,m.RESOURCE_CLASSES["behavior-heavy"])
+child=m.itemized_cost_bound(.25,24,m.RESOURCE_CLASSES["behavior-heavy"],parent_managed=True)
+assert base["categories"]["foundation_shared_meter_reserve"]==210.0
+assert child["categories"]["foundation_shared_meter_reserve"]==0.0
+assert base["total"]-child["total"]==210.0
+PY
+  pass "validation parent proof bounds child count and removes only the already-reserved shared meter"
 }
 
 cost_retry_unit() {
@@ -569,10 +640,12 @@ PY
 static_private_controller_contract
 environment_mode_defaults
 prepare_contract
+private_snapshot_prepare_contract
 executor_credential_adversary
 linux_systemd_drop_integration
 management_fencing_unit
 effective_rbac_adversaries
+validation_parent_capacity_contract
 cost_retry_unit
 retail_rate_unit
 commissioning_inventory_role_overlap_unit

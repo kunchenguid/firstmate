@@ -57,10 +57,10 @@ The fallback `commissioning` profile declares only slots 1 and 2.
 Dedicated private subnets, managed identities, and non-public evidence containers reserve separate boundaries for no-mistakes credentialed control cells, uncredentialed validation shards, Crosscheck credentialed reviewer/model cells, Crosscheck uncredentialed tool cells, and fresh networkless verifier cells.
 The verifier subnet has no NAT attachment, disables default outbound access, and uses its own NSG with explicit deny-all inbound and outbound rules, including VNet and private-endpoint destinations.
 No validation, reviewer, tool, or verifier VM is created by this template.
-Those pools must scale to zero and may not mount a control home.
+Those workload classes must scale to zero and may not mount a control home; subnet and identity separation never implies pre-provisioned compute.
 The policy reviewer identity is separate from the browser/tool identity so the follow-up can preserve a credentialed-reviewer and uncredentialed-tool boundary.
 The template does not claim that moving a shared singleton daemon into Azure solves contention.
-A follow-up owns isolated per-run or small-cell daemon, database, cache, process, credential, and lifecycle behavior.
+The isolated per-run daemon, database, cache, process, credential, worktree, and lifecycle behavior is owned by [`docs/azure-validation.md`](azure-validation.md).
 
 The live 128-vCPU regional limit can cover a 2-vCPU supervisor, sixteen 4-vCPU mixed-family author workers, and a 62-vCPU landing reserve.
 That headroom is reserved for isolated validation, Crosscheck, browser, replacement, recovery, and ancillary capacity.
@@ -68,7 +68,7 @@ Author admission must stop before consuming the capacity needed to review and la
 Homogeneous full mode retains the hard 96-vCPU Dasv6 family gate and is currently unavailable because its live family limit is 10.
 Mixed full mode instead proves enough free quota in every exact selected family for its assigned two-worker slice while still requiring all 128 regional vCPUs and the 62-vCPU landing reserve.
 SKU and quota eligibility are not a capacity reservation, so every allocation still requires a fresh live gate.
-A later validation/review pool must prove its own live family quota rather than borrowing an assumption from the author pools.
+Every later validation/review request must prove its selected family's live quota rather than borrowing an assumption from author capacity.
 
 ## Network and private administration
 
@@ -140,6 +140,8 @@ One Dasv6 supervisor plus two continuous Dasv6 workers is about $332/month for V
 The full mixed plan's average worker rate is about $0.218/hour, making the 3,500-hour planning arithmetic, supervisor, NAT/outbound IP, and conservative $210 reserve about $1,077/month.
 Sixteen mixed workers plus the supervisor and NAT/outbound IP running continuously is about $2,653/month before disks, validation/review/browser capacity, Log Analytics, blob capacity and operations, network transfer, taxes, discounts, or credits.
 The separate one-shot validation seam defaults to `Standard_D4as_v6` (4 vCPUs/16 GiB), so two immediate shards fit inside the existing 10-vCPU Dasv6 allowance.
+The no-mistakes validation control cell defaults near 8 vCPUs/32 GiB and live-selects an affordable candidate v5 family only after proving current availability, capability, quota, price, and separation from the v6/v7 author plan.
+Requested behavior parallelism fans into mixed-family identity-less command VMs only after the complete 40-vCPU heavy shape fits current author/review demand under the shared East US 128-vCPU admission ceiling described in [`docs/azure-validation.md`](azure-validation.md).
 East US homogeneous-family increases are unavailable on this sponsorship subscription, so the runner never waits for 96 homogeneous family vCPUs and may instead select one of the foundation's reviewed mixed-family shapes only after proving that exact family's current free quota and retail rate.
 Quota is capacity, not permission to spend; actual and forecast billing telemetry is authoritative.
 Credits remain unverified and are never assumed.
@@ -245,6 +247,7 @@ The runner owns snapshot upload, command/result protocol, no-mistakes command in
 The intended first real use is parallel heavy test, lint, and behavior commands while the local primary remains responsive.
 
 The queued fleet lifecycle implementation is specified in [`docs/azure-workers.md`](azure-workers.md) and owns budget/forecast admission, zero-warm-idle scheduling, landing-capacity reservation, provider-session revocation, and application health while preserving the role topology above.
+The no-mistakes path is the dispatcher and elastic cell implementation in [`docs/azure-validation.md`](azure-validation.md), which reserves its complete specialized shape through that same shared allocator.
 
 ## Acceptance and immediate use
 
@@ -271,9 +274,9 @@ Already-running local work finishes locally and is never migrated in place.
 
 ## Herdr boundary
 
-Herdr is the required primary cloud terminal/session interface.
-tmux exists only as a recovery fallback.
-Cloud-default acceptance is blocked on a real end-to-end Herdr proof after infrastructure exists.
+Herdr is the required primary cloud terminal/session interface for a later remote interactive supervisor and author fleet.
+tmux exists only as a recovery fallback for that topology.
+The standalone Azure validation plane uses private control-plane and command interfaces while Firstmate remains local, so its acceptance and Mac-relief eligibility do not wait for remote Herdr.
 
 The template exposes empty Herdr release, artifact URI, and integrity-pin seams but installs nothing from them.
 They remain empty until the independent Linux and remote topology evidence establishes a supported pinned artifact, network, authentication, and endpoint contract.

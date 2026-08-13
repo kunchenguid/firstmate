@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 
-[ "$#" -eq 9 ] || { echo "guest bootstrap: expected nine bound parameters" >&2; exit 125; }
+[ "$#" -eq 10 ] || { echo "guest bootstrap: expected ten bound parameters" >&2; exit 125; }
 REQUEST_B64=$1
 VM_RESOURCE_ID=$2
 VM_INSTANCE_ID=$3
@@ -12,13 +12,15 @@ GUEST_DIGEST=$4
 STORAGE_ACCOUNT=$5
 CONTAINER=$6
 OUTPUT_BLOB=$7
-IDENTITY_CLIENT_ID=$8
-EXECUTOR_B64=$9
+INPUT_BLOB=$8
+IDENTITY_CLIENT_ID=$9
+EXECUTOR_B64=${10}
 set --
 case "$GUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "guest bootstrap: bad protocol digest" >&2; exit 125 ;; esac
 case "$STORAGE_ACCOUNT" in [a-z0-9][a-z0-9]*) ;; *) echo "guest bootstrap: bad storage name" >&2; exit 125 ;; esac
 [ "$CONTAINER" = validation-shards ] || { echo "guest bootstrap: bad result container" >&2; exit 125; }
 case "$OUTPUT_BLOB" in *..*|/*|*//*|*[!A-Za-z0-9._/@:-]*) echo "guest bootstrap: bad result blob" >&2; exit 125 ;; esac
+case "$INPUT_BLOB" in none) ;; *..*|/*|*//*|*[!A-Za-z0-9._/@:-]*) echo "guest bootstrap: bad input blob" >&2; exit 125 ;; esac
 [[ "$IDENTITY_CLIENT_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "guest bootstrap: bad identity client id" >&2; exit 125; }
 [ -n "$VM_RESOURCE_ID" ] && [ -n "$VM_INSTANCE_ID" ] || { echo "guest bootstrap: missing VM identity" >&2; exit 125; }
 
@@ -73,7 +75,11 @@ if supplied != "sha256:" + hashlib.sha256(canonical).hexdigest(): raise SystemEx
 if "sha256:" + hashlib.sha256(executor_path.read_bytes()).hexdigest() != request["protocol"]["executor_digest"]: raise SystemExit("guest bootstrap: executor digest mismatch")
 if request["protocol"]["guest_digest"] != sys.argv[3]: raise SystemExit("guest bootstrap: guest digest mismatch")
 repo = request["repository"]
-if repo.get("source_mode") != "public-github-https" or not repo.get("remote", "").startswith("https://github.com/"): raise SystemExit("guest bootstrap: source mode mismatch")
+if repo.get("source_mode") not in ("public-github-https", "private-parent-bundle") or not repo.get("remote", "").startswith("https://github.com/"): raise SystemExit("guest bootstrap: source mode mismatch")
+if repo.get("source_mode") == "private-parent-bundle":
+    if not repo.get("input_blob") or not repo.get("snapshot_digest") or not repo.get("snapshot_bytes"): raise SystemExit("guest bootstrap: private snapshot binding is incomplete")
+else:
+    if repo.get("input_blob") is not None or repo.get("snapshot_bytes") != 0: raise SystemExit("guest bootstrap: public source carries private staging")
 limits = request["limits"]
 hard = {"cpu_cores": (1,8), "memory_bytes": (2**30,56*2**30), "pid_max": (16,4096), "disk_bytes": (2**30,52*2**30), "log_bytes": (1024,32*2**20), "artifact_bytes": (0,512*2**20), "network_bytes": (0,0), "wall_seconds": (1,14400)}
 for name, bounds in hard.items():
@@ -89,7 +95,8 @@ print(value)
 PY
 }
 INVOCATION=$(read_request invocation); COMMIT=$(read_request repository.commit); TREE=$(read_request repository.tree)
-REMOTE=$(read_request repository.remote); CPU_CORES=$(read_request limits.cpu_cores); MEMORY_BYTES=$(read_request limits.memory_bytes)
+REMOTE=$(read_request repository.remote); SOURCE_MODE=$(read_request repository.source_mode)
+CPU_CORES=$(read_request limits.cpu_cores); MEMORY_BYTES=$(read_request limits.memory_bytes)
 PID_MAX=$(read_request limits.pid_max); DISK_BYTES=$(read_request limits.disk_bytes); WALL_SECONDS=$(read_request limits.wall_seconds)
 ARTIFACT_BYTES=$(read_request limits.artifact_bytes); NETWORK_BYTES=$(read_request limits.network_bytes)
 
@@ -105,7 +112,28 @@ chown fmrunner:fmrunner /work
 
 runuser -u fmrunner -- git -C /work/repo init -q
 runuser -u fmrunner -- git -C /work/repo remote add origin "$REMOTE"
-run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$COMMIT"
+if [ "$SOURCE_MODE" = private-parent-bundle ]; then
+  [ "$INPUT_BLOB" = "$(read_request repository.input_blob)" ] || { echo "guest bootstrap: private snapshot blob mismatch" >&2; exit 125; }
+  SNAPSHOT=$BASE/snapshot.bundle
+  TOKEN_FILE=$BASE/input-token
+  run_bootstrap_network curl --fail --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 10 -H Metadata:true \
+    "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-08-01&resource=https%3A%2F%2Fstorage.azure.com%2F&client_id=$IDENTITY_CLIENT_ID" \
+    | jq -er .access_token >"$TOKEN_FILE"
+  chmod 0600 "$TOKEN_FILE"
+  DOWNLOAD_URL="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}/${INPUT_BLOB}"
+  run_bootstrap_network curl --fail --silent --show-error --connect-timeout 30 --max-time 1800 \
+    --max-filesize "$(read_request repository.snapshot_bytes)" \
+    -H "Authorization: Bearer $(<"$TOKEN_FILE")" -H 'x-ms-version: 2023-11-03' \
+    --output "$SNAPSHOT" "$DOWNLOAD_URL"
+  rm -f "$TOKEN_FILE"
+  [ "$(stat -c %s "$SNAPSHOT")" = "$(read_request repository.snapshot_bytes)" ] \
+    && [ "sha256:$(sha256sum "$SNAPSHOT" | awk '{print $1}')" = "$(read_request repository.snapshot_digest)" ] \
+    || { echo "guest bootstrap: private snapshot digest/size mismatch" >&2; exit 125; }
+  runuser -u fmrunner -- git -C /work/repo fetch "$SNAPSHOT" "$COMMIT"
+else
+  [ "$INPUT_BLOB" = none ] || { echo "guest bootstrap: public source received a private snapshot blob" >&2; exit 125; }
+  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$COMMIT"
+fi
 runuser -u fmrunner -- git -C /work/repo checkout --detach "$COMMIT" >/dev/null
 [ "$(git -C /work/repo rev-parse HEAD)" = "$COMMIT" ] && [ "$(git -C /work/repo rev-parse 'HEAD^{tree}')" = "$TREE" ] || { echo "guest bootstrap: source identity mismatch" >&2; exit 125; }
 

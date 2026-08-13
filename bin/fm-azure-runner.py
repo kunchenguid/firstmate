@@ -48,6 +48,7 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
 SAFE_ARTIFACT = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/+@:-]{1,240}$")
 SAFE_PUBLIC_GIT_REMOTE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$")
+SAFE_PUBLIC_SOURCE_REF = re.compile(r"^refs/heads/[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,237}[A-Za-z0-9])?$")
 LOCAL_COMMAND_TIMEOUT_SECONDS = 300
 COST_QUERY_TIMEOUT_SECONDS = 60
 COST_RETRY_DEADLINE_SECONDS = 900
@@ -55,7 +56,7 @@ COST_CACHE_MAX_AGE_SECONDS = 4 * 60 * 60
 LEASE_DURATION_SECONDS = 60
 LEASE_RENEW_TIMEOUT_SECONDS = 10
 LEASE_SAFETY_MARGIN_SECONDS = 15
-MAX_STAGING_INPUT_BYTES = 512 * 1024**2
+MAX_STAGING_INPUT_BYTES = 1024**3
 MAX_BOOTSTRAP_NETWORK_BYTES = 16 * 1024**3
 MAX_RESULT_UPLOAD_BYTES = 600 * 1024**2
 BOOTSTRAP_RATE_BITS_PER_SECOND = 1_000_000
@@ -225,9 +226,26 @@ def public_git(repo, *args, check=True):
     return run(command, check=check, env=git_env)
 
 
-def public_origin_proof(repo, remote, candidate_commit, expected=None):
+def require_public_source_ref(value):
+    if value is None:
+        return None
+    if (
+        not SAFE_PUBLIC_SOURCE_REF.match(value)
+        or ".." in value
+        or "//" in value
+        or "@{" in value
+        or value.endswith((".", ".lock"))
+    ):
+        raise RunnerError("public source ref must be one exact bounded refs/heads/* name")
+    return value
+
+
+def public_origin_proof(
+    repo, remote, candidate_commit, expected=None, source_ref=None, private_source=False
+):
     if not SAFE_PUBLIC_GIT_REMOTE.match(remote) or "@" in remote:
         raise RunnerError("Azure private controller requires a credential-free public GitHub HTTPS origin")
+    source_ref = require_public_source_ref(source_ref)
     with tempfile.TemporaryDirectory(prefix="fm-azure-public-proof-") as temporary:
         proof_repo = Path(temporary)
         public_git(proof_repo, "init", "--bare")
@@ -237,27 +255,62 @@ def public_origin_proof(repo, remote, candidate_commit, expected=None):
         if symrefs != ["refs/heads/main"] or len(heads) != 1 or not re.match(r"^[0-9a-f]{40,64}$", heads[0]):
             raise RunnerError("public origin must advertise one exact refs/heads/main default")
         default_ref = symrefs[0]
-        remote_head = heads[0]
+        default_head = heads[0]
         exact = public_git(proof_repo, "ls-remote", remote, default_ref).stdout.splitlines()
-        if exact != ["{}\t{}".format(remote_head, default_ref)]:
+        if exact != ["{}\t{}".format(default_head, default_ref)]:
             raise RunnerError("public origin default-head advertisement changed or is ambiguous")
-        fetched_ref = "refs/fm-azure-runner/public-main"
-        public_git(proof_repo, "fetch", "--no-tags", "--force", remote, "+{}:{}".format(default_ref, fetched_ref))
-        fetched_head = public_git(proof_repo, "rev-parse", "--verify", fetched_ref).stdout.strip()
-        if fetched_head != remote_head:
+        public_git(
+            proof_repo, "fetch", "--no-tags", "--force", remote,
+            "+{}:refs/fm-azure-runner/public-main".format(default_ref),
+        )
+        fetched_default = public_git(
+            proof_repo, "rev-parse", "--verify", "refs/fm-azure-runner/public-main"
+        ).stdout.strip()
+        if fetched_default != default_head:
             raise RunnerError("fresh public default-head fetch differs from its advertisement")
-        if expected is not None and expected != {
-            "remote": remote, "default_ref": default_ref, "default_head": remote_head,
-        }:
-            raise RunnerError("public origin/default head changed after request preparation")
-        if public_git(proof_repo, "merge-base", "--is-ancestor", candidate_commit, fetched_ref, check=False).returncode != 0:
+
+        selected_ref = source_ref or default_ref
+        selected_head = default_head
+        fetched_ref = "refs/fm-azure-runner/public-main"
+        if private_source:
+            if source_ref is None:
+                raise RunnerError("private parent snapshot requires one exact source ref")
+            selected_head = candidate_commit
+        elif source_ref is not None:
+            source_lines = public_git(proof_repo, "ls-remote", remote, source_ref).stdout.splitlines()
+            if source_lines != ["{}\t{}".format(candidate_commit, source_ref)]:
+                raise RunnerError("candidate commit is not the exact advertised public source-ref head")
+            fetched_ref = "refs/fm-azure-runner/public-source"
+            public_git(
+                proof_repo, "fetch", "--no-tags", "--force", remote,
+                "+{}:{}".format(source_ref, fetched_ref),
+            )
+            selected_head = public_git(proof_repo, "rev-parse", "--verify", fetched_ref).stdout.strip()
+            if selected_head != candidate_commit:
+                raise RunnerError("fresh public source-ref fetch differs from the candidate commit")
+        elif public_git(
+            proof_repo, "merge-base", "--is-ancestor", candidate_commit, fetched_ref, check=False
+        ).returncode != 0:
             raise RunnerError("candidate commit is not reachable from the exact public origin/main head")
-        if public_git(proof_repo, "cat-file", "-t", candidate_commit).stdout.strip() != "commit":
-            raise RunnerError("candidate public object is not an exact commit")
-        tree = public_git(proof_repo, "rev-parse", "{}^{{tree}}".format(candidate_commit)).stdout.strip()
-        if not re.match(r"^[0-9a-f]{40,64}$", tree) or public_git(proof_repo, "cat-file", "-t", tree).stdout.strip() != "tree":
-            raise RunnerError("candidate public commit tree identity is malformed")
-        return {"remote": remote, "default_ref": default_ref, "default_head": remote_head, "tree": tree}
+
+        proof_identity = {
+            "remote": remote,
+            "default_ref": default_ref,
+            "default_head": default_head,
+            "source_ref": selected_ref,
+            "source_head": selected_head,
+        }
+        if expected is not None and expected != proof_identity:
+            raise RunnerError("public origin/source identity changed after request preparation")
+        object_repo = repo if private_source else proof_repo
+        object_git = git if private_source else public_git
+        if object_git(object_repo, "cat-file", "-t", candidate_commit).stdout.strip() != "commit":
+            raise RunnerError("candidate source object is not an exact commit")
+        tree = object_git(object_repo, "rev-parse", "{}^{{tree}}".format(candidate_commit)).stdout.strip()
+        if not re.match(r"^[0-9a-f]{40,64}$", tree) or object_git(object_repo, "cat-file", "-t", tree).stdout.strip() != "tree":
+            raise RunnerError("candidate source commit tree identity is malformed")
+        proof_identity["tree"] = tree
+        return proof_identity
 
 
 def now_utc():
@@ -272,6 +325,12 @@ def iso_utc(value=None):
 def require_identifier(label, value):
     if not SAFE_ID.match(value):
         raise RunnerError("{} must use 1-64 bounded identifier characters".format(label))
+    return value
+
+
+def require_capacity_fence(value):
+    if not re.fullmatch(r"[0-9a-f]{64}", str(value)):
+        raise RunnerError("capacity fence must be 64 lowercase hex characters")
     return value
 
 
@@ -639,7 +698,25 @@ def prepare(env, args, parent_state=None):
         raise RunnerError("repository must be on a named committed branch")
     commit = git(repo, "rev-parse", "HEAD").stdout.strip()
     remote = git(repo, "remote", "get-url", "origin").stdout.strip()
-    public = public_origin_proof(repo, remote, commit)
+    private_snapshot_source = None
+    if args.private_snapshot_bundle:
+        private_snapshot_arg = Path(args.private_snapshot_bundle)
+        private_snapshot_source = private_snapshot_arg.resolve()
+        if private_snapshot_arg.is_symlink() or not private_snapshot_source.is_file():
+            raise RunnerError("private parent snapshot must be a regular non-link Git bundle")
+        if private_snapshot_source.stat().st_size > MAX_STAGING_INPUT_BYTES:
+            raise RunnerError("private parent snapshot exceeds the one-GiB staging bound")
+        if not args.capacity_parent or not args.source_ref:
+            raise RunnerError("private parent snapshot requires exact capacity parent and source ref")
+        heads = git(repo, "bundle", "list-heads", str(private_snapshot_source)).stdout.splitlines()
+        expected_head = "{} {}".format(commit, args.source_ref)
+        if heads != [expected_head]:
+            raise RunnerError("private parent snapshot must contain only the exact source-ref head")
+        run(["git", "bundle", "verify", str(private_snapshot_source)], cwd=repo)
+    public = public_origin_proof(
+        repo, remote, commit, source_ref=args.source_ref,
+        private_source=private_snapshot_source is not None,
+    )
     tree = public["tree"]
 
     task = require_identifier("task", args.task)
@@ -666,10 +743,21 @@ def prepare(env, args, parent_state=None):
         raise RunnerError("invocation payload directory already exists")
     payload_dir.mkdir(parents=True, mode=0o700)
     os.chmod(payload_dir, 0o700)
+    private_snapshot_path = None
+    private_snapshot_digest = None
+    private_snapshot_bytes = 0
+    if private_snapshot_source is not None:
+        private_snapshot_path = payload_dir / "snapshot.bundle"
+        shutil.copyfile(str(private_snapshot_source), str(private_snapshot_path))
+        os.chmod(private_snapshot_path, 0o600)
+        private_snapshot_digest = "sha256:" + sha256_file(private_snapshot_path)
+        private_snapshot_bytes = private_snapshot_path.stat().st_size
     source_identity = {
         "remote": remote,
         "default_ref": public["default_ref"],
         "default_head": public["default_head"],
+        "source_ref": public["source_ref"],
+        "source_head": public["source_head"],
         "commit": commit,
         "tree": tree,
     }
@@ -708,6 +796,15 @@ def prepare(env, args, parent_state=None):
         "home_binding": env["home_binding"],
         "task": task,
         "generation": generation,
+        "capacity_parent": (
+            require_identifier("capacity parent", args.capacity_parent)
+            if args.capacity_parent else None
+        ),
+        "capacity_reservation_vcpus": args.capacity_reservation_vcpus,
+        "capacity_fence": (
+            require_capacity_fence(args.capacity_fence)
+            if getattr(args, "capacity_fence", None) else None
+        ),
         "deployment_generation": env["deployment_generation"],
         "cost_admission_mode": env["cost_admission_mode"],
         "cell_ordinal": env["cell_ordinal"],
@@ -720,14 +817,20 @@ def prepare(env, args, parent_state=None):
         ),
         "fence": fence,
         "repository": {
-            "source_mode": "public-github-https",
+            "source_mode": (
+                "private-parent-bundle" if private_snapshot_path else "public-github-https"
+            ),
             "remote": remote,
             "default_ref": public["default_ref"],
             "default_head": public["default_head"],
+            "source_ref": public["source_ref"],
+            "source_head": public["source_head"],
             "commit": commit,
             "tree": tree,
-            "snapshot_digest": snapshot_digest,
-            "snapshot_bytes": 0,
+            "snapshot_digest": (
+                private_snapshot_digest if private_snapshot_path else snapshot_digest
+            ),
+            "snapshot_bytes": private_snapshot_bytes,
         },
         "command": command,
         "command_digest": command_digest,
@@ -745,6 +848,19 @@ def prepare(env, args, parent_state=None):
         "created_at": iso_utc(prepared_at),
         "compute_deallocation_deadline": iso_utc(expires_at),
     }
+    if bool(request["capacity_parent"]) != bool(request["capacity_reservation_vcpus"]):
+        raise RunnerError("capacity parent and reservation vCPUs must be supplied together")
+    if request["capacity_parent"]:
+        if not re.match(r"^azv-[a-z0-9]{12}$", request["capacity_parent"]):
+            raise RunnerError("capacity parent must be an exact Azure validation cell id")
+        if not 8 <= request["capacity_reservation_vcpus"] <= 64:
+            raise RunnerError("capacity parent reservation must be 8-64 vCPUs")
+    if private_snapshot_path:
+        request["repository"]["input_blob"] = staging_prefix = "{}/{}/{}/{}/attempt-{}/snapshot.bundle".format(
+            env["home_binding"].split(":", 1)[1][:16], task, generation, invocation, attempt
+        )
+    else:
+        request["repository"]["input_blob"] = None
     request_digest = "sha256:" + sha256_bytes(canonical_bytes(request))
     request["request_digest"] = request_digest
     request_path = payload_dir / "request.json"
@@ -776,6 +892,8 @@ def prepare(env, args, parent_state=None):
         "repository_root": str(repo),
         "staging": {
             "container": CONTAINER,
+            "input_blob": request["repository"]["input_blob"],
+            "input_blob_etag": None,
             "output_blob": staging_prefix + "/result.tar.gz",
             "control_container": CONTROL_CONTAINER,
         },
@@ -804,14 +922,31 @@ def prepare(env, args, parent_state=None):
 def reprove_public_request(state):
     repository = state["request"]["repository"]
     repo = Path(state["repository_root"]).resolve()
+    private_source = repository.get("source_mode") == "private-parent-bundle"
     proof = public_origin_proof(
         repo, repository["remote"], repository["commit"],
         expected={
             "remote": repository["remote"],
             "default_ref": repository["default_ref"],
             "default_head": repository["default_head"],
+            "source_ref": repository["source_ref"],
+            "source_head": repository["source_head"],
         },
+        source_ref=(
+            repository["source_ref"]
+            if repository["source_ref"] != repository["default_ref"]
+            else None
+        ),
+        private_source=private_source,
     )
+    if private_source:
+        snapshot_path = Path(state["input_path"]).parent / "snapshot.bundle"
+        if (
+            not snapshot_path.is_file()
+            or "sha256:" + sha256_file(snapshot_path) != repository["snapshot_digest"]
+            or snapshot_path.stat().st_size != repository["snapshot_bytes"]
+        ):
+            raise RunnerError("private parent snapshot changed after request preparation")
     if proof["tree"] != repository["tree"]:
         raise RunnerError("public request tree changed after preparation")
 
@@ -1435,7 +1570,7 @@ def retail_rate(env, sku):
     return prices.pop()
 
 
-def itemized_cost_bound(rate, hours, limits):
+def itemized_cost_bound(rate, hours, limits, parent_managed=False):
     rate_bound_bytes = BOOTSTRAP_RATE_BITS_PER_SECOND * 3600 * hours // 8
     vm_network_bytes = min(MAX_BOOTSTRAP_NETWORK_BYTES, rate_bound_bytes)
     bootstrap_bytes = min(
@@ -1459,7 +1594,7 @@ def itemized_cost_bound(rate, hours, limits):
         "nat_data_processing": bootstrap_gib * NAT_DATA_GIB_RATE_CEILING_USD,
         "internet_egress": bootstrap_gib * INTERNET_EGRESS_GIB_RATE_CEILING_USD,
         "trusted_bootstrap_traffic": bootstrap_gib * BOOTSTRAP_GIB_RATE_CEILING_USD,
-        "foundation_shared_meter_reserve": FOUNDATION_SHARED_METER_RESERVE_USD,
+        "foundation_shared_meter_reserve": 0.0 if parent_managed else FOUNDATION_SHARED_METER_RESERVE_USD,
         "repository_command_egress": 0.0,
     }
     return {
@@ -1486,12 +1621,14 @@ def itemized_cost_bound(rate, hours, limits):
     }
 
 
-def budget_gate(env, limits, outstanding_reservations=0.0):
+def budget_gate(env, limits, outstanding_reservations=0.0, parent_managed=False):
     actual = cost_query(env, forecast=False)
     forecast = cost_query(env, forecast=True)
     rate = retail_rate(env, limits["sku"])
-    first_hour = itemized_cost_bound(rate, 1, limits)
-    first_day = itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits)
+    first_hour = itemized_cost_bound(rate, 1, limits, parent_managed=parent_managed)
+    first_day = itemized_cost_bound(
+        rate, MAX_BILLABLE_LIFETIME_HOURS, limits, parent_managed=parent_managed
+    )
     maximum_increment = first_day["total"]
     pressure = max(actual, forecast) + outstanding_reservations + maximum_increment
     if pressure >= env["budget_limit"]:
@@ -1886,7 +2023,7 @@ def shared_capacity_environment(env):
 def shared_capacity_reserve(env, state, cost):
     request = state["request"]
     limits = request["limits"]
-    fence = request["fence"].split(":", 1)[1]
+    fence = request.get("capacity_fence") or request["fence"].split(":", 1)[1]
     command = [
         sys.executable, str(WORKER_LIFECYCLE), "capacity-reserve",
         "--reservation-id", state["invocation"],
@@ -1939,7 +2076,7 @@ def shared_capacity_release(env, state):
     reservation = state.get("shared_capacity_reservation")
     if not reservation or reservation.get("status") == "released":
         return
-    fence = state["request"]["fence"].split(":", 1)[1]
+    fence = state["request"].get("capacity_fence") or state["request"]["fence"].split(":", 1)[1]
     receipt = sha256_bytes(canonical_bytes({
         "invocation": state["invocation"],
         "fence": state["request"]["fence"],
@@ -2115,13 +2252,20 @@ def reserve_budget_management(env, state, lease, limits, admitted_cost=None):
         if admitted_cost is not None:
             return admitted_cost
         return budget_gate(
-            env, limits, outstanding_reservations=sum(item["amount_usd"] for item in reservations if item["id"] != existing[0]["id"])
+            env, limits,
+            outstanding_reservations=sum(
+                item["amount_usd"] for item in reservations if item["id"] != existing[0]["id"]
+            ),
+            parent_managed=bool(state["request"].get("capacity_parent")),
         )
     outstanding = sum(item["amount_usd"] for item in reservations)
     if admitted_cost is not None:
         cost = admitted_cost
     else:
-        cost = budget_gate(env, limits, outstanding_reservations=outstanding)
+        cost = budget_gate(
+            env, limits, outstanding_reservations=outstanding,
+            parent_managed=bool(state["request"].get("capacity_parent")),
+        )
     tags = reservation_tags(env, state, cost["max_increment"], iso_utc())
     az_command(env, [
         "identity", "create", "--resource-group", env["resource_group"], "--name", reservation_name(env, state["invocation"]),
@@ -2201,6 +2345,42 @@ def active_runner_vms(env):
             active.append(vm)
     return active
 
+
+def validation_capacity_parent_gate(env, state):
+    parent = state["request"].get("capacity_parent")
+    if not parent:
+        return
+    reservation = int(state["request"]["capacity_reservation_vcpus"])
+    vms, _, _ = az_command(env, [
+        "vm", "list", "--resource-group", env["resource_group"], "--show-details",
+    ])
+    parents = []
+    child_count = 0
+    for vm in vms:
+        tags = vm.get("tags") or {}
+        if "deallocated" in str(vm.get("powerState", "")).lower():
+            continue
+        if tags.get("firstmate-role") == "validation-cell" and tags.get("validation-cell") == parent:
+            parents.append(vm)
+        if tags.get("firstmate-role") == "validation-shard" and tags.get("capacity-parent") == parent:
+            child_count += 1
+    if len(parents) != 1:
+        raise RunnerError("capacity parent cell is absent, deallocated, or ambiguous")
+    tags = parents[0].get("tags") or {}
+    expected = {
+        "workload": "firstmate",
+        "firstmate-role": "validation-cell",
+        "lifecycle": "elastic-scale-to-zero",
+        "deployment-generation": env["deployment_generation"],
+        "cleanup-owner": env["owner"],
+        "home-binding": state["request"]["home_binding"],
+        "validation-cell": parent,
+        "reserved-vcpus": str(reservation),
+    }
+    if any(tags.get(key) != value for key, value in expected.items()):
+        raise RunnerError("capacity parent owner/generation/home/reservation identity is not exact")
+    if child_count >= max(0, (reservation - 8) // 4):
+        raise RunnerError("capacity parent has no reserved processor slot for another shard")
 
 
 class ManagementAdmissionLease:
@@ -2357,6 +2537,8 @@ def ownership_tags(env, state):
         "home-binding": request["home_binding"],
         "task-binding": request["task"],
         "task-generation": request["generation"],
+        "capacity-parent": request.get("capacity_parent") or "none",
+        "capacity-reservation-vcpus": str(request.get("capacity_reservation_vcpus") or 0),
         "invocation-binding": state["invocation"],
         "attempt": str(state["attempt"]),
         "fence": request["fence"],
@@ -2563,6 +2745,99 @@ def verify_ttl_schedule(state, resource):
         raise RunnerError("control-plane TTL schedule binding is not exact")
 
 
+def private_snapshot_record(env, state):
+    blob = state["staging"].get("input_blob")
+    if not blob:
+        return None
+    value, rc, stderr = az_command(env, [
+        "storage", "blob", "show", "--auth-mode", "login",
+        "--account-name", env["storage"], "--container-name", CONTAINER,
+        "--name", blob,
+    ], check=False)
+    if rc != 0:
+        exists, exists_rc, exists_stderr = az_command(env, [
+            "storage", "blob", "exists", "--auth-mode", "login",
+            "--account-name", env["storage"], "--container-name", CONTAINER,
+            "--name", blob,
+        ], check=False)
+        if exists_rc != 0:
+            raise RunnerError("private snapshot existence is ambiguous: {}; {}".format(stderr, exists_stderr))
+        if not exists.get("exists"):
+            return None
+        raise RunnerError("private snapshot exists but its exact identity is unreadable")
+    return value
+
+
+def verify_private_snapshot_record(state, value):
+    repository = state["request"]["repository"]
+    properties = value.get("properties", value)
+    metadata = value.get("metadata") or properties.get("metadata") or {}
+    etag = value.get("etag") or properties.get("etag")
+    if (
+        not etag
+        or int(properties.get("contentLength", value.get("contentLength", -1))) != repository["snapshot_bytes"]
+        or metadata != {
+            "snapshotdigest": repository["snapshot_digest"].split(":", 1)[1],
+            "commit": repository["commit"],
+        }
+    ):
+        raise RunnerError("private snapshot blob size/digest/commit identity is not exact")
+    return etag
+
+
+def stage_private_snapshot(env, state):
+    blob = state["staging"].get("input_blob")
+    if not blob:
+        return
+    existing = private_snapshot_record(env, state)
+    if existing is not None:
+        state["staging"]["input_blob_etag"] = verify_private_snapshot_record(state, existing)
+        save_state(env, state)
+        return
+    source = Path(state["input_path"]).parent / "snapshot.bundle"
+    repository = state["request"]["repository"]
+    if (
+        not source.is_file()
+        or "sha256:" + sha256_file(source) != repository["snapshot_digest"]
+        or source.stat().st_size != repository["snapshot_bytes"]
+    ):
+        raise RunnerError("private snapshot payload differs from its request binding")
+    az_command(env, [
+        "storage", "blob", "upload", "--auth-mode", "login",
+        "--account-name", env["storage"], "--container-name", CONTAINER,
+        "--name", blob, "--file", str(source), "--overwrite", "false",
+        "--metadata",
+        "snapshotdigest={}".format(repository["snapshot_digest"].split(":", 1)[1]),
+        "commit={}".format(repository["commit"]),
+    ])
+    created = private_snapshot_record(env, state)
+    if created is None:
+        raise RunnerError("private snapshot upload completed without its exact blob")
+    state["staging"]["input_blob_etag"] = verify_private_snapshot_record(state, created)
+    save_state(env, state)
+
+
+def delete_private_snapshot(env, state):
+    blob = state["staging"].get("input_blob")
+    if not blob:
+        return
+    value = private_snapshot_record(env, state)
+    if value is None:
+        return
+    etag = verify_private_snapshot_record(state, value)
+    if state["staging"].get("input_blob_etag") != etag:
+        raise RunnerError("private snapshot blob ETag changed; cleanup retained")
+    _, rc, stderr = az_command(env, [
+        "storage", "blob", "delete", "--auth-mode", "login",
+        "--account-name", env["storage"], "--container-name", CONTAINER,
+        "--name", blob, "--if-match", etag,
+    ], check=False)
+    if rc != 0:
+        raise RunnerError("private snapshot conditional delete failed: {}".format(stderr))
+    if private_snapshot_record(env, state) is not None:
+        raise RunnerError("private snapshot remains after exact deletion")
+
+
 def create_run_command(env, state):
     current_guest_digest = "sha256:" + sha256_file(GUEST)
     if current_guest_digest != state["request"]["protocol"]["guest_digest"]:
@@ -2583,6 +2858,7 @@ def create_run_command(env, state):
                 {"name": "storage_account", "value": env["storage"]},
                 {"name": "container", "value": CONTAINER},
                 {"name": "output_blob", "value": state["staging"]["output_blob"]},
+                {"name": "input_blob", "value": state["staging"].get("input_blob") or "none"},
                 {"name": "identity_client_id", "value": env["controller_identity_client_id"]},
                 {"name": "executor_b64", "value": executor_b64},
             ],
@@ -2713,7 +2989,7 @@ def verify_resource_tags(env, state, resource, label):
     expected = ownership_tags(env, state)
     for key in (
         "workload", "firstmate-role", "lifecycle", "deployment-generation", "cleanup-owner",
-        "home-binding", "task-binding", "task-generation", "invocation-binding", "attempt", "fence",
+        "home-binding", "task-binding", "task-generation", "capacity-parent", "capacity-reservation-vcpus", "invocation-binding", "attempt", "fence",
         "snapshot-digest", "command-digest", "resource-class", "selected-sku", "sku-family",
         "cell-ordinal", "cost-attribution", "cleanup-token",
     ):
@@ -2857,6 +3133,11 @@ def cleanup(env, state):
         transition(env, state, "cleanup-retained", "compute cleanup ambiguous; staging retained")
         raise
     transition(env, state, "compute-removed", "exact invocation VM/NIC/OS disk absent")
+    try:
+        delete_private_snapshot(env, state)
+    except RunnerError:
+        transition(env, state, "cleanup-retained", "private snapshot cleanup is ambiguous")
+        raise
     payload_dir = Path(state["input_path"]).parent
     if payload_dir.parent == env["state_dir"] / "payloads":
         shutil.rmtree(payload_dir, ignore_errors=False)
@@ -2902,10 +3183,13 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
         scope_gate(env)
         limits = state["request"]["limits"]
         sku_quota_gate(env, limits)
+        validation_capacity_parent_gate(env, state)
         cost = (
             commissioning_cost_gate(env, state, limits)
             if mode == COMMISSIONING_COST_ADMISSION_MODE
-            else budget_gate(env, limits)
+            else budget_gate(
+                env, limits, parent_managed=bool(state["request"].get("capacity_parent"))
+            )
         )
         foundation_gate(env)
         cost = shared_capacity_reserve(env, state, cost)
@@ -2935,8 +3219,10 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
                 commissioning_cost_gate(env, state, limits)
                 sku_quota_gate(env, limits)
             foundation_gate(env)
+            validation_capacity_parent_gate(env, state)
             reprove_public_request(state)
             verify_all_reservation_rbac_zero(env)
+            stage_private_snapshot(env, state)
             lease.renew_and_assert()
             create_vm(env, state)
             lease.assert_held()
@@ -2999,6 +3285,7 @@ def resume(env, state):
             print_logs_and_summary(state, result)
             return int(result["exit_code"])
         cleanup_partial_capacity(env, state)
+        delete_private_snapshot(env, state)
         transition(env, state, "absent-fenced", "VM absence proven; same invocation will never be rerun", old_lease_absent=True)
         if state.get("reservation_recorded"):
             mark_management_reservation_cleanup_verified(env, state)
@@ -3023,6 +3310,16 @@ def retry(env, old_state, args):
     args.task = old_state["request"]["task"]
     args.generation = old_state["request"]["generation"]
     args.resource_class = old_state["request"]["resource_class"]
+    args.capacity_parent = old_state["request"].get("capacity_parent")
+    args.capacity_reservation_vcpus = old_state["request"].get("capacity_reservation_vcpus")
+    source_ref = old_state["request"]["repository"]["source_ref"]
+    default_ref = old_state["request"]["repository"]["default_ref"]
+    args.source_ref = source_ref if source_ref != default_ref else None
+    args.private_snapshot_bundle = (
+        str(Path(old_state["input_path"]).parent / "snapshot.bundle")
+        if old_state["request"]["repository"].get("source_mode") == "private-parent-bundle"
+        else None
+    )
     args.wall_seconds = old_state["request"]["limits"]["wall_seconds"]
     args.dependency = [item["path"] for item in old_state["request"].get("dependencies", [])]
     args.artifact = list(old_state["request"].get("artifacts", []))
@@ -3073,7 +3370,24 @@ def add_request_arguments(parser, require_command=True):
     parser.add_argument("--generation", required=True)
     parser.add_argument("--invocation")
     parser.add_argument("--resource-class", choices=sorted(RESOURCE_CLASSES), default="validation-standard")
+    parser.add_argument(
+        "--capacity-parent",
+        help="exact parent cell whose processor reservation already covers this invocation",
+    )
+    parser.add_argument("--capacity-reservation-vcpus", type=int)
+    parser.add_argument(
+        "--capacity-fence",
+        help="exact parent shape fence so this invocation re-admits its pre-reserved constituent",
+    )
     parser.add_argument("--wall-seconds", type=int)
+    parser.add_argument(
+        "--source-ref",
+        help="exact refs/heads/* identity for a public remote head or private parent snapshot",
+    )
+    parser.add_argument(
+        "--private-snapshot-bundle",
+        help="exact parent-cell Git bundle staged privately for an unpushed validation head",
+    )
     parser.add_argument("--dependency", action="append", default=[])
     parser.add_argument("--artifact", action="append", default=[])
     if require_command:

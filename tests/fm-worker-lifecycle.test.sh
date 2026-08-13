@@ -1258,7 +1258,8 @@ assert all(item["status"] == "reserved" for item in value["constituents"])
 PY
 
   # Child lineage: a runner re-admitting one exact constituent id must stay
-  # reserved without double-counting the shape's own capacity.
+  # reserved without double-counting the shape's own capacity, and its exact
+  # first-day bound may come in at or below the parent's cushioned amount.
   out=$(run_shape capacity-reserve \
     --reservation-id azr-shd000000001 --fence-binding "$fence" \
     --role validation --sku Standard_D4as_v7 --sku-family StandardDasv7Family \
@@ -1268,6 +1269,21 @@ import json
 import sys
 assert json.loads(sys.argv[1])["status"] == "reserved"
 PY
+  out=$(run_shape capacity-reserve \
+    --reservation-id azr-shd000000001 --fence-binding "$fence" \
+    --role validation --sku Standard_D4as_v7 --sku-family StandardDasv7Family \
+    --vcpus 4 --amount-usd 18.5 --confirm-subscription "$SUB")
+  python3 - "$out" <<'PY' || fail "child exact bound below the parent cushion was refused"
+import json
+import sys
+assert json.loads(sys.argv[1])["status"] == "reserved"
+PY
+  if run_shape capacity-reserve \
+      --reservation-id azr-shd000000001 --fence-binding "$fence" \
+      --role validation --sku Standard_D4as_v7 --sku-family StandardDasv7Family \
+      --vcpus 4 --amount-usd 26 --confirm-subscription "$SUB" >/dev/null 2>&1; then
+    fail "child bound above the parent cushion was accepted"
+  fi
 
   # A changed identity for an existing constituent refuses.
   if run_shape capacity-reserve-shape \

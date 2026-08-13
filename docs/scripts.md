@@ -68,6 +68,10 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, complete native tasks or inject compatibility digests |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crewmate                            |
 | `fm-no-mistakes-reattach.sh` | Retry one home-scoped existing run after its transient reconciliation timeout    |
+| `fm-azure-pilot.sh`      | Validate, preview, apply, inspect, recover, or explicitly remove the private Azure foundation |
+| `fm-azure-runner.sh`     | Run one credential-free exact repository command on one private disposable Azure VM |
+| `fm-azure-validation.sh` | Queue and control exact-head no-mistakes runs in isolated elastic Azure cells        |
+| `fm-azure-validation-shard-bridge.py` | Exchange exact behavior/lint requests and independent Azure runner receipts inside one cell |
 | `fm-nm-step-liveness.sh` | Read a no-mistakes step's processes as alive, dead, or graded unknown                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
