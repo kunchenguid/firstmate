@@ -45,7 +45,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, any unfinished autonomous run under
+#                       data/runs/, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
@@ -835,6 +836,22 @@ if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
+fi
+
+# Autonomous runs this home still owns. A run's durable record, not conversation
+# memory, is what a restart re-enters from, so an unfinished run is surfaced from
+# disk here instead of being rediscovered by luck. Gated on the directory: a home
+# that never started a run pays one [ -d ] test and prints no subsection.
+if [ -d "$DATA/runs" ]; then
+  RUNS_UNFINISHED=$("$SCRIPT_DIR/fm-run.sh" list 2>/dev/null \
+    | awk -F'\t' '$2 != "" && $2 != "done" { print }') || RUNS_UNFINISHED=
+  if [ -n "$RUNS_UNFINISHED" ]; then
+    subsection "Autonomous runs not finished (run / state / ownership generation)"
+    printf '%s\n' "$RUNS_UNFINISHED"
+    printf '\nEach line is a run this home still owns. Read its frozen scope and receipts with\n'
+    printf '%s/bin/fm-run.sh report <run-id>, and load autonomous-run-engine before resuming,\n' "$FM_ROOT"
+    printf 'stopping, or reporting on one. Resuming is idempotent per ownership generation.\n'
+  fi
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a

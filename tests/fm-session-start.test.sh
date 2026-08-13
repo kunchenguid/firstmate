@@ -19,6 +19,8 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
+#   - unfinished autonomous runs surfaced from data/runs/, and silence when a
+#     home has none
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1130,6 +1132,37 @@ EOF
   [ "$capped" -eq 1 ] || fail "expected exactly one truncated tail line, got $capped: $tail_section"
 
   pass "status tail lines are capped with a truncation marker while the full log stays reachable"
+}
+
+test_unfinished_autonomous_runs_are_surfaced() {
+  local rec root home fakebin out runs
+  rec=$(new_world autonomous-runs)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # A home that never started a run prints no subsection at all.
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "Autonomous runs not finished" \
+    "a home with no runs still printed the autonomous-run subsection"
+
+  runs="$home/data/runs"
+  mkdir -p "$runs/night-audit" "$runs/old-research"
+  printf 'generation=2\nstate=supervise\n' > "$runs/night-audit/run.state"
+  printf 'generation=1\nstate=done\n' > "$runs/old-research/run.state"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Autonomous runs not finished" \
+    "an unfinished run was not surfaced at session start"
+  assert_contains "$out" "night-audit" "the unfinished run's id was not printed"
+  assert_contains "$out" "supervise" "the unfinished run's state was not printed"
+  assert_not_contains "$out" "old-research" \
+    "a finished run was surfaced as still owed"
+  assert_contains "$out" "load autonomous-run-engine before resuming" \
+    "the digest did not route an unfinished run to its owner"
+  pass "session start surfaces an unfinished autonomous run and stays silent when there is none"
 }
 
 test_orphan_status_logs_are_printed() {
@@ -2417,6 +2450,7 @@ test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
+test_unfinished_autonomous_runs_are_surfaced
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
