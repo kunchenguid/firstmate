@@ -14,8 +14,6 @@
 #                 nag, and its supersession contract.
 #   SESSION     - bin/fm-sessionstart-cursor.sh, which injects the digest at
 #                 sessionStart.
-#   COMPACTION  - bin/fm-precompact-cursor.sh stages a refreshed digest and the
-#                 next stop delivers it as a typed follow-up.
 #
 # The park runs as a child of a fake harness (a bash symlink named cursor-agent)
 # whose pid holds the fixture home's session lock, so the real Cursor ancestry
@@ -42,7 +40,7 @@ install_scripts() {
   local dir=$1 f
   mkdir -p "$dir/bin" "$dir/docs"
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
-           fm-precompact-cursor.sh fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
+           fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
            fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
@@ -572,38 +570,16 @@ test_sessionstart_silent_in_child_worktree() {
   pass "fm-sessionstart-cursor: silent inside a child crewmate worktree"
 }
 
-test_precompact_stages_context_for_next_stop() {
-  local dir out body
-  dir=$(make_primary_dir "$TMP_ROOT/precompact")
-  install_digest_fixture "$dir"
-  out=$(printf '{"hook_event_name":"preCompact","session_id":"sess-cursor","cursor_version":"x"}' \
-    | FM_HOME="$dir" "$FAKE_CURSOR" -c '
-      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-      exec "$FM_HOME/bin/fm-precompact-cursor.sh"
-    ' 2>/dev/null)
-  [ -z "$out" ] || fail "preCompact cannot inject context and must stage silently: $out"
-  [ -s "$dir/state/.cursor-pending-context" ] || fail "preCompact did not persist the refreshed digest"
-  out=$(run_park "$dir")
-  [ "$(kind_of_followup "$out")" = session-start ] \
-    || fail "the next stop must deliver staged context as a session-start follow-up, got: $out"
-  body=$(followup_of "$out")
-  case "$body" in *'FIRSTMATE DIGEST "quoted" line'*'second line'*) ;; *) fail "the staged digest did not reach the follow-up intact: $body" ;; esac
-  [ ! -e "$dir/state/.cursor-pending-context" ] || fail "delivered compact context remained pending"
-  out=$(run_park "$dir")
-  [ -z "$out" ] || fail "compact context was delivered more than once: $out"
-  grep -q -- '--source compact' "$dir/state/digest-args" \
-    || fail "preCompact did not use the compact-source route"
-  pass "cursor preCompact: staged digest reaches the next stop exactly once"
-}
-
 # --- registration ------------------------------------------------------------
 
 test_tracked_registration_covers_the_primary_events() {
   local reg
   reg="$ROOT/.cursor/hooks.json"
   [ -f "$reg" ] || fail "firstmate must ship a tracked project-scope .cursor/hooks.json"
-  jq -e '.hooks.stop and .hooks.sessionStart and .hooks.preToolUse and .hooks.preCompact' "$reg" >/dev/null 2>&1 \
-    || fail "the registration must cover stop, sessionStart, preCompact, and preToolUse"
+  jq -e '.hooks.stop and .hooks.sessionStart and .hooks.preToolUse' "$reg" >/dev/null 2>&1 \
+    || fail "the registration must cover stop, sessionStart, and preToolUse"
+  jq -e '.hooks | has("preCompact") | not' "$reg" >/dev/null 2>&1 \
+    || fail "preCompact staging is deliberately deferred to a follow-up and must stay unregistered"
   jq -e '[.hooks.stop[] | select(.loop_limit != null and .loop_limit > 0)] | length == 1' "$reg" >/dev/null 2>&1 \
     || fail "the stop registration needs an explicit positive loop_limit: without it Cursor's default is unlimited"
   jq -e '[.hooks.sessionStart[]] | all(.timeout > 120)' "$reg" >/dev/null 2>&1 \
@@ -652,6 +628,5 @@ test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
 test_sessionstart_silent_in_child_worktree
-test_precompact_stages_context_for_next_stop
 test_tracked_registration_covers_the_primary_events
 test_default_ceiling_bites_before_the_registered_loop_limit

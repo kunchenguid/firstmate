@@ -256,10 +256,11 @@ It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull 
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
-Cursor compaction instruction refresh is routed through the stop boundary.
-Cursor's `preCompact` response cannot inject `additional_context`, so the tracked hook stages the compact-source digest in `state/.cursor-pending-context` and the next stop hook delivers it exactly once as a session-start-typed follow-up.
-The portable regression executes both hook adapters as real processes and verifies staging, typed delivery, and removal after delivery.
-A real compaction could not be forced in the isolated Cursor session, so native `preCompact` firing remains explicitly unverified rather than claimed.
+Cursor compaction instruction refresh is DEFERRED and not shipped, so a Cursor primary does not re-emit its digest after a compaction.
+Two static facts decided that: `PreCompactRequestResponse` carries only `user_message`, and `preCompact` is absent from the `additional_context` step set (`index.js` @ 4814884), so the step cannot inject a digest and any delivery has to be routed through a later boundary.
+A staged-then-delivered design was built and then withdrawn during review, because carrying a digest across two concurrently running `stop` hooks introduced races that could deliver it twice or strand it indefinitely, and closing them kept enlarging a critical section inside a hook Cursor awaits at the turn boundary.
+Native `preCompact` firing was never observed either, because a real compaction could not be forced in the isolated session, so the surface has no empirical basis yet.
+It is therefore recorded as uncovered in the same sense as the Codex interactive TUI, and `tests/fm-cursor-primary.test.sh` asserts `preCompact` stays unregistered so it cannot return unnoticed without its own design and evidence.
 
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 
