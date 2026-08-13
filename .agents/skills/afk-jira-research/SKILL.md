@@ -39,6 +39,7 @@ Everything below is the contract the mode runs under once a proof exists.
 - Atlassian stays disabled outside an explicit captain invocation or an approved run manifest.
 
 Freeze the site, projects, spaces, authorship filter, statuses, date range, and allowed fields before anything is read.
+Freeze every local root the run may read into `source.readRoots` as well: at least one is required, and preflight refuses a read-only run that froze none, because the read gate bounds reads to the roots the manifest names.
 A scope that turns out to be wrong is a new run.
 
 ## Schema-drift tripwire

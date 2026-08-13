@@ -210,6 +210,20 @@ day_write() {  # <file> <day> <baseline> <last>
   mv -f "$tmp" "$file"
 }
 
+# The hysteresis record is the same read-modify-write shape as the day record and
+# gets the same treatment. A truncated read here costs less - the dead-band is
+# skipped and the raw threshold class is used - but "less" is not "nothing", and
+# a classification that silently drops its hysteresis is one the operator cannot
+# reproduce from the state on disk.
+class_write() {  # <lane> <class> <percent>
+  local file tmp
+  file=$(state_file "$1" class)
+  mkdir -p "$(dirname "$file")"
+  tmp="$file.tmp.$$"
+  printf 'class=%s\nat=%s\npercent=%s\n' "$2" "$(fm_run_now_iso)" "$3" > "$tmp" || return 1
+  mv -f "$tmp" "$file"
+}
+
 # Records today's baseline on the first observation of a local day and returns
 # "<day> <baseline> <consumed>". Rollover is implicit: a different day resets the
 # baseline to the current reading, so yesterday's spend never leaks into today.
@@ -362,6 +376,7 @@ command_classify() {
   local policy policy_provider policy_scope floor budget quota_file facts
   local present state_status stale semantics avail percent runway pace
   local class=normal reasons='' previous day baseline consumed day_state=not-applicable
+  local class_lock=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --lane) shift; lane=${1:-} ;;
@@ -401,6 +416,16 @@ command_classify() {
 $facts
 EOF
 
+  # Reading the previous class, deciding this one from it, and recording the
+  # result is one step for the same reason day_track's is: two concurrent
+  # recording classifications would otherwise both read the same "previous" and
+  # the later write would win, losing the dead-band the earlier one established.
+  # A --no-record run only reads, so it takes no lock.
+  if [ "$record" = 1 ]; then
+    class_lock="$(state_file "$lane" class).lock"
+    mkdir -p "$FM_GOV_STATE"
+    fm_run_lock_acquire "$class_lock" || fail "could not take the class-state lock for lane $lane"
+  fi
   previous=$(read_kv "$(state_file "$lane" class)" class)
 
   # Unknown is a class, not a fallback to available. Every path that cannot show
@@ -420,6 +445,7 @@ EOF
   fi
 
   if [ "$class" = unknown ]; then
+    [ -z "$class_lock" ] || fm_run_lock_release "$class_lock"
     printf 'lane=%s\nprovider=%s\nscope=%s\nclass=unknown\npercent=unknown\nrunway=%s\npace=%s\nday_consumed=unknown\nday_budget_state=unknown\nreasons=%s\n' \
       "$lane" "$provider" "$scope" "${runway:-unknown}" "${pace:-unknown}" "$reasons"
     return 0
@@ -431,6 +457,7 @@ EOF
   : "$baseline"
 
   if [ "$observe_only" = 1 ]; then
+    [ -z "$class_lock" ] || fm_run_lock_release "$class_lock"
     printf 'lane=%s\nday=%s\nbaseline=%s\npercent=%s\nday_consumed=%s\n' \
       "$lane" "$day" "$baseline" "$percent" "$consumed"
     return 0
@@ -480,9 +507,9 @@ EOF
   fi
 
   if [ "$record" = 1 ]; then
-    mkdir -p "$FM_GOV_STATE"
-    printf 'class=%s\nat=%s\npercent=%s\n' "$class" "$(fm_run_now_iso)" "$percent" \
-      > "$(state_file "$lane" class)"
+    class_write "$lane" "$class" "$percent" \
+      || { fm_run_lock_release "$class_lock"; fail "could not record the class state for lane $lane"; }
+    fm_run_lock_release "$class_lock"
   fi
 
   printf 'lane=%s\nprovider=%s\nscope=%s\nclass=%s\npercent=%s\nrunway=%s\npace=%s\nday=%s\nday_consumed=%s\nday_budget_state=%s\nreasons=%s\n' \

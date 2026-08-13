@@ -30,6 +30,9 @@ A ready task with neither is skipped with that reason, not worked.
 Scope is a list of exact note paths, a reviewed manifest, or a stable Base query **whose current members are frozen into the manifest before execution**.
 Freeze the members, never the query: a note that starts matching at 3am must not be able to join a run that is already going.
 
+Freeze the exact task list into `source.taskPaths`, and freeze every root the run may read into `source.readRoots`.
+At least one read root is required: preflight refuses a read-only run that froze none, because the read gate bounds reads to the roots the manifest names and has nothing to compare against otherwise.
+
 ## Re-check the seven gates at dispatch, not just at intake
 
 Hours pass between intake and a task's turn, and the vault changes in that time.

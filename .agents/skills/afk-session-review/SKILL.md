@@ -34,6 +34,7 @@ They contain secrets, personal material, company data, tool output, and stale in
 Personal and company archives are processed on **separate lanes**.
 Company sessions stay on company-approved account lanes; personal sessions stay personal.
 The engine refuses a read into another registered lane's configuration root, and a two-lane run does not pass preflight without `privacy.crossLaneAllowed` set to `sanitized-abstract-pattern-only`.
+Freeze the lanes under review into `source.sessionLanes` and every archive root the run may read into `source.readRoots`; both are required, and preflight refuses a run that froze no read roots, because the read gate bounds reads to the roots the manifest names.
 
 Only an abstract pattern crosses between lanes, and only when no company fact or identity can be reconstructed from it.
 "Context switching between many small tasks correlates with lower follow-through" is portable.

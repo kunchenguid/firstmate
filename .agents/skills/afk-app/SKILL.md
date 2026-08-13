@@ -31,6 +31,7 @@ An audit that discovers something worth fixing ends by reporting it and queuing 
 
 Create with `--mode afk-app --submode audit --grant read-only`.
 Freeze at least one `source.projects` entry.
+Freeze at least one `source.readRoots` entry too: audit carries a read-only grant, and preflight refuses a read-only run that froze no read roots, because the read gate bounds reads to the roots the manifest names.
 
 The run reads the project and drives a local or staging URL; it cannot write anything but its evidence directory, and the engine enforces that rather than trusting the submode's name.
 Prefer deterministic tools for execution: a scanner that finds the issue costs a fraction of a model round that guesses at it, and its output is reproducible.

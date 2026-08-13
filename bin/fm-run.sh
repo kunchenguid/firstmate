@@ -114,6 +114,14 @@ FM_RUN_STOP_RULES='reserve-threshold deadline no-progress unstable-baseline heal
 FM_RUN_ALWAYS_DENY=('http:POST' 'http:PUT' 'http:PATCH' 'http:DELETE' 'graphql:mutation')
 FM_RUN_READONLY_DENY=('*:write' '*:mutate' '*:create' '*:update' '*:delete' '*:deploy' '*:merge')
 
+# The same floor for write targets. A manifest seeds writes.protectedPaths with
+# these and may add to it, but the gate checks this array before it reads the
+# manifest at all, so an authoring mistake or a deliberately narrowed list cannot
+# expose the material these patterns cover - the tests that define accepted
+# behavior, the instruction files that define the agent's own rules, and git's
+# own object store.
+FM_RUN_PROTECTED_FLOOR=('**/tests/**' '**/*.evaluator.*' 'AGENTS.md' 'CLAUDE.md' '**/.git/**')
+
 in_list() {  # <needle> <space-separated-list>
   local item
   for item in $2; do
@@ -245,6 +253,20 @@ json_array() {  # reads lines on stdin
   jq -R . | jq -s .
 }
 
+# A manifest field path is interpolated into a jq program, so it has to be a
+# plain dotted path and nothing else. Anything richer - a pipe, a second
+# assignment, a function call - would let one call change fields the receipt
+# never names, and the receipt is the audit trail prove-no-write rests on.
+require_field_path() {  # <path>
+  case "$1" in
+    ''|.*|*..*|*.) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
 command_new() {
   local run_id=${1:-} mode='' submode='' lane='' grant='' yolo=off authorized_at='' wall_seconds=28800
   local root manifest lane_class lane_root grant_kind expected_kind
@@ -315,6 +337,7 @@ EOF
     --argjson allowlist "$(mode_tool_allowlist "$mode" "$submode" | json_array)" \
     --argjson denylist "$(mode_tool_denylist "$mode" | json_array)" \
     --argjson stopRules "$(mode_stop_rules "$mode" | json_array)" \
+    --argjson protectedPaths "$(printf '%s\n' "${FM_RUN_PROTECTED_FLOOR[@]}" | json_array)" \
     '{
       schemaVersion: $schemaVersion,
       runId: $runId,
@@ -346,7 +369,7 @@ EOF
       tools: { allowlist: $allowlist, denylist: $denylist, surfaceProof: null },
       writes: {
         allowedPaths: [],
-        protectedPaths: ["**/tests/**","**/*.evaluator.*","AGENTS.md","CLAUDE.md","**/.git/**"],
+        protectedPaths: $protectedPaths,
         evidenceDir: $evidenceDir,
         vaultWriter: "firstmate-only"
       },
@@ -392,6 +415,8 @@ command_set() {
   done
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
+  require_field_path "$path" \
+    || fail "not a plain manifest field path: $path (letters, digits, dot, underscore and hyphen only)"
   hold_run_lock "$run_id"
   require_unfrozen "$run_id"
   manifest=$(fm_run_manifest_path "$run_id")
@@ -410,6 +435,8 @@ command_add() {
   [ "$#" -eq 3 ] || { usage >&2; exit 2; }
   fm_run_require_jq || exit 1
   fm_run_validate_id "$run_id" || exit 1
+  require_field_path "$path" \
+    || fail "not a plain manifest field path: $path (letters, digits, dot, underscore and hyphen only)"
   hold_run_lock "$run_id"
   require_unfrozen "$run_id"
   manifest=$(fm_run_manifest_path "$run_id")
@@ -897,6 +924,13 @@ command_write_check() {
     refuse "$path is a symlink; a write target must be a real path inside this run's write area"
   fi
   resolved=$(fm_run_resolve_path "$path")
+
+  for pattern in "${FM_RUN_PROTECTED_FLOOR[@]}"; do
+    if fm_run_glob_match "$pattern" "$resolved" || fm_run_glob_match "$pattern" "${resolved##*/}"; then
+      fm_run_receipt_append "$run_id" write "$resolved" refused "protected-floor:$pattern"
+      refuse "$resolved matches the compiled protected floor $pattern"
+    fi
+  done
 
   while IFS= read -r pattern; do
     [ -n "$pattern" ] || continue

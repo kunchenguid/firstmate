@@ -125,7 +125,7 @@ test_write_area_is_the_evidence_directory() {
 
   capture write-check write-case "$evidence/AGENTS.md"; out=$OUT
   expect_code 3 "$RC" "writing a protected path"
-  assert_contains "$out" 'protected path' "a protected path was writable"
+  assert_contains "$out" 'protected' "a protected path was writable"
 
   # A symlinked parent must not launder a path into the write area: the check
   # compares physical paths, so the link is resolved before the comparison.
@@ -277,11 +277,87 @@ test_fix_known_writes_only_inside_its_granted_worktree() {
 
   capture write-check fixknown-ok "$WORKTREE/tests/app.test.js"; out=$OUT
   expect_code 3 "$RC" "writing a protected test path inside the worktree"
-  assert_contains "$out" 'protected path' "the accepted-behavior tests were writable"
+  assert_contains "$out" 'protected' "the accepted-behavior tests were writable"
 
   capture write-check fixknown-ok "$SOURCES/other.js"; out=$OUT
   expect_code 3 "$RC" "writing outside the granted worktree"
   pass "a fix-known grant reaches its own worktree and still cannot touch the tests that define accepted behavior"
+}
+
+# The manifest seeds writes.protectedPaths, so an author can narrow or replace it
+# before freezing. The floor is what makes that harmless.
+test_the_protected_floor_survives_a_manifest_that_drops_it() {
+  local out
+  "$RUN" new floor-case --mode afk-app --submode fix-known \
+    --lane test-personal --grant fix-known:deadbeef >/dev/null
+  "$RUN" set floor-case account.isolationAsserted true --json
+  "$RUN" add floor-case source.projects demo
+  "$RUN" add floor-case writes.allowedPaths "$WORKTREE"
+  "$RUN" set floor-case writes.protectedPaths '["nothing-real"]' --json
+  "$RUN" freeze floor-case >/dev/null
+  "$RUN" claim floor-case >/dev/null
+
+  # The narrowed list is still non-empty, so preflight has nothing to object to:
+  # the floor has to hold at the gate itself.
+  capture preflight floor-case; out=$OUT
+  expect_code 0 "$RC" "preflight with a narrowed protected list"
+
+  capture write-check floor-case "$WORKTREE/tests/app.test.js"; out=$OUT
+  expect_code 3 "$RC" "writing a test path under a manifest that dropped the defaults"
+  assert_contains "$out" 'protected floor' "the compiled floor did not refuse a test path"
+
+  capture write-check floor-case "$WORKTREE/AGENTS.md"; out=$OUT
+  expect_code 3 "$RC" "writing AGENTS.md under a manifest that dropped the defaults"
+
+  capture write-check floor-case "$WORKTREE/nested/CLAUDE.md"; out=$OUT
+  expect_code 3 "$RC" "writing a nested CLAUDE.md"
+
+  capture write-check floor-case "$WORKTREE/.git/config"; out=$OUT
+  expect_code 3 "$RC" "writing into the git directory"
+
+  assert_grep 'protected-floor' "$HOME_DIR/data/runs/floor-case/receipts.jsonl" \
+    "the floor refusals left no receipt"
+
+  # The floor refuses what it covers and nothing more: ordinary source still writes.
+  capture write-check floor-case "$WORKTREE/src/app.js"; out=$OUT
+  expect_code 0 "$RC" "writing ordinary source under the floor"
+
+  # A manifest may still ADD to the floor.
+  "$RUN" new floor-added --mode afk-app --submode fix-known \
+    --lane test-personal --grant fix-known:deadbeef >/dev/null
+  "$RUN" set floor-added account.isolationAsserted true --json
+  "$RUN" add floor-added source.projects demo
+  "$RUN" add floor-added writes.allowedPaths "$WORKTREE"
+  "$RUN" add floor-added writes.protectedPaths '**/vendor/**'
+  "$RUN" freeze floor-added >/dev/null
+  "$RUN" claim floor-added >/dev/null
+  capture write-check floor-added "$WORKTREE/vendor/lib.js"; out=$OUT
+  expect_code 3 "$RC" "writing a path the manifest added to the floor"
+  pass "a manifest may add protected paths and can never subtract from the compiled floor"
+}
+
+# The path argument is interpolated into a jq program, so a receipt that names one
+# field has to mean exactly one field changed.
+test_a_manifest_edit_cannot_change_fields_its_receipt_never_names() {
+  local out grant
+  "$RUN" new path-case --mode afk-research --lane test-personal --grant read-only >/dev/null
+
+  capture set path-case 'authority.grant = "fix-known:x" | .writes.allowedPaths' '["/etc"]' --json
+  out=$OUT
+  expect_code 1 "$RC" "a set path carrying a second assignment"
+  assert_contains "$out" 'not a plain manifest field path' "an injected set path was accepted"
+
+  grant=$("$RUN" show path-case | jq -r '.authority.grant')
+  [ "$grant" = read-only ] \
+    || fail "the refused edit still changed authority.grant to $grant"
+
+  capture add path-case 'source.readRoots) | .writes.allowedPaths += (["/etc"]' /tmp
+  expect_code 1 "$RC" "an add path carrying a second assignment"
+
+  # A legitimate dotted path still works, so the guard bounds the shape and not the feature.
+  capture set path-case budgets.wallSeconds 120 --json
+  expect_code 0 "$RC" "a plain dotted field path"
+  pass "a manifest edit is confined to the single field its receipt names"
 }
 
 test_one_mutable_owner_and_idempotent_resume() {
@@ -701,6 +777,8 @@ test_a_read_only_run_without_read_roots_is_refused_at_preflight
 test_preflight_refuses_an_unproven_or_misdeclared_start
 test_read_only_run_cannot_declare_write_paths
 test_fix_known_writes_only_inside_its_granted_worktree
+test_the_protected_floor_survives_a_manifest_that_drops_it
+test_a_manifest_edit_cannot_change_fields_its_receipt_never_names
 test_one_mutable_owner_and_idempotent_resume
 test_concurrent_claims_leave_exactly_one_owner
 test_a_symlinked_write_target_is_refused_but_a_read_follows_it

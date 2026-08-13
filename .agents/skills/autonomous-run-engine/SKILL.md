@@ -59,11 +59,13 @@ Then build the manifest, in this order, before freezing anything:
 ```sh
 bin/fm-run.sh new <run-id> --mode <mode> --lane <lane> --grant <grant> [--submode <s>] [--wall-seconds <n>]
 bin/fm-run.sh set <run-id> account.isolationAsserted true --json   # only after actually verifying it
+bin/fm-run.sh add <run-id> source.readRoots <path>                 # required: at least one for a read-only grant
 bin/fm-run.sh add <run-id> source.<field> <value>                  # once per frozen scope member
 bin/fm-run.sh freeze <run-id>
 ```
 
 Assert profile isolation because you checked the lane's configuration root, not because the field exists.
+Every read-only grant needs at least one `source.readRoots` entry: the read gate bounds reads to the roots the manifest names, so a run that froze none would be bounded by nothing and preflight refuses it.
 Freeze a Base query's **current members**, never the query: a later-matching item must not be able to join a running run.
 
 `--dry-run` intake means: build and freeze the manifest, run preflight, and stop there without dispatching.
@@ -76,7 +78,7 @@ bin/fm-run.sh preflight <run-id>
 ```
 
 Preflight is the last cheap moment.
-It refuses an unasserted profile, an unregistered lane, a mismatched configuration root, an empty allowlist, a read-only run carrying write paths, a change-authorized run pointed at the firstmate home, an unknown stop rule, a task list that was never authorized, a worker declared as the vault writer, a two-lane review with no privacy partition, self-analysis off a personal lane, the deferred `bounded-improvement` submode, and a Jira run with no proven tool surface.
+It refuses an unasserted profile, an unregistered lane, a mismatched configuration root, an empty allowlist, a read-only run carrying write paths, a read-only run that froze no read roots, a change-authorized run pointed at the firstmate home, an unknown stop rule, a task list that was never authorized, a worker declared as the vault writer, a two-lane review with no privacy partition, self-analysis off a personal lane, the deferred `bounded-improvement` submode, and a Jira run with no proven tool surface.
 
 A preflight refusal is a stop, not an obstacle.
 Report the exact named requirement and do not route around it.
