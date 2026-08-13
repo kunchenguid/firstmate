@@ -118,7 +118,11 @@
       "review": "Captain decision",
       "link": {
         "supported": false
-      }
+      },
+      "tests": "3 failed",
+      "commit": "9f8e7d6",
+      "blocker": "Awaiting Captain diagnosis decision",
+      "next_action": "Captain decision needed"
     },
     "done-task": {
       "project": "React Library",
@@ -130,7 +134,10 @@
       "link": {
         "supported": true,
         "file": "/Users/example/secret.md"
-      }
+      },
+      "tests": "64 passed",
+      "version": "v1.4.0",
+      "next_action": "None"
     },
     "paused-task": {
       "project": "tldraw",
@@ -143,7 +150,10 @@
       "link": {
         "supported": true,
         "file": "Items/tldraw.md"
-      }
+      },
+      "tests": "Not run",
+      "commit": "c4d5e6f",
+      "next_action": "Resume when Captain returns"
     },
     "react-qa": {
       "project": "React Library",
@@ -156,7 +166,10 @@
       "link": {
         "supported": true,
         "file": "Items/React Library.md"
-      }
+      },
+      "tests": "128 passed",
+      "commit": "a1b2c3d",
+      "next_action": "Finish runtime QA sweep"
     },
     "stale-task": {
       "project": "Old Project",

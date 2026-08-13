@@ -2,7 +2,7 @@
 # fm-herdr-operations-console.sh - fixture-first, display-only Herdr operations view.
 #
 # Usage:
-#   fm-herdr-operations-console.sh --fixture PATH [--format all|json|panel|activity|network]
+#   fm-herdr-operations-console.sh --fixture PATH [--format all|json|panel|status|activity|network]
 #       [--now RFC3339] [--max-events N] [--width N] [--color|--no-color]
 #       [--publish-metadata WORKSPACE_ID]
 #
@@ -45,7 +45,7 @@ Render the fixture-only Herdr Firstmate operations console.
 
 Options:
   --fixture PATH              Required JSON fixture path, or - for stdin.
-  --format FORMAT             all (default), json, panel, activity, or network.
+  --format FORMAT             all (default), json, panel, status, activity, or network.
   --now RFC3339               Observation time override for deterministic tests.
   --max-events N              Activity retention bound; default is fixture value or 80, max 200.
   --width N                    Maximum rendered line width; default is 120.
@@ -121,7 +121,7 @@ done
 
 [ -n "$FIXTURE" ] || { usage >&2; die '--fixture is required'; }
 case "$FORMAT" in
-  all|json|panel|activity|network) ;;
+  all|json|panel|status|activity|network) ;;
   *) die "unsupported format: $FORMAT" ;;
 esac
 case "$WIDTH" in
@@ -263,7 +263,7 @@ NORMALIZED=$(
     | if (($snapshot.tasks // null) | type) != "array" then error("snapshot tasks") else . end
     | if any($snapshot.tasks[]?; unsafe_id(.id) or .id == "") then error("task id") else . end
     | ((.ttl_seconds // 300) as $ttl
-       | if ($ttl | type) != "number" or ($ttl < 1) or ($ttl > 86400) or (($ttl % 1) != 0) then error("ttl_seconds") else $ttl end) as $ttl_seconds
+       | if ($ttl | type) != "number" or ($ttl < 1) or ($ttl > 86400) or (($ttl | floor) != $ttl) then error("ttl_seconds") else $ttl end) as $ttl_seconds
     | ((.tasks // {}) as $task_display
        | if ($task_display | type) != "object" then error("task display") else $task_display end) as $task_display
     | ($snapshot.tasks | map(
@@ -299,6 +299,12 @@ NORMALIZED=$(
             effort:safe(($display.effort // $task.effort); "Unknown"; 32),
             review:safe($review; "Unknown"; 80),
             needs_review:$needs_review,
+            tests:safe($display.tests; "Unknown"; 48),
+            commit:safe(($display.commit // $display.version); "Unknown"; 48),
+            blocker:(if $reported_state == "blocked" or ($task.hints.blocked_event // false) == true
+                     then safe(($display.blocker // "Recorded blocker"); "Recorded blocker"; 80)
+                     else safe($display.blocker; "None recorded"; 80) end),
+            next_action:safe($display.next_action; "Unknown"; 80),
             link:obsidian_link($display.link),
             source:{state:safe($current.source; "unknown"; 24)}
           }
@@ -472,6 +478,9 @@ publish_metadata() {
     'any(.result.snapshot.workspaces[]?; (.workspace_id // .id) == $workspace)' >/dev/null 2>&1 \
     || die "workspace is not present in the named lab session: $workspace"
   ttl_ms=$(printf '%s' "$NORMALIZED" | jq -r '.herdr.ttl_seconds * 1000')
+  case "$ttl_ms" in
+    ''|*[!0-9]*) die 'lab metadata TTL is not a whole number of milliseconds' ;;
+  esac
   if [ "$ttl_ms" -lt 1 ] || [ "$ttl_ms" -gt 86400000 ]; then
     ttl_ms=300000
   fi
@@ -555,6 +564,53 @@ if [ "$FORMAT" = activity ] || [ "$FORMAT" = all ]; then
      end),
     (("retained=" + ((.activity.events | length) | tostring) + " max=" + (.activity.max_events | tostring) + " truncated=" + (.activity.truncated | tostring) + " deduplicated=" + (.activity.deduplicated | tostring) + " redacted=" + (.activity.redacted | tostring) + " malformed=" + (.activity.malformed | tostring)) | fit(.))
   ' || die 'activity rendering failed'
+fi
+
+if [ "$FORMAT" = status ] || [ "$FORMAT" = all ]; then
+  printf '%s\n' "$NORMALIZED" | jq -r --argjson width "$WIDTH" --arg color "$COLOR" '
+    def fit($value):
+      if ($value | length) <= $width then $value
+      elif $width <= 3 then $value[:$width]
+      else $value[:($width - 3)] + "..."
+      end;
+    def ansi($code; $value):
+      if $color == "on" then ("\u001b[" + $code + "m" + $value + "\u001b[0m") else $value end;
+    def state_color($state):
+      if $state == "blocked" then "38;5;211"
+      elif $state == "done" then "38;5;158"
+      elif $state == "working" or $state == "qa" then "38;5;117"
+      elif $state == "pending-review" or $state == "waiting" then "38;5;223"
+      elif $state == "paused" then "38;5;183"
+      else "38;5;249"
+      end;
+    def marker($state):
+      if $state == "blocked" then "[BLOCKED]"
+      elif $state == "done" then "[DONE]"
+      elif $state == "working" then "[WORKING]"
+      elif $state == "qa" then "[QA]"
+      elif $state == "pending-review" then "[REVIEW]"
+      elif $state == "waiting" then "[WAITING]"
+      elif $state == "paused" then "[PAUSED]"
+      elif $state == "stale" then "[STALE]"
+      else "[UNKNOWN]"
+      end;
+    "STATUS // HERDR SIDE PANEL // TOKYO NIGHT",
+    (if (.tasks | length) == 0 then "[UNKNOWN] No task records - no current evidence"
+     else (.tasks[] |
+       . as $t
+       | (state_color($t.state)) as $code
+       | (fit(marker($t.state) + " " + $t.project + " / " + $t.task) | ansi($code; .)),
+         fit("    ✓ TESTS   " + $t.tests),
+         fit("    ◆ COMMIT  " + $t.commit),
+         fit("    ↗ REVIEW  " + $t.review),
+         fit("    ⚠ BLOCKER " + $t.blocker),
+         fit("    PHASE     " + $t.phase + " | " + $t.state_label + " | " + $t.freshness),
+         fit("    WORKER    " + $t.profile_lane + " | " + $t.model + " · " + $t.effort),
+         fit("    NEXT      " + $t.next_action),
+         ""
+     )
+     end)
+  ' || die 'status rendering failed'
 fi
 
 if [ "$FORMAT" = network ] || [ "$FORMAT" = all ]; then

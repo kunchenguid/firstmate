@@ -208,6 +208,12 @@ The normalized `fm-herdr-operations-console.v1` object feeds the panel, bounded 
 The panel identifies its Tokyo Night theme and shows project, task, phase, explicit state, profile lane, model, effort, freshness, review need, and Obsidian navigation state.
 States are accepted only from structured current-state evidence and are limited to explicit `Working`, `QA`, `Pending review`, `Waiting`, `Blocked`, `Paused`, `Done`, `Stale`, and `Unknown` labels.
 Missing or expired evidence remains `Unknown` or `Stale`, and silence never becomes `Working` or `Done`.
+`--format status` renders the routine side-panel status block that belongs in Herdr rather than Captain chat.
+Each task shows a state marker, the readable `✓ TESTS`, `◆ COMMIT`, `↗ REVIEW`, and `⚠ BLOCKER` labels, phase, freshness, profile lane, model, effort, and next action.
+The marker is a bracketed word such as `[BLOCKED]` or `[WORKING]`, so an accessible Tokyo Night colour is an added signal and never the only one, and no status is expressed as an emoji.
+Test, commit or version, blocker, and next-action values are displayed only when the fixture records them and otherwise read `Unknown` or `None recorded`.
+Captain chat keeps a plain-language outcome or a single decision question; this panel owns the routine structured detail.
+`ttl_seconds` must be a whole number of seconds between 1 and 86400, so the published display cache always carries a whole-millisecond expiry bound.
 Activity accepts only an allowlisted source and event kind, redacts private-path or secret-like summaries, deduplicates by explicit key, keeps a configured bound, and marks the retained view scrollable.
 The network view uses only validated fixture edges and normalized task states, and an empty edge set says that no dependency was recorded rather than inventing one.
 Obsidian navigation is supported only for an explicit `AI Project Manager` vault link to a safe relative `Items/*.md` file, with every other link rendered as unsupported.

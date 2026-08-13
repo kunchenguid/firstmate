@@ -285,6 +285,98 @@ test_truncated_history_is_surfaced() {
   pass "dropped activity history is disclosed on every text surface"
 }
 
+test_fractional_ttl_is_refused_before_any_helper_call() {
+  local helper="$TMP_ROOT/ttl-herdr-lab.sh" log="$TMP_ROOT/ttl-herdr.log" fixture output rc value
+  write_fake_lab_helper "$helper" "$log"
+
+  for value in 300.5 1.0005 0.5 86400.9; do
+    fixture="$TMP_ROOT/ttl-$value.json"
+    jq --argjson t "$value" '.ttl_seconds = $t' "$FIXTURE" > "$fixture"
+    : > "$log"
+    rc=0
+    output=$(HERDR_LAB_HELPER="$helper" HERDR_LAB_SESSION=fm-lab-console-test \
+      FM_FAKE_HERDR_LOG="$log" "$CONSOLE" --fixture "$fixture" --format json \
+      --now 2026-08-13T12:00:00Z --publish-metadata w1 2>&1) || rc=$?
+    expect_code 1 "$rc" "fractional ttl_seconds $value was not refused"
+    assert_contains "$output" "malformed fixture input" \
+      "fractional ttl_seconds $value did not fail closed at the normalizer"
+    assert_not_contains "$output" "integer expression expected" \
+      "fractional ttl_seconds $value reached the shell numeric clamp"
+    [ ! -s "$log" ] || fail "fractional ttl_seconds $value reached the lab helper"
+  done
+
+  for value in 1 300 86400; do
+    fixture="$TMP_ROOT/ttl-ok-$value.json"
+    jq --argjson t "$value" '.ttl_seconds = $t' "$FIXTURE" > "$fixture"
+    "$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z >/dev/null \
+      || fail "whole ttl_seconds $value was rejected"
+  done
+  jq 'del(.ttl_seconds)' "$FIXTURE" > "$TMP_ROOT/ttl-absent.json"
+  "$CONSOLE" --fixture "$TMP_ROOT/ttl-absent.json" --format json \
+    --now 2026-08-13T12:00:00Z >/dev/null || fail "absent ttl_seconds lost its documented default"
+
+  : > "$log"
+  output=$(HERDR_LAB_HELPER="$helper" HERDR_LAB_SESSION=fm-lab-console-test \
+    FM_FAKE_HERDR_LOG="$log" "$CONSOLE" --fixture "$FIXTURE" --format json \
+    --now 2026-08-13T12:00:00Z --publish-metadata w1) \
+    || fail "whole-number ttl publication failed"
+  assert_grep "--ttl-ms 300000" "$log" "publication did not send a whole-millisecond TTL"
+  pass "fractional ttl_seconds fails closed before any Herdr call"
+}
+
+test_status_panel_uses_accessible_markers_and_required_fields() {
+  local plain colored task_block
+  plain=$("$CONSOLE" --fixture "$FIXTURE" --format status --no-color --now 2026-08-13T12:00:00Z)
+
+  assert_contains "$plain" "✓ TESTS" "status panel omitted the readable TESTS label"
+  assert_contains "$plain" "◆ COMMIT" "status panel omitted the readable COMMIT label"
+  assert_contains "$plain" "↗ REVIEW" "status panel omitted the readable REVIEW label"
+  assert_contains "$plain" "⚠ BLOCKER" "status panel omitted the readable BLOCKER label"
+
+  assert_contains "$plain" "128 passed" "status panel omitted recorded test evidence"
+  assert_contains "$plain" "a1b2c3d" "status panel omitted recorded commit evidence"
+  assert_contains "$plain" "v1.4.0" "status panel omitted a recorded version as commit evidence"
+  assert_contains "$plain" "Finish runtime QA sweep" "status panel omitted the recorded next action"
+  assert_contains "$plain" "Awaiting Captain diagnosis decision" "status panel omitted a recorded blocker"
+  assert_contains "$plain" "Personal Codex" "status panel omitted the profile lane"
+  assert_contains "$plain" "Luna Max" "status panel omitted the model"
+
+  if printf '%s' "$plain" | grep -qE '[😀-🿿🚀-🛿✅❌🔴🟢🟡]'; then
+    fail "status panel used an emoji status marker"
+  fi
+
+  task_block=$(printf '%s\n' "$plain" | grep -A 8 'Old Project / Historical run')
+  case "$task_block" in
+    *"✓ TESTS   Unknown"*) ;;
+    *) fail "status panel inferred test evidence that the snapshot never recorded" ;;
+  esac
+  case "$task_block" in
+    *"⚠ BLOCKER None recorded"*) ;;
+    *) fail "status panel did not report an absent blocker honestly" ;;
+  esac
+
+  assert_contains "$plain" "[BLOCKED]" "status panel lacked a non-color blocked marker"
+  assert_contains "$plain" "[WORKING]" "status panel lacked a non-color working marker"
+  assert_contains "$plain" "[STALE]" "status panel lacked a non-color stale marker"
+  assert_contains "$plain" "[UNKNOWN]" "status panel lacked a non-color unknown marker"
+
+  colored=$("$CONSOLE" --fixture "$FIXTURE" --format status --color --now 2026-08-13T12:00:00Z)
+  printf '%s' "$colored" | grep -q "$(printf '\033')\[38;5;" \
+    || fail "status panel emitted no ANSI color when color was requested"
+  assert_contains "$colored" "[BLOCKED]" "colored status panel dropped the text marker"
+  assert_contains "$colored" "✓ TESTS" "colored status panel dropped the readable TESTS label"
+  printf '%s' "$plain" | grep -q "$(printf '\033')" \
+    && fail "no-color status panel still emitted ANSI escapes"
+
+  local narrow
+  narrow=$("$CONSOLE" --fixture "$FIXTURE" --format status --no-color --now 2026-08-13T12:00:00Z --width 76)
+  if printf '%s\n' "$narrow" | awk 'length($0) > 76 { exit 1 }'; then :; else
+    fail "narrow status panel emitted a line wider than 76 columns"
+  fi
+  assert_not_contains "$plain" "/Users/example" "status panel leaked a private path"
+  pass "status panel pairs colored state markers with readable labels and honest fields"
+}
+
 test_fleet_snapshot_exposes_recorded_model_and_effort() {
   local home out
   home="$TMP_ROOT/snapshot-model"
@@ -310,4 +402,6 @@ test_narrow_panel_and_ascii_network
 test_metadata_publication_uses_named_lab_and_preserves_focus
 test_failed_publication_reports_only_its_own_diagnostic
 test_truncated_history_is_surfaced
+test_fractional_ttl_is_refused_before_any_helper_call
+test_status_panel_uses_accessible_markers_and_required_fields
 test_fleet_snapshot_exposes_recorded_model_and_effort
