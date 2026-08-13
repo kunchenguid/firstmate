@@ -371,6 +371,94 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Rule <n> of a generated brief's "# Rules" section, flattened to a single
+# whitespace-normalized line. Scoping to that section matters because a ship
+# brief's Setup steps are numbered too. The assertions below are about what the
+# rule says, not how it wraps, so a line break inside a sentence must not decide
+# whether the contract is present.
+brief_rule_text() {  # <brief> <rule-number>
+  awk -v n="$2" '
+    /^# Rules$/ { in_rules = 1; next }
+    !in_rules { next }
+    /^# / { exit }
+    $0 ~ "^" n "\\. " { in_rule = 1 }
+    in_rule && NF == 0 { exit }
+    in_rule { print }
+  ' "$1" | tr '\n' ' ' | tr -s ' '
+}
+
+# "Stay inside this worktree; modify nothing outside it" is a rule about FILES. A
+# worker can satisfy it completely and still administer the pool its own worktree
+# came from - removing a worktree is not an edit outside a directory - which
+# destroys the working copies of lanes that are running at the time. Every
+# crewmate scaffold must therefore carry the shared-infrastructure rule, and it
+# must be stated around the ACT: worktree providers differ in their commands but
+# not in the damage, so a constraint written against one provider leaves the same
+# hole open on every other one. A prohibition with no exit gets worked around, so
+# the rule must also route a genuine need for a second checkout somewhere.
+# Secondmate charters are deliberately out of scope: a secondmate operates its own
+# home and administers its own crewmates' worktrees through the normal lifecycle.
+test_shared_infrastructure_rule_covers_every_crewmate_scaffold() {
+  local home kind id brief rule file_rule providers name
+  home="$TMP_ROOT/shared-infra-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-shared-infra-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    rule=$(brief_rule_text "$brief" 7)
+    [ -n "$rule" ] || fail "$kind: generated brief carries no shared-infrastructure rule"
+
+    # Stated around the act, and around why the act reaches other lanes.
+    assert_contains "$rule" \
+      "Never create, remove, return, prune, move, or reassign any worktree or pool slot" \
+      "$kind: rule does not forbid the act of administering a worktree or pool slot"
+    assert_contains "$rule" "serving every lane and home" \
+      "$kind: rule does not say the pool and daemon are shared across lanes"
+
+    # Concrete commands are examples. The rule must still reach a worktree
+    # provider it does not name, so switching providers cannot reopen the hole.
+    assert_contains "$rule" "whatever other worktree provider is in use" \
+      "$kind: rule does not reach an unnamed worktree provider"
+    providers=0
+    for name in 'git worktree' 'treehouse' 'orca worktree'; do
+      case "$rule" in *"$name"*) providers=$((providers + 1)) ;; esac
+    done
+    [ "$providers" -ge 2 ] || fail \
+      "$kind: rule names fewer than two providers as examples, so it reads as a single-provider rule"
+
+    # An exit, so a genuine need for a second checkout is not a workaround.
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_contains "$rule" 'append `blocked: {what you need and why}` and stop' \
+      "$kind: rule prohibits the act without telling the worker what to do instead"
+    assert_contains "$rule" "Firstmate does it for you" \
+      "$kind: rule does not say who performs the work the worker must not do"
+
+    # Same class as the shared no-mistakes daemon - one instance serving every
+    # lane - so the two are stated together and the daemon rule is not orphaned.
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_contains "$rule" 'never stop, restart, or update the `no-mistakes` daemon' \
+      "$kind: shared-daemon prohibition was lost from the shared-infrastructure rule"
+    assert_contains "$rule" "on ANY no-mistakes daemon error" \
+      "$kind: shared-daemon errors no longer route to the same exit"
+    [ "$(grep -o 'daemon' "$brief" | wc -l | tr -d ' ')" \
+      = "$(printf '%s\n' "$rule" | grep -o 'daemon' | wc -l | tr -d ' ')" ] \
+      || fail "$kind: the brief discusses the shared daemon outside the one rule that owns it"
+
+    # The file-scope rule must point here rather than reading as complete.
+    file_rule=$(brief_rule_text "$brief" 2)
+    assert_contains "$file_rule" "shared administration is rule 7" \
+      "$kind: the stay-inside-this-worktree rule still reads as if it covered shared administration"
+  done
+  pass "fm-brief.sh: every crewmate scaffold forbids shared worktree/pool administration and offers an exit"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -720,6 +808,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_shared_infrastructure_rule_covers_every_crewmate_scaffold
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

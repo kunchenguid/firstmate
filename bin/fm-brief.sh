@@ -350,7 +350,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    look stale or unused, and including this one - firstmate discards yours at teardown.
    Never delete or rewrite a branch or ref you did not create, and never stop, restart, or update
    the \`no-mistakes\` daemon.
-   Removing worktrees from inside a lane has already destroyed other lanes' working copies mid-run,
+   Removing a worktree from inside a lane destroys the working copy of whatever lane owns it, mid-run,
    so there is no safe local workaround - if you need a second checkout, a worktree or branch
    removed, a daemon action, or anything else on that list, and on ANY no-mistakes daemon error,
    append \`blocked: {what you need and why}\` and stop. Firstmate does it for you.
@@ -478,7 +478,7 @@ $RULE1
    look stale or unused, and including this one - firstmate cleans yours up when you are done.
    Never delete or rewrite a branch or ref you did not create, and never stop, restart, or update
    the \`no-mistakes\` daemon.
-   Removing worktrees from inside a lane has already destroyed other lanes' working copies mid-run,
+   Removing a worktree from inside a lane destroys the working copy of whatever lane owns it, mid-run,
    so there is no safe local workaround - if you need a second checkout, a worktree or branch
    removed, a daemon action, or anything else on that list, and on ANY no-mistakes daemon error,
    append \`blocked: {what you need and why}\` and stop. Firstmate does it for you.
