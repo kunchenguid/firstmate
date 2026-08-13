@@ -85,9 +85,13 @@ if [ "$EVENT" = preCompact ]; then
   [ -d "$STATE" ] && [ -n "$SESSION_ID" ] || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
   lock_acquire_bounded || exit 0
-  TMP="$PENDING_CONTEXT.tmp.$$"
-  jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" \
-    '{session_id:$session_id,digest:$digest}' > "$TMP" 2>/dev/null \
+  TMP=$(mktemp "$STATE/.cursor-pending-context.XXXXXX") || {
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
+    exit 0
+  }
+  STAGE_ID=${TMP##*/}
+  jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" --arg stage_id "$STAGE_ID" \
+    '{session_id:$session_id,digest:$digest,stage_id:$stage_id}' > "$TMP" 2>/dev/null \
     && mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null
   rm -f "$TMP" 2>/dev/null || true
   fm_lock_release "$PENDING_CONTEXT_LOCK"

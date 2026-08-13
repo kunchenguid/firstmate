@@ -120,21 +120,33 @@ lock_acquire_bounded() {  # <lock>
   return 1
 }
 
+commit_locks_acquire() {
+  lock_acquire_bounded "$CLAIM_LOCK" || return 1
+  if ! lock_acquire_bounded "$OWNER_LOCK"; then
+    fm_lock_release "$CLAIM_LOCK"
+    return 1
+  fi
+  return 0
+}
+
+commit_locks_release() {
+  fm_lock_release "$OWNER_LOCK"
+  fm_lock_release "$CLAIM_LOCK"
+}
+
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
 # embedded quote, newline, or the U+2063 prefix cannot corrupt the response.
 emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
-  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
-  if ! park_still_ours \
-    || ! fm_operational_input_encode "$kind" "$body" encoded \
-    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
-    || ! park_still_ours \
-    || ! printf '%s\n' "$response"; then
-    fm_lock_release "$OWNER_LOCK"
+  fm_operational_input_encode "$kind" "$body" encoded || exit 0
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
+  commit_locks_acquire || exit 0
+  if ! park_still_ours || ! printf '%s\n' "$response"; then
+    commit_locks_release
     exit 0
   fi
   [ "$reset_budget" = reset-budget ] && budget_reset
-  fm_lock_release "$OWNER_LOCK"
+  commit_locks_release
   exit 0
 }
 
@@ -161,78 +173,78 @@ budget_reset() {
 }
 
 budget_reset_if_ours() {
-  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  commit_locks_acquire || exit 0
   if ! park_still_ours; then
-    fm_lock_release "$OWNER_LOCK"
+    commit_locks_release
     exit 0
   fi
   budget_reset
-  fm_lock_release "$OWNER_LOCK"
+  commit_locks_release
 }
 
 emit_staged_context() {
-  local staged_session staged encoded response
-  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
-  if ! park_still_ours; then
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  fi
-  lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || {
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  }
+  local snapshot current staged_session staged encoded response
+  lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || exit 0
   if [ ! -s "$PENDING_CONTEXT" ] || [ -L "$PENDING_CONTEXT" ] || [ "$SESSION_ID" = unknown ]; then
     fm_lock_release "$PENDING_CONTEXT_LOCK"
-    fm_lock_release "$OWNER_LOCK"
     return 0
   fi
-  staged_session=$(jq -r '.session_id // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
-  staged=$(jq -r '.digest // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
-  if [ "$staged_session" != "$SESSION_ID" ] || [ -z "$staged" ]; then
+  snapshot=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
+  fm_lock_release "$PENDING_CONTEXT_LOCK"
+  staged_session=$(printf '%s' "$snapshot" | jq -r '.session_id // empty' 2>/dev/null || true)
+  staged=$(printf '%s' "$snapshot" | jq -r '.digest // empty' 2>/dev/null || true)
+  [ "$staged_session" = "$SESSION_ID" ] && [ -n "$staged" ] || return 0
+  fm_operational_input_encode session-start "$staged" encoded || exit 0
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
+
+  commit_locks_acquire || exit 0
+  lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || {
+    commit_locks_release
+    exit 0
+  }
+  current=$(cat "$PENDING_CONTEXT" 2>/dev/null || true)
+  if ! park_still_ours || [ "$current" != "$snapshot" ] || ! printf '%s\n' "$response"; then
     fm_lock_release "$PENDING_CONTEXT_LOCK"
-    fm_lock_release "$OWNER_LOCK"
-    return 0
-  fi
-  if ! fm_operational_input_encode session-start "$staged" encoded \
-    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
-    || ! park_still_ours \
-    || ! printf '%s\n' "$response"; then
-    fm_lock_release "$PENDING_CONTEXT_LOCK"
-    fm_lock_release "$OWNER_LOCK"
+    commit_locks_release
     exit 0
   fi
   rm -f "$PENDING_CONTEXT" 2>/dev/null || true
   fm_lock_release "$PENDING_CONTEXT_LOCK"
-  fm_lock_release "$OWNER_LOCK"
+  commit_locks_release
   exit 0
 }
 
 emit_repair_followup() {  # <reason> <arm-tail> <attempt>
-  local reason=$1 arm_tail=$2 attempt_count=$3 count body encoded response
-  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  local reason=$1 arm_tail=$2 attempt_count=$3 prior count body encoded response
+  commit_locks_acquire || exit 0
   if ! park_still_ours; then
-    fm_lock_release "$OWNER_LOCK"
+    commit_locks_release
     exit 0
   fi
   budget_read
   [ "$BUDGET_COUNT" -lt "$BLOCK_BUDGET" ] || {
-    fm_lock_release "$OWNER_LOCK"
+    commit_locks_release
     exit 0
   }
-  count=$((BUDGET_COUNT + 1))
+  prior=$BUDGET_COUNT
+  count=$((prior + 1))
+  commit_locks_release
+
   body="TURN WOULD END BLIND - supervision is off. The hook-owned watcher park could not establish a live cycle after $attempt_count bounded attempts (nag $count of $BLOCK_BUDGET).
 $arm_tail
 
 $reason"
-  if ! fm_operational_input_encode turn-end-guard "$body" encoded \
-    || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
-    || ! park_still_ours \
-    || ! printf '%s\n' "$response"; then
-    fm_lock_release "$OWNER_LOCK"
+  fm_operational_input_encode turn-end-guard "$body" encoded || exit 0
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
+
+  commit_locks_acquire || exit 0
+  budget_read
+  if ! park_still_ours || [ "$BUDGET_COUNT" -ne "$prior" ] || ! printf '%s\n' "$response"; then
+    commit_locks_release
     exit 0
   fi
   budget_write "$count"
-  fm_lock_release "$OWNER_LOCK"
+  commit_locks_release
   exit 0
 }
 

@@ -391,9 +391,10 @@ test_park_stands_down_when_superseded() {
 }
 
 test_park_serializes_supersession_with_followup_commit() {
-  local dir first_pid second_pid first_out second_out waited claim_seq
+  local dir first_pid second_pid first_out second_out waited claim_seq budget_count
   dir=$(make_primary_dir "$TMP_ROOT/park-commit-race")
   : > "$dir/state/task1.meta"
+  printf 'session=sess-cursor\ncount=1\n' > "$dir/state/.turnend-cursor-blocks"
   write_arm_fixture "$dir" actionable
   cat >> "$dir/bin/fm-operational-input.sh" <<'SH'
 fm_operational_input_encode() {
@@ -413,6 +414,7 @@ SH
     waited=$((waited + 1))
     [ "$waited" -lt 200 ] || fail "the first park never reached follow-up commit"
   done
+  write_arm_fixture "$dir" failed
   ( run_park "$dir" > "$dir/state/second-out" ) &
   second_pid=$!
   waited=0
@@ -429,9 +431,12 @@ SH
   first_out=$(cat "$dir/state/first-out" 2>/dev/null || true)
   second_out=$(cat "$dir/state/second-out" 2>/dev/null || true)
   [ -z "$first_out" ] || fail "the older park emitted after a newer stop arrived: $first_out"
-  [ "$(kind_of_followup "$second_out")" = watcher ] \
+  [ "$(kind_of_followup "$second_out")" = turn-end-guard ] \
     || fail "the newest park did not own the follow-up: $second_out"
-  pass "cursor park: the newest stop owns a concurrent follow-up commit"
+  budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-cursor-blocks" 2>/dev/null || true)
+  [ "$budget_count" = 2 ] \
+    || fail "the superseded actionable park reset shared nag state: $budget_count"
+  pass "cursor park: the newest stop exclusively owns a concurrent commit"
 }
 
 test_superseded_park_does_not_consume_nag_budget() {
@@ -564,7 +569,7 @@ test_precompact_stages_instead_of_injecting() {
 }
 
 test_precompact_replacement_cannot_be_deleted_by_consumer() {
-  local dir park_pid compact_pid out waited staged
+  local dir park_pid compact_pid second_pid out second_out waited
   dir=$(make_primary_dir "$TMP_ROOT/session-compact-race")
   jq -n --arg session_id sess-cursor --arg digest 'OLD STAGED DIGEST' \
     '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
@@ -593,16 +598,19 @@ SH
   done
   ( run_session "$dir" preCompact compact > "$dir/state/compact-out" ) &
   compact_pid=$!
-  sleep 0.2
+  wait "$compact_pid" 2>/dev/null || true
+  ( run_park "$dir" > "$dir/state/new-context-out" ) &
+  second_pid=$!
+  wait "$second_pid" 2>/dev/null || true
   : > "$dir/state/context-consume-release"
   wait "$park_pid" 2>/dev/null || true
-  wait "$compact_pid" 2>/dev/null || true
   out=$(cat "$dir/state/context-consume-out" 2>/dev/null || true)
-  case "$(followup_of "$out")" in *'OLD STAGED DIGEST'*) ;; *) fail "the original staged digest was not committed: $out" ;; esac
-  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
-  [ "$staged" = 'NEW STAGED DIGEST' ] \
-    || fail "the consumer deleted the concurrently replaced digest: $staged"
-  pass "fm-sessionstart-cursor: staged replacement is serialized with consumption"
+  second_out=$(cat "$dir/state/new-context-out" 2>/dev/null || true)
+  [ -z "$out" ] || fail "the superseded consumer emitted obsolete context: $out"
+  case "$(followup_of "$second_out")" in *'NEW STAGED DIGEST'*) ;; *) fail "the newest park did not deliver the replacement digest: $second_out" ;; esac
+  [ ! -e "$dir/state/.cursor-pending-context" ] \
+    || fail "the delivered replacement digest was not consumed"
+  pass "fm-sessionstart-cursor: newest park exclusively consumes staged replacement"
 }
 
 test_sessionstart_silent_in_child_worktree() {
