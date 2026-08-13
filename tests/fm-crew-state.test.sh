@@ -434,6 +434,60 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+# A parked run needs the full semantic verdict: busy pane evidence outranks a
+# stale pause declaration, exact idle permits that declaration, and unknown is
+# neither pole so it must not hide a possibly-resumed crew as paused.
+test_parked_run_uses_semantic_busy_verdict() {
+  reset_fakes
+  local busy_dir busy_gen idle_dir idle_gen unknown_dir out
+
+  busy_dir=$(new_case parked-busy)
+  make_repo_on_branch "$busy_dir/wt" fm/feat-parked-busy
+  make_fakebin "$busy_dir" >/dev/null
+  fm_write_meta "$busy_dir/state/parked-busy.meta" "window=fm:fm-parked-busy" \
+    "worktree=$busy_dir/wt" "kind=ship" "harness=claude"
+  printf 'paused: awaiting captain decision\n' > "$busy_dir/state/parked-busy.status"
+  busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$busy_dir/state" parked-busy)
+  "$ROOT/bin/fm-busy-event.sh" apply "$busy_dir/state" parked-busy busy --gen "$busy_gen" \
+    --source claude-hook --event user-prompt-submit
+  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-parked-busy)
+  out=$(run_crew_state "$busy_dir" parked-busy)
+  assert_contains "$out" "state: parked" "parked + busy remains run-step parked"
+  assert_contains "$out" "pane busy" "parked + busy reports resumed pane activity"
+  assert_not_contains "$out" "state: paused" "busy pane evidence outranks a stale pause declaration"
+
+  reset_fakes
+  idle_dir=$(new_case parked-idle)
+  make_repo_on_branch "$idle_dir/wt" fm/feat-parked-idle
+  make_fakebin "$idle_dir" >/dev/null
+  fm_write_meta "$idle_dir/state/parked-idle.meta" "window=fm:fm-parked-idle" \
+    "worktree=$idle_dir/wt" "kind=ship" "harness=claude"
+  printf 'paused: awaiting captain decision\n' > "$idle_dir/state/parked-idle.status"
+  idle_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$idle_dir/state" parked-idle)
+  "$ROOT/bin/fm-busy-event.sh" apply "$idle_dir/state" parked-idle idle --gen "$idle_gen" \
+    --source claude-hook --event stop
+  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-parked-idle)
+  out=$(run_crew_state "$idle_dir" parked-idle)
+  assert_contains "$out" "state: paused" "parked + exact idle honors a declared pause"
+  assert_contains "$out" "declared pause holds" "idle verdict reaches the declared-pause branch"
+
+  reset_fakes
+  unknown_dir=$(new_case parked-unknown)
+  make_repo_on_branch "$unknown_dir/wt" fm/feat-parked-unknown
+  make_fakebin "$unknown_dir" >/dev/null
+  fm_write_meta "$unknown_dir/state/parked-unknown.meta" "window=fm:fm-parked-unknown" \
+    "worktree=$unknown_dir/wt" "kind=ship" "harness=claude"
+  printf 'paused: awaiting captain decision\n' > "$unknown_dir/state/parked-unknown.status"
+  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-parked-unknown)
+  out=$(run_crew_state "$unknown_dir" parked-unknown)
+  assert_contains "$out" "state: parked" "parked + unknown remains parked"
+  assert_contains "$out" "pane state unavailable (unknown missing)" \
+    "unknown verdict is reported without treating it as idle"
+  assert_not_contains "$out" "state: paused" "unknown must not authorize the idle-only pause branch"
+  assert_not_contains "$out" "pane idle" "unknown must not be mislabeled idle"
+  pass "parked runs distinguish semantic busy, idle, and unknown verdicts"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -1369,6 +1423,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_parked_run_uses_semantic_busy_verdict
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
