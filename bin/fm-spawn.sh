@@ -1048,10 +1048,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   if [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
-    [ -f "$STATE/$ID.worker-server" ] || {
-      echo "error: task $ID has no cursor worker-server ownership record; refusing relaunch because prior worker absence cannot be proven" >&2
-      exit 1
-    }
+    # Same-harness cursor relaunch still needs the worker-server record to prove
+    # the detached process is gone. Switching away must not: the pane is already
+    # agent-free, and state/<id>.cursor-session still has to be retired.
+    next_harness=$RELAUNCH_PRIOR_HARNESS
+    if [ -n "$HARNESS_ARG" ]; then
+      next_harness=$(fm_control_harness_family "$HARNESS_ARG") || next_harness=$HARNESS_ARG
+    fi
+    if [ "$next_harness" = cursor ]; then
+      [ -f "$STATE/$ID.worker-server" ] || {
+        echo "error: task $ID has no cursor worker-server ownership record; refusing relaunch because prior worker absence cannot be proven" >&2
+        exit 1
+      }
+    fi
+    unset next_harness
   fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1377,6 +1387,15 @@ if [ "$HARNESS" = cursor ]; then
     CURSOR_WORKER_LAUNCH_OWNERSHIP_PUBLISHED=1
   fi
   export CURSOR_WORKER_LAUNCH_TOKEN
+fi
+
+# Probed after the harness/backend refusals above: an impossible combination is
+# a configuration error the operator can fix without a healthy runtime, so it
+# should not be reported as a runtime failure of the backend it can never use.
+# Still well before any endpoint, worktree, launch command, or metadata exists.
+# A relaunch proves its backend through the endpoint validation instead.
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" = orca ]; then
+  fm_backend_orca_runtime_check || exit 1
 fi
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
