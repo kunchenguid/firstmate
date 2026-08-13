@@ -465,6 +465,74 @@ EOF
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
+test_resolve_records_superseded_prior_decision() {
+  local home origin prior_hold replacement_hold pending_hold show help
+  home=$(make_home superseded-decision)
+  help=$(run_decisions "$home" --help)
+  assert_contains "$help" "[--supersedes <prior-hold-id>]" \
+    "resolve help omitted the supersession field"
+  origin=sample-supersession-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review superseding sample decisions" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create supersession origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Supersession review\n\nA later decision replaces an earlier answer.\n' \
+    > "$home/data/$origin/report.md"
+
+  prior_hold=$(run_decisions "$home" hold "$origin" prior-route \
+    --title "Choose the prior route" --reason "captain prior route pending" --repo sample) \
+    || fail "could not register prior decision"
+  tasks_in "$home" add prior-route-work "Apply the prior route" --kind ship --repo sample \
+    --blocked-by "$prior_hold" >/dev/null || fail "could not create prior routed work"
+  printf 'Use the original sample route.\n' > "$home/prior-decision.txt"
+  run_decisions "$home" resolve "$origin" prior-route \
+    --decision-file "$home/prior-decision.txt" --routed-to prior-route-work >/dev/null \
+    || fail "could not resolve prior decision"
+
+  replacement_hold=$(run_decisions "$home" hold "$origin" replacement-route \
+    --title "Choose the replacement route" --reason "captain replacement route pending" --repo sample) \
+    || fail "could not register replacement decision"
+  tasks_in "$home" add replacement-route-work "Apply the replacement route" \
+    --kind ship --repo sample --blocked-by "$replacement_hold" >/dev/null \
+    || fail "could not create replacement routed work"
+  printf 'Use the replacement sample route.\n' > "$home/replacement-decision.txt"
+
+  pending_hold=$(run_decisions "$home" hold "$origin" pending-route \
+    --title "Choose a pending route" --reason "captain pending route choice" --repo sample) \
+    || fail "could not register pending decision"
+  if run_decisions "$home" resolve "$origin" replacement-route \
+    --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
+    --supersedes "$pending_hold" > "$home/pending-supersedes.out" 2> "$home/pending-supersedes.err"; then
+    fail "resolve accepted an unresolved decision as the superseded prior decision"
+  fi
+  show=$(tasks_in "$home" show "$replacement_hold" --full)
+  assert_contains "$show" "state: queued" "invalid supersession closed the replacement hold"
+  assert_contains "$show" "held: yes" "invalid supersession released the replacement hold"
+
+  run_decisions "$home" resolve "$origin" replacement-route \
+    --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
+    --supersedes "$prior_hold" >/dev/null \
+    || fail "could not resolve a decision with a supersession pointer"
+  show=$(tasks_in "$home" show "$replacement_hold" --full)
+  assert_contains "$show" "state: done" "superseding decision did not close"
+  assert_contains "$show" "supersedes: $prior_hold" \
+    "superseding decision did not retain the prior hold identity"
+  show=$(tasks_in "$home" show "$prior_hold" --full)
+  assert_contains "$show" "state: done" "superseding decision changed the prior decision record"
+  run_decisions "$home" resolve "$origin" replacement-route \
+    --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
+    --supersedes "$prior_hold" >/dev/null \
+    || fail "identical supersession retry was not idempotent"
+  if run_decisions "$home" resolve "$origin" replacement-route \
+    --decision-file "$home/replacement-decision.txt" --routed-to replacement-route-work \
+    > "$home/missing-supersedes.out" 2> "$home/missing-supersedes.err"; then
+    fail "resolution retry accepted a missing supersession pointer"
+  fi
+  pass "resolve records a stable supersession pointer only to a durably resolved prior decision"
+}
+
 # tasks-axi quotes multi-entry blocked_by values as "a,b,c". resolve must strip
 # those surrounding quotes before comma-boundary membership so the first and last
 # list elements match, not only middle elements.
@@ -569,4 +637,5 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_resolve_records_superseded_prior_decision
 test_resolve_matches_quoted_blocked_by_edges
