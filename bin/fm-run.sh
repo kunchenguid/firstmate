@@ -7,7 +7,7 @@
 # script owns only the mechanics those documents point at, so a mode cannot make
 # its own read-only claim: the claim is whatever this engine will actually permit.
 #
-# Five invariants are enforced here rather than described:
+# Six invariants are enforced here rather than described:
 #   1. A run cannot expand its own manifest. `set`/`add` refuse after `freeze`,
 #      and every later command re-verifies the manifest against the hash recorded
 #      at freeze, so an edit by anything at all stops the run.
@@ -15,11 +15,20 @@
 #      the denylist and the built-in floor are defense in depth on top of it.
 #   3. A write is permitted only into the run's evidence directory, plus the
 #      explicitly granted paths of a change-authorized run. Paths are compared
-#      after physical resolution, so a symlinked parent cannot smuggle one out.
-#   4. Exactly one owner may mutate a run. A second owner may take over only from
-#      a quiesced state, so a failed handoff converges to one owner or none.
-#   5. Every gate decision, allowed or refused, writes a receipt. `prove-no-write`
-#      is only meaningful because the refusals are recorded too.
+#      after physical resolution, so a symlinked parent cannot smuggle one out,
+#      and a target whose own final component is a symlink is refused rather than
+#      resolved. FM_RUN_PROTECTED_FLOOR is checked before the manifest's own
+#      writes.protectedPaths, so a manifest may add to it and never subtract.
+#   4. A read is bounded by the frozen source.readRoots. A read-only run must
+#      freeze at least one root or preflight refuses it, since a run that named
+#      none would be bounded by nothing. Reads are judged on the resolved target.
+#   5. Exactly one owner may mutate a run. Every state-changing command holds the
+#      run-scoped lock, so a claim is one compare-and-swap rather than a separate
+#      read and write; a second owner may take over only from a quiesced state,
+#      so a failed handoff converges to one owner or none.
+#   6. Every gate decision, allowed or refused, writes a receipt. `prove-no-write`
+#      is only meaningful because the refusals are recorded too - and it speaks
+#      only for what was recorded through these gates, not for the filesystem.
 #
 # Usage:
 #   fm-run.sh new <run-id> --mode <mode> --lane <lane> --grant <grant>
@@ -97,7 +106,13 @@ trap fm_run_lock_release_all EXIT
 # could take the run, and each wrote - producing two owners for one run. Reading,
 # deciding, and writing under this lock is what makes the claim a real
 # compare-and-swap instead of three independent writes.
+#
+# The existence check belongs here rather than only in the callers: acquiring the
+# lock creates the run root as a side effect, so locking a run that was never
+# created would occupy its id and make `new` refuse it forever. A mistyped id
+# must stay free.
 hold_run_lock() {  # <run-id>
+  fm_run_exists "$1" || fail "run $1 does not exist"
   fm_run_lock_acquire "$(fm_run_lock_path "$1")"
 }
 

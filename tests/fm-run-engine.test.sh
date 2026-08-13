@@ -394,6 +394,34 @@ test_a_refused_manifest_edit_leaves_no_residue_in_the_run_root() {
   pass "a refused manifest edit leaves no temp file behind and does not disturb the run"
 }
 
+# A command naming a run that was never created must refuse without leaving the
+# run id occupied. Taking the run lock before the existence check would create
+# the run root as a side effect, and `new` refuses an id whose root already
+# exists - so a single mistyped id would burn that id for the rest of the home.
+test_a_command_against_a_missing_run_does_not_occupy_its_id() {
+  local out
+  capture set typo-case account.isolationAsserted true --json
+  expect_code 1 "$RC" "editing a run that was never created"
+  capture add typo-case source.readRoots "$SOURCES"
+  expect_code 1 "$RC" "appending to a run that was never created"
+  capture claim typo-case
+  expect_code 1 "$RC" "claiming a run that was never created"
+
+  [ ! -e "$HOME_DIR/data/runs/typo-case" ] \
+    || fail "a command against a missing run created its run root"
+
+  # The refusals left nothing that `list` reports as a run.
+  capture list
+  out=$OUT
+  assert_not_contains "$out" typo-case "list reported a run id no run occupies"
+
+  # The decisive consequence: the id is still free, so the operator can create
+  # the run they meant to create.
+  capture new typo-case --mode afk-research --lane test-personal --grant read-only
+  expect_code 0 "$RC" "creating a run whose id a refused command had touched"
+  pass "a command against a missing run refuses without occupying the run id"
+}
+
 test_one_mutable_owner_and_idempotent_resume() {
   local out
   new_research_run custody-case
@@ -814,6 +842,7 @@ test_fix_known_writes_only_inside_its_granted_worktree
 test_the_protected_floor_survives_a_manifest_that_drops_it
 test_a_manifest_edit_cannot_change_fields_its_receipt_never_names
 test_a_refused_manifest_edit_leaves_no_residue_in_the_run_root
+test_a_command_against_a_missing_run_does_not_occupy_its_id
 test_one_mutable_owner_and_idempotent_resume
 test_concurrent_claims_leave_exactly_one_owner
 test_a_symlinked_write_target_is_refused_but_a_read_follows_it
