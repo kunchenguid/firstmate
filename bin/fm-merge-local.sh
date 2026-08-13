@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's fm/<id> branch.
+# project's checked-out clean target branch to the crewmate's fm/<id> branch.
+# The target defaults to the remote default branch exactly as before. An exact
+# Captain-approved landing may instead name an existing local integration branch
+# with --target-branch; the helper never switches branches.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -9,15 +12,68 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
-# Usage: fm-merge-local.sh <task-id>
+# Usage: fm-merge-local.sh [--target-branch <branch>] <task-id>
 set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: fm-merge-local.sh [--target-branch <branch>] <task-id>
+
+Fast-forward the project's currently checked-out clean target branch from the
+local-only task branch fm/<task-id>. Without --target-branch, the target remains
+the project's remote default branch. The explicit target must be an existing
+local branch and must already be checked out; this command never switches it.
+EOF
+}
+
+usage_error() {
+  echo "error: $1" >&2
+  usage >&2
+  exit 2
+}
+
+TARGET=
+TARGET_SET=0
+ID=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --target-branch)
+      [ "$TARGET_SET" -eq 0 ] || usage_error "--target-branch may be specified only once"
+      [ "$#" -ge 2 ] || usage_error "--target-branch requires a branch name"
+      case "$2" in
+        --*) usage_error "--target-branch requires a branch name" ;;
+      esac
+      TARGET=$2
+      TARGET_SET=1
+      shift 2
+      ;;
+    --target-branch=*)
+      usage_error "use --target-branch <branch>"
+      ;;
+    --*)
+      usage_error "unknown option: $1"
+      ;;
+    -*)
+      usage_error "unknown option: $1"
+      ;;
+    *)
+      [ -z "$ID" ] || usage_error "unexpected argument: $1"
+      ID=$1
+      shift
+      ;;
+  esac
+done
+[ -n "$ID" ] || usage_error "task id is required"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=${1:?usage: fm-merge-local.sh <task-id>}
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
@@ -42,27 +98,46 @@ default_branch() {
 }
 
 BRANCH="fm/$ID"
-git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
+TASK_REF="refs/heads/$BRANCH"
+git -C "$PROJ" rev-parse --verify --quiet "$TASK_REF" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+if [ "$TARGET_SET" -eq 1 ]; then
+  git -C "$PROJ" check-ref-format --branch "$TARGET" >/dev/null 2>&1 \
+    || { echo "error: invalid target branch name '$TARGET'" >&2; exit 1; }
+  git -C "$PROJ" show-ref --verify --quiet "refs/heads/$TARGET" \
+    || { echo "error: target branch '$TARGET' does not exist in $PROJ" >&2; exit 1; }
+else
+  TARGET=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
-# The project's main checkout must be on its default branch and clean, so the
-# fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+[ "$TARGET" != "$BRANCH" ] || { echo "error: target branch '$TARGET' is the task branch; refusing to merge a branch into itself" >&2; exit 1; }
+TARGET_REF="refs/heads/$TARGET"
+
+# The project's main checkout must already be on the exact target branch and
+# clean, so the fast-forward lands predictably (firstmate never writes here
+# otherwise). The default-target refusal retains its established wording.
+cur_ref=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || echo "")
+cur=${cur_ref#refs/heads/}
+if [ "$TARGET_SET" -eq 1 ]; then
+  [ "$cur_ref" = "$TARGET_REF" ] || { echo "error: $PROJ is on '$cur', expected target branch '$TARGET'; cannot merge safely" >&2; exit 1; }
+else
+  [ "$cur_ref" = "$TARGET_REF" ] || { echo "error: $PROJ is on '$cur', expected default branch '$TARGET'; cannot merge safely" >&2; exit 1; }
+fi
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
-  echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
-  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+# Clean fast-forward only: TARGET must be an ancestor of BRANCH. Fully qualified
+# local refs prevent a same-named tag or remote ref from making either side
+# ambiguous.
+if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$TASK_REF"; then
+  echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
+  echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+git -C "$PROJ" merge --ff-only "$TASK_REF" >/dev/null
+after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"
