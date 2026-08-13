@@ -53,6 +53,7 @@ Observed output:
 
 ```text
 ok - fm-spawn: a provider shell missing node receives the exact caller PATH, resolves a versioned formula's node/npx, runs env-node, and preserves quoted entries
+ok - fm-spawn: the cursor launch template's own env prefix keeps the caller PATH handoff intact
 ok - fm-spawn: fresh spawn and public relaunch both replace provider PATH with one deterministic caller snapshot
 ok - fm-spawn: an empty PATH refuses before helper resolution or task mutation
 ok - fm-spawn: a control byte in PATH refuses before endpoint creation and never reaches the worker command channel
@@ -60,11 +61,27 @@ ok - fm-spawn: a control byte in PATH refuses before endpoint creation and never
 ```
 
 Applicability was inspected across every supported axis.
-All verified worker harnesses - Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse - launch after the one shared export, and their existing narrower launch prefixes do not clear `PATH`.
+All verified worker harnesses - Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse - launch after the one shared export, and their existing narrower launch prefixes do not clear `PATH`.
+Cursor is the only one whose template already carried an `env` prefix of its own; it unsets four foreign primary markers and never touches `PATH`, and Cursor is crewmate/scout only, so no Cursor secondmate axis exists to inspect.
 Tmux, Herdr, Zellij, Orca, and cmux all submit that export in the existing backend-neutral literal launch line immediately before the harness command, so no provider-specific environment mutation was added.
 Fresh spawns and recovery relaunches converge by replacing the shell value with the current caller snapshot instead of appending directories.
-A remote secondmate's host-local `fm-spawn.sh` receives the filesystem-composed remote job `PATH` and now forwards that same explicit value into its Herdr pane; the parent-side remote transport remains not applicable because it never creates the remote pane itself.
 Orca and cmux secondmate launches remain not applicable because those backend-kind combinations are still unsupported, while their ordinary worker launches use the shared handoff.
+
+A remote secondmate's host-local `fm-spawn.sh` runs as a remote job child, so its caller `PATH` is the filesystem-composed operator `PATH` rather than an interactive one, and it forwards that same explicit value into its Herdr pane.
+That composition previously stopped at the linked `<prefix>/bin`, which by construction cannot contain a keg-only versioned formula, so the remote axis reproduced the original `node=MISSING` / `npx=MISSING` symptom on any host whose Node came from `brew install node@24`.
+`bin/fm-remote-job-lib.sh` is the earliest shared owner of that value, so the fix lands there: `<prefix>/opt/<name>@<version>/bin` is appended after the system tail for both Homebrew prefixes.
+Appending only adds directories, so no richer inherited value is replaced and no linked or system command can be shadowed by an unlinked formula.
+The parent-side remote transport remains not applicable because it never creates the remote pane itself.
+
+```sh
+tests/fm-remote-job.test.sh
+```
+
+Observed output:
+
+```text
+ok - operator PATH resolves a keg-only versioned formula only behind the system tail
+```
 
 ## tmux
 

@@ -29,8 +29,9 @@
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
-# ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
-# system tail. No shell startup files are evaluated.
+# ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; linked Homebrew;
+# the system tail; and last of all Homebrew's keg-only versioned formula bins.
+# No shell startup files are evaluated.
 #
 # On macOS the worker is Firstmate's Aqua LaunchAgent
 # dev.firstmate.remote-job at ~/Library/LaunchAgents/dev.firstmate.remote-job.plist
@@ -135,6 +136,39 @@ fm_remote_job_append_glob_dirs() { # <glob whose matches are directories>
   done < <(compgen -G "$pattern" || true)
 }
 
+# The Homebrew prefixes this composer inspects, in order. Apple Silicon uses
+# /opt/homebrew and Intel uses /usr/local; a host with only one of them simply
+# contributes nothing for the other. The override exists for isolated tests,
+# which cannot install a real Homebrew prefix.
+fm_remote_job_homebrew_prefixes() {
+  local raw=${FM_REMOTE_JOB_HOMEBREW_PREFIXES_OVERRIDE:-/opt/homebrew:/usr/local} prefix old_ifs
+  old_ifs=$IFS
+  IFS=:
+  for prefix in $raw; do
+    [ -z "$prefix" ] || printf '%s\n' "$prefix"
+  done
+  IFS=$old_ifs
+}
+
+# Homebrew deliberately leaves keg-only formulae - which includes every
+# versioned formula such as node@24 or python@3.13 - unlinked from <prefix>/bin,
+# so a PATH that stops at the linked bin cannot resolve them at all and
+# /usr/bin/env node fails even though the operator installed Node. Their stable
+# launcher directory is <prefix>/opt/<formula>/bin, which survives the formula's
+# own patch upgrades because the versioned name is a symlink into the Cellar.
+#
+# Only <name>@<version> kegs are admitted, and only after the system tail, so
+# this recovers the operator's intent without letting an unlinked formula shadow
+# a system or linked-Homebrew executable - the exact shadowing Homebrew unlinks
+# them to prevent. Several versions of one formula are ordered highest-name
+# first so the choice is deterministic rather than glob-arbitrary.
+fm_remote_job_append_keg_only_bins() { # <homebrew-prefix>
+  local prefix=$1 directory
+  while IFS= read -r directory; do
+    [ -z "$directory" ] || fm_remote_job_path_append_if_dir "$directory"
+  done < <(compgen -G "$prefix/opt/*@*/bin" 2>/dev/null | LC_ALL=C sort -r || true)
+}
+
 fm_remote_job_nvm_default_selector() { # <account-home>
   local account_home=$1 alias_root selector alias_file next depth=0 suffix
   alias_root="$account_home/.nvm/alias"
@@ -209,7 +243,7 @@ fm_remote_job_nvm_selected_bin() { # <account-home>
 }
 
 fm_remote_job_compose_operator_path() { # <account-home>
-  local account_home=$1 account_user nvm_bin
+  local account_home=$1 account_user nvm_bin brew_prefix
   FM_REMOTE_JOB_OPERATOR_PATH=
   fm_remote_job_path_append_if_dir "$account_home/.local/bin"
   nvm_bin=$(fm_remote_job_nvm_selected_bin "$account_home" 2>/dev/null || true)
@@ -226,12 +260,16 @@ fm_remote_job_compose_operator_path() { # <account-home>
     fm_remote_job_path_append_resolved_dir "/etc/profiles/per-user/$account_user/bin"
   fi
   fm_remote_job_path_append_resolved_dir /run/current-system/sw/bin
-  fm_remote_job_path_append_if_dir /opt/homebrew/bin
-  fm_remote_job_path_append_if_dir /usr/local/bin
+  while IFS= read -r brew_prefix; do
+    fm_remote_job_path_append_if_dir "$brew_prefix/bin"
+  done < <(fm_remote_job_homebrew_prefixes)
   fm_remote_job_path_append /usr/bin
   fm_remote_job_path_append /bin
   fm_remote_job_path_append /usr/sbin
   fm_remote_job_path_append /sbin
+  while IFS= read -r brew_prefix; do
+    fm_remote_job_append_keg_only_bins "$brew_prefix"
+  done < <(fm_remote_job_homebrew_prefixes)
   printf '%s\n' "$FM_REMOTE_JOB_OPERATOR_PATH"
 }
 

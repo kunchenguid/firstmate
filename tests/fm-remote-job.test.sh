@@ -152,6 +152,49 @@ esac
 printf '20\n' > "$NVM_ROOT/alias/default"
 pass "operator PATH honors nvm defaults with a deterministic fallback"
 
+# Homebrew leaves keg-only formulae - every versioned formula included - out of
+# <prefix>/bin, so a remote worker on a host whose Node came from
+# `brew install node@24` could resolve neither node nor a #!/usr/bin/env node
+# executable. The keg bin therefore has to be discovered, but only behind the
+# system tail so an unlinked formula can never shadow a real system command.
+# A dedicated empty account home keeps the nvm fixture above out of this case.
+KEG_HOME="$TMP_ROOT/keg-account"
+KEG_PREFIX="$TMP_ROOT/brew-prefix"
+KEG_LINKED="$KEG_PREFIX/bin"
+KEG_NEW="$KEG_PREFIX/Cellar/node@24/24.14.1/bin"
+KEG_OLD="$KEG_PREFIX/Cellar/node@22/22.9.0/bin"
+KEG_UNVERSIONED="$KEG_PREFIX/opt/libpq/bin"
+mkdir -p "$KEG_HOME" "$KEG_LINKED" "$KEG_NEW" "$KEG_OLD" "$KEG_UNVERSIONED" "$KEG_PREFIX/opt"
+ln -s ../Cellar/node@24/24.14.1 "$KEG_PREFIX/opt/node@24"
+ln -s ../Cellar/node@22/22.9.0 "$KEG_PREFIX/opt/node@22"
+printf '#!/bin/bash\ncase "${1:-}" in */npx) printf "keg-npx-ok\\n" ;; *) printf "keg-node-24\\n" ;; esac\n' > "$KEG_NEW/node"
+printf '#!/usr/bin/env node\n' > "$KEG_NEW/npx"
+printf '#!/bin/bash\nprintf "keg-shadow\\n"\n' > "$KEG_NEW/ls"
+printf '#!/bin/bash\nprintf "keg-node-22\\n"\n' > "$KEG_OLD/node"
+printf '#!/bin/bash\nprintf "keg-psql\\n"\n' > "$KEG_UNVERSIONED/psql"
+chmod +x "$KEG_NEW/node" "$KEG_NEW/npx" "$KEG_NEW/ls" "$KEG_OLD/node" "$KEG_UNVERSIONED/psql"
+FM_REMOTE_JOB_HOMEBREW_PREFIXES_OVERRIDE="$KEG_PREFIX"
+fm_remote_job_compose_operator_path "$KEG_HOME" >/dev/null
+KEG_NODE=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node 2>/dev/null || printf 'MISSING\n')
+[ "$KEG_NODE" = keg-node-24 ] \
+  || fail "the composed PATH did not resolve the highest keg-only versioned formula's node (got '$KEG_NODE')"
+KEG_NPX=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" npx 2>/dev/null || printf 'MISSING\n')
+[ "$KEG_NPX" = keg-npx-ok ] \
+  || fail "a keg-only #!/usr/bin/env node executable did not run through the composed PATH (got '$KEG_NPX')"
+KEG_SHADOW=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" ls -d "$TMP_ROOT" 2>/dev/null || printf 'MISSING\n')
+[ "$KEG_SHADOW" != keg-shadow ] || fail "a keg-only formula bin shadowed the system tail"
+PATH="$FM_REMOTE_JOB_OPERATOR_PATH" command -v psql >/dev/null 2>&1 \
+  && fail "the composed PATH admitted an unversioned keg-only formula bin"
+printf '#!/bin/bash\nprintf "linked-node\\n"\n' > "$KEG_LINKED/node"
+chmod +x "$KEG_LINKED/node"
+fm_remote_job_compose_operator_path "$KEG_HOME" >/dev/null
+KEG_NODE=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node 2>/dev/null || printf 'MISSING\n')
+[ "$KEG_NODE" = linked-node ] \
+  || fail "a linked Homebrew bin lost precedence to a keg-only formula (got '$KEG_NODE')"
+unset FM_REMOTE_JOB_HOMEBREW_PREFIXES_OVERRIDE
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+pass "operator PATH resolves a keg-only versioned formula only behind the system tail"
+
 NIX_PROFILE="$ACCOUNT_HOME/.nix-profile"
 NIX_BIN="$TMP_ROOT/nix-profile-bin"
 mkdir -p "$NIX_PROFILE" "$NIX_BIN"

@@ -110,6 +110,9 @@ read_spawn_case() {
   IFS='|' read -r CASE_BASE HOME_DIR PROJECT_DIR WORKTREE_DIR FAKEBIN_DIR CASE_ID <<EOF_CASE
 $1
 EOF_CASE
+  # The third spawn positional: a raw launch command by default, or a bare
+  # adapter name for a case that must exercise a real harness template.
+  SPAWN_ARG3="sh '$CASE_BASE/probe.sh'"
 }
 
 run_spawn() { # <caller-path> [extra env NAME=value ...]
@@ -125,7 +128,7 @@ run_spawn() { # <caller-path> [extra env NAME=value ...]
     FM_FAKE_PANE_LAUNCH="$CASE_BASE/pane.launch" \
     FM_FAKE_TMUX_LOG="$CASE_BASE/tmux.log" \
     PATH="$caller_path" \
-    "$SPAWN" "$CASE_ID" "$PROJECT_DIR" "sh '$CASE_BASE/probe.sh'" \
+    "$SPAWN" "$CASE_ID" "$PROJECT_DIR" "$SPAWN_ARG3" \
       --backend tmux --mode no-mistakes --yolo off 2>&1
 }
 
@@ -173,6 +176,44 @@ SH
   assert_contains "$result" "quoted-path-ok" "a quoted/metacharacter PATH entry was not preserved as data"
   [ ! -e "$CASE_BASE/literal" ] || fail "PATH shell metacharacters executed instead of remaining quoted data"
   pass "fm-spawn: a provider shell missing node receives the exact caller PATH, resolves a versioned formula's node/npx, runs env-node, and preserves quoted entries"
+}
+
+# Cursor is the only verified worker adapter whose launch template already
+# carries an `env` prefix of its own, so it is the one runtime where a later
+# change could plausibly clear the shared handoff. Drive its real template.
+test_cursor_template_env_prefix_preserves_the_caller_path() {
+  local record versioned caller_path out status result
+  record=$(make_spawn_case cursor-harness)
+  read_spawn_case "$record"
+  versioned="$CASE_BASE/homebrew/opt/node@24/bin"
+  make_fake_node_install "$versioned"
+  cat > "$FAKEBIN_DIR/cursor-agent" <<SH
+#!/bin/sh
+{
+  printf 'path=%s\\n' "\$PATH"
+  printf 'node=%s\\n' "\$(command -v node 2>/dev/null || printf MISSING)"
+  npx
+} > '$CASE_BASE/result'
+SH
+  chmod +x "$FAKEBIN_DIR/cursor-agent"
+  SPAWN_ARG3=cursor
+
+  if PATH=$(cat "$CASE_BASE/pane.path") command -v node >/dev/null 2>&1; then
+    fail "the fake provider baseline unexpectedly resolves node"
+  fi
+  caller_path="$versioned:$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
+  out=$(run_spawn "$caller_path" CURSOR_PROJECTS_ROOT_OVERRIDE="$CASE_BASE/cursor-projects")
+  status=$?
+  expect_code 0 "$status" "a cursor spawn should succeed: $out"
+  assert_contains "$out" "spawned $CASE_ID" "the cursor spawn did not report success"
+  result=$(cat "$CASE_BASE/result" 2>/dev/null || true)
+  assert_contains "$result" "path=$caller_path" \
+    "cursor's own env prefix did not preserve the caller PATH"
+  assert_contains "$result" "node=$versioned/node" \
+    "the cursor worker did not resolve node from the versioned formula bin"
+  assert_contains "$result" "npx-env-node-ok" \
+    "the cursor worker could not run a #!/usr/bin/env node executable"
+  pass "fm-spawn: the cursor launch template's own env prefix keeps the caller PATH handoff intact"
 }
 
 test_fresh_spawn_and_relaunch_replace_provider_path_idempotently() {
@@ -258,6 +299,7 @@ SH
 }
 
 test_versioned_homebrew_path_reaches_worker_and_env_shebang
+test_cursor_template_env_prefix_preserves_the_caller_path
 test_fresh_spawn_and_relaunch_replace_provider_path_idempotently
 test_empty_path_refuses_before_helper_resolution
 test_control_byte_path_refuses_before_endpoint_creation
