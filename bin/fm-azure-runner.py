@@ -148,6 +148,13 @@ COMMISSIONING_SKU_POOL = (
     "Standard_E4as_v6",
     "Standard_D4ds_v6",
 )
+COMMISSIONING_DISPOSABLE_RESOURCE_TYPES = {
+    "microsoft.compute/disks",
+    "microsoft.compute/virtualmachines",
+    "microsoft.compute/virtualmachines/runcommands",
+    "microsoft.devtestlab/schedules",
+    "microsoft.network/networkinterfaces",
+}
 
 
 class RunnerError(RuntimeError):
@@ -1557,6 +1564,27 @@ def exact_commissioning_budget(env):
     return {"id": budget_id, "etag": budget.get("eTag") or budget.get("etag")}
 
 
+def partition_commissioning_inventory(resources, expected_foundation):
+    disposable = []
+    reservation_resources = []
+    foundation_resources = []
+    for item in resources:
+        role = (item.get("tags") or {}).get("firstmate-role")
+        resource_type = str(item.get("type", "")).lower()
+        if role == "validation-shard" and resource_type in COMMISSIONING_DISPOSABLE_RESOURCE_TYPES:
+            disposable.append(item)
+        elif role == "runner-cost-reservation":
+            reservation_resources.append(item)
+        else:
+            foundation_resources.append(item)
+    actual_foundation = {
+        (str(item.get("type", "")).lower(), item.get("name")) for item in foundation_resources
+    }
+    if actual_foundation != expected_foundation:
+        raise RunnerError("commissioning requires the exact 29-resource foundation and zero foreign resources")
+    return disposable, reservation_resources
+
+
 def commissioning_inventory_gate(env, state):
     resources, _, _ = az_command(env, ["resource", "list", "--resource-group", env["resource_group"]])
     vault_endpoints = [
@@ -1608,20 +1636,7 @@ def commissioning_inventory_gate(env, state):
         ("microsoft.managedidentity/userassignedidentities", "id-{}-{}".format(env["prefix"], suffix))
         for suffix in ("validation", "policy-review", "crosscheck-tools", "validation-shards", "networkless-verifier")
     )
-    disposable = []
-    reservation_resources = []
-    foundation_resources = []
-    for item in resources:
-        role = (item.get("tags") or {}).get("firstmate-role")
-        if role == "validation-shard":
-            disposable.append(item)
-        elif role == "runner-cost-reservation":
-            reservation_resources.append(item)
-        else:
-            foundation_resources.append(item)
-    actual = {(str(item.get("type", "")).lower(), item.get("name")) for item in foundation_resources}
-    if actual != expected:
-        raise RunnerError("commissioning requires the exact 29-resource foundation and zero foreign resources")
+    disposable, reservation_resources = partition_commissioning_inventory(resources, expected)
     ensure_state_dirs(env)
     for path in sorted(env["state_dir"].glob("azr-*.json")):
         try:

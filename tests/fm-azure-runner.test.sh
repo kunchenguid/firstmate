@@ -356,6 +356,29 @@ PY
   pass "retail pricing selects exact Linux on-demand consumption and refuses Low Priority or ambiguity"
 }
 
+commissioning_inventory_role_overlap_unit() {
+  python3 - "$HOST" <<'PY'
+import importlib.util, sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+controller={"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-validation-shards","name":"id-prefix-validation-shards","type":"Microsoft.ManagedIdentity/userAssignedIdentities","tags":{"firstmate-role":"validation-shard"}}
+expected={("microsoft.managedidentity/userassignedidentities","id-prefix-validation-shards")}
+disposable,reservations=m.partition_commissioning_inventory([controller],expected)
+assert disposable==[] and reservations==[]
+runner_vm={"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-prefix-run-aaaaaaaaaaaa","name":"vm-prefix-run-aaaaaaaaaaaa","type":"Microsoft.Compute/virtualMachines","tags":{"firstmate-role":"validation-shard","invocation-binding":"azr-aaaaaaaaaaaa"}}
+disposable,reservations=m.partition_commissioning_inventory([controller,runner_vm],expected)
+assert disposable==[runner_vm] and reservations==[]
+foreign={"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-foreign","name":"id-foreign","type":"Microsoft.ManagedIdentity/userAssignedIdentities","tags":{"firstmate-role":"validation-shard"}}
+try: m.partition_commissioning_inventory([controller,foreign],expected)
+except m.RunnerError as exc: assert "zero foreign" in str(exc)
+else: raise AssertionError("foreign role-tagged managed identity bypassed exact foundation inventory")
+foreign_vm={**runner_vm,"type":"Microsoft.Network/publicIPAddresses","name":"pip-foreign"}
+try: m.partition_commissioning_inventory([controller,foreign_vm],expected)
+except m.RunnerError as exc: assert "zero foreign" in str(exc)
+else: raise AssertionError("foreign validation-shard role on an unapproved disposable type bypassed inventory")
+PY
+  pass "foundation controller UAMI survives overlapping role classification while foreign role-tagged resources refuse"
+}
+
 mixed_pool_capacity_unit() {
   python3 - "$HOST" <<'PY'
 import importlib.util, pathlib, tempfile, sys
@@ -508,6 +531,7 @@ management_fencing_unit
 effective_rbac_adversaries
 cost_retry_unit
 retail_rate_unit
+commissioning_inventory_role_overlap_unit
 mixed_pool_capacity_unit
 commissioning_admission_unit
 
