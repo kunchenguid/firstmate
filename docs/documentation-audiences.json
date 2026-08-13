@@ -257,6 +257,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/cross-repo-workspaces.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
