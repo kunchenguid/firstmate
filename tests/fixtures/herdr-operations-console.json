@@ -1,0 +1,300 @@
+{
+  "schema": "fm-herdr-operations-console.fixture.v1",
+  "now": "2026-08-13T12:00:00Z",
+  "ttl_seconds": 300,
+  "max_events": 4,
+  "snapshot": {
+    "schema": "fm-fleet-snapshot.v1",
+    "generated": "2026-08-13T11:59:50Z",
+    "fm_home": "/Users/example/private-firstmate-home",
+    "main_inventory": {
+      "valid": true
+    },
+    "tasks": [
+      {
+        "id": "company-blocked",
+        "kind": "ship",
+        "harness": "codex",
+        "project": "sports-shorts",
+        "backlog": {
+          "title": "Sports Shorts"
+        },
+        "paths": {
+          "worktree": {
+            "path": "/Users/example/private-company-worktree",
+            "present": true
+          }
+        },
+        "current_state": {
+          "state": "blocked",
+          "source": "run-step",
+          "observed_at": "2026-08-13T11:59:40Z"
+        },
+        "hints": {
+          "pending_decision": true,
+          "blocked_event": true
+        }
+      },
+      {
+        "id": "done-task",
+        "kind": "ship",
+        "harness": "claude",
+        "project": "react-library",
+        "backlog": {
+          "title": "React Library"
+        },
+        "current_state": {
+          "state": "done",
+          "source": "run-step",
+          "observed_at": "2026-08-13T11:59:50Z"
+        }
+      },
+      {
+        "id": "paused-task",
+        "kind": "ship",
+        "harness": "codex",
+        "project": "tldraw",
+        "backlog": {
+          "title": "tldraw"
+        },
+        "current_state": {
+          "state": "paused",
+          "source": "status-log",
+          "observed_at": "2026-08-13T11:58:00Z"
+        }
+      },
+      {
+        "id": "react-qa",
+        "kind": "ship",
+        "harness": "codex",
+        "project": "react-library",
+        "backlog": {
+          "title": "React Library"
+        },
+        "current_state": {
+          "state": "working",
+          "source": "pane",
+          "observed_at": "2026-08-13T11:59:50Z"
+        }
+      },
+      {
+        "id": "stale-task",
+        "kind": "ship",
+        "harness": "pi",
+        "project": "old-project",
+        "backlog": {
+          "title": "Old Project"
+        },
+        "current_state": {
+          "state": "done",
+          "source": "status-log",
+          "observed_at": "2026-08-13T11:40:00Z"
+        }
+      },
+      {
+        "id": "unknown-task",
+        "kind": "ship",
+        "harness": "kimi",
+        "project": "unknown-project",
+        "backlog": {
+          "title": "Unknown Project"
+        },
+        "current_state": {
+          "state": "unknown",
+          "source": "none",
+          "observed_at": "2026-08-13T11:59:00Z"
+        }
+      }
+    ]
+  },
+  "tasks": {
+    "company-blocked": {
+      "project": "Sports Shorts",
+      "task": "Diagnosis",
+      "phase": "Diagnosis",
+      "profile_lane": "Company Codex",
+      "model": "Sol High",
+      "effort": "diagnosis",
+      "review": "Captain decision",
+      "link": {
+        "supported": false
+      }
+    },
+    "done-task": {
+      "project": "React Library",
+      "task": "Release check",
+      "phase": "Completed",
+      "profile_lane": "Company Claude",
+      "model": "Opus",
+      "effort": "review",
+      "link": {
+        "supported": true,
+        "file": "/Users/example/secret.md"
+      }
+    },
+    "paused-task": {
+      "project": "tldraw",
+      "task": "Native archive review",
+      "phase": "Waiting for Captain",
+      "profile_lane": "Personal Codex",
+      "model": "Luna Max",
+      "effort": "medium",
+      "review": "Paused by Captain",
+      "link": {
+        "supported": true,
+        "file": "Items/tldraw.md"
+      }
+    },
+    "react-qa": {
+      "project": "React Library",
+      "task": "Browser QA",
+      "phase": "Runtime QA",
+      "profile_lane": "Personal Codex",
+      "model": "Luna Max",
+      "effort": "QA",
+      "review": "None",
+      "link": {
+        "supported": true,
+        "file": "Items/React Library.md"
+      }
+    },
+    "stale-task": {
+      "project": "Old Project",
+      "task": "Historical run",
+      "phase": "Unknown phase",
+      "profile_lane": "Personal Claude",
+      "model": "Sonnet",
+      "effort": "low",
+      "review": "Evidence stale",
+      "link": {
+        "supported": true,
+        "file": "Items/Old Project.md"
+      }
+    },
+    "unknown-task": {
+      "project": "Unknown Project",
+      "task": "No current evidence",
+      "phase": "Unknown phase",
+      "profile_lane": "Company Codex",
+      "model": "Unknown",
+      "effort": "Unknown",
+      "review": "Unknown",
+      "link": {
+        "supported": true,
+        "file": "Items/Unknown Project.md"
+      }
+    }
+  },
+  "events": [
+    {
+      "id": "event-react-created",
+      "dedupe_key": "react-task",
+      "at": "2026-08-13T11:55:00Z",
+      "source": "AI Project Manager",
+      "kind": "task-updated",
+      "task_id": "react-qa",
+      "summary": "React Library task recorded"
+    },
+    {
+      "id": "event-react-updated",
+      "dedupe_key": "react-task",
+      "at": "2026-08-13T11:58:00Z",
+      "source": "AI Project Manager",
+      "kind": "task-updated",
+      "task_id": "react-qa",
+      "summary": "React Library task refreshed"
+    },
+    {
+      "id": "event-react-state",
+      "at": "2026-08-13T11:59:00Z",
+      "source": "Firstmate",
+      "kind": "worker-state",
+      "task_id": "react-qa",
+      "summary": "React Library worker entered QA"
+    },
+    {
+      "id": "event-company-blocked",
+      "at": "2026-08-13T11:59:20Z",
+      "source": "Firstmate",
+      "kind": "decision",
+      "task_id": "company-blocked",
+      "summary": "Sports Shorts is blocked pending Captain decision"
+    },
+    {
+      "id": "event-tldraw-paused",
+      "at": "2026-08-13T11:50:00Z",
+      "source": "Firstmate",
+      "kind": "worker-state",
+      "task_id": "paused-task",
+      "summary": "tldraw remains paused"
+    },
+    {
+      "id": "event-docs",
+      "at": "2026-08-13T11:40:00Z",
+      "source": "Obsidian",
+      "kind": "docs",
+      "task_id": "react-qa",
+      "summary": "Project navigation hint refreshed"
+    },
+    {
+      "id": "event-private",
+      "at": "2026-08-13T11:59:30Z",
+      "source": "Firstmate",
+      "kind": "docs",
+      "summary": "Private file /Users/example/secret-worktree must never appear"
+    },
+    {
+      "id": "event-malformed",
+      "source": "Firstmate",
+      "kind": "worker-state",
+      "summary": "Missing timestamp is malformed"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Captain",
+      "to": "Firstmate",
+      "relation": "owns"
+    },
+    {
+      "from": "Firstmate",
+      "to": "react-qa",
+      "relation": "observes"
+    },
+    {
+      "from": "react-qa",
+      "to": "Review",
+      "relation": "gates"
+    },
+    {
+      "from": "Firstmate",
+      "to": "company-blocked",
+      "relation": "observes"
+    },
+    {
+      "from": "company-blocked",
+      "to": "Approval",
+      "relation": "waits-for"
+    },
+    {
+      "from": "Firstmate",
+      "to": "paused-task",
+      "relation": "observes"
+    },
+    {
+      "from": "Firstmate",
+      "to": "stale-task",
+      "relation": "observes"
+    },
+    {
+      "from": "Firstmate",
+      "to": "unknown-task",
+      "relation": "observes"
+    },
+    {
+      "from": "Firstmate",
+      "to": "done-task",
+      "relation": "observes"
+    }
+  ]
+}

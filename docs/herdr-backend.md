@@ -200,6 +200,29 @@ A Herdr pane id contains a colon, so the adapter splits `window=` on the first c
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
 
+## Fixture operations console
+
+`bin/fm-herdr-operations-console.sh` is an opt-in, fixture-first renderer around one `fm-fleet-snapshot.v1` object.
+The fleet snapshot remains the current-state owner, while the fixture envelope supplies only display labels, explicit profile lanes, navigation hints, privacy-safe activity events, and dependency edges.
+The normalized `fm-herdr-operations-console.v1` object feeds the panel, bounded activity history, and separate ASCII network view so those surfaces cannot drift from one another.
+The panel identifies its Tokyo Night theme and shows project, task, phase, explicit state, profile lane, model, effort, freshness, review need, and Obsidian navigation state.
+States are accepted only from structured current-state evidence and are limited to explicit `Working`, `QA`, `Pending review`, `Waiting`, `Blocked`, `Paused`, `Done`, `Stale`, and `Unknown` labels.
+Missing or expired evidence remains `Unknown` or `Stale`, and silence never becomes `Working` or `Done`.
+Activity accepts only an allowlisted source and event kind, redacts private-path or secret-like summaries, deduplicates by explicit key, keeps a configured bound, and marks the retained view scrollable.
+The network view uses only validated fixture edges and normalized task states, and an empty edge set says that no dependency was recorded rather than inventing one.
+Obsidian navigation is supported only for an explicit `AI Project Manager` vault link to a safe relative `Items/*.md` file, with every other link rendered as unsupported.
+The renderer reads no agent chat, pane text, process name, prompt, report body, or raw private path.
+Use `--width 76` or another bounded width for a later narrow terminal attachment; this prototype does not configure Tailscale, SSH, mobile access, or the live Captain layout.
+The optional `--publish-metadata <workspace-id>` path is display-only and accepts only an explicitly named `fm-lab-` session through `bin/fm-herdr-lab.sh`; it verifies focus before and after metadata publication and never starts, stops, deletes, approves, or controls a worker.
+The Herdr metadata is therefore a short-lived display cache, not task, approval, worker, project, or AI Project Manager authority.
+
+The deterministic fixture and contract tests are:
+
+```sh
+tests/fm-herdr-operations-console.test.sh
+tests/fm-herdr-lab.test.sh
+```
+
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
@@ -331,6 +354,7 @@ tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
+tests/fm-herdr-operations-console.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
