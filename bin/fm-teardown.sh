@@ -1966,7 +1966,10 @@ remove_firstmate_home() {
           echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
           ;;
         "$FM_HOME_RETURN_RESTORE_FAILED")
-          echo "error: treehouse return failed for $label $abs_home_path and its staged identity could not be put back; lease may still be held" >&2
+          echo "error: the staged identity of $label $abs_home_path could not be put back; its lease was not released and the staging directory named above holds what is missing" >&2
+          ;;
+        "$FM_HOME_RETURN_STAGE_FAILED")
+          echo "error: the identity of $label $abs_home_path could not be cleared, so its lease was not released; the home is intact and rerunning teardown retries it" >&2
           ;;
       esac
       # Process events are rearmed even when the identity could not be restored:

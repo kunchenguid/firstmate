@@ -176,6 +176,7 @@ Either property that cannot be established refuses the launch instead of passing
 Giving a leased secondmate home back to the pool is the other half of that boundary, and `fm-home-return-lib.sh` owns it.
 A pooled home keeps its directory across `treehouse return`, and everything that makes it a home rather than a checkout is gitignored, so the pool's clean-and-reset cannot remove it and the next task would inherit a retired secondmate's identity.
 That library therefore clears the identity itself, transactionally and only once ownership and the shared removable-home layout contract are proven while the lease is still held, so a failed return hands the home back exactly as it was instead of leaving it half cleared.
+Which homes are retirable is that one shared contract, not a stricter pooled variant: a pooled home stages exactly what removing a standalone home outright would have removed, so no layout is retirable one way and stuck the other.
 Both lifecycle paths that release a lease call it, retirement in `fm-teardown.sh` and failed-seed rollback in `fm-home-seed.sh`, so no path can return a slot that is still marked.
 Its header owns the exact artifact list and failure modes, and `tests/fm-teardown-home-identity.test.sh` drives both paths, in both directions, against a throwaway repository with its own pool.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.

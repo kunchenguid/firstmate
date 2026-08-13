@@ -991,6 +991,13 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-home-return-lib.sh)
+      # The shared clear-identity-around-the-pool-return transaction, sourced by
+      # both bin/fm-teardown.sh's retirement (pr-forge) and bin/fm-home-seed.sh's
+      # failed-seed rollback (secondmate).
+      printf '%s\n' pr-forge
+      printf '%s\n' secondmate
+      ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the

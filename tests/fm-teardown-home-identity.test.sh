@@ -31,10 +31,17 @@
 # Both lifecycle paths that return a leased home are driven here, in both
 # directions: retirement through bin/fm-teardown.sh and failed-seed rollback
 # through bin/fm-home-seed.sh, each with a successful return and with a return
-# that fails. The supported layout is driven too - an operational directory
-# symlinked to a target inside the home retires normally, exactly as the
-# non-pooled path already allows - alongside the unsafe link that resolves out
-# of the home, which is refused.
+# that fails.
+#
+# What makes a home retirable is one boundary, so the parity cases drive each
+# layout through the pooled path AND through the standalone path where the home
+# is a plain directory removed outright. Supported layouts retire on both;
+# unsafe ones refuse on both with the same reason. A layout that only one path
+# accepts would leave a pooled home unretirable and its lease never released,
+# which is the same pool-slot leak in a new shape.
+#
+# The lease-identity comparison in the reuse case needs a JSON reader; without
+# one that case says so and asserts slot reuse by path alone rather than failing.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -145,14 +152,24 @@ lease_pool_worktree() {  # <holder>
 
 # The lease allocation as treehouse's own --json record, which is where the pool
 # publishes the identity of a lease (its path, id, and holder) for exactly this
-# kind of non-interactive use.
+# kind of non-interactive use. Reading it needs a JSON reader, so a machine
+# without one still leases by path and says which assertion it had to drop.
+lease_reader_available() {
+  command -v python3 >/dev/null 2>&1
+}
+
 lease_pool_worktree_json() {  # <holder>
   ( cd "$CASE_REPO" && treehouse get --lease --lease-holder "$1" --json )
 }
 
 lease_json_field() {  # <json> <field>
-  command -v python3 >/dev/null 2>&1 || return 0
+  lease_reader_available || return 0
   printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$2" 2>/dev/null || true
+}
+
+return_pool_worktree() {  # <path>
+  [ -n "$1" ] || return 0
+  ( cd "$CASE_REPO" && treehouse return --force "$1" >/dev/null 2>&1 ) || true
 }
 
 # The one worktree a max_trees=1 pool holds, whatever treehouse named it.
@@ -354,67 +371,122 @@ test_failed_return_restores_the_home() {
   pass "a failed return restores the complete home and keeps its registration"
 }
 
-# 4. Malformed identity is a refusal, not a guess: an operational path that
-# resolves OUT of the home cannot be cleared without reaching outside it, so
-# retirement stops and changes nothing. Pooling does not change that answer - it
-# is the same removable-home contract the plain-directory path applies.
-test_escaping_operational_symlink_refuses() {
-  local id home out status
-  id=identity-symlink-t4
-  make_pool_case teardown-identity-symlink
-  home=$(lease_pool_worktree "$id")
+# 4. Removability is one boundary, and these cases hold both sides of it to it.
+# The same home layout is driven through the POOLED path, where retirement clears
+# the identity and hands the checkout back, and through the STANDALONE path,
+# where the home is a plain directory that retirement removes outright. A layout
+# accepted by one and refused by the other would mean a pooled home could be
+# permanently unretirable - its lease never released - purely for a shape the
+# plain-directory path removes without complaint.
+#
+# build_parity_home <home> <id> <layout>: a seeded home wearing one layout.
+build_parity_home() {
+  local home=$1 id=$2 layout=$3 opdir
   seed_pool_home "$home" "$id"
-  register_secondmate "$id" "$home"
-  mkdir -p "$CASE_DIR/escaped-data"
-  printf 'not the home\n' > "$CASE_DIR/escaped-data/keep.md"
-  rm -rf "${home:?}/data"
-  ln -s "$CASE_DIR/escaped-data" "$home/data"
-
-  out=$(run_teardown "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "teardown retired a home whose data directory resolves outside it"$'\n'"--- output ---"$'\n'"$out"
-  assert_contains "$out" "resolves outside the secondmate home" \
-    "teardown did not explain the refusal of an escaping operational path"
-  [ -L "$home/data" ] || fail "teardown removed the escaping data symlink it refused to clear"
-  assert_grep "not the home" "$CASE_DIR/escaped-data/keep.md" \
-    "teardown followed an escaping symlink out of the home"
-  assert_grep "$id" "$home/$MARKER" "teardown cleared the marker of a home it refused to retire"
-  assert_no_identity_staging "a refused retirement staged identity anyway"
-  assert_present "$CASE_FLEET/state/$id.meta" \
-    "teardown cleared the task metadata of a home it refused to retire"
-  pass "an operational path resolving outside the home refuses retirement"
+  case "$layout" in
+    internal-symlink)
+      for opdir in data config projects; do
+        rm -rf "${home:?}/$opdir"
+        mkdir -p "$home/internal-$opdir"
+        printf 'owned %s\n' "$opdir" > "$home/internal-$opdir/keep.md"
+        ln -s "$home/internal-$opdir" "$home/$opdir"
+      done
+      ;;
+    nested-owned-target)
+      rm -rf "${home:?}/projects"
+      mkdir -p "$home/data/projects-store"
+      printf 'nested under another owned path\n' > "$home/data/projects-store/keep.md"
+      ln -s "$home/data/projects-store" "$home/projects"
+      ;;
+    symlinked-marker)
+      rm -f "${home:?}/$MARKER"
+      printf '%s\n' "$id" > "$home/identity-store"
+      ln -s "$home/identity-store" "$home/$MARKER"
+      ;;
+    escaping-target)
+      rm -rf "${home:?}/data"
+      mkdir -p "$CASE_DIR/escaped-target"
+      printf 'not the home\n' > "$CASE_DIR/escaped-target/keep.md"
+      ln -s "$CASE_DIR/escaped-target" "$home/data"
+      ;;
+    dangling-link)
+      rm -rf "${home:?}/data"
+      ln -s "$home/never-created" "$home/data"
+      ;;
+    resolution-cycle)
+      rm -rf "${home:?}/data"
+      ln -s data "$home/data"
+      ;;
+    ancestor-target)
+      rm -rf "${home:?}/data"
+      ln -s "$home" "$home/data"
+      ;;
+    *) fail "unknown parity layout $layout" ;;
+  esac
 }
 
-# 4b. The supported shape of the same layout: an operational directory symlinked
-# to a target INSIDE the home is what the non-pooled retirement path already
-# allows, so a pooled home wearing it retires normally. Both the link and the
-# target it owns come off, or the returned checkout would still carry the home's
-# operational state under another name.
-test_internal_operational_symlink_retires() {
-  local id home out status opdir
-  id=identity-inside-symlink-t4b
-  make_pool_case teardown-identity-inside-symlink
-  home=$(lease_pool_worktree "$id")
-  seed_pool_home "$home" "$id"
-  register_secondmate "$id" "$home"
-  for opdir in data config projects; do
-    rm -rf "${home:?}/$opdir"
-    mkdir -p "$home/internal-$opdir"
-    printf 'owned %s\n' "$opdir" > "$home/internal-$opdir/keep.md"
-    ln -s "$home/internal-$opdir" "$home/$opdir"
-  done
+# run_parity_layout <layout> retired|refused [<shared-refusal-reason>]
+run_parity_layout() {
+  local layout=$1 expect=$2 reason=${3:-}
+  local pooled_id standalone_id pooled standalone out status
+  make_pool_case "parity-$layout" 2
+  pooled_id="parity-pooled-$layout"
+  standalone_id="parity-alone-$layout"
+  pooled=$(lease_pool_worktree "$pooled_id")
+  standalone="$CASE_DIR/standalone-home"
+  mkdir -p "$standalone"
+  build_parity_home "$pooled" "$pooled_id" "$layout"
+  build_parity_home "$standalone" "$standalone_id" "$layout"
 
-  out=$(run_teardown "$id")
+  register_secondmate "$pooled_id" "$pooled"
+  out=$(run_teardown "$pooled_id")
   status=$?
-  expect_code 0 "$status" "retiring a home with supported internal operational symlinks should succeed"$'\n'"--- output ---"$'\n'"$out"
-  assert_home_identity_cleared "$home" "the returned checkout still wears the retired home's identity"
-  for opdir in data config projects; do
-    if [ -e "$home/internal-$opdir" ] || [ -L "$home/internal-$opdir" ]; then
-      fail "retirement left the target of the $opdir symlink on the returned checkout"
-    fi
-  done
-  assert_no_identity_staging "retirement left its staged identity behind"
-  pass "an operational directory symlinked inside the home retires with its target"
+  if [ "$expect" = retired ]; then
+    expect_code 0 "$status" "the pooled path refused the $layout layout"$'\n'"--- output ---"$'\n'"$out"
+    assert_home_identity_cleared "$pooled" "the pooled $layout retirement left identity on the returned checkout"
+    assert_no_identity_staging "the pooled $layout retirement left its staging behind"
+  else
+    [ "$status" -ne 0 ] || fail "the pooled path retired the $layout layout"$'\n'"--- output ---"$'\n'"$out"
+    assert_contains "$out" "$reason" "the pooled $layout refusal did not give the shared reason"
+    assert_present "$pooled/$MARKER" "the pooled $layout refusal cleared the marker anyway"
+    assert_no_identity_staging "the pooled $layout refusal staged identity anyway"
+  fi
+
+  register_secondmate "$standalone_id" "$standalone"
+  out=$(run_teardown "$standalone_id")
+  status=$?
+  if [ "$expect" = retired ]; then
+    expect_code 0 "$status" "the standalone path refused the $layout layout the pooled path retired"$'\n'"--- output ---"$'\n'"$out"
+    [ ! -e "$standalone" ] || fail "the standalone path left the $layout home behind"
+  else
+    [ "$status" -ne 0 ] || fail "the standalone path retired the $layout layout the pooled path refused"$'\n'"--- output ---"$'\n'"$out"
+    assert_contains "$out" "$reason" "the standalone $layout refusal did not give the same reason as the pooled one"
+    assert_present "$standalone/$MARKER" "the standalone $layout refusal removed the home anyway"
+  fi
+}
+
+# The supported layouts: both paths retire them. An operational directory
+# symlinked inside the home, including a target nested under another owned path,
+# and an identity marker that is a link to a regular file, which the standalone
+# gate accepts because its test follows links.
+test_supported_layouts_retire_on_both_paths() {
+  run_parity_layout internal-symlink retired
+  run_parity_layout nested-owned-target retired
+  run_parity_layout symlinked-marker retired
+  pass "supported home layouts retire through the pooled and the standalone path alike"
+}
+
+# The rejected layouts: both paths refuse them, for the same stated reason,
+# because one validator owns that answer for both. An escape, a dangling link, a
+# link that resolves nowhere because it points at itself, and a target that is an
+# ancestor of the home.
+test_rejected_layouts_refuse_on_both_paths() {
+  local reason="resolves outside the secondmate home"
+  run_parity_layout escaping-target refused "$reason"
+  run_parity_layout dangling-link refused "$reason"
+  run_parity_layout resolution-cycle refused "$reason"
+  run_parity_layout ancestor-target refused "$reason"
+  pass "unsafe home layouts refuse on both paths with the same reason"
 }
 
 # 5. Resemblance is not ownership: another leased checkout in the same pool, with
@@ -474,12 +546,17 @@ test_ownership_check_precedes_cleanup() {
 # and the lease identity: the same path under a NEW lease id is the slot being
 # released and reacquired, not a lease that was never returned.
 test_next_lease_is_reusable() {
-  local id home out status next next_id first_id
+  local id home out status next next_id first_id lease
   id=identity-release-t7
   make_pool_case teardown-identity-release 1
-  home=$(lease_pool_worktree_json "$id")
-  first_id=$(lease_json_field "$home" lease_id)
-  home=$(lease_json_field "$home" path)
+  if lease_reader_available; then
+    lease=$(lease_pool_worktree_json "$id")
+    first_id=$(lease_json_field "$lease" lease_id)
+    home=$(lease_json_field "$lease" path)
+  else
+    first_id=
+    home=$(lease_pool_worktree "$id")
+  fi
   [ -n "$home" ] || fail "the throwaway pool did not report a leased worktree path"
   seed_pool_home "$home" "$id"
   register_secondmate "$id" "$home"
@@ -487,17 +564,23 @@ test_next_lease_is_reusable() {
   out=$(run_teardown "$id")
   status=$?
   expect_code 0 "$status" "retiring a leased secondmate home should succeed"$'\n'"--- output ---"$'\n'"$out"
-  next=$(lease_pool_worktree_json "next-holder")
-  next_id=$(lease_json_field "$next" lease_id)
-  next=$(lease_json_field "$next" path)
-  [ -n "$next" ] || fail "the pool refused a lease after the retirement"
-  [ "$next" = "$home" ] || fail "the pool handed out $next instead of reusing the retired slot $home"
-  if [ -n "$first_id" ] && [ -n "$next_id" ]; then
-    [ "$next_id" != "$first_id" ] || fail "the pool reported the same lease id, so the retired lease was never released"
+  if lease_reader_available; then
+    lease=$(lease_pool_worktree_json "next-holder")
+    next_id=$(lease_json_field "$lease" lease_id)
+    next=$(lease_json_field "$lease" path)
   else
-    echo "# lease-id comparison not run: no JSON reader available, path reuse asserted alone"
+    next_id=
+    next=$(lease_pool_worktree "next-holder")
+  fi
+  [ -n "$next" ] || fail "the pool refused a lease after the retirement"
+  [ "$next" = "$home" ] || { return_pool_worktree "$next"; fail "the pool handed out $next instead of reusing the retired slot $home"; }
+  if [ -n "$first_id" ] && [ -n "$next_id" ]; then
+    [ "$next_id" != "$first_id" ] || { return_pool_worktree "$next"; fail "the pool reported the same lease id, so the retired lease was never released"; }
+  else
+    echo "# lease-id comparison not run: no JSON reader available, slot reuse asserted by path alone"
   fi
   assert_home_identity_cleared "$next" "the next lease was handed a checkout still wearing a retired identity"
+  return_pool_worktree "$next"
   pass "the next lease after a retirement reuses the retired slot and carries no home residue"
 }
 
@@ -557,8 +640,8 @@ test_seed_rollback_failed_return_keeps_identity() {
 test_seeded_identity_survives_ordinary_use
 test_retirement_returns_a_clean_checkout
 test_failed_return_restores_the_home
-test_escaping_operational_symlink_refuses
-test_internal_operational_symlink_retires
+test_supported_layouts_retire_on_both_paths
+test_rejected_layouts_refuse_on_both_paths
 test_unrelated_checkout_is_untouched
 test_ownership_check_precedes_cleanup
 test_next_lease_is_reusable

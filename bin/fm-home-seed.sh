@@ -593,7 +593,9 @@ seed_pool_return() {  # <home> <label>
 # retirement uses, so neither path can return a marked checkout. A home whose
 # marker names another secondmate is not this run's to clear, so its lease is
 # still released - leaking a pool slot would be the worse failure - but its
-# identity is left exactly as the pool handed it over.
+# identity is left exactly as the pool handed it over. That release happens only
+# when nothing was moved; once clearing has touched the home, a lease this run
+# could not put back in a known state is kept rather than handed on.
 seed_return_treehouse_home() {
   local home=$1 id=${2:-} abs_home rc=0
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
@@ -609,6 +611,12 @@ seed_return_treehouse_home() {
       seed_pool_return "$abs_home" "treehouse-acquired home" || {
         echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
       }
+      ;;
+    "$FM_HOME_RETURN_STAGE_FAILED")
+      echo "warning: the seeded identity of $abs_home could not be cleared during seed rollback; the home is intact and its lease may still be held" >&2
+      ;;
+    "$FM_HOME_RETURN_RESTORE_FAILED")
+      echo "warning: the seeded identity staged out of $abs_home during seed rollback could not be put back; its lease may still be held and the staging directory named above holds what is missing" >&2
       ;;
     *)
       echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2

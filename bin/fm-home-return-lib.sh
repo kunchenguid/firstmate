@@ -36,12 +36,18 @@
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 SUB_HOME_PARENT_MARKER="${SUB_HOME_PARENT_MARKER:-.fm-secondmate-parent}"
 
-# Refused before the return; nothing on disk changed.
+# Refused before anything moved; nothing on disk changed and the lease is still
+# exactly as the caller handed it over.
 FM_HOME_RETURN_REFUSED=1
 # The return itself failed; the home was put back exactly as it was.
 FM_HOME_RETURN_FAILED=2
-# The return failed AND the staged identity could not be put back.
+# The staged identity could not be put back; the staging directory named in the
+# diagnostic holds it and the lease must not be released.
 FM_HOME_RETURN_RESTORE_FAILED=3
+# Staging could not finish, and what it had already moved was put back. The home
+# is intact but its identity was never cleared, so the lease must not be
+# released as though it had been.
+FM_HOME_RETURN_STAGE_FAILED=4
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
@@ -100,79 +106,96 @@ fm_home_identity_artifacts() {
   printf '%s\n' "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER" data state config projects
 }
 
-# Every path inside <home> this retirement owns, one home-relative path per line,
-# in the order they must be staged. A supported operational symlink contributes
-# both the link and the target it owns, because clearing only the link would
-# leave that target on the returned checkout. Nothing outside the home is ever
-# listed, and two owned paths may never overlap: an alias that resolves onto
-# another owned path is ambiguous about what clearing it would remove, so it is
-# refused rather than guessed at.
+# Every path inside <home> this retirement owns, one home-relative path per line.
+# The rule is exactly what removing the home directory outright would have taken,
+# so a pooled home and a standalone one answer the same question the same way:
+# a link entry itself always counts, and an operational directory's resolved
+# target counts too whenever it lives inside the home, since removing the home
+# would have taken that target with it.
+# A symlinked operational directory is therefore staged THROUGH its resolved
+# target rather than refused, which is the layout
+# validate_firstmate_operational_dirs_for_removal already approves. A resolved
+# target that escapes the home, dangles, cannot be resolved (a cycle resolves
+# nowhere), or is the home itself is refused by that same validator before this
+# runs, and refused again here because an unresolvable target cannot be staged.
+# Targets that nest inside another owned path are folded into it rather than
+# staged twice, so an internal layout is never rejected merely for being spelled
+# as a link, and an identity FILE is staged as the link it is: following it to
+# decide what else to delete is the ambiguity this refuses to guess at, and
+# removing the home would not have followed it either.
 fm_home_identity_inventory() {  # <abs-home> <label>
-  local home=$1 label=$2 name path target rel seen entry
-  seen=
+  local home=$1 label=$2 name path target rel owned="" printed="" entry keep
   for name in $(fm_home_identity_artifacts); do
     path="$home/$name"
     { [ -e "$path" ] || [ -L "$path" ]; } || continue
-    if [ -L "$path" ]; then
-      case "$name" in
-        "$SUB_HOME_MARKER"|"$SUB_HOME_PARENT_MARKER")
-          echo "REFUSED: $label identity file $path is a symlink; retirement cannot prove whose identity it names" >&2
-          return 1
-          ;;
-      esac
-      target=$(cd "$path" 2>/dev/null && pwd -P) || {
-        echo "REFUSED: $label operational path $path could not be resolved" >&2
-        return 1
-      }
-      if ! path_is_ancestor_of "$home" "$target"; then
-        echo "REFUSED: $label operational path $path resolves outside the secondmate home to $target" >&2
-        return 1
-      fi
-      rel=${target#"$home"/}
-    else
-      rel=$name
+    owned="$owned $name"
+    [ -L "$path" ] || continue
+    case "$name" in
+      "$SUB_HOME_MARKER"|"$SUB_HOME_PARENT_MARKER") continue ;;
+    esac
+    target=$(cd "$path" 2>/dev/null && pwd -P) || {
+      echo "REFUSED: $label operational path $path could not be resolved, so retirement cannot tell what clearing it would remove" >&2
+      return 1
+    }
+    if [ "$target" = "$home" ] || ! path_is_ancestor_of "$home" "$target"; then
+      echo "REFUSED: $label operational path $path resolves to $target, which is not inside the secondmate home" >&2
+      return 1
     fi
-    for entry in $seen; do
-      if [ "$entry" = "$rel" ] || [ "$entry" = "$name" ] \
-        || path_is_ancestor_of "$entry" "$rel" || path_is_ancestor_of "$rel" "$entry"; then
-        echo "REFUSED: $label owns overlapping cleanup targets $entry and $rel; retirement cannot tell them apart" >&2
-        return 1
+    owned="$owned ${target#"$home"/}"
+  done
+  for rel in $owned; do
+    keep=1
+    for entry in $owned; do
+      [ "$entry" != "$rel" ] || continue
+      if path_is_ancestor_of "$entry" "$rel"; then
+        keep=0
+        break
       fi
     done
-    seen="$seen $name"
-    printf '%s\n' "$name"
-    if [ "$rel" != "$name" ]; then
-      seen="$seen $rel"
-      printf '%s\n' "$rel"
-    fi
+    [ "$keep" -eq 1 ] || continue
+    case " $printed " in
+      *" $rel "*) continue ;;
+    esac
+    printed="$printed $rel"
+    printf '%s\n' "$rel"
   done
 }
 
 # Move the owned paths aside into a private staging directory, echoing that
 # directory (empty when the home owns nothing). Staging is a move, not a copy, so
-# what goes back to the pool is a checkout. A move that fails mid-way puts back
-# what it already took, so a refusal never leaves a partially cleared home.
+# what goes back to the pool is a checkout.
+# Returns FM_HOME_RETURN_REFUSED only while nothing has moved. Once a move has
+# happened the answer is never "nothing changed": a failure mid-inventory puts
+# back what it already took and reports FM_HOME_RETURN_STAGE_FAILED, or
+# FM_HOME_RETURN_RESTORE_FAILED when that recovery itself could not finish, and
+# both name the staging directory and the artifact that stopped it.
 fm_home_identity_stage() {  # <abs-home> <label>
-  local home=$1 label=$2 staging rel inventory
-  inventory=$(fm_home_identity_inventory "$home" "$label") || return 1
+  local home=$1 label=$2 staging rel inventory moved=0
+  inventory=$(fm_home_identity_inventory "$home" "$label") || return "$FM_HOME_RETURN_REFUSED"
   if [ -z "$inventory" ]; then
     printf '\n'
     return 0
   fi
   staging=$(umask 077; mktemp -d "${home%/*}/.fm-home-identity.XXXXXX") || {
     echo "REFUSED: cannot stage the retiring identity of $label $home" >&2
-    return 1
+    return "$FM_HOME_RETURN_REFUSED"
   }
   : > "$staging/manifest"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     if ! mkdir -p "$staging/tree/$(dirname "$rel")" \
       || ! mv -f -- "$home/$rel" "$staging/tree/$rel"; then
-      echo "REFUSED: cannot stage $home/$rel for $label; recovering from $staging" >&2
-      fm_home_identity_restore "$home" "$label" "$staging" || return 1
-      return 1
+      if [ "$moved" -eq 0 ]; then
+        echo "REFUSED: cannot stage $home/$rel for $label; nothing was moved and $staging is empty" >&2
+        rm -rf -- "$staging"
+        return "$FM_HOME_RETURN_REFUSED"
+      fi
+      echo "error: cannot stage $home/$rel for $label after already moving $moved of its owned paths aside; recovering them from $staging" >&2
+      fm_home_identity_restore "$home" "$label" "$staging" || return "$FM_HOME_RETURN_RESTORE_FAILED"
+      return "$FM_HOME_RETURN_STAGE_FAILED"
     fi
     printf '%s\n' "$rel" >> "$staging/manifest"
+    moved=$(( moved + 1 ))
   done <<EOF
 $inventory
 EOF
@@ -224,10 +247,8 @@ fm_home_return_with_clean_identity() {  # <home> <label> <expected-id> <return_f
     return "$FM_HOME_RETURN_REFUSED"
   }
   marker="$abs_home/$SUB_HOME_MARKER"
-  if [ -L "$marker" ]; then
-    echo "REFUSED: $label $abs_home has a symlinked identity marker $marker; retirement cannot prove whose identity it names" >&2
-    return "$FM_HOME_RETURN_REFUSED"
-  fi
+  # Read exactly as the standalone removal gate reads it: `-f` follows a link to
+  # a regular file, so a home is seeded here whenever it is seeded there.
   if [ ! -f "$marker" ]; then
     # Not a seeded home, so this fleet owns nothing on it to clear. Resemblance
     # is not ownership: the checkout goes back untouched.
@@ -242,7 +263,7 @@ fm_home_return_with_clean_identity() {  # <home> <label> <expected-id> <return_f
     fi
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home" "$label" || return "$FM_HOME_RETURN_REFUSED"
-  staging=$(fm_home_identity_stage "$abs_home" "$label") || return "$FM_HOME_RETURN_REFUSED"
+  staging=$(fm_home_identity_stage "$abs_home" "$label") || return $?
   if "$return_fn" "$abs_home" "$label"; then
     [ -z "$staging" ] || rm -rf -- "$staging"
     return 0
