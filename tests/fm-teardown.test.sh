@@ -1437,7 +1437,7 @@ test_teardown_validates_omp_evidence_generation_and_temps() {
     > "$case_dir/state/task-x1.omp-session-evidence.owner"
   mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
   token='g-current.123.1000.1'
-  temp="$case_dir/state/task-x1.omp-session-evidence/$token.g-current.456.550e8400-e29b-41d4-a716-446655440000.1.tmp"
+  temp="$case_dir/state/task-x1.omp-session-evidence/$token.incarnation-550e8400-e29b-41d4-a716-446655440000.generation-g-current.pid-456.seq-1.tmp"
   printf '%s 1000 1000 0\n' "$token" > "$temp"
   legacy_temp="$case_dir/state/task-x1.omp-session-evidence/$token.456.2.tmp"
   printf '%s 1000 1000 0\n' "$token" > "$legacy_temp"
@@ -1446,10 +1446,29 @@ test_teardown_validates_omp_evidence_generation_and_temps() {
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 0 "$rc" "omp-evidence-owned-temp: teardown should accept a proven atomic temp"
+  expect_code 1 "$rc" "omp-evidence-unowned-temp: teardown must reject synthetic temps"
+  assert_present "$temp" "omp-evidence-unowned-temp: teardown removed a synthetic UUID temp"
+  assert_present "$legacy_temp" "omp-evidence-unowned-temp: teardown removed a legacy temp"
+
+  case_dir=$(make_case omp-evidence-owned-partial-temp)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  printf 'g-current\n' > "$case_dir/state/task-x1.busy-gen"
+  printf 'firstmate-omp-session-evidence-v1\ntask-x1\n%s\nfirstmate-omp-incarnation-v1 g-current 456 550e8400-e29b-41d4-a716-446655440000\n' "$case_dir/state" \
+    > "$case_dir/state/task-x1.omp-session-evidence.owner"
+  mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
+  token='g-current.123.1000.1'
+  temp="$case_dir/state/task-x1.omp-session-evidence/$token.incarnation-550e8400-e29b-41d4-a716-446655440000.generation-g-current.pid-456.seq-1.tmp"
+  printf 'partial evidence\n' > "$temp"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "omp-evidence-owned-partial-temp: teardown should accept an owned partial temp"
   assert_absent "$case_dir/state/task-x1.omp-session-evidence" \
-    "omp-evidence-owned-temp: teardown left proven atomic evidence temp behind"
-  pass "teardown enforces current-generation evidence and accepts only proven temps"
+    "omp-evidence-owned-partial-temp: teardown left owned partial evidence temp behind"
+  pass "teardown enforces durable temp ownership and recovers partial temps"
 }
 
 test_herdr_teardown_clears_escalation_marker() {

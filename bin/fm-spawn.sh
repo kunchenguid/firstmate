@@ -2763,6 +2763,7 @@ import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, r
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
+const SESSION_EVIDENCE_OWNER = "$STATE_REAL/$ID.omp-session-evidence.owner";
 const BUSY_GEN_PATH = "$STATE_REAL/$ID.busy-gen";
 const TURNEND = "$TURNEND";
 const RUN_TOKEN_PREFIX = "$BUSY_GEN" + ".";
@@ -2770,7 +2771,11 @@ let runToken = "";
 let idlePublishedToken = "";
 let runSequence = 0;
 let tempSequence = 0;
-const INCARNATION_ID = "$BUSY_GEN." + process.pid + "." + randomUUID();
+const INCARNATION_MARKER = "firstmate-omp-incarnation-v1";
+const INCARNATION_UUID = randomUUID();
+const INCARNATION_ID = "incarnation-" + INCARNATION_UUID + ".generation-" + "$BUSY_GEN" +
+  ".pid-" + process.pid;
+const INCARNATION_RECORD = INCARNATION_MARKER + " $BUSY_GEN " + process.pid + " " + INCARNATION_UUID;
 const ownedTemps = new Set<string>();
 let recoveryBlocked = false;
 const runRecords: Array<{
@@ -2860,6 +2865,38 @@ const readOptional = (path: string) => {
     throw error;
   }
 };
+const parseIncarnationRegistry = (content: string) => {
+  const lines = content.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") lines.pop();
+  if (lines.length < 3 || lines[0] !== "firstmate-omp-session-evidence-v1" ||
+      lines[1] !== "$ID" || lines[2] !== "$STATE_REAL") return null;
+  const records: Array<{ generation: string; processId: string; uuid: string }> = [];
+  for (const line of lines.slice(3)) {
+    const fields = line.split(/\s+/);
+    if (fields.length !== 4 || fields[0] !== INCARNATION_MARKER ||
+        !/^[A-Za-z0-9._-]+$/.test(fields[1]) || !/^[0-9]+$/.test(fields[2]) ||
+        !Number.isSafeInteger(Number(fields[2])) || Number(fields[2]) <= 0 ||
+        !/^[0-9a-f-]{36}$/.test(fields[3])) return null;
+    records.push({ generation: fields[1], processId: fields[2], uuid: fields[3] });
+  }
+  return records;
+};
+const readIncarnationRegistry = () => parseIncarnationRegistry(readRegularFile(SESSION_EVIDENCE_OWNER));
+const ensureIncarnationRegistration = () => {
+  requireCurrentGeneration();
+  const content = readRegularFile(SESSION_EVIDENCE_OWNER);
+  const records = parseIncarnationRegistry(content);
+  if (!records) throw new Error("OMP evidence ownership registry is malformed");
+  if (records.some((record) => record.generation === "$BUSY_GEN" &&
+      record.processId === String(process.pid) && record.uuid === INCARNATION_UUID)) return;
+  const normalized = content.endsWith("\n") ? content : content + "\n";
+  atomicWrite(SESSION_EVIDENCE_OWNER, normalized + INCARNATION_RECORD + "\n");
+};
+const incarnationRegistered = (generation: string, processId: string, uuid: string) => {
+  const records = readIncarnationRegistry();
+  return records?.some((record) => record.generation === generation &&
+    record.processId === processId && record.uuid === uuid) === true;
+};
 const parseRunToken = (token: string) => {
   if (typeof token !== "string" || !token.startsWith(RUN_TOKEN_PREFIX)) return null;
   const fields = token.slice(RUN_TOKEN_PREFIX.length).split(".");
@@ -2873,19 +2910,13 @@ const parseRunToken = (token: string) => {
   return { processId, startedAt, sequence };
 };
 const isAtomicTempName = (name: string) => {
-  const legacy = /^(.*)\.([0-9]+)\.([0-9]+)\.tmp$/.exec(name);
-  if (legacy && parseRunToken(legacy[1])) {
-    const processId = Number(legacy[2]);
-    const sequence = Number(legacy[3]);
-    return Number.isSafeInteger(processId) && processId > 0 &&
-      Number.isSafeInteger(sequence) && sequence > 0;
-  }
-  const current = /^(.*)\.([A-Za-z0-9._-]+)\.([0-9]+)\.([0-9a-f-]{36})\.([0-9]+)\.tmp$/.exec(name);
-  if (!current || current[2] !== "$BUSY_GEN" || !parseRunToken(current[1])) return false;
-  const processId = Number(current[3]);
+  const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
+  if (!current || current[3] !== "$BUSY_GEN" || !parseRunToken(current[1])) return false;
+  const processId = current[4];
   const sequence = Number(current[5]);
-  return Number.isSafeInteger(processId) && processId > 0 &&
-    Number.isSafeInteger(sequence) && sequence > 0;
+  return Number.isSafeInteger(Number(processId)) && Number(processId) > 0 &&
+    Number.isSafeInteger(sequence) && sequence > 0 &&
+    incarnationRegistered(current[3], processId, current[2]);
 };
 const writeRunEvidence = (record: {
   token: string;
@@ -3114,6 +3145,13 @@ const adoptCurrentRun = () => {
     } catch (error) {
       if ((error as any)?.code !== "ENOENT") throw error;
     }
+  } catch {
+    recoveryBlocked = true;
+    runToken = "";
+    return "";
+  }
+  try {
+    ensureIncarnationRegistration();
   } catch {
     recoveryBlocked = true;
     runToken = "";

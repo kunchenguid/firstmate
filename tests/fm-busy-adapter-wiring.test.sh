@@ -232,6 +232,30 @@ switch (process.env.MODE) {
     if (!readFileSync(runPath, "utf8").trim()) throw new Error("the next run did not publish its marker");
     break;
   }
+  case "owned-partial-evidence-temp": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const runPath = base + ".omp-session-run";
+    const evidenceDir = base + ".omp-session-evidence";
+    const ownerPath = base + ".omp-session-evidence.owner";
+    const turnEndPath = base + ".turn-ended";
+    await fire("agent_start");
+    const token = readFileSync(runPath, "utf8").trim();
+    const ownerLine = readFileSync(ownerPath, "utf8").trim().split(/\r?\n/)
+      .find((line) => line.startsWith("firstmate-omp-incarnation-v1 "));
+    if (!ownerLine) throw new Error("the extension did not register its incarnation");
+    const fields = ownerLine.split(/\s+/);
+    if (fields.length !== 4) throw new Error("the incarnation registration was malformed");
+    const temp = evidenceDir + "/" + token + ".incarnation-" + fields[3] +
+      ".generation-" + fields[1] + ".pid-" + fields[2] + ".seq-1.tmp";
+    writeFileSync(temp, "partial evidence\n", { encoding: "utf8", flag: "wx" });
+    try { unlinkSync(turnEndPath); } catch {}
+    const reloadedHandlers = await loadHandlers("?owned-partial=" + String(Date.now()));
+    await fireWith(reloadedHandlers, "agent_end");
+    if (busyState().includes("state=busy")) throw new Error("an owned partial evidence temp kept OMP busy");
+    if (!markerPresent(turnEndPath)) throw new Error("owned partial evidence recovery omitted turn-end evidence");
+    if (!existsSync(temp)) throw new Error("owned partial evidence temp was removed before cleanup");
+    break;
+  }
   case "state-marker-symlinks": {
     const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
     const paths = [
@@ -983,7 +1007,7 @@ test_omp_extension_preserves_unverified_evidence_temps() {
   printf '%s\n' "$run_token 1 1 0" > "$evidence_dir/$foreign_token.123.1.tmp"
   out=$(drive_omp_ext "$ext" agent-end "$state" "$id") || fail "unverified evidence temp recovery drive failed: $out"
   out=$(classify omp "$id" "$state")
-  [ "$out" = "idle omp-ext" ] || fail "a same-shaped evidence temp blocked recovery, got '$out'"
+  [ "$out" = "busy omp-ext" ] || fail "an unverified evidence temp must block recovery, got '$out'"
   [ -e "$evidence_dir/$foreign_token.123.1.tmp" ] || fail "an unverified evidence temp was removed"
 
   rec=$(make_spawn_case omp-foreign-evidence-temp omp "$id")
@@ -1000,6 +1024,24 @@ test_omp_extension_preserves_unverified_evidence_temps() {
   [ "$out" = "busy omp-ext" ] || fail "a foreign evidence temp was accepted, got '$out'"
   [ -e "$evidence_dir/foreign.123.1.tmp" ] || fail "a foreign evidence temp was silently removed"
   pass "omp reload preserves unverified evidence temporary files"
+}
+
+test_omp_extension_recovers_owned_partial_evidence_temp() {
+  local rec id=busy-omp-owned-partial-temp out state ext evidence_dir
+  rec=$(make_spawn_case omp-owned-partial-temp omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp owned-partial-temp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" owned-partial-evidence-temp "$state" "$id") \
+    || fail "owned partial evidence recovery drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "owned partial evidence did not recover the run, got '$out'"
+  evidence_dir="$state/$id.omp-session-evidence"
+  [ -n "$(find "$evidence_dir" -maxdepth 1 -type f -name '*.tmp' -print -quit)" ] \
+    || fail "owned partial evidence temp was not retained until cleanup"
+  pass "omp recovers owned partial evidence temps without accepting foreign temps"
 }
 
 test_omp_extension_rejects_evidence_path_collisions() {
@@ -1538,6 +1580,7 @@ test_omp_extension_rejects_unproven_timestamp_after_reload
 test_omp_extension_adopts_pending_run_before_new_start
 test_omp_extension_recovers_partial_persistence
 test_omp_extension_preserves_unverified_evidence_temps
+test_omp_extension_recovers_owned_partial_evidence_temp
 test_omp_extension_rejects_evidence_path_collisions
 test_omp_spawn_preserves_unverified_evidence_collisions
 test_omp_extension_reconciles_idle_finalizing_before_new_run
