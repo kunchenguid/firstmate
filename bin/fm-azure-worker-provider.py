@@ -370,17 +370,21 @@ def slot_from_name(name, pattern):
     return slot if 1 <= slot <= 16 else None
 
 
-def partial_container_metadata(metadata, slot, workers):
-    # Container metadata is only stamped at tag convergence, so a create
-    # interrupted before that point leaves an empty-metadata container next to
-    # exact-fleet template siblings. Emptiness inherits a same-slot sibling's
-    # tags (VM first); a bare orphan container stays empty and still
-    # classifies as foreign.
-    if metadata or slot not in workers:
-        return metadata
+def slot_sibling_tags(workers, slot):
+    # Children are only tagged at convergence, so a create interrupted before
+    # that point leaves untagged resources next to exact-fleet template
+    # siblings. Emptiness inherits a same-slot sibling's tags (VM first); a
+    # slot with no proven sibling yields emptiness and still classifies as
+    # foreign. Non-empty foreign tags never reach this inheritance.
+    if slot not in workers:
+        return {}
     resources = workers[slot]["resources"]
     donor = resources.get("vm") or next(iter(resources.values()), None)
     return dict((donor or {}).get("tags") or {})
+
+
+def partial_container_metadata(metadata, slot, workers):
+    return metadata if metadata else slot_sibling_tags(workers, slot)
 
 
 def cost_body(controller, forecast):
@@ -704,6 +708,8 @@ def inventory(controller, include_metrics=True):
 
     def add(kind, value, slot, power=None, tags_override=None):
         tags = dict(tags_override if tags_override is not None else (value.get("tags") or {}))
+        if not tags:
+            tags = slot_sibling_tags(workers, slot)
         if not is_exact_fleet(controller, tags):
             conflicts.append({"kind": kind, "slot": slot, "reason": "same-fleet name has foreign owner or generation"})
             return

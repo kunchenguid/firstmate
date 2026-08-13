@@ -509,6 +509,12 @@ assert module.partial_container_metadata({}, 2, partial_workers) == {}
 stamped={"workload":"firstmate","deployment-generation":"other","cleanup-owner":"owner"}
 assert module.partial_container_metadata(dict(stamped), 1, partial_workers) == stamped
 
+# Any untagged pre-convergence child (extension, run command, TTL) inherits
+# the same sibling proof; a slot with no proven sibling yields emptiness.
+assert module.slot_sibling_tags(partial_workers, 1) == sibling_tags
+assert module.slot_sibling_tags(vm_workers, 1) == sibling_tags
+assert module.slot_sibling_tags(partial_workers, 2) == {}
+
 # Guest marker framing: only marker lines parse, the last one wins, and a
 # malformed payload fails closed.
 assert module.marker_payload("noise\nFM-X:{}\n", "FM-WORKER-RESULT:") is None
