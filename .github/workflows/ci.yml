@@ -363,6 +363,8 @@ jobs:
             exit 1
           }
 
+          /bin/bash tests/fm-remote-home-seed.test.sh
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
