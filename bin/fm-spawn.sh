@@ -1660,13 +1660,15 @@ effort_flag_for_harness() {
       esac
       ;;
     traex)
-      # Same config key as codex, and the binary's own parser is authoritative:
-      # `-c model_reasoning_effort='"max"'` is rejected with
-      # "unknown variant `max`, expected one of `none`, `minimal`, `low`,
-      # `medium`, `high`, `xhigh`" (verified 2026-07-17, traex 0.200.13). Omit max
-      # rather than passing a known-bad value that would abort the launch.
+      # Same config key as codex, and the binary's own parser is authoritative.
+      # On traex 0.200.13 `-c model_reasoning_effort='"max"'` was rejected, so max
+      # was omitted. As of traex 0.200.19 the parser accepts max: a bogus value is
+      # now rejected with "unknown variant `bogusvalue`, expected one of `none`,
+      # `minimal`, `low`, `medium`, `high`, `xhigh`, `max`", and `max` loads
+      # cleanly (verified 2026-08-13, traex 0.200.19). The ceiling is now max,
+      # identical to claude and pi.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)

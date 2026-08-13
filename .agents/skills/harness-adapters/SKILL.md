@@ -134,7 +134,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
-| traex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on traex 0.200.13 (2026-07-17). Same config key as codex, and the binary's own parser is authoritative: `-c model_reasoning_effort='"max"'` is rejected with "unknown variant `max`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`", so `max` is omitted. The ceiling is `xhigh`, identical to codex. |
+| traex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified on traex 0.200.19 (2026-08-13). Same config key as codex. On 0.200.13 the parser rejected `max`, but 0.200.19 accepts it: a bogus value is rejected with "unknown variant `bogusvalue`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`", and `max` loads cleanly. The ceiling is now `max`, unlike codex. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
@@ -561,7 +561,7 @@ muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and c
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
 
-## traex (VERIFIED 2026-07-17, traex 0.200.13; primary/secondmate surfaces added 2026-07-20)
+## traex (VERIFIED 2026-07-17, traex 0.200.13; primary/secondmate surfaces added 2026-07-20; control mechanics and effort ceiling re-verified 2026-08-13 on 0.200.19)
 
 TRAE CLI 2.0, a fork of `openai/codex` maintained by the TRAE team, so it inherits codex's launch shape, `notify=` turn-end, `esc to interrupt` busy line, `$<skill>` popup, and codex's primary supervision shape (foreground checkpoint, blocking Stop hook).
 The crewmate/scout face is fully verified including live runs.
@@ -581,10 +581,24 @@ The correct resume is `traex resume <id>`; never copy traex's own printed resume
 | Skill invocation | `$<skill>`, codex-style popup (`/<skill>` is claude-only) |
 | Autonomy | `-y` (long form `--dangerously-bypass-approvals-and-sandbox`) |
 | Model flag | `-m`/`--model <MODEL>` |
-| Effort flag | `-c model_reasoning_effort="<none\|minimal\|low\|medium\|high\|xhigh>"`; see the [launch-profile-axes table](#launch-profile-axes) |
+| Effort flag | `-c model_reasoning_effort="<none\|minimal\|low\|medium\|high\|xhigh\|max>"`; see the [launch-profile-axes table](#launch-profile-axes) |
 | Turn-end hook | codex-style `-c notify=[...]`, fires in TUI and exec, needs NO hook trust |
 | Env marker | `TRAECLI_SESSION_INBOX` (see the detection warning below) |
 | Resume | `traex resume [SESSION_ID] [--last]`, plus `fork` |
+
+**Control mechanics are registered in the executable owner (verified 2026-08-13, traex 0.200.19).**
+The `Exit command` and `Interrupt` rows above are the verification record; `bin/fm-control-lib.sh` is what `bin/fm-control.sh` actually runs, so traex was unreachable by the control plane until its rows landed there.
+All five control-table values match codex exactly, each confirmed live against a real traex pane rather than copied:
+- Interrupt: a single Escape while generating stopped the turn and rendered `■ Interrupted by user`; one press was sufficient.
+- Composer clear: none needed - after the single Escape, typing fresh text showed only that text with no restored prompt, so traex does not repollute its composer (unlike muse).
+- Interrupt ack source: `none` - traex is a codex fork with no verified interrupt-terminal signal, so a cancellation claim reads from the busy fold like codex.
+- Exit: `/quit` opened the codex-style slash popup, and a following Enter returned the pane to a shell prompt (the foreground process became `zsh`), confirming a real process exit rather than a menu.
+- On 0.200.19 the `/quit` exit still misprints `To continue this session, run traecli resume <id>`; the correct resume is `traex resume <id>` (never copy traex's own printed line).
+
+**Effort ceiling is now `max` (re-verified 2026-08-13, traex 0.200.19).**
+On 0.200.13 the config parser rejected `max`; on 0.200.19 it accepts it.
+`traex exec -c model_reasoning_effort='"bogusvalue"'` is rejected with "unknown variant `bogusvalue`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`" (the variant list now includes `max`), and `-c model_reasoning_effort='"max"'` loads cleanly past config validation.
+`fm-spawn`'s traex effort accept set was widened from `low|medium|high|xhigh` to `low|medium|high|xhigh|max` to match.
 
 **Busy signature: the anchor is `esc to interrupt` and nothing else.**
 The default `FM_TMUX_BUSY_REGEX_DEFAULT` matches unchanged; no `FM_BUSY_REGEX` override is needed.
