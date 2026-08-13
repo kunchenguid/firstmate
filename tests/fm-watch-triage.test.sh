@@ -136,6 +136,11 @@ test_signal_reason_is_actionable_classifier() {
   signal_reason_is_actionable "$state/c.turn-ended" && fail "a bare turn-ended marker classified actionable"
   # Coalesced batch: one benign + one captain-relevant -> actionable.
   signal_reason_is_actionable "$state/a.status" "$state/b.status" || fail "coalesced benign+actionable not actionable"
+  # A failure and a merge result are captain-relevant and must always wake.
+  printf 'failed: build broke on main\n' > "$state/d.status"
+  signal_reason_is_actionable "$state/d.status" || fail "a failed: line was not actionable"
+  printf 'merged\n' > "$state/e.status"
+  signal_reason_is_actionable "$state/e.status" || fail "a legacy merged line was not actionable"
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
@@ -343,6 +348,30 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
+test_secondmate_status_signal_never_absorbed_classifier() {
+  local dir fakebin state
+  dir=$(make_case secondmate-signal-classify); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  # Even PROVABLY working, a secondmate's .status signal is its routed-reply
+  # channel and must surface; its bare turn-ended keeps the ordinary absorb.
+  export FM_FAKE_CREW_STATE_sm='state: working · source: run-step · running'
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf 'working: routed reply for the parent\n' > "$state/sm.status"
+  ! signal_crew_provably_working "$state/sm.status" \
+    || fail "a working secondmate's status signal was treated as absorbable"
+  signal_crew_provably_working "$state/sm.turn-ended" \
+    || fail "a working secondmate's bare turn-end lost its ordinary absorb"
+  # An ordinary crewmate with the same verdict stays absorbable: the rule is
+  # keyed on recorded kind, not on task naming or content guessing.
+  export FM_FAKE_CREW_STATE_crew='state: working · source: run-step · running'
+  printf 'kind=ship\n' > "$state/crew.meta"
+  printf 'working: progress\n' > "$state/crew.status"
+  signal_crew_provably_working "$state/crew.status" \
+    || fail "the secondmate rule leaked onto an ordinary crewmate status"
+  unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_crew
+  pass "a secondmate's status signal is never absorbed as provably working; crewmates are unaffected"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -425,6 +454,57 @@ test_working_note_not_working_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "surfaced working: note was not queued"
   [ -s "$state/.seen-task_status" ] || fail "surfaced working: note did not advance its .seen-* suppressor"
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
+}
+
+test_secondmate_status_note_surfaced_despite_busy_agent() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  printf 'working: routed reply landed in the parent stream\n' > "$state/mate.status"
+  # Busy evidence that would absorb an ordinary crewmate's no-verb note must
+  # not absorb a secondmate's: its status stream is the routed-reply channel.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a busy secondmate's routed status note"
+  grep -F "signal: $state/mate.status" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced secondmate note"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced note failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.status" >/dev/null \
+    || fail "surfaced secondmate note was not queued"
+  pass "a secondmate's status note surfaces even while its own agent is busy"
+}
+
+test_self_announced_close_does_not_rewake_but_next_note_does() {
+  local dir state fakebin out status_file pid rc
+  dir=$(make_case self-close-quiet); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'needs-decision [key=k1]: pick one\n' > "$status_file"
+  prime_status_seen "$state" "$status_file" || fail "could not prime the announced baseline"
+  # The home's own bookkeeping close, written through the guarded
+  # self-announced append this home's answerers use.
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced "$2" "$3" "resolved [key=k1]: answered: closed by this home"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$status_file" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the bookkeeping close was not self-announced (rc=$rc)"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "the home's own bookkeeping close re-woke its own watcher: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "self-announced close printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "self-announced close enqueued a durable wake"; }
+  # A later, different note on the SAME task still wakes: dedup is keyed on the
+  # exact announced bytes, never on task identity.
+  printf 'needs-decision [key=k2]: a genuinely new decision\n' >> "$status_file"
+  wait_for_exit "$pid" 40 || fail "a later different note after a self-announced close was swallowed"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the later note did not surface as a signal"
+  pass "a self-announced close never wakes its own home, and the next real note still does"
 }
 
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
@@ -1853,10 +1933,13 @@ test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
+test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
+test_secondmate_status_note_surfaced_despite_busy_agent
+test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run

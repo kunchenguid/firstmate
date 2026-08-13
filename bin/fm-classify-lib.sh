@@ -177,11 +177,12 @@ status_is_paused_or_captain_held() {  # <status-line>
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
 # folds skip the line), never rewritten to "default".
-# The parsers are pure reads of a single line; the verb parser strips any key
-# token before the colon so the leading word is recovered cleanly.
+# The parsers are pure reads of a single line. Status metadata may contain any
+# number of "[name=value]" tags before the colon, in any order, so verb parsing
+# ends at the first tag rather than special-casing "[key=...]".
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
-  v=${v%%\[key=*}
+  v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
@@ -436,7 +437,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=3
+FM_OPEN_DECISIONS_FOLD_VERSION=4
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -709,16 +710,31 @@ crew_is_paused() {  # <id>
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to
 # task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
+# A kind=secondmate task's .status signal is never absorbable here regardless of
+# busy evidence: that stream is the mate's routed-reply channel, so every append
+# is parent-directed content the supervisor must read (a routed reply, a newly
+# raised decision, a mirrored remote line), and a busy mate agent makes its note
+# more current, not less deliverable. Scoped to .status files - a mate's bare
+# turn-ended ping still uses the ordinary provably-working absorb.
 signal_crew_provably_working() {  # <file> ...
-  local f base task seen=""
+  local f base dir task seen=""
   for f in "$@"; do
     base=${f##*/}
+    dir=${f%/*}
+    [ "$dir" != "$f" ] || dir=.
     case "$base" in
       *.status)     task=${base%.status} ;;
       *.turn-ended) task=${base%.turn-ended} ;;
       *)            continue ;;
     esac
     [ -n "$task" ] || continue
+    case "$base" in
+      *.status)
+        if [ "$(grep '^kind=' "$dir/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = secondmate ]; then
+          return 1
+        fi
+        ;;
+    esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     crew_is_provably_working "$task" || return 1
