@@ -273,16 +273,22 @@ NORMALIZED=$(
       ($value | type) == "string"
       and ($value | test("(merge|deploy|delete|destroy|drop |force[- ]push|revoke|rotate|production|prod |credential|secret|token|password|uninstall|overwrite|replace .*app|irreversible)"; "i"));
     def identity_token($task_id):
-      ($task_id | ascii_downcase | gsub("[^a-z0-9]"; "-")) as $slug
-      | (if ($slug | test("^[a-z0-9]")) and $slug == $task_id
-         then $slug
-         else $slug + "-" + ($task_id | explode
-                             | reduce .[] as $c (17; ((. * 131) + $c) % 100000) | tostring)
-         end)
+      ($task_id
+       | explode
+       | map(if . == 45 or (. >= 48 and . <= 57) or (. >= 97 and . <= 122)
+             then ([.] | implode)
+             else "_" + (. | tostring) + "_"
+             end)
+       | join(""))
       | if length == 0 then "task" else . end;
-    def decision_alias($task_id; $stem):
-      "D-" + identity_token($task_id)
-      + (if $stem == null then "" else " · " + $stem end);
+    def decision_key($task_id; $decision):
+      ($decision.obsidian_id // null) as $explicit
+      | if ($explicit | type) == "string" and ($explicit | test("^D[0-9]+$"))
+        then {key:$explicit, source:"obsidian"}
+        else {key:("D-" + identity_token($task_id)), source:"task-identity"}
+        end;
+    def decision_alias($key; $stem):
+      $key + (if $stem == null then "" else " · " + $stem end);
     def node_for($id; $tasks):
       if $id == "Captain" then {id:"Captain", label:"Captain", state:null}
       elif $id == "Firstmate" then {id:"Firstmate", label:"Firstmate", state:null}
@@ -413,11 +419,22 @@ NORMALIZED=$(
            | .value as $t
            | (($task_display[$t.id] // {}).decision // {}) as $decision
            | (obsidian_stem($t.link; ($task_display[$t.id] // {}).link)) as $stem
+           | ([$decision.options[]? | select((. | type) == "string")] | length) as $raw_option_count
            | ([$decision.options[]?
                | select((. | type) == "string")
-               | safe(.; ""; 40)
-               | select(. != "" and (. | test("^[A-Za-z][A-Za-z0-9 /_-]*$")))]
-              | unique) as $named_options
+               | . as $raw
+               | (safe($raw; ""; 40)) as $display
+               | if $display != "" and ($display | test("^[A-Za-z0-9][A-Za-z0-9 ()/_.,:+-]*$"))
+                 then {label:$display, supported:true}
+                 else {label:"Unsupported option (select explicitly)", supported:false}
+                 end]
+              | to_entries
+              | map(.value + {order:.key})
+              | unique_by(.label)
+              | sort_by(.order)
+              | map(del(.order))) as $option_entries
+           | ($option_entries | map(.label)) as $named_options
+           | ([$option_entries[] | select(.supported | not)] | length) as $unsupported_option_count
            | (safe($decision.question; ""; 120)) as $question
            | (safe($decision.recommendation; ""; 120)) as $recommendation
            | ((ts_epoch($decision.opened_at)) as $opened
@@ -434,8 +451,11 @@ NORMALIZED=$(
                ($task_display[$t.id] // {}).project,
                $t.blocker, $t.task]
               | any(restricted_decision(.))) as $restricted
+           | (decision_key($t.id; $decision)) as $key
            | {
-               alias:decision_alias($t.id; $stem),
+               alias:decision_alias($key.key; $stem),
+               alias_key:$key.key,
+               alias_source:$key.source,
                task_id:$t.id,
                project:$t.project,
                task:$t.task,
@@ -448,9 +468,13 @@ NORMALIZED=$(
                           end),
                blocked_task:$t.task,
                state:$t.state,
-               options:(if ($named_options | length) >= 2 then $named_options else ["Igen", "Nem"] end),
-               binary:(($named_options | length) < 2),
-               keys:(if ($named_options | length) >= 2
+               options:(if $raw_option_count > 0 then $named_options else ["Igen", "Nem"] end),
+               binary:($raw_option_count == 0),
+               option_count:$raw_option_count,
+               options_retained:($named_options | length),
+               unsupported_options:$unsupported_option_count,
+               options_complete:(($named_options | length) == $raw_option_count),
+               keys:(if $raw_option_count > 0
                      then ($named_options
                            | reduce .[] as $option
                                ({used:[], keys:[], seq:0};
@@ -490,17 +514,25 @@ NORMALIZED=$(
           inventory:(if $snapshot.main_inventory.valid == false then "invalid" else "valid-or-unknown" end)
         },
         tasks:$tasks,
-        decisions:{
-          cards:$decisions,
-          open:($decisions | length),
-          focused:(if ($decisions | length) == 1 then $decisions[0].alias else null end),
-          selection_required:(($decisions | length) > 1),
-          bare_reply_accepted:(($decisions | length) == 1 and $decisions[0].shorthand_allowed),
-          restricted:([$decisions[] | select(.restricted) | .alias]),
-          click_to_approve:false,
-          chat_visibility:"unsupported",
-          chat_ask_state:"unknown"
-        },
+        decisions:(
+          (($decisions | map(.alias_key) | length)
+           == ($decisions | map(.alias_key) | unique | length)) as $aliases_unique
+          | {
+              cards:$decisions,
+              open:($decisions | length),
+              aliases_unique:$aliases_unique,
+              ambiguous_aliases:([$decisions | group_by(.alias_key)[]
+                                  | select(length > 1) | .[0].alias_key]),
+              focused:(if ($decisions | length) == 1 and $aliases_unique
+                       then $decisions[0].alias else null end),
+              selection_required:(($decisions | length) > 1 or ($aliases_unique | not)),
+              bare_reply_accepted:(($decisions | length) == 1 and $aliases_unique
+                                   and $decisions[0].shorthand_allowed),
+              restricted:([$decisions[] | select(.restricted) | .alias]),
+              click_to_approve:false,
+              chat_visibility:"unsupported",
+              chat_ask_state:"unknown"
+            }),
         selector:(
           ((.selector // {}) as $sel
            | ($sel.profiles // {}) as $profiles
@@ -808,6 +840,13 @@ if [ "$FORMAT" = decisions ] || [ "$FORMAT" = all ]; then
          fit("│ RECOMMEND " + $d.recommendation),
          fit("│ BLOCKED   " + $d.blocked_task),
          fit("│ KEYS      " + ($d.keys | join("  "))),
+         fit("│ OPTIONS   " + (if $d.option_count == 0 then "binary Igen/Nem"
+                               elif $d.unsupported_options > 0 or ($d.options_complete | not)
+                               then (($d.options_retained | tostring) + "/" + ($d.option_count | tostring)
+                                     + " shown; " + ($d.unsupported_options | tostring)
+                                     + " unsupported - select explicitly")
+                               else (($d.option_count | tostring) + " recorded, all shown")
+                               end)),
          fit("│ APPROVAL  " + $d.approval_boundary),
          fit("└ " + (if $d.restricted then "explicit confirmation required; shorthand refused"
                      elif $d.binary then "reply Igen or Nem"
@@ -816,7 +855,8 @@ if [ "$FORMAT" = decisions ] || [ "$FORMAT" = all ]; then
      )
      end),
     fit(if .decisions.selection_required
-        then "Multiple open decisions - select one explicitly; no default is assumed."
+        then (if .decisions.aliases_unique then "Multiple open decisions - select one explicitly; no default is assumed."
+              else "Alias is ambiguous for more than one decision - select explicitly by task; no reply is routed." end)
         elif .decisions.bare_reply_accepted
         then ("Focused: " + (.decisions.focused // "none") + " - bare Igen or Nem accepted.")
         elif (.decisions.open) > 0

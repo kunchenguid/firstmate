@@ -628,6 +628,41 @@ test_alias_is_pure_identity_under_collision() {
       | .restricted == true and .shorthand_allowed == false
   ' >/dev/null || fail "surviving merge card lost its approval boundary"
 
+  local hash_fixture pair pair_a pair_b alias_a alias_b
+  for pair in "aaaaAAA:AaAAaaa" "task.A_b:task+a:B"; do
+    pair_a=${pair%%:*}
+    pair_b=${pair#*:}
+    hash_fixture="$TMP_ROOT/alias-hash-$pair_a.json"
+    jq --arg a "$pair_a" --arg b "$pair_b" '
+        .snapshot.tasks += [
+          {id:$a, kind:"ship", harness:"codex", project:"h", backlog:{title:"H"},
+           current_state:{state:"parked", source:"run-step", observed_at:"2026-08-13T11:59:30Z"},
+           hints:{pending_decision:true}},
+          {id:$b, kind:"ship", harness:"codex", project:"h", backlog:{title:"H"},
+           current_state:{state:"parked", source:"run-step", observed_at:"2026-08-13T11:59:30Z"},
+           hints:{pending_decision:true}}]
+        | .tasks[$a] = {project:"H", task:"Safe cleanup", phase:"Review",
+            profile_lane:"Personal Codex",
+            decision:{question:"Archive the old notes?", recommendation:"Archive",
+                      opened_at:"2026-08-13T11:50:00Z"}}
+        | .tasks[$b] = {project:"H", task:"Release", phase:"Review",
+            profile_lane:"Personal Codex",
+            decision:{question:"Merge the release branch into main?", recommendation:"Hold",
+                      opened_at:"2026-08-13T11:50:00Z"}}' "$FIXTURE" > "$hash_fixture"
+    alias_a=$("$CONSOLE" --fixture "$hash_fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -r --arg a "$pair_a" '[.decisions.cards[] | select(.task_id == $a)][0].alias')
+    alias_b=$("$CONSOLE" --fixture "$hash_fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -r --arg b "$pair_b" '[.decisions.cards[] | select(.task_id == $b)][0].alias')
+    [ "$alias_a" != "$alias_b" ] \
+      || fail "ids $pair_a and $pair_b shared alias $alias_a (restricted card reachable by the safe alias)"
+    "$CONSOLE" --fixture "$hash_fixture" --format json --now 2026-08-13T12:00:00Z \
+      | jq -e --arg b "$pair_b" '
+        .decisions.aliases_unique == true
+          and (.decisions.ambiguous_aliases | length) == 0
+          and ([.decisions.cards[] | select(.task_id == $b)][0].restricted) == true
+      ' >/dev/null || fail "alias uniqueness was not reported for the $pair_a pair"
+  done
+
   local variant_fixture
   variant_fixture="$TMP_ROOT/alias-variants.json"
   jq '.snapshot.tasks = [.snapshot.tasks[] | select(.id | startswith("variant") | not)]
@@ -750,6 +785,53 @@ test_option_key_tokens_are_unique_and_readable() {
         == (.keys | map(capture("^\\[(?<k>[^]]+)\\]").k) | unique | length))
     ' >/dev/null || fail "shipped fixture produced duplicate key tokens"
   pass "option key tokens stay unique and readable under colliding initials"
+}
+
+test_decision_options_are_never_silently_dropped() {
+  local fixture out text card_query
+  card_query='[.decisions.cards[] | select(.task_id == "multi-option")][0]'
+
+  fixture="$TMP_ROOT/options-punctuation.json"
+  jq '.tasks["multi-option"].decision.options = ["zip","native bundle (fast)","tarball"]' \
+    "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .options_retained == 3 and .options_complete == true
+        and .binary == false
+        and (.options | index(\"native bundle (fast)\")) != null" >/dev/null \
+    || fail "an ordinary parenthesised option was dropped from the card"
+
+  fixture="$TMP_ROOT/options-numeric.json"
+  jq '.tasks["multi-option"].decision.options = ["deploy to prod","2fa"]' "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .binary == false
+        and .option_count == 2 and .options_retained == 2
+        and (.options | index(\"Igen\")) == null
+        and (.options | index(\"2fa\")) != null
+        and .restricted == true and .shorthand_allowed == false" >/dev/null \
+    || fail "a numeric-leading option collapsed the card to a binary Igen/Nem decision"
+
+  fixture="$TMP_ROOT/options-unsupported.json"
+  jq '.tasks["multi-option"].decision.options = ["zip","/Users/bob/secret-plan.md","tarball"]' \
+    "$FIXTURE" > "$fixture"
+  out=$("$CONSOLE" --fixture "$fixture" --format json --now 2026-08-13T12:00:00Z)
+  printf '%s' "$out" | jq -e "$card_query
+      | .option_count == 3 and .unsupported_options == 1 and .options_complete == true
+        and .binary == false
+        and (.options | map(test(\"/Users/bob\")) | any | not)
+        and (.options | index(\"Unsupported option (select explicitly)\")) != null" >/dev/null \
+    || fail "a private-path option was silently discarded instead of explicitly marked"
+  assert_not_contains "$out" "/Users/bob" "decision option leaked a private path"
+
+  text=$("$CONSOLE" --fixture "$fixture" --format decisions --no-color --now 2026-08-13T12:00:00Z)
+  assert_contains "$text" "unsupported - select explicitly" \
+    "decision surface did not disclose an unsupported option"
+
+  text=$("$CONSOLE" --fixture "$FIXTURE" --format decisions --no-color --now 2026-08-13T12:00:00Z)
+  assert_contains "$text" "recorded, all shown" \
+    "decision surface did not confirm a complete option set"
+  pass "decision options are retained, marked, and never collapsed to a false binary"
 }
 
 test_chat_visibility_is_reported_honestly() {
@@ -886,6 +968,7 @@ test_decision_inbox_is_stable_bounded_and_approval_safe
 test_alias_is_pure_identity_under_collision
 test_restriction_survives_truncation_redaction_and_options
 test_option_key_tokens_are_unique_and_readable
+test_decision_options_are_never_silently_dropped
 test_chat_visibility_is_reported_honestly
 test_profile_selector_is_display_only_and_verified
 test_motion_is_bounded_and_reduced_motion_aware
