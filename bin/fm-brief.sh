@@ -237,6 +237,7 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+A keyed event puts its \`[key=<slug>]\` tag BEFORE the colon, e.g. \`needs-decision [key=chosen-slug]: {summary}\`; never \`needs-decision: [key=slug] ...\`, which files under the \`default\` key so key-addressed resolution will not find it (\`bin/fm-classify-lib.sh\` owns keyed open/resolved semantics).
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -320,6 +321,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Keyed form (optional, for a decision or blocker a later reply must address by key):
+   \`needs-decision [key=chosen-slug]: {summary}\` - the \`[key=<slug>]\` tag goes BEFORE the colon.
+   NEVER write \`needs-decision: [key=slug] ...\`: a key after the colon files under the \`default\`
+   key and key-addressed resolution will not find it. \`$FM_ROOT/bin/fm-classify-lib.sh\` owns
+   keyed open/resolved semantics.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
@@ -433,6 +439,11 @@ $RULE1
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Keyed form (optional, for a decision or blocker a later reply must address by key):
+   \`needs-decision [key=chosen-slug]: {summary}\` - the \`[key=<slug>]\` tag goes BEFORE the colon.
+   NEVER write \`needs-decision: [key=slug] ...\`: a key after the colon files under the \`default\`
+   key and key-addressed resolution will not find it. \`$FM_ROOT/bin/fm-classify-lib.sh\` owns
+   keyed open/resolved semantics.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
