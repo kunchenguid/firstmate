@@ -189,6 +189,39 @@ write_registry() {
 EOF
 }
 
+# Ship and scout workers can lose conversation context to compaction or a
+# cross-harness takeover. Both generated briefs must therefore make the same
+# status artifact carry every live instruction that committed work does not yet
+# preserve, including the rationale and all result-dependent branches.
+test_worker_briefs_preserve_live_instructions() {
+  local home kind id brief args
+  home="$TMP_ROOT/durable-instruction-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="durable-instruction-$kind"
+    case "$kind" in
+      ship) args="--mode no-mistakes" ;;
+      scout) args="--scout" ;;
+    esac
+    # shellcheck disable=SC2086 # args is an intentional word-split fixture.
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate $args >/dev/null 2>&1 \
+      || fail "$kind brief with durable-instruction contract should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep 'working [INSTRUCTION-FOR-AFTER-COMPACT]:' "$brief" \
+      "$kind brief omitted the durable instruction status-note marker"
+    assert_grep 'live instruction that is not yet reflected in committed work' "$brief" \
+      "$kind brief did not define when a durable instruction note is required"
+    assert_grep 'the exact instruction, why it exists, and every result-dependent branch' "$brief" \
+      "$kind brief did not preserve the instruction, rationale, and result branches"
+    assert_grep 'After compaction, reread that note before continuing.' "$brief" \
+      "$kind brief did not require post-compaction recovery"
+    assert_grep 'cross-harness takeover record' "$brief" \
+      "$kind brief did not make the same note support a replacement worker"
+  done
+  pass "fm-brief.sh: ship and scout briefs preserve live instructions durably"
+}
+
 # fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
 # metacharacter corruption for every ship delivery mode. This also guards
 # against any *new* unescaped apostrophe or unbalanced quote later added to
@@ -713,6 +746,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_worker_briefs_preserve_live_instructions
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

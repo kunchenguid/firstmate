@@ -49,6 +49,8 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every ordinary worker scaffold also carries the durable-instruction status-note
+# contract used for compaction recovery and cross-harness takeover.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -298,6 +300,15 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' DURABLE_INSTRUCTION_RULE <<'EOF' || true
+8. Before you risk compaction, if you hold a live instruction that is not yet reflected in committed work, append one `working [INSTRUCTION-FOR-AFTER-COMPACT]: ...` line to the status file.
+   Record the exact instruction, why it exists, and every result-dependent branch in that one durable note.
+   This includes an answered decision, a verification bar, a bounded investigation, or a rule about what not to do.
+   After compaction, reread that note before continuing.
+   Treat it as the cross-harness takeover record: a replacement worker inherits the worktree and status log, but none of the conversation.
+EOF
+DURABLE_INSTRUCTION_RULE=${DURABLE_INSTRUCTION_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -335,6 +346,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$DURABLE_INSTRUCTION_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -451,6 +463,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$DURABLE_INSTRUCTION_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
