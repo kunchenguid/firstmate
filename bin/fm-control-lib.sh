@@ -13,11 +13,8 @@
 # here rather than improvised per harness in agent prose.
 #
 # This file owns three capability tables plus their pure artifact-path tables
-# and nothing else. It has no side effects, runs no backend command, and reads
-# no state, so it can be sourced by a test as a pure contract. Its one include
-# is bin/fm-agy-lib.sh, the single owner of agy's global plugin paths, which is
-# itself side-effect-free on source; naming that registry directory a second
-# time here is exactly the drift the one-owner rule exists to prevent:
+# and nothing else. It has no side effects, runs no backend command, reads no
+# state, and sources nothing, so it can be sourced by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -44,9 +41,6 @@
 # all. `relaunch` covers the same need deterministically for every adapter,
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
-
-# shellcheck source=bin/fm-agy-lib.sh
-. "$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-agy-lib.sh"
 
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
@@ -270,7 +264,11 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
-    agy) printf '%s\n' "$(fm_agy_auth_dir)/$token" ;;
+    # Stated inline for the same reason grok's and kimi's are: this file is a
+    # dependency-free contract, and taking an include for one path string would
+    # make every caller and fixture that symlinks it provide a second file.
+    # bin/fm-agy-lib.sh owns this layout; keep the two in step.
+    agy) printf '%s\n' "${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}/plugins/fm-turn-end/fm-turn-end.d/$token" ;;
     *) return 0 ;;
   esac
 }

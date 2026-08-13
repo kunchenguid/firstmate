@@ -193,6 +193,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "CONSOLIDATION.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
     },
@@ -293,6 +297,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/supervision-protocols/agy.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
@@ -331,6 +339,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/agy-composer.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Antigravity CLI (`agy`) executable resolution, model catalogue, and the paths
 # of the ONE firstmate-owned global agy plugin.
-# Sourced by bin/fm-spawn.sh and by bin/fm-control-lib.sh (which is what reaches
-# bin/fm-teardown.sh). This file is sourced by scripts and has no side effects
-# on source.
+# Sourced by bin/fm-spawn.sh. This file is sourced by scripts and has no side
+# effects on source.
+# bin/fm-control-lib.sh deliberately restates the registry path inline instead of
+# sourcing this file, because it is a dependency-free contract; keep the two in
+# step when this layout changes.
 #
 # Why one owner: agy's turn-end and busy wiring is a GLOBAL customization, so
 # its directory layout is shared by every firstmate home on the machine and by
