@@ -87,7 +87,7 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
 # when the fold later advances the cursor. Prints nothing when nothing is
 # unread, which is the common case.
 print_unread_status_section() {
-  local snapshot=${1:-} unread task line item_bytes=220 shown=0 source
+  local snapshot=${1:-} unread task line shown=0
 
   if [ -n "$snapshot" ]; then
     unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
@@ -99,12 +99,7 @@ print_unread_status_section() {
   while IFS=$(printf '\t') read -r task line; do
     [ -n "$task" ] || continue
     [ -n "$line" ] || continue
-    source="$STATE/$task.status"
     line="$task $line"
-    if [ "${#line}" -gt $((item_bytes - 1)) ]; then
-      fm_cap_line_var "$line" $((item_bytes - 1))
-      line="$FM_LINE_CAP_LINE (full line: $source)"
-    fi
     if [ "$shown" -eq 0 ]; then
       printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
@@ -179,35 +174,22 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot deferred cursor_snapshot
-  deferred="$STATE/.status-presentation-commit.$$"
-  rm -rf "$deferred" || return 1
-  mkdir "$deferred" || return 1
-  FM_DEFER_CURSOR_COMMIT_DIR=$deferred
-  export FM_DEFER_CURSOR_COMMIT_DIR
-  snapshot=$(status_presentation_snapshot "$STATE") || {
-    rm -rf "$deferred"
-    return 1
-  }
-  if [ -z "$snapshot" ]; then
-    rm -rf "$deferred"
-    return 0
-  fi
-  if ! print_unread_status_section "$snapshot"; then
-    status_discard_presentation_stages "$STATE" || true
-    cursor_snapshot=$(status_cursor_snapshot "$STATE" "$snapshot") || cursor_snapshot=''
-    if [ -n "$cursor_snapshot" ]; then print_open_decisions_section "$cursor_snapshot" || true; fi
-    rm -rf "$deferred"
-    return 1
-  fi
-  if ! print_open_decisions_section "$snapshot" \
-    || ! status_commit_deferred_cursors "$STATE" "$deferred"; then
-    status_discard_presentation_stages "$STATE" || true
-    rm -rf "$deferred"
-    return 1
-  fi
-  status_discard_presentation_stages "$STATE" || true
-  rm -rf "$deferred"
+  local snapshot=${1:-}
+  if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
+  [ -n "$snapshot" ] || return 0
+  print_unread_status_section "$snapshot" || return 1
+  print_open_decisions_section "$snapshot" || return 1
+  status_commit_presentation_snapshot "$STATE" "$snapshot"
+}
+
+print_status_presentation() {  # [<deduped-raw-rows>]
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot rc=0
+  fm_lock_acquire_wait "$lock" || return 1
+  snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then fm_wake_print_annotations "$rows" "$snapshot" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" || rc=1; fi
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -293,7 +275,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_status_sections) || true
+  (print_status_presentation) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -345,7 +327,6 @@ DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(fm_wake_print_annotations "$RAW_ROWS") || true
-(print_status_sections) || true
+(print_status_presentation "$RAW_ROWS") || true
 assert_watcher_liveness
 exit 0

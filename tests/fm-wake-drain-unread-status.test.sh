@@ -195,6 +195,7 @@ test_snapshot_does_not_ack_a_later_append() {
     scan_unread_surface_snapshot "$STATE" "$snapshot" > "$2"
     printf "note: appended after presentation snapshot\n" >> "$STATE/task-race.status"
     scan_open_decisions_snapshot "$STATE" "$snapshot" >/dev/null
+    status_commit_presentation_snapshot "$STATE" "$snapshot"
     scan_unread_surface_lines "$STATE" > "$3"
   ' _ "$ROOT" "$dir/first" "$dir/second" || fail "snapshot race exercise failed"
   first=$(cat "$dir/first")
