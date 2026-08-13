@@ -24,7 +24,6 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It optionally accepts one superseded hold identity only when that prior captain decision is already durably resolved, then retains the pointer without rewriting the prior record.
 It records the decision digest, routed task identities, and optional supersession pointer as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision, routed-task set, or supersession pointer is rejected.
 A failed intermediate step leaves the hold open.
