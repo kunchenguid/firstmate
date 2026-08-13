@@ -802,13 +802,16 @@ if (
 }
 
 for (const itemClass of visibility.CALM_TRANSCRIPT_CLASSES) {
-  const visible = visibility.calmTranscriptClassIsVisible(itemClass);
-  const expected =
-    itemClass === "genuine-user-prompt" ||
-    itemClass === "genuine-agent-response" ||
-    itemClass === "working-status";
-  if (visible !== expected) {
-    throw new Error(`Calm allowlist classified ${itemClass} as visible=${visible}`);
+  for (const level of ["on", "max"]) {
+    const visible = visibility.calmTranscriptClassIsVisible(itemClass, level);
+    const expected =
+      itemClass === "genuine-user-prompt" ||
+      itemClass === "genuine-agent-response" ||
+      itemClass === "working-status" ||
+      (itemClass === "assistant-working-note" && level === "on");
+    if (visible !== expected) {
+      throw new Error(`Calm allowlist classified ${itemClass} as visible=${visible} at level ${level}`);
+    }
   }
 }
 const watcherBody =
@@ -826,6 +829,10 @@ const operationalChat = {
 const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
+  // Pi builds user rows with the registered markdown transformers from 0.83 onward and
+  // without them before that; the stub answers both shapes with the empty list Pi and
+  // Firstmate both use today.
+  getMarkdownTransformers: () => [],
   getMarkdownThemeWithSettings: () => undefined,
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
@@ -1350,6 +1357,273 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
   pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
+}
+
+test_calm_max_mid_turn_working_notes() {
+  local fixture out output_file status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm max renderer test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm max mid-turn presentation"
+
+  fixture="$TMP_ROOT/calm-max"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// Both extension instances below resolve their own relative "./lib/..." specifiers to
+// the same module URLs, so they share one live visibility policy exactly the way a
+// single Pi process does.
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+const calmPreferencePath = `${process.env.FM_HOME}/config/calm`;
+const components = [];
+const ui = {
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel(value) {
+    // Pi's own fan-out: every mounted assistant row re-runs its layout.
+    for (const component of components) component.setHiddenThinkingLabel(value ?? "Thinking...");
+  },
+  setStatus() {},
+  setToolsExpanded() {},
+  setWorkingVisible() {},
+  notify() {},
+};
+const context = { ui };
+
+async function loadCalmExtension() {
+  const registeredTools = [];
+  let sessionStart;
+  let calmCommand;
+  const pi = {
+    events: { emit() {}, on() {} },
+    on(event, handler) {
+      if (event === "session_start") sessionStart = handler;
+    },
+    registerCommand(name, command) {
+      if (name === "calm") calmCommand = command;
+    },
+    registerEntryRenderer() {},
+    registerTool(tool) {
+      registeredTools.push(tool.name);
+    },
+    getAllTools() {
+      return [];
+    },
+  };
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?max=${Date.now()}-${Math.random()}`);
+  extension.default(pi);
+  if (!calmCommand || !sessionStart) {
+    throw new Error("Calm extension did not register its command and session handler");
+  }
+  return { calmCommand, sessionStart, registeredTools };
+}
+
+const assistantBase = {
+  role: "assistant",
+  api: "calm-max-test",
+  provider: "calm-max-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  timestamp: 1,
+};
+const toolCall = { type: "toolCall", id: "calm-max-tool", name: "read", arguments: { path: "sample.txt" } };
+const messages = {
+  // The reported incident: narration emitted in the same assistant message as a tool call.
+  midTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
+  },
+  // The genuine reply that ends a response, which no level may hide.
+  finalReply: {
+    ...assistantBase,
+    stopReason: "stop",
+    content: [{ type: "text", text: "FINAL_REPLY_TEXT" }],
+  },
+  // Still streaming: finality is unknown, and hiding here would stop a real reply.
+  streaming: {
+    ...assistantBase,
+    stopReason: "pending",
+    content: [{ type: "text", text: "STREAMING_NOTE_TEXT" }],
+  },
+  // Truncated with tool calls is mid-turn; Pi's own truncation notice stays.
+  truncatedMidTurn: {
+    ...assistantBase,
+    stopReason: "length",
+    content: [{ type: "text", text: "TRUNCATED_MIDTURN_NOTE" }, toolCall],
+  },
+  // Truncated without tool calls ended the response.
+  truncatedFinal: {
+    ...assistantBase,
+    stopReason: "length",
+    content: [{ type: "text", text: "TRUNCATED_FINAL_TEXT" }],
+  },
+};
+const messagesBefore = JSON.stringify(messages);
+const rows = {};
+for (const [name, message] of Object.entries(messages)) {
+  rows[name] = new AssistantMessageComponent(message, true);
+  components.push(rows[name]);
+}
+const rendered = (name) => rows[name].render(100);
+const renderedText = (name) => rendered(name).join("\n");
+const snapshot = () => {
+  const shot = {};
+  for (const name of Object.keys(rows)) shot[name] = JSON.stringify(rendered(name));
+  return shot;
+};
+const requireVisible = (name, needle, context) => {
+  if (rendered(name).length === 0 || !renderedText(name).includes(needle)) {
+    throw new Error(`${context}: ${name} lost ${needle}`);
+  }
+};
+const requireHidden = (name, needle, context) => {
+  if (renderedText(name).includes(needle)) {
+    throw new Error(`${context}: ${name} still rendered ${needle}`);
+  }
+};
+
+let calm = await loadCalmExtension();
+if (calm.registeredTools.length !== 0) {
+  throw new Error("Calm claimed built-in tools with no persisted preference");
+}
+await calm.sessionStart({ reason: "startup" }, context);
+const stockRows = snapshot();
+for (const name of Object.keys(rows)) {
+  if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
+
+await calm.calmCommand.handler("", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+  throw new Error("plain /calm from off did not persist on");
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "ordinary Calm");
+requireVisible("finalReply", "FINAL_REPLY_TEXT", "ordinary Calm");
+
+await calm.calmCommand.handler("max", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "max\n") {
+  throw new Error("/calm max did not persist max as its own literal value");
+}
+if (rendered("midTurn").length !== 0) {
+  throw new Error(`Calm max left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
+}
+requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm max");
+// Pi owns the wording of its truncation notice; Calm max must leave that row's own
+// notice standing rather than collapsing an incomplete response to nothing.
+if (rendered("truncatedMidTurn").length === 0) {
+  throw new Error("Calm max removed Pi's own truncation notice with the working note");
+}
+requireVisible("streaming", "STREAMING_NOTE_TEXT", "Calm max");
+requireVisible("truncatedFinal", "TRUNCATED_FINAL_TEXT", "Calm max");
+if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
+  throw new Error("Calm max changed the genuine final reply row");
+}
+if (JSON.stringify(messages) !== messagesBefore) {
+  throw new Error("Calm max mutated the assistant messages instead of a presentation copy");
+}
+
+await calm.calmCommand.handler("max", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "max\n" || rendered("midTurn").length !== 0) {
+  throw new Error("repeating /calm max did not stay at max");
+}
+await calm.calmCommand.handler("  MaX  ", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "max\n" || rendered("midTurn").length !== 0) {
+  throw new Error("/calm max is not accepted with surrounding space or mixed case");
+}
+
+// Restart: scramble the live level the way a fresh process starts, then let a newly
+// loaded extension restore from the persisted file alone.
+visibility.setCalmPresentation("off");
+ui.setHiddenThinkingLabel(undefined);
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live level");
+calm = await loadCalmExtension();
+if (calm.registeredTools.length !== 7) {
+  throw new Error(`a session restored at max claimed ${calm.registeredTools.length} built-in tools instead of 7`);
+}
+await calm.sessionStart({ reason: "resume" }, context);
+if (rendered("midTurn").length !== 0) {
+  throw new Error("a restored session treated the persisted max level as unrecognized");
+}
+for (const reason of ["startup", "new", "fork", "reload"]) {
+  await calm.sessionStart({ reason }, context);
+  if (rendered("midTurn").length !== 0) {
+    throw new Error(`a ${reason} session did not restore the persisted max level`);
+  }
+  requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
+}
+
+await calm.calmCommand.handler("", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+  throw new Error("plain /calm from max did not revert to ordinary Calm");
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "reverted Calm");
+
+await calm.calmCommand.handler("", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+  throw new Error("plain /calm from on did not keep the existing off toggle");
+}
+const restoredRows = snapshot();
+for (const name of Object.keys(rows)) {
+  if (restoredRows[name] !== stockRows[name]) {
+    throw new Error(`turning Calm off did not restore byte-identical ${name} rendering`);
+  }
+}
+
+await calm.calmCommand.handler("max", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "max\n" || rendered("midTurn").length !== 0) {
+  throw new Error("/calm max did not enter max directly from off");
+}
+await calm.calmCommand.handler("unrecognized", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+  throw new Error("an unrecognized /calm argument did not fall back to the plain toggle");
+}
+if (!existsSync(calmPreferencePath)) {
+  throw new Error("Calm stopped persisting its preference file");
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm max mid-turn contract failed: $out"
+  [ -z "$out" ] || fail "Pi calm max mid-turn test printed output: $out"
+  pass "Pi calm max collapses mid-turn assistant working notes to zero height while ordinary Calm keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, and restores the persisted max level across session starts"
 }
 
 test_operational_followup_turn_e2e() {
@@ -3659,6 +3933,7 @@ test_pi_compat_missing_adapter_exports
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
+test_calm_max_mid_turn_working_notes
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle

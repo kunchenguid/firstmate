@@ -152,6 +152,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -392,8 +394,8 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
-    "$STATE/.$ID.open-decisions-cursor"
+  status_retire_presentation_task "$STATE" "$ID" || return 1
+  rm -f -- "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -455,6 +457,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 LOCAL_MERGE_TARGET=$(fm_meta_get "$META" local_merge_target)
+LOCAL_MERGE_TARGET_PENDING=$(fm_meta_get "$META" local_merge_target_pending)
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1148,7 +1151,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed landing_target landing_ref unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed landing_target landing_ref pending_ref pending_unmerged_raw pending_unmerged unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1175,11 +1178,33 @@ validate_worktree_teardown_safety() {
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
+  pending_unmerged=
+  if [ "$MODE" = local-only ] && [ -n "$LOCAL_MERGE_TARGET_PENDING" ]; then
+    if git -C "$PROJ" check-ref-format --branch "$LOCAL_MERGE_TARGET_PENDING" >/dev/null 2>&1; then
+      pending_ref="refs/heads/$LOCAL_MERGE_TARGET_PENDING"
+      if git -C "$PROJ" show-ref --verify --quiet "$pending_ref"; then
+        if ! pending_unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$pending_ref" -- 2>/dev/null); then
+          if worktree_safety_blocked_by_lock "commits not on $LOCAL_MERGE_TARGET_PENDING"; then
+            return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+          fi
+          echo "REFUSED: cannot inspect worktree $WT for commits not on $LOCAL_MERGE_TARGET_PENDING." >&2
+          echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+          return 1
+        fi
+        pending_unmerged=$(printf '%s\n' "$pending_unmerged_raw" | head -5)
+        if [ -z "$pending_unmerged" ]; then
+          LOCAL_MERGE_TARGET=$LOCAL_MERGE_TARGET_PENDING
+        fi
+      fi
+    fi
+  fi
+
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     landing_target=$LOCAL_MERGE_TARGET
     if [ -z "$landing_target" ]; then
       landing_target=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    elif ! git -C "$PROJ" check-ref-format --branch "$landing_target" >/dev/null 2>&1; then
+    fi
+    if ! git -C "$PROJ" check-ref-format --branch "$landing_target" >/dev/null 2>&1; then
       echo "REFUSED: recorded local merge target '$landing_target' is invalid." >&2
       return 1
     fi
@@ -2281,7 +2306,8 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+    status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
@@ -2560,11 +2586,11 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+status_retire_presentation_task "$STATE" "$ID" || exit 1
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
-  "$STATE/.$ID.open-decisions-cursor" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 fm_lock_release "$META_LOCK"
