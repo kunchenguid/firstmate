@@ -82,6 +82,8 @@ output_token_at=guest.rindex("metadata/identity/oauth2/token")
 assert input_token_at < guest.index('rm -f "$TOKEN_FILE"',input_token_at) < run_at < output_token_at
 assert '/usr/bin/python3 "$EXECUTOR"' in guest
 assert "https://files.pythonhosted.org/packages/*.whl" in guest
+assert 'repository"].get("source_ancestors", [])' in guest
+assert 'git -C /work/repo fetch --depth=1 origin "$ancestor"' in guest
 assert 'fetch_exact "$url"' in guest and '--location' not in guest[guest.index('while IFS=$\'\\t\' read -r url'):guest.index('done <"$BASE/wheels.tsv"')]
 assert "protectedParameters" not in host
 assert "generate-sas" not in host
@@ -100,10 +102,11 @@ prepare_contract() {
   python3 - "$HOST" <<'PY'
 import importlib.util, pathlib, types, sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-remote="https://github.com/Ruby-Labs/cloud-host-owner.git"; head="a"*40; candidate="b"*40; tree="c"*40
+remote="https://github.com/Ruby-Labs/cloud-host-owner.git"; head="a"*40; candidate="b"*40; tree="c"*40; ancestor="d"*40
 class Result:
     def __init__(self,stdout="",returncode=0): self.stdout=stdout; self.returncode=returncode
 calls=[]
+pr_ref="refs/pull/130/head"
 def public_git(_repo,*args,check=True):
     calls.append(args)
     if args[:2]==("init","--bare"): return Result()
@@ -111,13 +114,16 @@ def public_git(_repo,*args,check=True):
     if args[:1]==("ls-remote",):
         ref=args[-1]
         if ref=="refs/heads/main": return Result("{}\t{}\n".format(head,ref))
-        if ref=="refs/heads/fm/feature": return Result("{}\t{}\n".format(candidate,ref))
+        if ref in ("refs/heads/fm/feature",pr_ref): return Result("{}\t{}\n".format(candidate,ref))
+        return Result("{}\t{}\n".format(head,ref))
     if args[:1]==("fetch",): return Result()
     if args[:2]==("rev-parse","--verify"):
         return Result((candidate if args[-1].endswith("public-source") else head)+"\n")
-    if args[:2]==("merge-base","--is-ancestor"): return Result(returncode=1)
-    if args[:2]==("cat-file","-t"): return Result(("commit" if args[-1]==candidate else "tree")+"\n")
-    if args[:1]==("rev-parse",) and args[-1]==candidate+"^{tree}": return Result(tree+"\n")
+    if args[:2]==("merge-base","--is-ancestor"):
+        return Result(returncode=0 if args[2:]==(ancestor,candidate) else 1)
+    if args[:2]==("cat-file","-t"):
+        return Result("commit\n" if args[2] in {candidate,ancestor} else "tree\n")
+    if args[:1]==("rev-parse",) and args[1].endswith("^{tree}"): return Result(tree+"\n")
     raise AssertionError(args)
 m.public_git=public_git
 try: m.public_origin_proof(pathlib.Path("/repo"),remote,candidate)
@@ -125,6 +131,18 @@ except m.RunnerError as exc: assert "not reachable" in str(exc)
 else: raise AssertionError("unmerged branch accepted without an exact source ref")
 proof=m.public_origin_proof(pathlib.Path("/repo"),remote,candidate,source_ref="refs/heads/fm/feature")
 assert proof["source_ref"]=="refs/heads/fm/feature" and proof["source_head"]==candidate and proof["tree"]==tree
+# An advertised PR-head ref admits the exact candidate with bound ancestors.
+pr_proof=m.public_origin_proof(pathlib.Path("/repo"),remote,candidate,source_ref=pr_ref,source_ancestors=(ancestor,))
+assert pr_proof["source_ref"]==pr_ref and pr_proof["source_head"]==candidate
+assert pr_proof["source_ancestors"]==[ancestor] and pr_proof["tree"]==tree
+# A mutable pull merge ref and unsafe shapes refuse before any network use.
+for bad in ("refs/pull/130/merge","refs/heads/a..b","refs/heads/x.lock"):
+    try: m.validate_public_source_ref(bad)
+    except m.RunnerError: pass
+    else: raise AssertionError("unsafe source ref accepted: "+bad)
+try: m.public_origin_proof(pathlib.Path("/repo"),remote,candidate,source_ref=pr_ref,source_ancestors=("e"*40,))
+except m.RunnerError as exc: assert "fetched commit" in str(exc)
+else: raise AssertionError("unfetched source ancestor accepted")
 def local_git(_repo,*args,check=True):
     if args[:2]==("cat-file","-t"): return Result(("commit" if args[-1]==candidate else "tree")+"\n")
     if args[:1]==("rev-parse",): return Result(tree+"\n")
@@ -134,10 +152,11 @@ private=m.public_origin_proof(pathlib.Path("/repo"),remote,candidate,source_ref=
 assert private["source_ref"]=="refs/heads/fm/unpushed" and private["source_head"]==candidate and private["tree"]==tree
 assert ("fetch","--no-tags","--force",remote,"+refs/heads/main:refs/fm-azure-runner/public-main") in calls
 assert ("fetch","--no-tags","--force",remote,"+refs/heads/fm/feature:refs/fm-azure-runner/public-source") in calls
+assert ("fetch","--no-tags","--force",remote,"+{}:refs/fm-azure-runner/public-source".format(pr_ref)) in calls
 # A stale tracking ref is irrelevant; proof uses fresh advertisement/fetch.
 assert not any("origin/main" in part for call in calls for part in call)
 PY
-  pass "prepare binds fresh public main and admits a feature branch only at its exact advertised source-ref head"
+  pass "prepare binds fresh public main and admits only an exact advertised branch or PR-head ref with bound ancestors"
 }
 
 private_snapshot_prepare_contract() {

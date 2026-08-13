@@ -22,9 +22,12 @@ The first live invocation remains blocked until the foundation and this code are
 
 ## Request and snapshot contract
 
-`prepare` refuses a detached HEAD, tracked changes, untracked files, and any origin other than a credential-free public GitHub HTTPS URL.
-By default it also refuses any commit not reachable from a freshly advertised and fetched `refs/heads/main` default head.
-The explicit `--source-ref refs/heads/<branch>` seam alone requires the candidate commit to be the exact freshly advertised and fetched head of that public branch; it never accepts an ancestor, stale tracking ref, tag, pull-request pseudo-ref, or changed remote head.
+`prepare` refuses tracked changes, untracked files, and any origin other than a credential-free public GitHub HTTPS URL.
+It also refuses a detached HEAD unless the caller supplies an exact public source ref whose fetched head equals that detached commit.
+By default the candidate must be reachable from a freshly advertised and fetched `refs/heads/main` default head.
+The explicit `--source-ref refs/heads/<branch>` seam alone requires the candidate commit to be the exact freshly advertised and fetched head of that public branch; it never accepts an ancestor, stale tracking ref, tag, or changed remote head.
+An explicit `--public-ref` may instead name only an advertised branch head or `refs/pull/<number>/head`, and the candidate must equal that ref's exact fetched head; mutable pull merge refs and unsafe ref shapes are refused, and the two source-ref seams are mutually exclusive.
+A caller may additionally bind one or more exact `--public-ancestor` commits; each must be present in the freshly fetched public history and be an ancestor of the candidate, and trusted guest bootstrap fetches and verifies each object before repository networking closes.
 An Azure validation cell additionally supplies `--private-snapshot-bundle` with its parent-cell reservation so an unpushed pipeline-fix head can execute without prematurely changing the task branch on GitHub.
 That private mode binds one exact source ref/head, a one-ref Git bundle, digest, size, parent cell, and private staging object while still freshly proving the public origin's trusted default ref/head.
 The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; all modes repeat their exact public/private source proof immediately before compute creation and retry.
@@ -34,16 +37,16 @@ The canonical `fm.azure-command/v1` request binds these fields:
 
 - SHA-256 home binding derived from the canonical `FM_HOME` path, without sending that path to Azure.
 - Task, task generation, deployment generation, invocation, fenced attempt, and optional parent attempt.
-- Exact public origin, trusted default ref/head, selected source ref/head, optional private bundle blob/digest/size, commit, tree, source-identity digest, command argv digest, and complete request digest.
+- Exact public origin, trusted default ref/head, selected source ref/head, required source ancestors, optional private bundle blob/digest/size, commit, tree, source-identity digest, command argv digest, and complete request digest.
 - Resource class, reviewed VM SKU, CPU, memory, PID, disk, per-stream log, artifact, network, and wall-time limits.
 - Declared repository-relative dependency paths and their file or tree digests.
 - Declared repository-relative result artifact paths.
 - Trusted guest-bootstrap and executor digests.
 
 The bounded request and trusted executor travel only as ordinary Managed Run Command parameters.
-Public mode fetches the exact public commit directly.
+In public mode trusted root fetches the exact public source ref when it is the candidate head, refuses a ref that moved after admission, and otherwise fetches the exact default-reachable commit.
 Private parent mode stages only the exact credential-free Git bundle in the foundation's private `validation-shards` container, where the guest UAMI downloads and verifies it before deleting its token and starting repository code.
-Trusted root fetches checksum-pinned ShellCheck, uv, and locked Linux wheels through the VNet NAT path, then verifies every digest before repository code starts.
+Trusted root then fetches checksum-pinned ShellCheck, uv, and locked Linux wheels through the VNet NAT path and verifies every digest before repository code starts.
 There is no SAS, shared key, Git credential, control-home payload, provider credential, or command-child data-plane authority.
 
 Declared dependency paths are rehashed after the VM clones the bundle.

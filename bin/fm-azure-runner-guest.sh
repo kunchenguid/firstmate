@@ -96,6 +96,7 @@ PY
 }
 INVOCATION=$(read_request invocation); COMMIT=$(read_request repository.commit); TREE=$(read_request repository.tree)
 REMOTE=$(read_request repository.remote); SOURCE_MODE=$(read_request repository.source_mode)
+SOURCE_REF=$(read_request repository.source_ref); SOURCE_HEAD=$(read_request repository.source_head)
 CPU_CORES=$(read_request limits.cpu_cores); MEMORY_BYTES=$(read_request limits.memory_bytes)
 PID_MAX=$(read_request limits.pid_max); DISK_BYTES=$(read_request limits.disk_bytes); WALL_SECONDS=$(read_request limits.wall_seconds)
 ARTIFACT_BYTES=$(read_request limits.artifact_bytes); NETWORK_BYTES=$(read_request limits.network_bytes)
@@ -130,11 +131,25 @@ if [ "$SOURCE_MODE" = private-parent-bundle ]; then
     && [ "sha256:$(sha256sum "$SNAPSHOT" | awk '{print $1}')" = "$(read_request repository.snapshot_digest)" ] \
     || { echo "guest bootstrap: private snapshot digest/size mismatch" >&2; exit 125; }
   runuser -u fmrunner -- git -C /work/repo fetch "$SNAPSHOT" "$COMMIT"
+elif [ "$SOURCE_REF" != none ] && [ "$SOURCE_HEAD" = "$COMMIT" ]; then
+  [ "$INPUT_BLOB" = none ] || { echo "guest bootstrap: public source received a private snapshot blob" >&2; exit 125; }
+  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$SOURCE_REF"
+  [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$COMMIT" ] || { echo "guest bootstrap: source ref moved after admission" >&2; exit 125; }
 else
   [ "$INPUT_BLOB" = none ] || { echo "guest bootstrap: public source received a private snapshot blob" >&2; exit 125; }
   run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$COMMIT"
 fi
 runuser -u fmrunner -- git -C /work/repo checkout --detach "$COMMIT" >/dev/null
+python3 - "$REQUEST" <<'PY' >"$BASE/source-ancestors"
+import json,sys
+for value in json.load(open(sys.argv[1],encoding="utf-8"))["repository"].get("source_ancestors", []): print(value)
+PY
+while IFS= read -r ancestor; do
+  [ -n "$ancestor" ] || continue
+  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$ancestor"
+  [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$ancestor" ] || { echo "guest bootstrap: source ancestor identity mismatch" >&2; exit 125; }
+  git -C /work/repo cat-file -e "$ancestor^{commit}" || { echo "guest bootstrap: source ancestor is absent" >&2; exit 125; }
+done <"$BASE/source-ancestors"
 [ "$(git -C /work/repo rev-parse HEAD)" = "$COMMIT" ] && [ "$(git -C /work/repo rev-parse 'HEAD^{tree}')" = "$TREE" ] || { echo "guest bootstrap: source identity mismatch" >&2; exit 125; }
 
 fetch_exact() { local url=$1 path=$2 bytes=$3 digest=$4 redirects=${5:-no} args=(); [ "$redirects" != yes ] || args+=(--location); run_bootstrap_network curl --fail --silent --show-error "${args[@]}" --connect-timeout 30 --max-time 300 --max-filesize "$bytes" --output "$path" "$url"; [ "$(stat -c %s "$path")" = "$bytes" ] && [ "sha256:$(sha256sum "$path" | awk '{print $1}')" = "$digest" ] || { echo "guest bootstrap: pinned download mismatch" >&2; exit 125; }; }

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Role-specific Crosscheck network policy. The credentialed model compartment may egress only to Azure-provided DNS and the exact provider endpoint addresses; instance metadata, the virtual network (siblings, private control, authors, validation, browsers, other reviews), and every other destination are denied, and all inbound is denied. Repository execution in tool and verifier compartments stays networkless through their deny-all class policy and in-guest namespace. Applying this policy is a security-sensitive mutation owned by bin/fm-crosscheck-azure-image.sh and requires explicit operator confirmation from released main."
+  },
+  "parameters": {
+    "modelNsgName": {"type": "string", "minLength": 1},
+    "location": {"type": "string", "defaultValue": "eastus", "allowedValues": ["eastus"]},
+    "providerEndpointAddresses": {
+      "type": "array",
+      "minLength": 1,
+      "metadata": {"description": "Exact provider endpoint IPv4 addresses or CIDRs the model may reach."}
+    },
+    "providerPort": {"type": "string", "defaultValue": "443"},
+    "commonTags": {"type": "object", "defaultValue": {}}
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('modelNsgName')]",
+      "location": "[parameters('location')]",
+      "tags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-egress'))]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "deny-all-inbound",
+            "properties": {
+              "priority": 4096, "direction": "Inbound", "access": "Deny", "protocol": "*",
+              "sourceAddressPrefix": "*", "sourcePortRange": "*",
+              "destinationAddressPrefix": "*", "destinationPortRange": "*"
+            }
+          },
+          {
+            "name": "deny-metadata-outbound",
+            "properties": {
+              "priority": 100, "direction": "Outbound", "access": "Deny", "protocol": "*",
+              "sourceAddressPrefix": "*", "sourcePortRange": "*",
+              "destinationAddressPrefix": "169.254.169.254/32", "destinationPortRange": "*"
+            }
+          },
+          {
+            "name": "allow-azure-dns-outbound",
+            "properties": {
+              "priority": 110, "direction": "Outbound", "access": "Allow", "protocol": "*",
+              "sourceAddressPrefix": "*", "sourcePortRange": "*",
+              "destinationAddressPrefix": "168.63.129.16/32", "destinationPortRange": "53"
+            }
+          },
+          {
+            "name": "allow-provider-endpoint-outbound",
+            "properties": {
+              "priority": 120, "direction": "Outbound", "access": "Allow", "protocol": "Tcp",
+              "sourceAddressPrefix": "*", "sourcePortRange": "*",
+              "destinationAddressPrefixes": "[parameters('providerEndpointAddresses')]",
+              "destinationPortRange": "[parameters('providerPort')]"
+            }
+          },
+          {
+            "name": "deny-vnet-outbound",
+            "properties": {
+              "priority": 4000, "direction": "Outbound", "access": "Deny", "protocol": "*",
+              "sourceAddressPrefix": "*", "sourcePortRange": "*",
+              "destinationAddressPrefix": "VirtualNetwork", "destinationPortRange": "*"
+            }
+          },
+          {
+            "name": "deny-all-outbound",
+            "properties": {
+              "priority": 4096, "direction": "Outbound", "access": "Deny", "protocol": "*",
+              "sourceAddressPrefix": "*", "sourcePortRange": "*",
+              "destinationAddressPrefix": "*", "destinationPortRange": "*"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "modelNsgName": {"type": "string", "value": "[parameters('modelNsgName')]"}
+  }
+}

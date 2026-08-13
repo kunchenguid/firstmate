@@ -52,7 +52,18 @@ seen_sig() {
   if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+kill_tree() {  # <pid>
+  local child
+  kill -STOP "$1" 2>/dev/null || true
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill -9 "$1" 2>/dev/null || true
+}
+reap() {
+  kill_tree "$1"
+  wait "$1" 2>/dev/null || true
+}
 
 wait_live() {
   local pid=$1 limit i=0

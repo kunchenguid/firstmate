@@ -48,7 +48,9 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
 SAFE_ARTIFACT = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/+@:-]{1,240}$")
 SAFE_PUBLIC_GIT_REMOTE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$")
-SAFE_PUBLIC_SOURCE_REF = re.compile(r"^refs/heads/[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,237}[A-Za-z0-9])?$")
+SAFE_PUBLIC_GIT_REF = re.compile(
+    r"^refs/(?:heads/[A-Za-z0-9._/-]{1,200}|pull/[1-9][0-9]*/head)$"
+)
 LOCAL_COMMAND_TIMEOUT_SECONDS = 300
 COST_QUERY_TIMEOUT_SECONDS = 60
 COST_RETRY_DEADLINE_SECONDS = 900
@@ -226,26 +228,25 @@ def public_git(repo, *args, check=True):
     return run(command, check=check, env=git_env)
 
 
-def require_public_source_ref(value):
-    if value is None:
-        return None
+def validate_public_source_ref(value):
+    if not isinstance(value, str) or not SAFE_PUBLIC_GIT_REF.fullmatch(value):
+        raise RunnerError("public source ref is not an allow-listed branch or PR-head ref")
     if (
-        not SAFE_PUBLIC_SOURCE_REF.match(value)
-        or ".." in value
-        or "//" in value
-        or "@{" in value
-        or value.endswith((".", ".lock"))
+        any(m in value for m in ("..", "//", "@{", "\\"))
+        or value.endswith(("/", ".", ".lock"))
     ):
-        raise RunnerError("public source ref must be one exact bounded refs/heads/* name")
+        raise RunnerError("public source ref has an unsafe shape")
     return value
 
 
 def public_origin_proof(
-    repo, remote, candidate_commit, expected=None, source_ref=None, private_source=False
+    repo, remote, candidate_commit, expected=None, source_ref=None,
+    source_ancestors=(), private_source=False,
 ):
     if not SAFE_PUBLIC_GIT_REMOTE.match(remote) or "@" in remote:
         raise RunnerError("Azure private controller requires a credential-free public GitHub HTTPS origin")
-    source_ref = require_public_source_ref(source_ref)
+    if source_ref is not None:
+        source_ref = validate_public_source_ref(source_ref)
     with tempfile.TemporaryDirectory(prefix="fm-azure-public-proof-") as temporary:
         proof_repo = Path(temporary)
         public_git(proof_repo, "init", "--bare")
@@ -293,17 +294,33 @@ def public_origin_proof(
         ).returncode != 0:
             raise RunnerError("candidate commit is not reachable from the exact public origin/main head")
 
+        object_repo = repo if private_source else proof_repo
+        object_git = git if private_source else public_git
+        ancestors = []
+        for ancestor in source_ancestors:
+            if not isinstance(ancestor, str) or not re.fullmatch(r"[0-9a-f]{40,64}", ancestor):
+                raise RunnerError("public source ancestor is not an exact commit identity")
+            if ancestor in ancestors:
+                continue
+            if object_git(object_repo, "cat-file", "-t", ancestor, check=False).stdout.strip() != "commit":
+                raise RunnerError("public source ancestor is not a fetched commit")
+            if object_git(
+                object_repo, "merge-base", "--is-ancestor", ancestor, candidate_commit,
+                check=False,
+            ).returncode != 0:
+                raise RunnerError("public source ancestor is not reachable from the candidate")
+            ancestors.append(ancestor)
+
         proof_identity = {
             "remote": remote,
             "default_ref": default_ref,
             "default_head": default_head,
             "source_ref": selected_ref,
             "source_head": selected_head,
+            "source_ancestors": ancestors,
         }
         if expected is not None and expected != proof_identity:
             raise RunnerError("public origin/source identity changed after request preparation")
-        object_repo = repo if private_source else proof_repo
-        object_git = git if private_source else public_git
         if object_git(object_repo, "cat-file", "-t", candidate_commit).stdout.strip() != "commit":
             raise RunnerError("candidate source object is not an exact commit")
         tree = object_git(object_repo, "rev-parse", "{}^{{tree}}".format(candidate_commit)).stdout.strip()
@@ -694,8 +711,10 @@ def prepare(env, args, parent_state=None):
     if dirty:
         raise RunnerError("repository must be an exact clean committed snapshot; tracked or untracked changes are present")
     branch = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if branch.returncode != 0:
-        raise RunnerError("repository must be on a named committed branch")
+    if branch.returncode != 0 and args.public_ref is None:
+        raise RunnerError(
+            "repository must be on a named committed branch unless an exact public source ref is supplied"
+        )
     commit = git(repo, "rev-parse", "HEAD").stdout.strip()
     remote = git(repo, "remote", "get-url", "origin").stdout.strip()
     private_snapshot_source = None
@@ -713,8 +732,12 @@ def prepare(env, args, parent_state=None):
         if heads != [expected_head]:
             raise RunnerError("private parent snapshot must contain only the exact source-ref head")
         run(["git", "bundle", "verify", str(private_snapshot_source)], cwd=repo)
+    if getattr(args, "public_ref", None) and args.source_ref:
+        raise RunnerError("choose one exact source identity: --source-ref or --public-ref")
     public = public_origin_proof(
-        repo, remote, commit, source_ref=args.source_ref,
+        repo, remote, commit,
+        source_ref=getattr(args, "public_ref", None) or args.source_ref,
+        source_ancestors=tuple(getattr(args, "public_ancestor", None) or ()),
         private_source=private_snapshot_source is not None,
     )
     tree = public["tree"]
@@ -758,6 +781,7 @@ def prepare(env, args, parent_state=None):
         "default_head": public["default_head"],
         "source_ref": public["source_ref"],
         "source_head": public["source_head"],
+        "source_ancestors": public.get("source_ancestors", []),
         "commit": commit,
         "tree": tree,
     }
@@ -825,6 +849,7 @@ def prepare(env, args, parent_state=None):
             "default_head": public["default_head"],
             "source_ref": public["source_ref"],
             "source_head": public["source_head"],
+            "source_ancestors": public.get("source_ancestors", []),
             "commit": commit,
             "tree": tree,
             "snapshot_digest": (
@@ -931,12 +956,14 @@ def reprove_public_request(state):
             "default_head": repository["default_head"],
             "source_ref": repository["source_ref"],
             "source_head": repository["source_head"],
+            "source_ancestors": repository.get("source_ancestors", []),
         },
         source_ref=(
             repository["source_ref"]
             if repository["source_ref"] != repository["default_ref"]
             else None
         ),
+        source_ancestors=repository.get("source_ancestors", []),
         private_source=private_source,
     )
     if private_source:
@@ -3312,12 +3339,24 @@ def retry(env, old_state, args):
     args.resource_class = old_state["request"]["resource_class"]
     args.capacity_parent = old_state["request"].get("capacity_parent")
     args.capacity_reservation_vcpus = old_state["request"].get("capacity_reservation_vcpus")
-    source_ref = old_state["request"]["repository"]["source_ref"]
-    default_ref = old_state["request"]["repository"]["default_ref"]
-    args.source_ref = source_ref if source_ref != default_ref else None
+    args.capacity_fence = old_state["request"].get("capacity_fence")
+    repository = old_state["request"]["repository"]
+    private_source = repository.get("source_mode") == "private-parent-bundle"
+    selected_source_ref = (
+        repository["source_ref"]
+        if repository["source_ref"] != repository["default_ref"]
+        else None
+    )
+    if private_source or not repository.get("source_ancestors"):
+        args.source_ref = selected_source_ref
+        args.public_ref = None
+    else:
+        args.source_ref = None
+        args.public_ref = selected_source_ref
+    args.public_ancestor = list(repository.get("source_ancestors", []))
     args.private_snapshot_bundle = (
         str(Path(old_state["input_path"]).parent / "snapshot.bundle")
-        if old_state["request"]["repository"].get("source_mode") == "private-parent-bundle"
+        if private_source
         else None
     )
     args.wall_seconds = old_state["request"]["limits"]["wall_seconds"]
@@ -3369,6 +3408,8 @@ def add_request_arguments(parser, require_command=True):
     parser.add_argument("--task", required=True)
     parser.add_argument("--generation", required=True)
     parser.add_argument("--invocation")
+    parser.add_argument("--public-ref")
+    parser.add_argument("--public-ancestor", action="append", default=[])
     parser.add_argument("--resource-class", choices=sorted(RESOURCE_CLASSES), default="validation-standard")
     parser.add_argument(
         "--capacity-parent",

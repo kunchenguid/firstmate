@@ -51,6 +51,7 @@
 263	tests/fm-composer-ghost.test.sh
 30	tests/fm-composer-lib.test.sh
 10055	tests/fm-crew-state.test.sh
+5000	tests/fm-crosscheck-azure.test.sh
 94232	tests/fm-crosscheck.test.sh
 13991	tests/fm-daemon.test.sh
 340	tests/fm-decision-pretool-check.test.sh

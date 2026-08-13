@@ -43,6 +43,7 @@ fm-checkout-return-boundary.test.sh	hermetic
 fm-composer-ghost.test.sh	hermetic
 fm-composer-lib.test.sh	hermetic
 fm-crew-state.test.sh	hermetic
+fm-crosscheck-azure.test.sh	hermetic
 fm-crosscheck.test.sh	hermetic
 fm-daemon.test.sh	hermetic
 fm-decision-pretool-check.test.sh	hermetic
