@@ -736,8 +736,8 @@ App-server partial methods and raw socket experiments do not satisfy that bridge
 
 ## Cursor Agent CLI
 
-Cursor is a crewmate/scout adapter only; a `--secondmate` launch is refused.
-The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`.
+Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.
+The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`, and extended on 2026-08-13 with the tmux composer verdict below.
 
 - Binary: `~/.local/bin/cursor-agent`, canonicalizing into `~/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent`.
 - Version: `cursor-agent --version` reported `2026.08.11-e8db854`, and `cursor-agent status` reported a logged-in account.
@@ -788,6 +788,24 @@ The glyph and the placeholder tail are dim (SGR 2), but the cell under the termi
 Reverse video is neither dim nor a dark foreground, so ghost stripping leaves a lone `P` and an idle composer read `pending` before the fix.
 After teaching the shared classifier the glyph, both placeholders, and the plain-row remnant rule, the same captures read `empty` on the styled cursorless backends, while real typed text - including text typed to exactly match the placeholder - still read `pending`.
 An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
+
+#### tmux composer verdict, corrected 2026-08-13
+
+The 2026-08-11 record that a Cursor pane's tmux composer verdict is `unknown` in every state described the cursor-ANCHORED read, which remains true: `#{cursor_y}` was 25 with `#{cursor_flag}` 0 on an idle pane, pointing below the footer, so tmux's cursor row is not a composer locator for Cursor.
+Read cursorlessly, the same live capture classifies correctly, so the composite verdict is no longer `unknown`:
+
+```text
+cursor_y=25  cursor_flag=0
+with-cursor : unknown      cursorless : empty     (idle composer)
+with-cursor : unknown      cursorless : pending   (real typed text, not submitted)
+with-cursor : unknown      cursorless : unknown   (agent exited to a shell)
+```
+
+`bin/fm-tmux-lib.sh` therefore reclassifies cursorlessly only when the pane's foreground process group is provably Cursor, so every other harness keeps the strict blank-cursor-row posture.
+That restored a genuine composer-empty proof and unblocked away-mode escalation delivery, which had deferred forever and then raised a wedge alarm.
+A live injection through `bin/fm-supervise-daemon.sh`'s own `inject_msg` into a real Cursor pane returned 0 and the pane processed the typed `FIRSTMATE_OP: v1 away-supervisor:` escalation.
+
+`tests/fm-tmux-agent-liveness.test.sh` pins this with real processes and no Cursor installed: it asserts the cursor-anchored source is blind, that the composite still reads `empty` idle and `pending` with typed text, that an identical screen stays `unknown` when the pane is not Cursor, and that a stale Cursor screen over a dead shell never reads `empty`.
 
 **Cursor parks its terminal cursor outside its composer.**
 With the composer on row 12 (zero-based), `#{cursor_y}` reported 17 both when idle and with real text typed, and `#{cursor_flag}` reported 0.

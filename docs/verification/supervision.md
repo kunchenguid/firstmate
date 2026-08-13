@@ -214,6 +214,48 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
+| Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+
+### Cursor primary park, 2026-08-13
+
+Cursor was validated as a primary on 2026-08-13 against the installed CLI on macOS 26.5.2 arm64 with tmux 3.6a, in a throwaway firstmate home on a private tmux socket, never against a live home and never with a user-scope hook.
+
+Mechanism facts established first, in a separate throwaway workspace:
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Can `stop` block? | hook exits 2 | No. The turn ended normally; Cursor's blocked-response mapper returns `{}` for the `stop` step. |
+| Can `stop` force one turn? | hook returns `{"followup_message":...}` | Yes. A genuine second turn ran and answered. |
+| Can `stop` park? | hook sleeps, then returns a follow-up | Yes. It is awaited; a 20s sleep held the boundary and the follow-up landed after it. |
+| What is `loop_count`? | four consecutive follow-ups, then a real user message | `0,1,2,3`, then `0` again. It counts follow-up-driven stops since the last real user message. |
+| Does `loop_limit` bind? | `loop_limit: 2` with an always-follow-up hook | Yes. The hook was invoked at `loop_count` 0 and 1 and never at 2. |
+| Does a superseded park still deliver? | captain message typed during a 600s park | Yes, and Cursor does not kill the parked hook. Both parks later delivered a follow-up, which is the defect `state/.cursor-park-owner` exists to close. |
+| Does Cursor load `.claude/settings.json`? | Claude-shaped `SessionStart`, `PreToolUse`, `Stop` in the same workspace | `SessionStart` and `PreToolUse` fired with a CURSOR-shaped payload carrying `cursor_version`; `Stop` did not fire. |
+
+The integration itself is exercised by the opt-in guard:
+
+```sh
+FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+harness: cursor-agent 2026.08.11-e8db854
+ok - cursor primary: the sessionStart hook takes the fleet lock as the Cursor process itself
+ok - cursor primary: the run-tier session start completes every stage
+ok - cursor primary: sessionStart additional_context reaches model context before the first turn
+ok - cursor primary: the stop-hook park delivers a real watcher wake as one follow-up
+ok - cursor primary: the park owns exactly one arm cycle with a live watcher beacon
+ok - cursor primary: the captain keeps control mid-park and the superseded park stands down
+ok - cursor primary: an away-mode escalation is delivered, confirmed, and processed
+```
+
+Two defects were found and fixed by that run rather than assumed absent.
+`bin/fm-session-lock-lib.sh` could not locate Cursor in the process ancestry, so every Cursor session start refused the fleet lock with `error: cannot locate harness process in ancestry` and produced a read-only digest; Cursor's identity is not expressible as a command-name pattern, so the lib now delegates to `bin/fm-cursor-lib.sh`.
+`fm_supervision_model` classified Cursor as `persistent`, so the mid-turn pull guard reported `WATCHER DOWN` between turns even with a beacon seconds old; Cursor's park runs the watcher only between turns, exactly like Claude's auto-arm, and is now classified `autoarm`.
+
+Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 

@@ -220,12 +220,8 @@ ACTIONABLE=0
 HEALTHY=0
 SUPERSEDED=0
 
-cleanup() {
-  [ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null
-  [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null
-  return 0
-}
-trap cleanup EXIT
+# Never leave an arm child or its capture file behind, on any exit path.
+trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
 
 attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do

@@ -140,9 +140,10 @@ fm_watcher_healthy() {
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
-#   autoarm     Claude Stop-hook auto-arm: the watcher is armed at each turn end
-#               and exits on its wake, so it runs only BETWEEN turns. Mid-turn a
-#               fresh beacon with no live watcher process is the healthy state.
+#   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
+#               watcher is armed at each turn end and exits on its wake, so it
+#               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
+#               watcher process is the healthy state.
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
@@ -161,7 +162,7 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude) printf 'autoarm\n' ;;
+    claude|cursor) printf 'autoarm\n' ;;
     pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
