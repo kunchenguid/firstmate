@@ -74,7 +74,7 @@ canonical_ok=no
 if git -C "$FM_ROOT" remote get-url origin >/dev/null 2>&1 && fetch_once "$FM_ROOT"; then
   origin_ok=yes
 fi
-if git -C "$FM_ROOT" fetch --quiet --no-tags "$CANONICAL_UPSTREAM_URL" \
+if git_unattended -C "$FM_ROOT" fetch --quiet --no-tags "$CANONICAL_UPSTREAM_URL" \
   "+refs/heads/$CANONICAL_UPSTREAM_BRANCH:$CANONICAL_UPSTREAM_REF" 2>/dev/null; then
   canonical_ok=yes
 fi
@@ -178,14 +178,17 @@ if [ -f "$SECONDMATES_MD" ]; then
     id=$SECONDMATE_REGISTRY_ID
     home=$SECONDMATE_REGISTRY_HOME
     if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
-      if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
-        while IFS= read -r remote_source_line; do
-          case "$remote_source_line" in
-            'firstmate fork origin:'*|'firstmate canonical upstream:'*)
-              echo "remote secondmate $id on $SECONDMATE_REGISTRY_HOST: ${remote_source_line#firstmate }"
-              ;;
-          esac
-        done <<< "$remote_out"
+      remote_rc=0
+      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1) \
+        || remote_rc=$?
+      while IFS= read -r remote_source_line; do
+        case "$remote_source_line" in
+          'firstmate fork origin:'*|'firstmate canonical upstream:'*)
+            echo "remote secondmate $id on $SECONDMATE_REGISTRY_HOST: ${remote_source_line#firstmate }"
+            ;;
+        esac
+      done <<< "$remote_out"
+      if [ "$remote_rc" -eq 0 ]; then
         remote_result=$(printf '%s\n' "$remote_out" | tail -1)
         case "$remote_result" in
           synced:*)
@@ -198,7 +201,9 @@ if [ -f "$SECONDMATES_MD" ]; then
           *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
         esac
       else
-        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+        remote_reason=$(printf '%s\n' "$remote_out" \
+          | grep -vE '^firstmate (fork origin|canonical upstream):' | head -1)
+        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_reason:-remote update failed}" >&2
       fi
     else
       process_secondmate "$id" "$home" "" "$effective_rev" no "$FM_ROOT"

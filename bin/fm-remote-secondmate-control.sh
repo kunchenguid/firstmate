@@ -245,25 +245,27 @@ cmd_sync() {
   printf 'synced: %s\n' "$head"
 }
 
+SOURCE_LINE_RE='^firstmate (fork origin|canonical upstream):'
+
+update_die() {  # <update-output> <message>
+  local out=$1 msg=$2
+  [ -z "$out" ] || printf '%s\n' "$out" | grep -vE "$SOURCE_LINE_RE" >&2 || true
+  die "$msg"
+}
+
 cmd_update() {
-  local id=$1 update_out root_status
+  local id=$1 update_out update_rc=0 root_status
   validate_id "$id"
   validate_home "$id"
-  if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    "$SCRIPT_DIR/fm-update.sh" 2>&1); then
-    [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-    die "remote code root update failed"
-  fi
+  update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-update.sh" 2>&1) || update_rc=$?
+  [ -z "$update_out" ] || printf '%s\n' "$update_out" | grep -E "$SOURCE_LINE_RE" || true
+  [ "$update_rc" -eq 0 ] || update_die "$update_out" "remote code root update failed"
   root_status=$(printf '%s\n' "$update_out" | grep '^firstmate:' | tail -1)
   case "$root_status" in
     'firstmate: updated '*|'firstmate: already current'*) ;;
-    *)
-      [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-      die "remote code root did not complete a safe fork-and-canonical update"
-      ;;
+    *) update_die "$update_out" "remote code root did not complete a safe fork-and-canonical update" ;;
   esac
-  printf '%s\n' "$update_out" \
-    | grep -E '^firstmate (fork origin|canonical upstream):' || true
   cmd_sync "$id"
 }
 

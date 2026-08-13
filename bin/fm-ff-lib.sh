@@ -193,9 +193,16 @@ validate_secondmate_home() {
   VALIDATED_HOME="$abs_home"
 }
 
+# Every fetch here runs unattended, so an unreachable or unauthenticated source
+# must fail fast instead of blocking on a terminal or askpass credential prompt.
+git_unattended() {
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' SSH_ASKPASS='' \
+    git -c credential.helper= -c core.askPass= "$@"
+}
+
 # A single fetch refreshes every worktree that shares an object store, so fetch
-# each distinct git-common-dir at most once. Used ONLY by the origin base mode;
-# the local-HEAD sync never fetches.
+# each distinct git-common-dir at most once. Used by callers that follow an
+# origin remote; the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
   local dir=$1 common
@@ -205,7 +212,7 @@ fetch_once() {
       *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+  if git_unattended -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
     [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi
@@ -261,16 +268,12 @@ live_secondmate_meta_records() {
 #   FF_STATUS = updated|current|skipped
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
-# base_mode selects where the fast-forward base comes from:
-#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
-#                  path); requires an origin remote and network reachability.
-#   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
-#                  dependency (the local-HEAD secondmate sync). The commit must
-#                  already exist in the target's object store, which it always does
-#                  for a worktree of this same repo; a standalone clone that lacks
-#                  it is skipped rather than fetched.
-# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# base_mode is a commit-ish: advance to that LOCAL commit with NO fetch and no
+# origin dependency. The commit must already exist in the target's object store,
+# which it always does for a worktree of this same repo; a standalone clone that
+# lacks it is skipped unless process_secondmate first imported it from an
+# explicit source. Guards: ff-only (never force/merge/stash); skip a dirty,
+# diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
@@ -293,20 +296,7 @@ ff_target() {
     return 0
   }
 
-  # Resolve the fast-forward base from base_mode (see header).
-  if [ "$base_mode" = origin ]; then
-    if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-      echo "$label: skipped: no origin remote"
-      return 0
-    fi
-    if ! fetch_once "$dir"; then
-      echo "$label: skipped: fetch failed"
-      return 0
-    fi
-    base="origin/$default"
-  else
-    base="$base_mode"
-  fi
+  base="$base_mode"
 
   if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
     echo "$label: skipped: $base does not exist"
@@ -396,10 +386,9 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  if [ "$base_mode" != origin ] \
-    && ! git -C "$home_real" cat-file -e "$base_mode^{commit}" 2>/dev/null \
-    && [ -n "$import_source" ]; then
-    if ! git -C "$home_real" fetch --quiet --no-tags "$import_source" "$base_mode" 2>/dev/null; then
+  if [ -n "$import_source" ] \
+    && ! git -C "$home_real" cat-file -e "$base_mode^{commit}" 2>/dev/null; then
+    if ! git_unattended -C "$home_real" fetch --quiet --no-tags "$import_source" "$base_mode" 2>/dev/null; then
       echo "secondmate $id: skipped: selected update commit is unavailable and could not be imported"
       return 0
     fi
