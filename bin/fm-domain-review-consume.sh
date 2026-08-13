@@ -93,14 +93,28 @@ REPO_TOP=$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null) || {
   echo "error: --repo must name the exact product worktree root: $REPO" >&2
   exit 13
 }
-if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
-  echo "error: product worktree must be clean before domain-review consumption" >&2
-  exit 13
-fi
-PRODUCT_HEAD=$(git -C "$REPO" rev-parse HEAD 2>/dev/null) || {
-  echo "error: product HEAD cannot be resolved" >&2
-  exit 13
+resolve_clean_exact_head() {
+  expected=${1:-}
+  when=${2:-before}
+  if ! porcelain=$(git -C "$REPO" status --porcelain --untracked-files=normal 2>/dev/null); then
+    echo "error: product worktree state cannot be read $when domain-review consumption" >&2
+    exit 13
+  fi
+  if [ -n "$porcelain" ]; then
+    echo "error: product worktree must be clean $when domain-review consumption" >&2
+    exit 13
+  fi
+  PRODUCT_HEAD=$(git -C "$REPO" rev-parse HEAD 2>/dev/null) || {
+    echo "error: product HEAD cannot be resolved $when domain-review consumption" >&2
+    exit 13
+  }
+  if [ -n "$expected" ] && [ "$PRODUCT_HEAD" != "$expected" ]; then
+    echo "error: product HEAD moved during domain-review consumption" >&2
+    exit 13
+  fi
 }
+
+resolve_clean_exact_head "" "before"
 
 RESULT=$(mktemp "${TMPDIR:-/tmp}/fm-domain-review-consume.XXXXXX") || exit 13
 NORMALIZED=$(mktemp "${TMPDIR:-/tmp}/fm-domain-review-normalized.XXXXXX") || {
@@ -115,6 +129,8 @@ if [ "$CONSUMER_STATUS" -ne 0 ]; then
   cat "$RESULT"
   exit "$CONSUMER_STATUS"
 fi
+
+resolve_clean_exact_head "$PRODUCT_HEAD" "after"
 
 node - "$RESULT" "$REPOSITORY" "$PRODUCT_HEAD" "$NORMALIZED" <<'NODE'
 const fs = require('node:fs')

@@ -25,6 +25,14 @@ write_consumer() {
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "${FAKE_CONSUMER_LOG:?}"
+case "${FAKE_CONSUMER_MUTATE:-none}" in
+  commit)
+    printf '%s\n' consumer-moved > "${FAKE_CONSUMER_REPO:?}/file.txt"
+    git -C "${FAKE_CONSUMER_REPO:?}" add file.txt
+    git -C "${FAKE_CONSUMER_REPO:?}" commit -qm consumer-moved
+    ;;
+  dirty) printf '%s\n' consumer-dirtied >> "${FAKE_CONSUMER_REPO:?}/file.txt" ;;
+esac
 case "${FAKE_CONSUMER_RESULT:-accepted}" in
   accepted)
     cat <<JSON
@@ -146,6 +154,26 @@ test_dirty_worktree_is_refused_before_consumer() {
   pass "dirty product worktrees stop before provider code runs"
 }
 
+test_worktree_moved_by_consumer_is_refused() {
+  local mutation message dir out rc
+  while IFS='|' read -r mutation message; do
+    dir=$(new_case "consumer-$mutation")
+    set +e
+    out=$(run_case "$dir" example/product env \
+      FAKE_CONSUMER_REPO="$dir/product" FAKE_CONSUMER_MUTATE="$mutation" 2>&1)
+    rc=$?
+    set -e
+    expect_code 13 "$rc" "a consumer that $mutation the product worktree must be refused"
+    assert_contains "$out" "$message" "post-consumer refusal was not actionable"
+    assert_not_contains "$out" '"status": "accepted"' \
+      "an unbound worktree still produced an accepted delivery result"
+  done <<'ROWS'
+commit|product HEAD moved during domain-review consumption
+dirty|product worktree must be clean after domain-review consumption
+ROWS
+  pass "the exact clean head binding is re-checked after the consumer returns"
+}
+
 test_incompatible_accepted_version_is_refused() {
   local dir out rc
   dir=$(new_case incompatible-version)
@@ -200,6 +228,7 @@ test_matching_accepted_result_is_consumed
 test_repository_identity_mismatch_is_refused
 test_changed_head_is_refused
 test_dirty_worktree_is_refused_before_consumer
+test_worktree_moved_by_consumer_is_refused
 test_incompatible_accepted_version_is_refused
 test_provider_labels_remain_visible_without_core_allowlist
 test_nonaccepted_consumer_results_are_preserved

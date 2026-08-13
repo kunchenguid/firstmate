@@ -24,7 +24,8 @@ Expected guarantees are:
 
 - a trusted external consumer receives the opaque handoff, exact clean product root, and independently resolved repository identity;
 - an accepted result passes only when its neutral protocol version, repository identity, current product head, strategy, and digest shapes match;
-- a dirty product worktree stops before external provider code runs;
+- a dirty product worktree stops before external provider code runs, and a worktree the consumer moved or dirtied stops before any accepted result is emitted;
+- an unreadable worktree state refuses instead of admitting an unverified tree;
 - a repository mismatch, stale accepted head, incompatible protocol version, malformed result, or nonaccepted outcome cannot authorize a review skip;
 - provider-owned review and quality labels remain visible without a provider-specific core allowlist;
 - provider-private fields beyond the normalized protocol are not forwarded;
