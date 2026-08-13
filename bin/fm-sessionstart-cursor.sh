@@ -36,9 +36,24 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PENDING_CONTEXT="$STATE/.cursor-pending-context"
+PENDING_CONTEXT_LOCK="$STATE/.cursor-pending-context.lock"
+LOCK_ATTEMPTS=${FM_CURSOR_LOCK_ATTEMPTS:-50}
+case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=50 ;; esac
 
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+lock_acquire_bounded() {
+  local attempt=0
+  while [ "$attempt" -lt "$LOCK_ATTEMPTS" ]; do
+    fm_lock_try_acquire "$PENDING_CONTEXT_LOCK" && return 0
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$LOCK_ATTEMPTS" ] && sleep 0.1
+  done
+  return 1
+}
 
 SOURCE=
 while [ $# -gt 0 ]; do
@@ -69,18 +84,21 @@ if [ "$EVENT" = preCompact ]; then
   # replaced rather than appended, so the session never receives two digests.
   [ -d "$STATE" ] && [ -n "$SESSION_ID" ] || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
+  lock_acquire_bounded || exit 0
   TMP="$PENDING_CONTEXT.tmp.$$"
   jq -n --arg session_id "$SESSION_ID" --arg digest "$DIGEST" \
     '{session_id:$session_id,digest:$digest}' > "$TMP" 2>/dev/null \
     && mv -f "$TMP" "$PENDING_CONTEXT" 2>/dev/null
   rm -f "$TMP" 2>/dev/null || true
+  fm_lock_release "$PENDING_CONTEXT_LOCK"
   exit 0
 fi
 
 command -v jq >/dev/null 2>&1 || exit 0
 RESPONSE=$(jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null) || exit 0
-if fm_session_lock_owned_by_self "$STATE"; then
+if fm_session_lock_owned_by_self "$STATE" && lock_acquire_bounded; then
   rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+  fm_lock_release "$PENDING_CONTEXT_LOCK"
 fi
 printf '%s\n' "$RESPONSE"
 exit 0

@@ -391,7 +391,7 @@ test_park_stands_down_when_superseded() {
 }
 
 test_park_serializes_supersession_with_followup_commit() {
-  local dir first_pid first_out second_out waited count
+  local dir first_pid second_pid first_out second_out waited claim_seq
   dir=$(make_primary_dir "$TMP_ROOT/park-commit-race")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
@@ -413,15 +413,25 @@ SH
     waited=$((waited + 1))
     [ "$waited" -lt 200 ] || fail "the first park never reached follow-up commit"
   done
-  second_out=$(run_park "$dir")
+  ( run_park "$dir" > "$dir/state/second-out" ) &
+  second_pid=$!
+  waited=0
+  claim_seq=
+  while [ "$claim_seq" != 2 ]; do
+    claim_seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$dir/state/.cursor-park-claim" 2>/dev/null || true)
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || fail "the newer park did not publish its ownership claim"
+  done
   : > "$dir/state/commit-release"
   wait "$first_pid" 2>/dev/null || true
+  wait "$second_pid" 2>/dev/null || true
   first_out=$(cat "$dir/state/first-out" 2>/dev/null || true)
-  count=0
-  [ -z "$first_out" ] || count=$((count + 1))
-  [ -z "$second_out" ] || count=$((count + 1))
-  [ "$count" -eq 1 ] || fail "concurrent commit emitted $count follow-ups: first=$first_out second=$second_out"
-  pass "cursor park: ownership claim and follow-up commit are serialized"
+  second_out=$(cat "$dir/state/second-out" 2>/dev/null || true)
+  [ -z "$first_out" ] || fail "the older park emitted after a newer stop arrived: $first_out"
+  [ "$(kind_of_followup "$second_out")" = watcher ] \
+    || fail "the newest park did not own the follow-up: $second_out"
+  pass "cursor park: the newest stop owns a concurrent follow-up commit"
 }
 
 test_superseded_park_does_not_consume_nag_budget() {
@@ -553,6 +563,48 @@ test_precompact_stages_instead_of_injecting() {
   pass "fm-sessionstart-cursor: preCompact stages the digest for the next turn boundary"
 }
 
+test_precompact_replacement_cannot_be_deleted_by_consumer() {
+  local dir park_pid compact_pid out waited staged
+  dir=$(make_primary_dir "$TMP_ROOT/session-compact-race")
+  jq -n --arg session_id sess-cursor --arg digest 'OLD STAGED DIGEST' \
+    '{session_id:$session_id,digest:$digest}' > "$dir/state/.cursor-pending-context"
+  cat > "$dir/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'NEW STAGED DIGEST\n'
+SH
+  chmod +x "$dir/bin/fm-session-start.sh"
+  cat >> "$dir/bin/fm-operational-input.sh" <<'SH'
+fm_operational_input_encode() {
+  local kind=${1-} body=${2-} result_var=${3-}
+  [ -n "$result_var" ] && fm_operational_kind_is_current "$kind" && [ -n "$body" ] || return 2
+  if [ "$kind" = session-start ] && ( set -C; : > "$FM_HOME/state/context-consume-entered" ) 2>/dev/null; then
+    while [ ! -e "$FM_HOME/state/context-consume-release" ]; do sleep 0.05; done
+  fi
+  printf -v "$result_var" '%s%s: %s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body"
+}
+SH
+  ( run_park "$dir" > "$dir/state/context-consume-out" ) &
+  park_pid=$!
+  waited=0
+  while [ ! -e "$dir/state/context-consume-entered" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -lt 200 ] || fail "the staged-context consumer did not enter its commit"
+  done
+  ( run_session "$dir" preCompact compact > "$dir/state/compact-out" ) &
+  compact_pid=$!
+  sleep 0.2
+  : > "$dir/state/context-consume-release"
+  wait "$park_pid" 2>/dev/null || true
+  wait "$compact_pid" 2>/dev/null || true
+  out=$(cat "$dir/state/context-consume-out" 2>/dev/null || true)
+  case "$(followup_of "$out")" in *'OLD STAGED DIGEST'*) ;; *) fail "the original staged digest was not committed: $out" ;; esac
+  staged=$(jq -r '.digest // empty' "$dir/state/.cursor-pending-context" 2>/dev/null || true)
+  [ "$staged" = 'NEW STAGED DIGEST' ] \
+    || fail "the consumer deleted the concurrently replaced digest: $staged"
+  pass "fm-sessionstart-cursor: staged replacement is serialized with consumption"
+}
+
 test_sessionstart_silent_in_child_worktree() {
   local base child out
   base=$(make_primary_dir "$TMP_ROOT/session-base")
@@ -624,6 +676,7 @@ test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
 test_precompact_stages_instead_of_injecting
+test_precompact_replacement_cannot_be_deleted_by_consumer
 test_sessionstart_silent_in_child_worktree
 test_tracked_registration_covers_the_primary_events
 test_default_ceiling_bites_before_the_registered_loop_limit

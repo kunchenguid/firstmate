@@ -63,17 +63,22 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.cursor-park-owner"
 OWNER_LOCK="$STATE/.cursor-park-owner.lock"
+CLAIM="$STATE/.cursor-park-claim"
+CLAIM_LOCK="$STATE/.cursor-park-claim.lock"
 BUDGET_FILE="$STATE/.turnend-cursor-blocks"
 PENDING_CONTEXT="$STATE/.cursor-pending-context"
+PENDING_CONTEXT_LOCK="$STATE/.cursor-pending-context.lock"
 
 LOOP_CEILING=${FM_CURSOR_TURNEND_LOOP_CEILING:-180}
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
 ARM_ATTEMPTS=${FM_CURSOR_PARK_ATTEMPTS:-2}
 POLL=${FM_CURSOR_PARK_POLL:-2}
+LOCK_ATTEMPTS=${FM_CURSOR_LOCK_ATTEMPTS:-50}
 case "$LOOP_CEILING" in ''|*[!0-9]*|0) LOOP_CEILING=180 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 case "$ARM_ATTEMPTS" in 1|2|3) : ;; *) ARM_ATTEMPTS=2 ;; esac
 case "$POLL" in ''|*[!0-9]*|0) POLL=2 ;; esac
+case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=50 ;; esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -105,17 +110,25 @@ case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+lock_acquire_bounded() {  # <lock>
+  local lock=$1 attempt=0
+  while [ "$attempt" -lt "$LOCK_ATTEMPTS" ]; do
+    fm_lock_try_acquire "$lock" && return 0
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$LOCK_ATTEMPTS" ] && sleep 0.1
+  done
+  return 1
+}
+
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
 # embedded quote, newline, or the U+2063 prefix cannot corrupt the response.
 emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_lock_try_acquire "$OWNER_LOCK" || exit 0
-  if ! park_still_ours; then
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  fi
-  if ! fm_operational_input_encode "$kind" "$body" encoded \
+  if ! park_still_ours \
+    || ! fm_operational_input_encode "$kind" "$body" encoded \
     || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
+    || ! park_still_ours \
     || ! printf '%s\n' "$response"; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
@@ -164,23 +177,32 @@ emit_staged_context() {
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
+  lock_acquire_bounded "$PENDING_CONTEXT_LOCK" || {
+    fm_lock_release "$OWNER_LOCK"
+    exit 0
+  }
   if [ ! -s "$PENDING_CONTEXT" ] || [ -L "$PENDING_CONTEXT" ] || [ "$SESSION_ID" = unknown ]; then
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 0
   fi
   staged_session=$(jq -r '.session_id // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
   staged=$(jq -r '.digest // empty' "$PENDING_CONTEXT" 2>/dev/null || true)
   if [ "$staged_session" != "$SESSION_ID" ] || [ -z "$staged" ]; then
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 0
   fi
   if ! fm_operational_input_encode session-start "$staged" encoded \
     || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
+    || ! park_still_ours \
     || ! printf '%s\n' "$response"; then
+    fm_lock_release "$PENDING_CONTEXT_LOCK"
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
   rm -f "$PENDING_CONTEXT" 2>/dev/null || true
+  fm_lock_release "$PENDING_CONTEXT_LOCK"
   fm_lock_release "$OWNER_LOCK"
   exit 0
 }
@@ -204,6 +226,7 @@ $arm_tail
 $reason"
   if ! fm_operational_input_encode turn-end-guard "$body" encoded \
     || ! response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) \
+    || ! park_still_ours \
     || ! printf '%s\n' "$response"; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
@@ -214,14 +237,32 @@ $reason"
 }
 
 # --- park ownership ----------------------------------------------------------
-# Last writer wins. The sequence is monotonic per home so a park can recognize
-# its own record without depending on pid reuse.
+# Last arrival wins. A claim ticket is published before waiting for an older
+# output commit, so that older park can stand down before writing its response.
 claim_park() {
-  local seq tmp
-  fm_lock_try_acquire "$OWNER_LOCK" || return 1
-  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
+  local seq owner_seq tmp
+  lock_acquire_bounded "$CLAIM_LOCK" || return 1
+  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$CLAIM" 2>/dev/null || true)
+  owner_seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
   case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+  case "$owner_seq" in ''|*[!0-9]*) owner_seq=0 ;; esac
+  [ "$owner_seq" -le "$seq" ] || seq=$owner_seq
   PARK_SEQ=$((seq + 1))
+  tmp="$CLAIM.tmp.$$"
+  if ! printf 'seq=%s pid=%s updated_at=%s\n' "$PARK_SEQ" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$CLAIM" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$CLAIM_LOCK"
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$CLAIM_LOCK"
+
+  lock_acquire_bounded "$OWNER_LOCK" || return 1
+  if ! claim_still_ours; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
   tmp="$OWNER.tmp.$$"
   if ! printf 'seq=%s pid=%s updated_at=%s\n' "$PARK_SEQ" "${BASHPID:-$$}" "$(date +%s)" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$OWNER" 2>/dev/null; then
@@ -234,8 +275,15 @@ claim_park() {
   return 0
 }
 
+claim_still_ours() {
+  local seq
+  seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$CLAIM" 2>/dev/null || true)
+  [ "$seq" = "$PARK_SEQ" ]
+}
+
 park_still_ours() {
   local seq
+  claim_still_ours || return 1
   seq=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$OWNER" 2>/dev/null || true)
   [ "$seq" = "$PARK_SEQ" ]
 }
