@@ -51,7 +51,7 @@ The exact session was exited and killed after the bounded check.
 `bin/fm-codex-effort.sh` uses literal `ESC .` and `ESC ,` on Herdr.
 It supports only idle Herdr Codex tasks whose endpoint identity, native agent state, live agent, current worktree, empty composer, and current model and effort footer are all verified.
 It treats tmux's observed `M-.` and `M-,` behavior as compatibility evidence only, because current Codex tmux workers have no verified semantic idle source and must refuse before any chord.
-It writes a durable recovery record before its first chord, serializes its chords with ordinary recorded-task steering through a shared endpoint input lock, checks each adjacent transition, revalidates semantic idle and the empty composer under that lock immediately before every chord, and atomically updates only `effort=` after the final footer confirmation.
+It writes a durable recovery record before its first chord, serializes its chords with all recorded-task steering including `fm-send --key` through a shared endpoint input lock, checks each adjacent transition, revalidates semantic idle and the empty composer under that lock immediately before every chord, and atomically updates only `effort=` after the final footer confirmation.
 If a chord is delivered before an interruption, unreadable UI, or metadata-write failure, the next locked invocation verifies the unchanged endpoint and reconciles the observed footer into metadata before it can send another chord.
 Zellij, Orca, and cmux remain refused because their current backend adapters return `unverified` from the recovery-grade agent-state interface, even though they have generic input and capture primitives.
 This is an evidence gap rather than a claim that their terminal transports cannot carry the keys.
@@ -64,7 +64,7 @@ tests/fm-codex-effort.test.sh
 tests/fm-teardown.test.sh
 ```
 
-The suites cover successful Herdr switching, captured Codex 0.147 footer variants, tmux refusal without semantic idle evidence, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, structural footer confirmation, serialized ordinary steering, swallowed input, changed UI, durable post-send recovery, task-id-reuse cleanup, unsupported backends, and no false success.
+The suites cover successful Herdr switching, captured Codex 0.147 footer variants, tmux refusal without semantic idle evidence, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, structural footer confirmation, serialized text and key steering, swallowed input, changed UI, durable post-send recovery, task-id-reuse cleanup, unsupported backends, and no false success.
 
 ## tmux
 

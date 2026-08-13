@@ -160,6 +160,10 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "pane send-keys")
+    if [ "${FM_FAKE_BLOCK_KEY_SEND:-0}" = 1 ]; then
+      : > "${FM_FAKE_KEY_ENTERED:?}"
+      while [ ! -e "${FM_FAKE_ALLOW_KEY:?}" ]; do sleep 0.01; done
+    fi
     if [ "${4:-}" = enter ] && [ -n "${FM_FAKE_AGENT_STATUS_FILE:-}" ]; then
       printf 'working\n' > "$FM_FAKE_AGENT_STATUS_FILE"
     fi
@@ -249,6 +253,9 @@ run_case() {  # <dir> <effort>
     FM_FAKE_SEND_ENTERED="${FM_FAKE_SEND_ENTERED:-}" \
     FM_FAKE_ALLOW_SEND="${FM_FAKE_ALLOW_SEND:-}" \
     FM_FAKE_SENT_TEXT="${FM_FAKE_SENT_TEXT:-}" \
+    FM_FAKE_BLOCK_KEY_SEND="${FM_FAKE_BLOCK_KEY_SEND:-0}" \
+    FM_FAKE_KEY_ENTERED="${FM_FAKE_KEY_ENTERED:-}" \
+    FM_FAKE_ALLOW_KEY="${FM_FAKE_ALLOW_KEY:-}" \
     FM_FAKE_REAL_MV="$(command -v mv)" \
     PATH="$dir/fakebin:$PATH" \
     "$SWITCH" effort-task "$effort"
@@ -271,9 +278,37 @@ run_send_case() {  # <dir> <message>
     FM_FAKE_SEND_ENTERED="${FM_FAKE_SEND_ENTERED:-}" \
     FM_FAKE_ALLOW_SEND="${FM_FAKE_ALLOW_SEND:-}" \
     FM_FAKE_SENT_TEXT="${FM_FAKE_SENT_TEXT:-}" \
+    FM_FAKE_BLOCK_KEY_SEND="${FM_FAKE_BLOCK_KEY_SEND:-0}" \
+    FM_FAKE_KEY_ENTERED="${FM_FAKE_KEY_ENTERED:-}" \
+    FM_FAKE_ALLOW_KEY="${FM_FAKE_ALLOW_KEY:-}" \
     FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
     PATH="$dir/fakebin:$PATH" \
     "$SEND" effort-task "$message"
+}
+
+run_key_send_case() {  # <dir> <key>
+  local dir=$1 key=$2
+  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_LOG="$dir/runtime.log" FM_FAKE_WORKTREE="${FM_FAKE_WORKTREE:-$dir/worktree}" \
+    FM_FAKE_EFFORT_FILE="$dir/effort" \
+    FM_FAKE_META="$dir/home/state/effort-task.meta" \
+    FM_FAKE_TARGET_EFFORT=high \
+    FM_FAKE_CHANGED_FILE="$dir/changed-ui" \
+    FM_FAKE_AGENT_STATUS="${FM_FAKE_AGENT_STATUS:-idle}" \
+    FM_FAKE_PANE_STATE="${FM_FAKE_PANE_STATE:-present}" \
+    FM_FAKE_UI="${FM_FAKE_UI:-footer}" \
+    FM_FAKE_FOOTER_FIXTURE="${FM_FAKE_FOOTER_FIXTURE:-}" \
+    FM_FAKE_AGENT_STATUS_FILE="${FM_FAKE_AGENT_STATUS_FILE:-}" \
+    FM_FAKE_BLOCK_ORDINARY_SEND="${FM_FAKE_BLOCK_ORDINARY_SEND:-0}" \
+    FM_FAKE_SEND_ENTERED="${FM_FAKE_SEND_ENTERED:-}" \
+    FM_FAKE_ALLOW_SEND="${FM_FAKE_ALLOW_SEND:-}" \
+    FM_FAKE_SENT_TEXT="${FM_FAKE_SENT_TEXT:-}" \
+    FM_FAKE_BLOCK_KEY_SEND="${FM_FAKE_BLOCK_KEY_SEND:-0}" \
+    FM_FAKE_KEY_ENTERED="${FM_FAKE_KEY_ENTERED:-}" \
+    FM_FAKE_ALLOW_KEY="${FM_FAKE_ALLOW_KEY:-}" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
+    PATH="$dir/fakebin:$PATH" \
+    "$SEND" effort-task --key "$key"
 }
 
 test_success_changes_effort_in_place_and_then_metadata() {
@@ -489,7 +524,11 @@ test_ordinary_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check()
   FM_FAKE_SENT_TEXT="$dir/sent-text" \
     run_case "$dir" medium >"$dir/effort.out" 2>"$dir/effort.err" &
   effort_pid=$!
-  sleep 0.15
+  waited=0
+  while ! grep -Eq 'increase|decrease' "$dir/runtime.log" && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
   if grep -Eq 'increase|decrease' "$dir/runtime.log"; then
     : > "$dir/allow-send"
     wait "$send_pid" || true
@@ -508,6 +547,59 @@ test_ordinary_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check()
     "effort helper delivered a chord after the serialized send began a turn"
   assert_grep 'ordinary steer' "$dir/sent-text" "ordinary send did not deliver its own text"
   pass "fm-codex-effort: ordinary fm-send input serializes with chords and receives a fresh semantic idle check"
+}
+
+test_key_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check() {
+  local dir key_pid effort_pid key_rc effort_rc waited=0
+  dir=$(make_case key-send-race)
+  printf 'idle\n' > "$dir/agent-status"
+
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_BLOCK_KEY_SEND=1 \
+  FM_FAKE_KEY_ENTERED="$dir/key-entered" \
+  FM_FAKE_ALLOW_KEY="$dir/allow-key" \
+    run_key_send_case "$dir" Enter >"$dir/key.out" 2>"$dir/key.err" &
+  key_pid=$!
+  while [ ! -e "$dir/key-entered" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$dir/key-entered" ]; then
+    : > "$dir/allow-key"
+    wait "$key_pid" || true
+    fail "key send did not reach its deterministic in-flight point"
+  fi
+
+  FM_FAKE_AGENT_STATUS_FILE="$dir/agent-status" \
+  FM_FAKE_BLOCK_KEY_SEND=1 \
+  FM_FAKE_KEY_ENTERED="$dir/key-entered" \
+  FM_FAKE_ALLOW_KEY="$dir/allow-key" \
+    run_case "$dir" medium >"$dir/effort.out" 2>"$dir/effort.err" &
+  effort_pid=$!
+  waited=0
+  while ! grep -Eq 'increase|decrease' "$dir/runtime.log" && [ "$waited" -lt 100 ]; do
+    sleep 0.02
+    waited=$((waited + 1))
+  done
+  if grep -Eq 'increase|decrease' "$dir/runtime.log"; then
+    : > "$dir/allow-key"
+    wait "$key_pid" || true
+    wait "$effort_pid" || true
+    fail "effort chord landed while key input held the endpoint input transaction"
+  fi
+
+  : > "$dir/allow-key"
+  key_rc=0; wait "$key_pid" || key_rc=$?
+  effort_rc=0; wait "$effort_pid" || effort_rc=$?
+  expect_code 0 "$key_rc" "key send should complete before the effort helper retries its idle check"
+  assert_grep 'pane send-keys w1:p1 enter' "$dir/runtime.log" \
+    "serialized key send did not deliver its recorded Enter input"
+  [ "$effort_rc" -ne 0 ] || fail "effort helper accepted an endpoint made busy by the serialized key send"
+  assert_contains "$(cat "$dir/effort.err")" "not idle" \
+    "effort helper did not recheck native semantic idle after a serialized key send"
+  assert_no_grep 'increase|decrease' "$dir/runtime.log" \
+    "effort helper delivered a chord after the serialized key send began a turn"
+  pass "fm-codex-effort: recorded fm-send --key input serializes with chords and receives a fresh semantic idle check"
 }
 
 test_post_send_failures_leave_a_durable_recoverable_record() {
@@ -571,5 +663,6 @@ test_swallowed_input_and_changed_ui_never_report_success
 test_footer_requires_the_current_bottom_status_row
 test_captured_real_codex_0147_footers_bind_the_recorded_worktree
 test_ordinary_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check
+test_key_send_serializes_with_effort_chords_and_forces_a_fresh_idle_check
 test_post_send_failures_leave_a_durable_recoverable_record
 test_unverified_backends_refuse_before_input
