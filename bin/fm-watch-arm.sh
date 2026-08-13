@@ -26,8 +26,9 @@
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
-#   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
-#                                                          this arm attaches and follows it
+#   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh watcher holds the lock;
+#                                                          this arm exits when its owner is live,
+#                                                          or follows an orphaned watcher
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -35,9 +36,10 @@
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. A cycle
-# that ends with no reason line and no healthy successor is resolved against the
+# returns the FAILED line. On started the owning arm waits the child and propagates
+# the wake reason. A later arm reports attached and exits when that owner is live;
+# it waits only when the healthy watcher is orphaned or --restart needs a peer
+# notification. A cycle that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
 # and exits 0, and only a cycle that delivered nothing is the typed nonzero
 # failure. Neither is ever a clean empty completion. On FAILED it exits non-zero
@@ -77,7 +79,7 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
-# Poll interval while attached to an existing healthy watcher.
+# Poll interval while waiting on an orphaned healthy watcher or restart peer.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
@@ -254,6 +256,49 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+# macOS and Linux both support `ps -p <pid> -o ppid=` and `args=`.
+# The healthy lock already proves that the child is this home's watcher, so a
+# live arm in its ancestry is this home's owner arm.
+watch_parent_pid() {
+  local pid=$1 parent
+  parent=$(LC_ALL=C ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$parent" in
+    ''|*[!0-9]*|0|"$pid") return 1 ;;
+  esac
+  printf '%s\n' "$parent"
+}
+
+watch_arm_process() {
+  local pid=$1 args
+  args=$(LC_ALL=C ps -ww -p "$pid" -o args= 2>/dev/null) || return 1
+  case "$args" in
+    *' --restart') args=${args% --restart} ;;
+    *' --arm') args=${args% --arm} ;;
+    *' arm') args=${args% arm} ;;
+  esac
+  case "$args" in
+    bash\ fm-watch-arm.sh|bash\ */fm-watch-arm.sh|*/bash\ fm-watch-arm.sh|*/bash\ */fm-watch-arm.sh|fm-watch-arm.sh|*/fm-watch-arm.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Return success only for a live arm in the healthy watcher's ancestry.
+# Any unreadable or changing process state deliberately falls back to today's
+# attach-and-wait behavior rather than risking a blind supervision cycle.
+healthy_watcher_has_live_owner_arm() {
+  local pid=$HEALTHY_PID parent hops=0
+  while [ "$hops" -lt 64 ]; do
+    parent=$(watch_parent_pid "$pid") || return 1
+    fm_pid_alive "$parent" || return 1
+    if watch_arm_process "$parent"; then
+      return 0
+    fi
+    pid=$parent
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -305,8 +350,8 @@ close_unobserved_cycle() {
   return 1
 }
 
-# Stay alive across identity-matched healthy holders. If one cycle ends, attach
-# to a verified successor. With no successor, report the wake that cycle durably
+# An orphaned or restart-attached arm stays alive across identity-matched healthy
+# holders. If one cycle ends, attach to a verified successor. With no successor, report the wake that cycle durably
 # delivered, or fail loudly - never a clean empty completion that an adapter could
 # mistake for a no-op.
 attach_and_wait() {
@@ -400,12 +445,19 @@ if [ "$mode" = restart ]; then
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
-# one - attach to that cycle and wait until it ends so the harness notify fires
-# then, not as an immediate empty wake. (--restart skips this: it just stopped
-# this home's watcher and wants a fresh one.)
+# one. A live owner arm in that watcher's ancestry already waits for this home's
+# notification, so a redundant re-arm reports attached and exits. An orphaned
+# watcher still needs this arm to attach and wait. (--restart skips this: it just
+# stopped this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
-  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  if healthy_watcher_has_live_owner_arm; then
+    report_attached
+    exit 0
+  fi
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+  # Only a waiting arm observes a cycle, so only it may link a predecessor row.
+  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  # Publish attachment only after lifecycle state and signal handling are ready.
   report_attached
   attach_and_wait "$HEALTHY_PID"
   exit $?

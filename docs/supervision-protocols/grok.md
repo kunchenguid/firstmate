@@ -10,10 +10,11 @@ When this session owns supervision and away mode is not active:
 
 4. Trust only the arm's one-line status.
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
-   On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
+   A redundant attach exits after that line when a live owner arm already waits for this home's watcher.
+   An orphaned watcher remains attached so the background task can report its close.
 6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
 7. After a successful start or attach status, end the turn.
-   The background arm remains the live wait until it returns an actionable wake or failure.
+   The background arm remains the live wait only when it started the watcher or attached to an orphaned watcher.
 8. Waiting is silent.
 9. Never use shell `&` for firstmate supervision.
 10. Never bundle the arm onto another command.
@@ -27,7 +28,9 @@ When you see a background-task-completed system reminder for the arm:
 4. Ordinary wake: re-arm the next cycle with the same background `bin/fm-watch-arm.sh` call if work remains in flight or X mode still needs polling.
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
-   Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
+   If the completed task contains only `watcher: attached ...` and the drain is empty, the existing owner arm remains the live wait; do not re-arm from that completion.
+   Re-arm reports and exits when an existing healthy cycle already has a live owner arm.
+   It follows a verified successor chain only for an orphaned watcher that needs a waiting arm.
    See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
 
 The primary project Stop hook runs `bin/fm-turnend-guard-grok.sh` as a backstop, not the normal wake path.

@@ -12,7 +12,8 @@ When this session owns supervision and away mode is not active:
 5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
    Keep the Stop-owned automatic mechanism as the only Claude arm owner.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside automatic arm output as proof that one live cycle exists.
-   On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
+   A redundant attach exits after that line when a live owner arm already waits for this home's watcher.
+   An orphaned watcher remains attached so the arm can report its close.
 7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
    No PreToolUse hook denies fleet commands based on watcher status.
    [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
@@ -22,5 +23,6 @@ When this session owns supervision and away mode is not active:
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds.
-Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
+Re-arm reports and exits when an existing healthy cycle already has a live owner arm.
+It follows a verified successor chain only for an orphaned watcher that needs a waiting arm.
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract and the Claude ownership model.
