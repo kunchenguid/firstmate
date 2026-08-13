@@ -48,6 +48,7 @@ test_ensure_dir_creates_a_not_yet_existing_config_dir() {
   dir="$TMP_ROOT/never-seen"
   wt="$dir/wt"
   CLAUDE_CONFIG_DIR="$dir/config" # does not exist yet
+  # shellcheck disable=SC2016  # single quotes are deliberate: these expand in the nested bash -c script, not here
   out=$(timeout 10 bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-claude-trust-lib.sh"
@@ -143,7 +144,8 @@ test_concurrent_writers_serialize_without_corruption_or_loss() {
   for i in $(seq 1 "$n"); do
     (
       wt="$dir/wt-$i"
-      out=$(CLAUDE_CONFIG_DIR="$dir" timeout 15 bash -c '
+      # shellcheck disable=SC2016  # single quotes are deliberate: these expand in the nested bash -c script, not here
+      if ! out=$(CLAUDE_CONFIG_DIR="$dir" timeout 15 bash -c '
         . "$1/bin/fm-wake-lib.sh"
         . "$1/bin/fm-claude-trust-lib.sh"
         lock=$(fm_claude_trust_lock_path) || exit 1
@@ -152,8 +154,10 @@ test_concurrent_writers_serialize_without_corruption_or_loss() {
         status=$?
         fm_lock_release "$lock"
         exit "$status"
-      ' _ "$ROOT" "$wt" 2>&1)
-      [ $? -eq 0 ] || { echo "$out" > "$dir/fail-$i.log"; exit 1; }
+      ' _ "$ROOT" "$wt" 2>&1); then
+        echo "$out" > "$dir/fail-$i.log"
+        exit 1
+      fi
     ) &
     pids+=($!)
   done
@@ -181,6 +185,7 @@ test_missing_jq_refuses_loudly() {
   mkdir -p "$dir"
   wt="$dir/wt"
   bash_bin=$(command -v bash)
+  # shellcheck disable=SC2016  # single quotes are deliberate: these expand in the nested bash -c script, not here
   out=$(PATH="$dir/empty-fakebin" "$bash_bin" -c '
     . "$1/bin/fm-claude-trust-lib.sh"
     export CLAUDE_CONFIG_DIR="$2"
