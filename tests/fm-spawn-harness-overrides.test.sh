@@ -122,7 +122,7 @@ test_absent_file_claude_byte_identical() {
   expect_code 0 "$status" "claude spawn without an override file should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "absent-file claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "absent override file keeps the claude launch byte-identical"
 }
@@ -145,7 +145,7 @@ test_absent_file_codex_byte_identical() {
   # The $(cat ...) is deliberately literal here: it must appear verbatim in the
   # launch line to expand in the crewmate pane, not in this test.
   # shellcheck disable=SC2016
-  expected='codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '"$sq_te"'\"]" "$('"$sq_op"' encode launch-brief < '"$sq_br"')"'
+  expected='env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '"$sq_te"'\"]" "$('"$sq_op"' encode launch-brief < '"$sq_br"')"'
   [ "$launch" = "$expected" ] || fail "absent-file codex launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "absent override file keeps the codex launch byte-identical"
 }
@@ -168,7 +168,7 @@ test_command_override_changes_binary_only() {
   # supervision wiring intact: the claude turn-end hook is still installed.
   assert_present "$WT_DIR/.claude/settings.local.json" "command override must not drop the turn-end hook"
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "command override did not replace only the binary"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "command override swaps the binary while keeping args, tail, and harness identity"
 }
@@ -263,7 +263,7 @@ test_malformed_file_falls_back_to_defaults() {
   status=$?
   expect_code 0 "$status" "a malformed override file must not break the spawn"
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "malformed override did not fall back to the built-in launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "a malformed override file falls back to the built-in launch"
 }
@@ -326,7 +326,7 @@ test_launch_variant_selects_variant_command() {
   assert_contains "$out" "spawned $id harness=claude launch=gateway" \
     "spawn line should report the base harness plus the selected variant"
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false $GW_BIN --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false $GW_BIN --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "variant command did not replace the binary"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "--launch selects the variant's command over the harness-level one"
 }
@@ -394,7 +394,7 @@ test_empty_variant_inherits_base_axes() {
   sq_br="'$HOME_DIR/data/$id/brief.md'"
   sq_op="'$OPINPUT'"
   # shellcheck disable=SC2016
-  expected='BASE_ENV='"'base'"' codex-base '"'--base-arg'"' -c "notify=[\"bash\",\"-c\",\"touch '"$sq_te"'\"]" "$('"$sq_op"' encode launch-brief < '"$sq_br"')"'
+  expected='env -u CURSOR_AGENT -u CURSOR_INVOKED_AS BASE_ENV='"'base'"' codex-base '"'--base-arg'"' -c "notify=[\"bash\",\"-c\",\"touch '"$sq_te"'\"]" "$('"$sq_op"' encode launch-brief < '"$sq_br"')"'
   [ "$launch" = "$expected" ] || fail "empty variant did not inherit the harness-level launch axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "an empty variant is declared and inherits command, args, and env from its harness"
 }
@@ -513,7 +513,7 @@ test_variants_declared_but_unselected_is_byte_identical() {
   status=$?
   expect_code 0 "$status" "declaring variants must not affect an unselected spawn"
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false cc --dangerously-skip-permissions \"\$('$OPINPUT' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "declaring variants changed the unselected launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   assert_no_grep "launch=" "$HOME_DIR/state/$id.meta" \
     "meta must carry no launch= line when no variant was selected"

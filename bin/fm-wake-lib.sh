@@ -639,7 +639,25 @@ fm_lock_try_acquire() {
     return 0
   fi
 
+  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
+  # $() forks a subshell whose BASHPID is not this frame's pid.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+    # The recorded holder is THIS very process. Single-threaded bash can only
+    # observe that when an interrupting trap abandoned the frame that held the
+    # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
+    # with the EXIT path then re-acquiring the same lock), and every
+    # lock-taking trap path in this repo exits rather than resuming the
+    # interrupted frame. Spinning here deadlocks the exit path against itself
+    # - the hang reproduced by the self-held reclaim regression in
+    # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
+    fm_lock_remove_path "$lockdir" || true
+    if fm_lock_try_create "$lockdir"; then
+      return 0
+    fi
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    return 1
+  fi
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
@@ -902,6 +920,78 @@ fm_wake_print_deduped() {
   ' "$file"
 }
 
+# --- signal announcement signatures -----------------------------------------
+#
+# The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a
+# status or turn-ended change by comparing a size:mtime signature against a
+# persisted state/.seen-* marker, and advances that marker only after the change
+# has been surfaced to firstmate or deliberately absorbed by the signal triage.
+# These three helpers plus the guarded append below are the ONE owner of that
+# signature and marker format, shared by the scan itself, by the drain-time
+# historical-annotation staleness check, and by this home's own bookkeeping
+# writers.
+
+fm_wake_signal_sig() {  # <file> -> "size:mtime"
+  if [ "$_FM_UNAME" = Darwin ]; then
+    stat -f '%z:%Fm' "$1" 2>/dev/null
+  else
+    stat -c '%s:%Y' "$1" 2>/dev/null
+  fi
+}
+
+fm_wake_signal_seen_path() {  # <state> <file>
+  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+}
+
+# 0 when <file>'s current signature exactly matches its recorded seen marker,
+# meaning every byte in it was already surfaced or deliberately absorbed.
+# A missing marker or unreadable signature is NOT a match, so uncertainty reads
+# as "unannounced bytes present".
+fm_wake_signal_seen_current() {  # <state> <file>
+  local sig
+  sig=$(fm_wake_signal_sig "$2") || return 1
+  [ -n "$sig" ] || return 1
+  [ "$(cat "$(fm_wake_signal_seen_path "$1" "$2")" 2>/dev/null)" = "$sig" ]
+}
+
+# Guarded self-announced status append - the one dedup primitive for a status
+# line THIS home's own machinery writes as bookkeeping it has already presented
+# in the very turn or tick that writes it (an answerer-closes resolved line, a
+# pending-reply escalation close, a captain-held transfer). Such a close must
+# not wake the session that wrote it, so this appends the line and then
+# advances the watcher's seen marker to cover exactly the appended bytes and
+# nothing else. The advance is provenance-gated and fails toward waking:
+#   - the marker advances ONLY when the file's pre-append signature matched the
+#     recorded seen marker (every earlier byte was already announced or
+#     deliberately absorbed), AND the post-append size equals the pre-append
+#     size plus exactly the appended bytes (no foreign write interleaved);
+#   - on ANY other condition - missing marker, pending foreign bytes, an
+#     interleaved writer, an unreadable signature - the line is still appended
+#     but the marker is left alone, so the watcher surfaces the file normally.
+# A later, different line from any other writer grows the size past the marker
+# and wakes as before: task identity alone can never suppress new content.
+# Returns 0 appended and self-announced, 1 appended but left for the watcher
+# (the safe direction), 2 the append itself failed.
+fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
+  local state=$1 file=$2 line=$3 marker pre_sig='' post_sig pre_size post_size
+  local LC_ALL=C
+  marker=$(fm_wake_signal_seen_path "$state" "$file")
+  if [ -e "$file" ]; then
+    pre_sig=$(fm_wake_signal_sig "$file") || pre_sig=''
+  fi
+  printf '%s\n' "$line" >> "$file" || return 2
+  [ -n "$pre_sig" ] || return 1
+  [ "$(cat "$marker" 2>/dev/null)" = "$pre_sig" ] || return 1
+  post_sig=$(fm_wake_signal_sig "$file") || return 1
+  [ -n "$post_sig" ] || return 1
+  pre_size=${pre_sig%%:*}
+  post_size=${post_sig%%:*}
+  case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
+  printf '%s' "$post_sig" > "$marker" 2>/dev/null || return 1
+  return 0
+}
+
 # Map one structurally valid signal key to its home-local status filename.
 # Queue payload text is intentionally ignored: it is display data, not a path
 # authority. The caller still verifies the resulting regular file immediately
@@ -1023,12 +1113,24 @@ fm_wake_print_annotations() {  # <deduped-raw-rows>
 
   while IFS=$(printf '\t') read -r status_key mode; do
     [ -n "$status_key" ] || continue
+    path="$STATE/$status_key"
+    # A turn-ended-only (historical) row's annotation would show the latest
+    # status line even when that line's bytes are fully covered by the seen
+    # marker - already surfaced to firstmate or deliberately absorbed by the
+    # signal triage. Presenting such an already-announced line again makes a
+    # bare turn-end look like fresh progress, so skip the annotation when the
+    # status file's signature still matches its marker (a proven replay). Any
+    # uncertainty - missing marker, unreadable signature - keeps the annotation
+    # with its existing historical caveat, and a direct status row is always
+    # annotated because its bytes are the queued announcement itself.
+    if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
+      continue
+    fi
     if [ "$reads" -ge "$read_cap" ]; then
       read_omitted=$((read_omitted + 1))
       continue
     fi
     reads=$((reads + 1))
-    path="$STATE/$status_key"
     fm_wake_latest_event "$path" "$tail_bytes" || continue
     prefix="wake annotation: latest wake-EVENT observed at drain, not current state"
     if [ "$mode" = historical ]; then

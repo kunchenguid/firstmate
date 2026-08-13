@@ -181,7 +181,7 @@ EOF
 
   launch=$(cat "$launchlog")
   case "$launch" in
-    'traex '*) : ;;
+    'env -u CURSOR_AGENT -u CURSOR_INVOKED_AS traex '*) : ;;
     *) fail "launch must invoke the traex binary, got: $launch" ;;
   esac
   # THE TRAP, pinned: any of coco 1.0's names here would silently launch a
