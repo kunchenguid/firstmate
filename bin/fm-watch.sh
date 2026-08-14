@@ -10,7 +10,7 @@
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# on every wake. Printed terminal lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
@@ -56,9 +56,13 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+#   watcher: FAILED - <backend> event wait exited <status>
+#                          an unexpected native-wait failure; the arm preserves
+#                          this concrete reason and returns nonzero
 # For normal supervision, resume the session-start primary-harness protocol
-# after each printed reason. Direct duplicate invocations of this script still
-# no-op through the watcher singleton lock.
+# after each printed actionable reason; a typed failure instead follows that
+# protocol's repair path. Direct duplicate invocations of this script still no-op
+# through the watcher singleton lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -643,6 +647,8 @@ heartbeat_scan_finds_actionable() {
 # loop is the permanent fail-closed backstop). This preserves the single live
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
+# Only the adapter's expected clean-timeout and unavailable statuses may continue
+# or fall back; every other status is a typed terminal failure for the arm layer.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
   local windows=()
