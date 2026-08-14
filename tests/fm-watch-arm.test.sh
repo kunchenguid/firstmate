@@ -241,6 +241,55 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   pass "watch-arm: a cycle that delivered no wake of its own still fails loudly"
 }
 
+test_owned_arm_preserves_typed_event_wait_failure() {
+  local dir state fakebin reader armout armerr status signal_number expected_rc
+  dir=$(make_case owned-typed-event-wait-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  reader="$dir/failing-reader"
+  armout="$dir/arm.out"
+  armerr="$dir/arm.err"
+
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '{"client":{"protocol":16},"server":{"running":true}}\n' ;;
+  "session list")
+    printf '{"sessions":[{"name":"default","socket_path":"/tmp/fm-fake.sock"}]}\n' ;;
+  "agent get")
+    exit 1 ;;
+esac
+exit 0
+SH
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '@subscribed\n'
+kill -USR1 "$PPID"
+SH
+  chmod +x "$fakebin/herdr" "$reader"
+  fm_write_meta "$state/demo.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$reader" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" 2> "$armerr"
+  status=$?
+  signal_number=$(kill -l USR1)
+  expected_rc=$((128 + signal_number))
+
+  expect_code 1 "$status" "an unexpected event-wait failure must fail its owned arm"
+  grep -qF "watcher: FAILED - herdr event wait exited $expected_rc" "$armout" \
+    || fail "the arm lost the watcher's typed event-wait reason: $(cat "$armout")"
+  ! grep -qF 'watcher cycle exited 1' "$armout" \
+    || fail "the arm replaced the concrete event-wait reason with its generic exit-1 failure: $(cat "$armout")"
+  ! grep -qF "watcher: FAILED - herdr event wait exited $expected_rc" "$armerr" \
+    || fail "the typed event-wait reason escaped the arm's captured stdout contract"
+  pass "watch-arm: an owned failed cycle preserves its typed event-wait reason"
+}
+
 test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   local dir home state fakebin result armout drainout status watcher_pid sequence generation decision_recovery_arm decision_successor
   dir=$(make_case rearm-resurface)
@@ -800,6 +849,7 @@ test_downtime_marker_does_not_follow_symlink() {
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
+test_owned_arm_preserves_typed_event_wait_failure
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence
 test_delivery_gap_wake_is_recovered_once

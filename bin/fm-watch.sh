@@ -710,7 +710,7 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
     *)
-      echo "watcher: FAILED - $first_backend event wait exited $rc" >&2
+      echo "watcher: FAILED - $first_backend event wait exited $rc"
       return 1
       ;;
   esac

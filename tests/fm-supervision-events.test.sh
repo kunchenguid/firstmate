@@ -140,7 +140,7 @@ fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind
 fm_backend_events_capable() { return 0; }
 # shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 fm_backend_wait_transition() { return 7; }
-UNEXPECTED_OUT=$(event_wait_or_sleep 2>&1)
+UNEXPECTED_OUT=$(event_wait_or_sleep)
 UNEXPECTED_RC=$?
 [ "$UNEXPECTED_RC" -ne 0 ] || fail "an unexpected event-wait failure must fail the watcher cycle"
 case "$UNEXPECTED_OUT" in
