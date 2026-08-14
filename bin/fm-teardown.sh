@@ -45,6 +45,11 @@
 # through `git -C <project> worktree remove --force <path>`.
 # An absent field keeps the existing Treehouse return path; an unknown value or
 # a project-command marker on Orca/secondmate metadata is refused before cleanup.
+# Forced secondmate child cleanup reads the same field from each child record and
+# holds it to the same contract: a project-command child worktree is removed
+# through registered native Git removal, never handed to `treehouse return` and
+# never rm -rf'd behind a failed return, and a child whose removal contract
+# cannot be honored retains its records instead of being discarded.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -2214,7 +2219,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_provider
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2225,6 +2230,20 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_provider=$(meta_value "$child_meta" worktree_provider)
+    case "$child_provider" in
+      '') ;;
+      project-command)
+        if [ "$child_backend" = orca ] || [ "$child_kind" = secondmate ]; then
+          echo "error: worktree_provider=project-command is invalid for child $child_id (backend=$child_backend kind=$child_kind); retaining that child's durable identity records and stopping forced cleanup" >&2
+          return 1
+        fi
+        ;;
+      *)
+        echo "error: unsupported worktree provider '$child_provider' for child $child_id; retaining that child's durable identity records and stopping forced cleanup" >&2
+        return 1
+        ;;
+    esac
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -2275,7 +2294,16 @@ cleanup_firstmate_home_children() {
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+      if [ "$child_provider" = project-command ]; then
+        if [ -z "$child_proj" ] || [ ! -d "$child_proj" ]; then
+          echo "error: recorded project '${child_proj:-unknown}' for project-command child $child_id is missing; retaining that child's durable identity records and stopping forced cleanup" >&2
+          return 1
+        fi
+        teardown_project_worktree_remove "$child_wt" "$child_proj" || {
+          echo "error: native Git removal failed for project-command child worktree $child_wt; retaining that child's durable identity records and stopping forced cleanup" >&2
+          return 1
+        }
+      elif [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
         else

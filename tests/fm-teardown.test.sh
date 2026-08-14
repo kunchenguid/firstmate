@@ -1813,6 +1813,40 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
+test_forced_secondmate_project_command_child_uses_native_git_cleanup() {
+  local case_dir home rc child_b_wt
+  case_dir=$(make_case project-command-child)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf 'worktree_provider=project-command\n' >> "$home/state/child-b.meta"
+  # git reports registrations physically, so the expected path must be too.
+  child_b_wt=$(cd "$case_dir/child-b-wt" && pwd -P)
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "project-command-child: forced secondmate teardown should complete"
+  assert_absent "$case_dir/child-b-wt" \
+    "project-command-child: the project-command child worktree was not removed"
+  git -C "$case_dir/project" worktree list --porcelain \
+    | grep -F "worktree $child_b_wt" >/dev/null \
+    && fail "project-command-child: cleanup left a stale git worktree registration"
+  assert_no_grep "$case_dir/child-b-wt" "$case_dir/treehouse.log" \
+    "project-command-child: the project-command child was handed to Treehouse"
+  assert_grep "$case_dir/child-a-wt" "$case_dir/treehouse.log" \
+    "project-command-child: the Treehouse child stopped going through treehouse return"
+  assert_absent "$home" \
+    "project-command-child: forced teardown left the retired secondmate home"
+  pass "forced secondmate cleanup removes a project-command child through registered native Git, never Treehouse"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2640,6 +2674,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
+test_forced_secondmate_project_command_child_uses_native_git_cleanup
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
