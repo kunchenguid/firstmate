@@ -72,7 +72,11 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose supervision decision is still open and whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+A live owner counts as that proof only while its decision is open, which the ledger settles: an entry naming that owner's own pid with any outcome other than `arming` means the claim already finished, so the lock is abandoned rather than in flight.
+The guard then stops reading it as recovery under way, the terminal check clears it instead of stepping aside for it, and the next Stop-owned firing reclaims it and arms rather than deferring.
+Without that boundary a cycle that armed, delivered one rewake, and exited left both Stop participants deferring to its leftover lock indefinitely, so on 2026-08-14 a home with two tasks in flight and a beacon 40 minutes cold ended every turn blind until an operator intervened.
+An `arming` entry stays in flight however old it is, because the owner foregrounds the arm for the whole watcher cycle.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
