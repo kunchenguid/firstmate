@@ -202,7 +202,7 @@ test_pr_url_strips_query_and_fragment() {
 }
 
 test_revision_fields_distinguish_pr_head_from_worktree_head() {
-  local id=report-revisions-a3 repo meta meta_tmp entry manifest page head short pr_head
+  local id=report-revisions-a3 repo meta meta_tmp entry manifest page head short pr_head legacy_completed
   repo="$TMP_ROOT/revision-worktree"
   mkdir -p "$repo"
   git -C "$repo" init -q
@@ -234,8 +234,17 @@ test_revision_fields_distinguish_pr_head_from_worktree_head() {
   assert_grep "<dt>Worktree HEAD</dt><dd>$short</dd>" "$page" "report page mislabeled the local worktree revision"
 
   mkdir -p "$STACK/entries/legacy-schema-v1"
-  printf '{"schemaVersion":1,"reportId":"legacy-schema-v1","taskId":"legacy-schema-v1","title":"Legacy","summary":"Legacy manifest","completedAt":"2026-07-01T00:00:00.000Z","kind":"ship","project":"example","harness":"codex","commit":"1234567890ab"}\n' \
-    > "$STACK/entries/legacy-schema-v1/manifest.json"
+  # This fixture only asserts that render accepts a schema-version-1 manifest
+  # without new revision fields; nothing enforces that it stays retention
+  # insensitive, so the stamp is computed relative to the wall clock (repo
+  # rule: no hardcoded dates that age across a behavior boundary). It sits
+  # deliberately well beyond the 30-day retention window, and a fixed
+  # now-minus-60-days offset keeps it on the expired side forever instead of
+  # silently crossing the boundary the way the legacy-cutover 2026-07-15
+  # stamps did (defused in PR 157).
+  legacy_completed=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
+  printf '{"schemaVersion":1,"reportId":"legacy-schema-v1","taskId":"legacy-schema-v1","title":"Legacy","summary":"Legacy manifest","completedAt":"%s","kind":"ship","project":"example","harness":"codex","commit":"1234567890ab"}\n' \
+    "$legacy_completed" > "$STACK/entries/legacy-schema-v1/manifest.json"
   run_stack render >/dev/null || fail "report reader rejected a schema-version-1 manifest without new revision fields"
   pass "report manifests distinguish PR head from worktree HEAD compatibly"
 }
