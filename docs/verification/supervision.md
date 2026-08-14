@@ -237,7 +237,7 @@ A synchronous project `Stop` hook parked until released and exit 2 produced exac
 Adding Claude's `asyncRewake` field did not detach or rewake the hook, and input entered during the park could not run until the hook released.
 Those negative controls rule out an unbounded Cursor-style park or Claude-style asynchronous arm for Codex without delaying captain input indefinitely, so the supported path remains bounded foreground checkpoints with an explicit continuation after every result or timeout.
 
-The shared classifier matrix covers Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Cursor, while the existing Muse-only public detection remains outside session-lock ownership.
+The shared classifier matrix covers Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Cursor, while Muse's crewmate-only public detection remains outside session-lock ownership.
 The change is above the runtime provider boundary: tmux, Herdr, Zellij, Orca, and cmux all feed the same watcher result into the selected primary-harness protocol, so no backend endpoint, event wait, or submission behavior changes.
 
 ### Cursor primary park, 2026-08-13
