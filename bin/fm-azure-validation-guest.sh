@@ -488,8 +488,8 @@ else
   set +e
   # shellcheck disable=SC2016  # Inner shell intentionally expands its positional arguments.
   runuser -u fmvalidate -- /bin/bash -c \
-    'set -a; . "$1"; set +a; exec "$2" axi status' \
-    validation-reattach "$ENV_FILE" "$NM_BIN" >"$STATUS_PROOF" 2>&1
+    'set -a; . "$1"; set +a; cd "$3" && exec "$2" axi status' \
+    validation-reattach "$ENV_FILE" "$NM_BIN" "$REPO" >"$STATUS_PROOF" 2>&1
   STATUS_RC=$?
   set -e
   if [ "$STATUS_RC" -ne 0 ] || ! grep -F "$RUN_ID" "$STATUS_PROOF" >/dev/null; then
@@ -623,9 +623,13 @@ RUN_EXIT=$(cat "$RUN_LOG.exit" 2>/dev/null || printf 125)
 STATUS_LOG=$LOGS/status-a$ATTEMPT.log
 set +e
 # shellcheck disable=SC2016  # Inner shell intentionally expands its positional arguments.
+# The status read is the sole input to outcome derivation and must run
+# inside the repository like the run itself; without the cd it fails with
+# "not in a git repository" from the guest's own working directory and
+# every outcome derives as failed regardless of the pipeline result.
 runuser -u fmvalidate -- /bin/bash -c \
-  'set -a; . "$1"; set +a; exec "$2" axi status' \
-  validation-status "$ENV_FILE" "$NM_BIN" >"$STATUS_LOG" 2>&1
+  'set -a; . "$1"; set +a; cd "$3" && exec "$2" axi status' \
+  validation-status "$ENV_FILE" "$NM_BIN" "$REPO" >"$STATUS_LOG" 2>&1
 STATUS_RC=$?
 set -e
 RUN_ID=$(grep -hEo '[0-9A-HJKMNP-TV-Z]{26}' "$STATUS_LOG" "$RUN_LOG" | tail -n 1 || true)

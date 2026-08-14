@@ -153,6 +153,7 @@ assert "0o755 if member.mode & 0o111 else 0o644" in guest
 assert 'for path in root.rglob("*"):' in guest
 assert "launch diagnostics (exit" in guest
 assert "code: recover_custody" in guest
+assert guest.count('cd "$3" && exec "$2" axi status') == 2
 assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
 assert '"reattaching", "collected")' in host
