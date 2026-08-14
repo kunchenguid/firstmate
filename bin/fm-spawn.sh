@@ -692,6 +692,7 @@ SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_WORKTREE_ACQUIRE_STATUS=
+SPAWN_WORKTREE_ACQUIRE_STATUS_TMP=
 WORKTREE_PROVIDER=
 WORKTREE_ACQUIRE_COMMAND=
 WORKTREE_ACQUIRE_CONFIG=
@@ -811,6 +812,8 @@ spawn_abort_cleanup() {
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
   [ -z "$SPAWN_WORKTREE_ACQUIRE_STATUS" ] \
     || rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS" 2>/dev/null || true
+  [ -z "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP" ] \
+    || rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1747,7 +1750,6 @@ resolve_worktree_acquire_command() {
   WORKTREE_ACQUIRE_CONFIG="$CONFIG/worktree-acquire/$project_name"
   if [ ! -e "$WORKTREE_ACQUIRE_CONFIG" ] && [ ! -L "$WORKTREE_ACQUIRE_CONFIG" ]; then
     WORKTREE_ACQUIRE_CONFIG=
-    WORKTREE_ACQUIRE_COMMAND='treehouse get'
     WORKTREE_PROVIDER=
     return 0
   fi
@@ -2314,9 +2316,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if [ "$WORKTREE_PROVIDER" = project-command ]; then
     SPAWN_WORKTREE_ACQUIRE_STATUS="$STATE/.worktree-acquire-$ID.${BASHPID:-$$}.status"
-    rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS"
+    SPAWN_WORKTREE_ACQUIRE_STATUS_TMP="$SPAWN_WORKTREE_ACQUIRE_STATUS.partial"
+    rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS" "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP"
     acquire_status_quoted=$(shell_quote "$SPAWN_WORKTREE_ACQUIRE_STATUS")
-    acquire_line="__fm_worktree_acquire() { $WORKTREE_ACQUIRE_COMMAND; }; if __fm_worktree_acquire; then __fm_worktree_acquire_rc=0; else __fm_worktree_acquire_rc=\$?; fi; unset -f __fm_worktree_acquire; printf '%s\\n' \"\$__fm_worktree_acquire_rc\" > $acquire_status_quoted; unset __fm_worktree_acquire_rc"
+    acquire_status_tmp_quoted=$(shell_quote "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP")
+    acquire_line="__fm_worktree_acquire() { $WORKTREE_ACQUIRE_COMMAND; }; if __fm_worktree_acquire; then __fm_worktree_acquire_rc=0; else __fm_worktree_acquire_rc=\$?; fi; unset -f __fm_worktree_acquire; printf '%s\\n' \"\$__fm_worktree_acquire_rc\" > $acquire_status_tmp_quoted && mv -f -- $acquire_status_tmp_quoted $acquire_status_quoted; unset __fm_worktree_acquire_rc"
     spawn_send_text_line "$WT_TARGET" "$acquire_line"
   else
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
@@ -2394,8 +2398,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   if [ "$WORKTREE_PROVIDER" = project-command ]; then
     validate_spawn_worktree "project worktree acquisition" "$T"
-    rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS"
+    rm -f -- "$SPAWN_WORKTREE_ACQUIRE_STATUS" "$SPAWN_WORKTREE_ACQUIRE_STATUS_TMP"
     SPAWN_WORKTREE_ACQUIRE_STATUS=
+    SPAWN_WORKTREE_ACQUIRE_STATUS_TMP=
   else
     validate_spawn_worktree "treehouse get" "$T"
   fi

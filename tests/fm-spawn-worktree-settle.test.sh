@@ -208,6 +208,10 @@ make_project_command_case() {  # <name> <id>
   fakebin=$(make_project_command_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" \
     "$home/config/worktree-acquire" "$prepared"
+  # The fake pane reports its settled directory with `pwd -P`, so the fixture's
+  # expected paths must be physical too: a TMPDIR that resolves through a
+  # symlink (always so on macOS) would otherwise fail every path comparison.
+  prepared=$(cd "$prepared" && pwd -P) || return 1
   printf 'codex\n' > "$home/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
@@ -239,6 +243,14 @@ read_project_command_record() {
   IFS='|' read -r CUSTOM_CASE CUSTOM_HOME CUSTOM_PROJECT CUSTOM_PREPARED CUSTOM_FAKEBIN <<EOF
 $1
 EOF
+}
+
+# fm-spawn watches a private status file to learn when the project command
+# finished. Whatever the outcome, no such artifact may outlive the attempt.
+assert_acquire_status_artifacts_cleaned() {  # <msg>
+  local leftovers
+  leftovers=$(find "$CUSTOM_HOME/state" -maxdepth 1 -name '.worktree-acquire-*' 2>/dev/null)
+  [ -z "$leftovers" ] || fail "$1"$'\n'"--- left behind ---"$'\n'"$leftovers"
 }
 
 run_project_command_spawn() {  # <id>
@@ -287,6 +299,8 @@ test_project_command_creates_and_enters_attached_worktree() {
   reads=$(cat "$CUSTOM_CASE/pane-count")
   [ "$reads" -ge 2 ] \
     || fail "configured acquisition was accepted without two working-directory reads"
+  assert_acquire_status_artifacts_cleaned \
+    "a successful acquisition left its private completion-status artifacts behind"
   pass "a project command safely substitutes the task slug, enters its prepared worktree, and preserves the attached branch"
 }
 
@@ -317,6 +331,8 @@ test_existing_project_target_refuses_quickly_and_preserves_work() {
     "failed acquisition published task metadata"
   [ ! -s "$CUSTOM_CASE/treehouse.log" ] \
     || fail "failed configured acquisition fell back to Treehouse"
+  assert_acquire_status_artifacts_cleaned \
+    "an aborted acquisition left its private completion-status artifacts behind"
   pass "an existing project target refuses promptly and preserves its unlanded work"
 }
 
