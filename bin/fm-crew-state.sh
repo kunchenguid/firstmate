@@ -49,10 +49,14 @@
 #      never applies to working/parked/done, so an ACTIVE or CURRENT run always
 #      keeps outranking status prose, and any absent, unconfirmed or malformed
 #      custody block fails closed to the run-step's failed verdict. It is also
-#      RUN_SOURCE=full only: a coarse (runs-list) attribution carries no
-#      branch_sync data at all, so a coarse-sourced terminal failed run keeps
-#      reporting failed even when custody genuinely was returned, until an
-#      `axi status` call attributes the branch through the full path again.
+#      RUN_SOURCE=full only: a coarse (runs-list) attribution still holds an
+#      `axi status` capture, but that capture describes ANOTHER branch's run -
+#      it is why the runs-list fallback ran at all - so its branch_sync block
+#      says nothing about this branch and trusting it would leak a different
+#      crew's custody_returned state onto this one. A coarse-sourced terminal
+#      failed run therefore keeps reporting failed even when custody genuinely
+#      was returned, until an `axi status` call attributes the branch through
+#      the full path again.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -377,9 +381,14 @@ nm_toon_field() {  # <toon> <key>
 # value, and an absent or malformed block, fails closed and leaves the terminal
 # run-step verdict authoritative, so a current, uncleaned failure can never be
 # hidden behind a `paused:`/`blocked:` append.
-# Reachable on the RUN_SOURCE=full path ONLY: a coarse (runs-list) attribution
-# never captures `axi status` TOON, so its $RUN_OUT holds no branch_sync block
-# and such a crew keeps its failed verdict - see the caller's own guard.
+# Reads whatever branch the capture happens to describe, so the caller alone
+# decides whether that branch is this crew's: reachable on the RUN_SOURCE=full
+# path ONLY. A coarse (runs-list) attribution still carries a real `axi status`
+# capture in $RUN_OUT, but one belonging to ANOTHER branch's run - that
+# mismatch is what sent attribution to the runs list - and its branch_sync
+# block would answer for that branch, not this one. Such a crew keeps its
+# failed verdict rather than borrowing a neighbour's custody state; see the
+# caller's own guard.
 nm_custody_returned() {  # <axi-status-toon>
   local blk state safety clean
   [ -n "$1" ] || return 1
@@ -611,9 +620,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   # not bound to the attributed run's id. This never touches
   # working/parked/done: an ACTIVE or CURRENT run always keeps outranking
   # status prose, and an absent or unconfirmed custody block fails closed to
-  # the run-step verdict below. RUN_SOURCE=full only: a coarse runs-list
-  # attribution has no branch_sync data to confirm, so it keeps reporting
-  # failed rather than guessing.
+  # the run-step verdict below. RUN_SOURCE=full only: on the coarse runs-list
+  # path $RUN_OUT describes another branch's run, so its branch_sync block is
+  # not this branch's answer to trust - that crew keeps reporting failed rather
+  # than inheriting a neighbour's custody state.
   if [ "$RUN_STATE" = failed ] && [ "$RUN_SOURCE" = full ] \
     && { status_is_paused "$LOG_LINE" || [ "$LOG_VERB" = blocked ]; } \
     && nm_custody_returned "$RUN_OUT"; then
