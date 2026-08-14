@@ -237,6 +237,11 @@ test_omp_identity_requires_canonical_executable_evidence() {
   chmod +x "$fakebin/omp"
   printf '#!/bin/sh\nexit 0\n' > "$fakebin/bun"
   chmod +x "$fakebin/bun"
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  chmod +x "$fakebin/perl"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity renamed "omp --resume"')
   [ "$got" = other ] || fail "a renamed process with exec-a style OMP args was accepted as '$got'"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "omp --resume"')

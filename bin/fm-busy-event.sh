@@ -100,8 +100,31 @@ REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
 LOCK="$REC.lock"
 LOCK_OWNER="$LOCK/owner"
+FS_HELPER="$SCRIPT_DIR/fm-omp-fs.py"
 LOCK_TOKEN=
 LOCK_OWNER_PID=
+LOCK_STATE_IDENTITY=
+LOCK_IDENTITY=
+LOCK_OWNER_IDENTITY=
+
+busy_lock_snapshot() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  [ -r "$FS_HELPER" ] || return 1
+  python3 "$FS_HELPER" snapshot-lock "$STATE" "${LOCK##*/}" ""
+}
+
+busy_lock_remove_snapshot() {
+  local snapshot=$1 state_identity lock_identity owner_identity owner_pid owner_token extra expected_owner
+  read -r state_identity lock_identity owner_identity owner_pid owner_token extra <<< "$snapshot"
+  [ -n "$state_identity" ] && [ -n "$lock_identity" ] && [ -n "$owner_identity" ] \
+    && [ -n "$owner_pid" ] && [ -n "$owner_token" ] && [ -z "$extra" ] || return 1
+  expected_owner=
+  [ "$owner_identity" = orphan ] || expected_owner=$owner_identity
+  python3 "$FS_HELPER" remove-lock "$STATE" "${LOCK##*/}" \
+    "$state_identity" "$lock_identity" \
+    "$expected_owner" \
+    "$owner_pid" "$owner_token"
+}
 
 lock_owner_write() {
   LOCK_OWNER_PID=${BASHPID:-$$}
@@ -110,12 +133,16 @@ lock_owner_write() {
 }
 
 lock_owner_status() {
-  local owner owner_pid owner_token extra
-  [ -f "$LOCK_OWNER" ] && [ ! -L "$LOCK_OWNER" ] || { printf 'missing\n'; return 0; }
-  owner=$(<"$LOCK_OWNER") || { printf 'invalid\n'; return 0; }
-  read -r owner_pid owner_token extra <<< "$owner"
-  if [ -z "$owner_pid" ] || [ -z "$owner_token" ] || [ -n "$extra" ]; then
+  local snapshot state_identity lock_identity owner_identity owner_pid owner_token extra
+  snapshot=$(busy_lock_snapshot) || { printf 'invalid\n'; return 0; }
+  read -r state_identity lock_identity owner_identity owner_pid owner_token extra <<< "$snapshot"
+  if [ -z "$state_identity" ] || [ -z "$lock_identity" ] || [ -z "$owner_identity" ] \
+    || [ -z "$owner_pid" ] || [ -z "$owner_token" ] || [ -n "$extra" ]; then
     printf 'invalid\n'
+    return 0
+  fi
+  if [ "$owner_identity" = orphan ]; then
+    printf 'orphan\n'
     return 0
   fi
   case "$owner_pid" in *[!0-9]*) printf 'invalid\n'; return 0 ;; esac
@@ -129,17 +156,30 @@ lock_owner_status() {
 # Serialize writers. The lock protects seq advancement and the sidecar/record
 # pair; a holder that died mid-write is broken after FM_BUSY_LOCK_STALE_SECS.
 lock_acquire() {
-  local tries=0 now mtime age owner_status
+  local tries=0 now mtime age owner_status snapshot state_identity lock_identity owner_identity owner_pid owner_token extra
   while true; do
     if mkdir "$LOCK" 2>/dev/null; then
-      if lock_owner_write; then
+      if lock_owner_write && snapshot=$(busy_lock_snapshot); then
+        read -r state_identity lock_identity owner_identity owner_pid owner_token extra <<< "$snapshot"
+        if [ -n "$state_identity" ] && [ -n "$lock_identity" ] && [ "$owner_identity" != orphan ] \
+          && [ -n "$owner_pid" ] && [ -n "$owner_token" ] && [ -z "$extra" ]; then
+          LOCK_STATE_IDENTITY=$state_identity
+          LOCK_IDENTITY=$lock_identity
+          LOCK_OWNER_IDENTITY=$owner_identity
+          LOCK_OWNER_PID=$owner_pid
+          LOCK_TOKEN=$owner_token
+        else
+          busy_lock_remove_snapshot "$snapshot" >/dev/null 2>&1 || true
+          return 1
+        fi
         if [ -n "${FM_BUSY_TEST_LOCK_ACQUIRED_GATE:-}" ]; then
           : > "$FM_BUSY_TEST_LOCK_ACQUIRED_GATE.ready" || return 1
           while [ ! -e "$FM_BUSY_TEST_LOCK_ACQUIRED_GATE.release" ]; do sleep 0.01; done
         fi
         return 0
       fi
-      rmdir "$LOCK" 2>/dev/null || true
+      snapshot=$(busy_lock_snapshot 2>/dev/null || true)
+      [ -z "$snapshot" ] || busy_lock_remove_snapshot "$snapshot" >/dev/null 2>&1 || true
       return 1
     fi
     tries=$((tries + 1))
@@ -149,10 +189,10 @@ lock_acquire() {
       mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
       age=$((now - mtime))
       owner_status=$(lock_owner_status)
-      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ] && [ "$owner_status" = dead ]; then
-        [ -f "$LOCK_OWNER" ] && [ ! -L "$LOCK_OWNER" ] || return 1
-        rm -f -- "$LOCK_OWNER" || return 1
-        rmdir "$LOCK" 2>/dev/null || return 1
+      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ] \
+        && { [ "$owner_status" = dead ] || [ "$owner_status" = orphan ]; }; then
+        snapshot=$(busy_lock_snapshot) || return 1
+        busy_lock_remove_snapshot "$snapshot" || return 1
         tries=0
         continue
       fi
@@ -165,14 +205,20 @@ lock_acquire() {
 }
 
 lock_release() {
-  local owner owner_pid owner_token extra
-  [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 0
-  [ -f "$LOCK_OWNER" ] && [ ! -L "$LOCK_OWNER" ] || return 0
-  owner=$(<"$LOCK_OWNER") || return 0
-  read -r owner_pid owner_token extra <<< "$owner"
-  [ "$owner_pid" = "$LOCK_OWNER_PID" ] && [ "$owner_token" = "$LOCK_TOKEN" ] && [ -z "$extra" ] || return 0
-  rm -f -- "$LOCK_OWNER" || return 1
-  rmdir "$LOCK" 2>/dev/null || true
+  local snapshot state_identity lock_identity owner_identity owner_pid owner_token extra
+  [ -n "$LOCK_STATE_IDENTITY" ] && [ -n "$LOCK_IDENTITY" ] && [ -n "$LOCK_OWNER_IDENTITY" ] || return 0
+  snapshot=$(busy_lock_snapshot 2>/dev/null) || return 0
+  read -r state_identity lock_identity owner_identity owner_pid owner_token extra <<< "$snapshot"
+  [ "$state_identity" = "$LOCK_STATE_IDENTITY" ] \
+    && [ "$lock_identity" = "$LOCK_IDENTITY" ] \
+    && [ "$owner_identity" = "$LOCK_OWNER_IDENTITY" ] \
+    && [ "$owner_pid" = "$LOCK_OWNER_PID" ] \
+    && [ "$owner_token" = "$LOCK_TOKEN" ] \
+    && [ -z "$extra" ] || return 0
+  busy_lock_remove_snapshot "$snapshot" || return 1
+  LOCK_STATE_IDENTITY=
+  LOCK_IDENTITY=
+  LOCK_OWNER_IDENTITY=
 }
 
 write_record() {  # <gen> <seq>

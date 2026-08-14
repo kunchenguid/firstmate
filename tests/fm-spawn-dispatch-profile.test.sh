@@ -942,7 +942,7 @@ SH
 test_raw_launch_marker_covers_process_tree_forms() {
   local rec id out status launch raw_omp script sub probe command expected_harness raw_owner
   local direct_id wrapped_id nested_id script_id stdin_id env_id cwd_id no_node_id no_node_env_id
-  local no_node_shell_id no_node_redirect_id no_node_source_id no_node_env_assignment_id canonical_wrapper
+  local no_node_shell_id no_node_redirect_id no_node_source_id no_node_env_assignment_id no_node_script_id canonical_wrapper
   direct_id=profile-raw-marker-direct-z8h
   wrapped_id=profile-raw-marker-wrapped-z8i
   nested_id=profile-raw-marker-nested-z8j
@@ -956,7 +956,8 @@ test_raw_launch_marker_covers_process_tree_forms() {
   no_node_redirect_id=profile-raw-marker-no-node-redirect-z8r
   no_node_source_id=profile-raw-marker-no-node-source-z8s
   no_node_env_assignment_id=profile-raw-marker-no-node-env-assignment-z8t
-  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id" "$no_node_env_id" "$no_node_env_assignment_id" "$no_node_shell_id" "$no_node_redirect_id" "$no_node_source_id")
+  no_node_script_id=profile-raw-marker-no-node-script-z8u
+  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id" "$no_node_env_id" "$no_node_env_assignment_id" "$no_node_shell_id" "$no_node_redirect_id" "$no_node_source_id" "$no_node_script_id")
   read_case_record "$rec"
   raw_omp="$FAKEBIN_DIR/omp"
   script="$CASE_DIR/start-omp.sh"
@@ -1035,6 +1036,15 @@ SH
     assert_absent "$HOME_DIR/state/$id.meta" \
       "shell-dispatched OMP wrote task metadata without policy validation"
   done
+
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$no_node_script_id" "$PROJ_DIR" "bash $script")
+  expect_code 1 "$?" "a shell script that invokes OMP must require policy validation without Node.js"
+  assert_contains "$out" "requires Node.js" \
+    "literal OMP shell script refusal did not identify the missing policy runtime"
+  assert_absent "$HOME_DIR/state/$no_node_script_id.meta" \
+    "literal OMP shell script wrote task metadata without policy validation"
   pass "raw launch ownership remains conservative when dispatcher or shell validation lacks Node.js"
 }
 

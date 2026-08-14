@@ -71,6 +71,22 @@ test_apply_current_gen_reset() {
   pass "firstmate-owned interrupt and recovery events bind to the current gen"
 }
 
+test_lock_recovers_empty_owner() {
+  local state gen out lock
+  state=$(new_state_dir lock-empty-owner)
+  gen=$($EV arm "$state" t1)
+  lock="$state/t1.busy-state.lock"
+  mkdir "$lock"
+  : > "$lock/owner"
+
+  FM_BUSY_LOCK_STALE_SECS=0 "$EV" apply "$state" t1 idle --gen "$gen" \
+    --source claude-hook --event stop || fail "empty-owner busy lock was not recovered"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] || fail "empty-owner recovery did not apply the event, got '$out'"
+  [ ! -e "$lock" ] || fail "empty-owner busy lock was not retired"
+  pass "busy-state lock recovery retires an empty owner lock"
+}
+
 test_apply_unarmed_refused() {
   local state
   state=$(new_state_dir apply-unarmed)
@@ -445,6 +461,7 @@ test_boolean_view_never_promotes_unknown() {
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
+test_lock_recovers_empty_owner
 test_apply_unarmed_refused
 test_lock_release_cannot_remove_replacement
 test_retire_serializes_and_rejects_stale_gen

@@ -1356,6 +1356,10 @@ raw_launch_fallback_first_command() {
         done
         continue
         ;;
+      exec|command)
+        i=$((i + 1))
+        continue
+        ;;
       nice|*/nice|time|*/time|setsid|*/setsid)
         i=$((i + 1))
         while [ "$i" -lt "$n" ]; do
@@ -1385,8 +1389,69 @@ raw_launch_uses_omp_fallback() {
   [ "$RAW_LAUNCH_FALLBACK_FIRST" = "$canonical" ]
 }
 
+raw_launch_script_target_path() {
+  local target=$1 base=${2:-} directory name resolved
+  case "$target" in
+    /*) resolved=$target ;;
+    *)
+      [ -n "$base" ] || base=$(pwd -P) || return 1
+      resolved="$base/$target"
+      ;;
+  esac
+  directory=${resolved%/*}
+  [ "$directory" != "$resolved" ] || directory=.
+  name=${resolved##*/}
+  [ -n "$name" ] || return 1
+  directory=$(CDPATH='' cd -- "$directory" 2>/dev/null && pwd -P) || return 1
+  resolved="$directory/$name"
+  [ -f "$resolved" ] && [ ! -L "$resolved" ] && [ -r "$resolved" ] || return 1
+  printf '%s' "$resolved"
+}
+
+raw_launch_script_contains_omp() {
+  local script=$1 depth=${2:-0} canonical line first rc token target nested i n
+  [ "$depth" -lt 8 ] || return 2
+  [ -f "$script" ] && [ ! -L "$script" ] && [ -r "$script" ] || return 2
+  canonical=$(resolve_pi_executable omp 2>/dev/null) || return 2
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    case "$line" in ''|'#'*) continue ;; esac
+    raw_launch_fallback_first_command "$line"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      first=$RAW_LAUNCH_FALLBACK_FIRST
+      case "$first" in
+        "$canonical"|omp|./omp|start-omp.sh) return 0 ;;
+        bash|*/bash|sh|*/sh|zsh|*/zsh|source|.)
+          raw_launch_tokenize "$line" || return 2
+          local -a words=("${RAW_LAUNCH_WORDS[@]}")
+          n=${#words[@]}
+          i=1
+          if [ "$first" = source ] || [ "$first" = . ]; then
+            target=${words[$i]:-}
+          elif [ "${words[$i]:-}" = '<' ]; then
+            target=${words[$((i + 1))]:-}
+          elif [ "${words[$i]:-}" = '--' ]; then
+            target=${words[$((i + 1))]:-}
+          elif [ "${words[$i]:-}" = '-c' ]; then
+            return 0
+          else
+            target=${words[$i]:-}
+          fi
+          nested=$(raw_launch_script_target_path "$target" "${script%/*}" 2>/dev/null) || return 2
+          raw_launch_script_contains_omp "$nested" $((depth + 1))
+          case "$?" in 0|2) return 0 ;; esac
+          ;;
+      esac
+    elif [ "$rc" -eq 2 ]; then
+      return 0
+    fi
+  done < "$script"
+  return 1
+}
+
 raw_launch_needs_policy_runtime() {
-  local launch=$1 canonical wrapper token target i n command_start
+  local launch=$1 canonical wrapper token target script_path script_result i n command_start
   raw_launch_tokenize "$launch" || return 1
   canonical=$(resolve_pi_executable omp 2>/dev/null) || return 1
   wrapper="$(dirname "$canonical")/start-omp.sh"
@@ -1447,11 +1512,25 @@ raw_launch_needs_policy_runtime() {
         if [ "$target" = "$wrapper" ] && [ -f "$wrapper" ] && [ -x "$wrapper" ]; then
           return 0
         fi
+        if script_path=$(raw_launch_script_target_path "$target" "$(pwd -P)" 2>/dev/null); then
+          raw_launch_script_contains_omp "$script_path"
+          script_result=$?
+          if [ "$script_result" -eq 0 ] || [ "$script_result" -eq 2 ]; then
+            return 0
+          fi
+        fi
         ;;
       source|.)
         target=${words[$((i + 1))]:-}
         if [ "$target" = "$wrapper" ] && [ -f "$wrapper" ] && [ -x "$wrapper" ]; then
           return 0
+        fi
+        if script_path=$(raw_launch_script_target_path "$target" "$(pwd -P)" 2>/dev/null); then
+          raw_launch_script_contains_omp "$script_path"
+          script_result=$?
+          if [ "$script_result" -eq 0 ] || [ "$script_result" -eq 2 ]; then
+            return 0
+          fi
         fi
         ;;
     esac
@@ -2939,6 +3018,23 @@ const lockOwnerRead = () => {
     if (fd >= 0) closeSync(fd);
   }
 };
+const lockOrphanSnapshot = () => {
+  const stateIdentity = directoryIdentity("$STATE_REAL");
+  const fields = safeFs([
+    "snapshot-lock", "$STATE_REAL", "$ID.busy-state.lock",
+    stateIdentity.dev + ":" + stateIdentity.ino,
+  ]).trim().split(/\s+/);
+  if (fields.length !== 5 || fields[0] !== stateIdentity.dev + ":" + stateIdentity.ino ||
+      fields[2] !== "orphan" || !/^[0-9-]+$/.test(fields[3]) ||
+      !/^[A-Za-z0-9._-]+$/.test(fields[4])) {
+    throw new Error("OMP lifecycle lock owner is unavailable");
+  }
+  return {
+    lock: fields[1],
+    processId: fields[3],
+    token: fields[4],
+  };
+};
 const lockOwnerWrite = () => {
   const noFollow = constants.O_NOFOLLOW;
   if (typeof noFollow !== "number") throw new Error("OMP lifecycle lock cannot enforce no-follow ownership");
@@ -3009,14 +3105,16 @@ const acquireGenerationLock = () => {
       }
       if (Date.now() - stat.mtimeMs >= 5000 && !lockOwnerAlive()) {
         const owner = lockOwnerRead();
-        if (!owner) throw new Error("OMP lifecycle lock owner is unavailable");
         const lockIdentity = directoryIdentity(GENERATION_LOCK);
         const stateIdentity = directoryIdentity("$STATE_REAL");
+        const orphan = owner ? null : lockOrphanSnapshot();
         safeFs([
           "remove-lock", "$STATE_REAL", "$ID.busy-state.lock",
           stateIdentity.dev + ":" + stateIdentity.ino,
           lockIdentity.dev + ":" + lockIdentity.ino,
-          owner.dev + ":" + owner.ino, owner.processId, owner.token,
+          owner ? owner.dev + ":" + owner.ino : "",
+          owner ? owner.processId : orphan.processId,
+          owner ? owner.token : orphan.token,
         ]);
         tries = 0;
         continue;

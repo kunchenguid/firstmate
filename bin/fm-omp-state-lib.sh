@@ -76,12 +76,16 @@ fm_omp_session_evidence_lock_snapshot() {
 }
 
 fm_omp_session_evidence_lock_owner_status() {
-  local state=$1 id=$2 owner content owner_pid owner_token extra
-  owner=$(fm_omp_session_evidence_lock_owner_path "$state" "$id")
-  content=$(fm_harness_read_regular_nofollow "$owner" 2>/dev/null) || { printf 'missing\n'; return 0; }
-  read -r owner_pid owner_token extra <<< "$content"
-  if [ -z "$owner_pid" ] || [ -z "$owner_token" ] || [ -n "$extra" ]; then
+  local state=$1 id=$2 snapshot state_identity lock_identity owner_identity owner_pid owner_token extra
+  snapshot=$(fm_omp_session_evidence_lock_snapshot "$state" "$id" 2>/dev/null) || { printf 'missing\n'; return 0; }
+  read -r state_identity lock_identity owner_identity owner_pid owner_token extra <<< "$snapshot"
+  if [ -z "$state_identity" ] || [ -z "$lock_identity" ] || [ -z "$owner_identity" ] \
+    || [ -z "$owner_pid" ] || [ -z "$owner_token" ] || [ -n "$extra" ]; then
     printf 'invalid\n'
+    return 0
+  fi
+  if [ "$owner_identity" = orphan ]; then
+    printf 'orphan\n'
     return 0
   fi
   case "$owner_pid" in *[!0-9]*) printf 'invalid\n'; return 0 ;; esac

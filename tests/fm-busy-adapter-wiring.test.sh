@@ -1689,9 +1689,8 @@ test_omp_extension_rejects_replaced_atomic_target() {
   gate="$state/$id.target-replacement-race"
   target="$state_real/$id.omp-session-run"
   collision="$target.foreign-target"
-  out=$(ATOMIC_GATE="$gate" \
-    FM_OMP_TEST_BEFORE_RENAME_GATE="$gate" \
-    FM_OMP_TEST_BEFORE_RENAME_TARGET="$target" \
+  out=$(ATOMIC_GATE="$gate" FM_OMP_FS_REPLACE_GATE="$gate" \
+    FM_OMP_FS_REPLACE_TARGET="${id}.omp-session-run" \
     drive_omp_ext "$ext" target-replacement-collision "$state" "$id") \
     || fail "target-replacement collision drive failed: $out"
   [ "$(cat "$target")" = 'foreign' ] || fail "a foreign OMP state target was replaced"
@@ -1699,6 +1698,26 @@ test_omp_extension_rejects_replaced_atomic_target() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "a rejected OMP target replacement changed settled state, got '$out'"
   pass "OMP state commits reject replacement targets without deleting foreign state"
+}
+
+test_omp_generation_lock_recovers_empty_owner() {
+  local rec id=busy-omp-empty-owner out state ext lock
+  rec=$(make_spawn_case omp-empty-owner omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp empty-owner spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  lock="$state/$id.busy-state.lock"
+  mkdir "$lock"
+  : > "$lock/owner"
+  touch -t 200001010000 "$lock"
+  out=$(drive_omp_ext "$ext" agent-start "$state" "$id") \
+    || fail "OMP empty-owner lock recovery failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "empty-owner recovery did not start a turn, got '$out'"
+  [ ! -e "$lock" ] || fail "empty-owner OMP lifecycle lock was not retired"
+  pass "OMP generation lock recovery retires an empty owner lock"
 }
 
 test_omp_spawn_requires_collision_safe_python() {
@@ -2004,6 +2023,7 @@ test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_omp_extension_generation_commit_is_atomic
 test_omp_extension_rejects_replaced_atomic_target
+test_omp_generation_lock_recovers_empty_owner
 test_omp_spawn_requires_collision_safe_python
 test_omp_turn_end_publication_holds_generation_lock
 test_omp_generation_lock_release_cannot_remove_replacement

@@ -30,32 +30,27 @@ FM_HARNESS_RE='^(claude|codex|opencode|grok|kimi)(-|$)|^pi$|^pi-signed$|^omp$'
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
 fm_harness_read_regular_nofollow() {
-  local path=${1:-}
+  local path=${1:-} directory name
   [ "$#" -eq 1 ] && [ -n "$path" ] || return 1
-  command -v perl >/dev/null 2>&1 || return 1
-  perl -MFcntl=:DEFAULT -e '
-    my $path = shift @ARGV;
-    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
-    my @stat = stat($fh);
-    exit 1 unless @stat && (($stat[2] & 0170000) == 0100000);
-    local $/;
-    my $content = <$fh>;
-    defined($content) or exit 1;
-    print $content;
-  ' "$path"
+  command -v python3 >/dev/null 2>&1 || return 1
+  case "$path" in
+    */*) directory=${path%/*}; name=${path##*/}; [ -n "$directory" ] || directory=/ ;;
+    *) directory=.; name=$path ;;
+  esac
+  case "$name" in ''|.|..|*/*) return 1 ;; esac
+  python3 "$FM_HARNESS_LIB_DIR/fm-omp-fs.py" read-file "$directory" "$name" ""
 }
 
 fm_harness_regular_identity_nofollow() {
-  local path=${1:-}
+  local path=${1:-} directory name
   [ "$#" -eq 1 ] && [ -n "$path" ] || return 1
-  command -v perl >/dev/null 2>&1 || return 1
-  perl -MFcntl=:DEFAULT -e '
-    my $path = shift @ARGV;
-    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
-    my @stat = stat($fh);
-    exit 1 unless @stat && (($stat[2] & 0170000) == 0100000);
-    print "$stat[0]:$stat[1]\n";
-  ' "$path"
+  command -v python3 >/dev/null 2>&1 || return 1
+  case "$path" in
+    */*) directory=${path%/*}; name=${path##*/}; [ -n "$directory" ] || directory=/ ;;
+    *) directory=.; name=$path ;;
+  esac
+  case "$name" in ''|.|..|*/*) return 1 ;; esac
+  python3 "$FM_HARNESS_LIB_DIR/fm-omp-fs.py" identity-file "$directory" "$name" ""
 }
 
 fm_harness_unlink_regular_nofollow_at() {

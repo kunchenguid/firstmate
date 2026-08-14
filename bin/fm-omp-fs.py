@@ -103,103 +103,138 @@ def removal_test_pause():
         time.sleep(0.01)
 
 
-def remove_file(parent, name, expected_parent, expected_entry):
-    fd = open_directory(parent, expected_parent)
-    placeholder = temporary_name("remove")
-    placeholder_created = False
-    placeholder_identity = ""
+def removal_final_test_pause():
+    gate = os.environ.get("FM_OMP_FS_REMOVE_FINAL_GATE")
+    if not gate:
+        return
+    with open(gate + ".ready", "w", encoding="utf-8"):
+        pass
+    while os.path.exists(gate + ".hold"):
+        time.sleep(0.01)
+
+
+def replacement_test_pause(name):
+    gate = os.environ.get("FM_OMP_FS_REPLACE_GATE")
+    target = os.environ.get("FM_OMP_FS_REPLACE_TARGET")
+    if not gate or (target and target != name):
+        return
+    with open(gate + ".ready", "w", encoding="utf-8"):
+        pass
+    while os.path.exists(gate + ".hold"):
+        time.sleep(0.01)
+
+
+def discard_file(fd, name, expected):
+    require_name(name)
+    placeholder = temporary_name("discard")
+    child = os.open(placeholder, FILE_WRITE_FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+    try:
+        placeholder_value = os.fstat(child)
+        if not stat.S_ISREG(placeholder_value.st_mode):
+            raise ValueError("not a regular placeholder")
+        placeholder_identity = identity(placeholder_value)
+    finally:
+        os.close(child)
     exchanged = False
     try:
-        regular_entry(fd, name, expected_entry)
-        child = os.open(placeholder, FILE_WRITE_FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
-        try:
-            value = os.fstat(child)
-            if not stat.S_ISREG(value.st_mode):
-                raise ValueError("not a regular placeholder")
-            placeholder_identity = identity(value)
-        finally:
-            os.close(child)
-        placeholder_created = True
+        regular_entry(fd, name, expected)
         exchange(fd, placeholder, name)
         exchanged = True
-        swapped = regular_entry(fd, placeholder)
-        replacement = regular_entry(fd, name)
-        if identity(swapped) != expected_entry or identity(replacement) != placeholder_identity:
+        moved = regular_entry(fd, placeholder)
+        current = regular_entry(fd, name)
+        if identity(moved) != expected or identity(current) != placeholder_identity:
             raise ValueError("entry changed during removal")
         removal_test_pause()
+        regular_entry(fd, placeholder, expected)
         regular_entry(fd, name, placeholder_identity)
-        regular_entry(fd, placeholder, expected_entry)
-        os.unlink(name, dir_fd=fd)
-        regular_entry(fd, placeholder, expected_entry)
+        removal_final_test_pause()
+        regular_entry(fd, placeholder, expected)
+        regular_entry(fd, name, placeholder_identity)
         os.unlink(placeholder, dir_fd=fd)
+        regular_entry(fd, name, placeholder_identity)
+        os.unlink(name, dir_fd=fd)
         exchanged = False
     finally:
+        rolled_back = False
         if exchanged:
             try:
-                swapped = regular_entry(fd, placeholder)
-                replacement = regular_entry(fd, name)
-                if identity(swapped) == expected_entry and identity(replacement) == placeholder_identity:
+                moved = regular_entry(fd, placeholder)
+                current = regular_entry(fd, name)
+                if identity(moved) == expected and identity(current) == placeholder_identity:
                     exchange(fd, placeholder, name)
-            except OSError:
-                pass
-        if placeholder_created:
-            try:
-                if identity(regular_entry(fd, placeholder)) == placeholder_identity:
-                    os.unlink(placeholder, dir_fd=fd)
-            except FileNotFoundError:
-                pass
+                    rolled_back = True
             except (OSError, ValueError):
                 pass
+        if not exchanged or rolled_back:
+            try:
+                regular_entry(fd, placeholder, placeholder_identity)
+                os.unlink(placeholder, dir_fd=fd)
+            except (FileNotFoundError, OSError, ValueError):
+                pass
+
+
+def remove_file(parent, name, expected_parent, expected_entry):
+    fd = open_directory(parent, expected_parent)
+    try:
+        discard_file(fd, name, expected_entry)
+    finally:
         os.close(fd)
+
+
+def discard_directory(fd, name, expected):
+    require_name(name)
+    child = os.open(name, READ_FLAGS, dir_fd=fd)
+    try:
+        if os.listdir(child):
+            raise ValueError("directory is not empty")
+    finally:
+        os.close(child)
+    temporary = temporary_name("discard-dir")
+    os.mkdir(temporary, 0o700, dir_fd=fd)
+    temporary_identity = identity(directory_entry(fd, temporary))
+    exchanged = False
+    try:
+        directory_entry(fd, name, expected)
+        exchange(fd, temporary, name)
+        exchanged = True
+        moved = directory_entry(fd, temporary)
+        current = directory_entry(fd, name)
+        if identity(moved) != expected or identity(current) != temporary_identity:
+            raise ValueError("directory changed during removal")
+        removal_test_pause()
+        directory_entry(fd, temporary, expected)
+        directory_entry(fd, name, temporary_identity)
+        removal_final_test_pause()
+        directory_entry(fd, temporary, expected)
+        directory_entry(fd, name, temporary_identity)
+        os.rmdir(temporary, dir_fd=fd)
+        directory_entry(fd, name, temporary_identity)
+        os.rmdir(name, dir_fd=fd)
+        exchanged = False
+    finally:
+        rolled_back = False
+        if exchanged:
+            try:
+                moved = directory_entry(fd, temporary)
+                current = directory_entry(fd, name)
+                if identity(moved) == expected and identity(current) == temporary_identity:
+                    exchange(fd, temporary, name)
+                    rolled_back = True
+            except (OSError, ValueError):
+                pass
+        if not exchanged or rolled_back:
+            try:
+                directory_entry(fd, temporary, temporary_identity)
+                os.rmdir(temporary, dir_fd=fd)
+            except (FileNotFoundError, OSError, ValueError):
+                pass
 
 
 def remove_directory(parent, name, expected_parent, expected_entry):
     fd = open_directory(parent, expected_parent)
-    temporary = temporary_name("rmdir")
-    temporary_created = False
-    exchanged = False
-    temporary_identity = ""
     try:
-        directory_entry(fd, name, expected_entry)
-        child = os.open(name, READ_FLAGS, dir_fd=fd)
-        try:
-            if os.listdir(child):
-                raise ValueError("directory is not empty")
-        finally:
-            os.close(child)
-        os.mkdir(temporary, 0o700, dir_fd=fd)
-        temporary_created = True
-        temporary_identity = identity(directory_entry(fd, temporary))
-        exchange(fd, temporary, name)
-        exchanged = True
-        swapped = directory_entry(fd, temporary)
-        replacement = directory_entry(fd, name)
-        if identity(swapped) != expected_entry or identity(replacement) != temporary_identity:
-            raise ValueError("directory changed during removal")
-        removal_test_pause()
-        directory_entry(fd, name, temporary_identity)
-        directory_entry(fd, temporary, expected_entry)
-        os.rmdir(name, dir_fd=fd)
-        directory_entry(fd, temporary, expected_entry)
-        os.rmdir(temporary, dir_fd=fd)
-        exchanged = False
+        discard_directory(fd, name, expected_entry)
     finally:
-        if exchanged:
-            try:
-                swapped = directory_entry(fd, temporary)
-                replacement = directory_entry(fd, name)
-                if identity(swapped) == expected_entry and identity(replacement) == temporary_identity:
-                    exchange(fd, temporary, name)
-            except OSError:
-                pass
-        if temporary_created:
-            try:
-                directory_entry(fd, temporary, temporary_identity)
-                os.rmdir(temporary, dir_fd=fd)
-            except FileNotFoundError:
-                pass
-            except (OSError, ValueError):
-                pass
         os.close(fd)
 
 
@@ -222,6 +257,8 @@ def remove_owned_lock(parent, name, expected_parent, expected_lock, expected_own
         if owner_value is None:
             entries = os.listdir(lock_fd)
             if not entries:
+                if expected_owner:
+                    raise ValueError("owner identity changed")
                 lock_identity = identity(lock_value)
             elif len(entries) == 1 and entries[0].startswith(".firstmate-remove-"):
                 orphan_name = entries[0]
@@ -240,15 +277,21 @@ def remove_owned_lock(parent, name, expected_parent, expected_lock, expected_own
         elif owner_content == b"":
             entries = os.listdir(lock_fd)
             orphan_entries = [entry for entry in entries if entry.startswith(".firstmate-remove-")]
-            if len(entries) != 2 or len(orphan_entries) != 1 or set(entries) != {"owner", orphan_entries[0]}:
+            if len(entries) == 1 and entries == ["owner"]:
+                if expected_owner and identity(owner_value) != expected_owner:
+                    raise ValueError("owner identity changed")
+                lock_identity = identity(lock_value)
+                owner_identity = identity(owner_value)
+            elif len(entries) != 2 or len(orphan_entries) != 1 or set(entries) != {"owner", orphan_entries[0]}:
                 raise ValueError("lock ownership changed")
-            orphan_name = orphan_entries[0]
-            orphan_value, orphan_content = read_regular_bytes(lock_fd, orphan_name)
-            if orphan_content != f"{process_id} {token}\n".encode():
-                raise ValueError("lock ownership changed")
-            lock_identity = identity(lock_value)
-            owner_identity = identity(owner_value)
-            orphan_identity = identity(orphan_value)
+            else:
+                orphan_name = orphan_entries[0]
+                orphan_value, orphan_content = read_regular_bytes(lock_fd, orphan_name)
+                if orphan_content != f"{process_id} {token}\n".encode():
+                    raise ValueError("lock ownership changed")
+                lock_identity = identity(lock_value)
+                owner_identity = identity(owner_value)
+                orphan_identity = identity(orphan_value)
         else:
             raise ValueError("lock ownership changed")
     finally:
@@ -304,6 +347,10 @@ def snapshot_lock(parent, name, expected_parent):
         entries = os.listdir(lock_fd)
         orphan_entries = [entry for entry in entries if entry.startswith(".firstmate-remove-")]
         if content != b"" or len(entries) != 2 or len(orphan_entries) != 1 or set(entries) != {"owner", orphan_entries[0]}:
+            if content == b"" and entries == ["owner"]:
+                sys.stdout.write(" ".join((identity(os.fstat(state_fd)), identity(opened_lock),
+                                           "orphan", "-", "-")) + "\n")
+                return
             raise ValueError("lock owner is malformed")
         _, orphan_content = read_regular_bytes(lock_fd, orphan_entries[0])
         fields = orphan_content.decode().strip().split()
@@ -404,12 +451,15 @@ def replace_file(parent, source, expected_parent, expected_source, target, expec
             os.link(source, target, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
             regular_entry(fd, target, expected_source)
             regular_entry(fd, source, expected_source)
-            os.unlink(source, dir_fd=fd)
+            discard_file(fd, source, expected_source)
             return
         if not stat.S_ISREG(target_value.st_mode) or not expected_target:
             raise ValueError("replacement target is not the expected regular file")
         if identity(target_value) != expected_target:
             raise ValueError("replacement target identity changed")
+        replacement_test_pause(target)
+        regular_entry(fd, source, expected_source)
+        regular_entry(fd, target, expected_target)
         exchange(fd, source, target)
         exchanged = True
         replacement = regular_entry(fd, target)
@@ -419,15 +469,20 @@ def replace_file(parent, source, expected_parent, expected_source, target, expec
         removal_test_pause()
         regular_entry(fd, target, expected_source)
         regular_entry(fd, source, expected_target)
-        os.unlink(source, dir_fd=fd)
+        discard_file(fd, source, expected_target)
         exchanged = False
     finally:
         if exchanged:
             try:
-                replacement = os.stat(target, dir_fd=fd, follow_symlinks=False)
-                swapped = os.stat(source, dir_fd=fd, follow_symlinks=False)
-                if identity(replacement) == expected_source and identity(swapped) == expected_target:
+                replacement = regular_entry(fd, target)
+                swapped = regular_entry(fd, source)
+                swapped_identity = identity(swapped)
+                if identity(replacement) == expected_source:
+                    regular_entry(fd, target, expected_source)
+                    regular_entry(fd, source, swapped_identity)
                     exchange(fd, source, target)
+                    exchanged = False
+                    discard_file(fd, source, expected_source)
             except (OSError, ValueError):
                 pass
         os.close(fd)
