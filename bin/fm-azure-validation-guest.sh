@@ -232,7 +232,12 @@ PY
   chmod 0600 "$STATE/request.json"
   RUNTIME=/opt/fm-azure-validation/runtime
   rm -rf "$RUNTIME"
-  install -d -m 0755 -o root -g root "$RUNTIME"
+  # install -d applies -m only to the directories it is given; implicit
+  # parent components are created at the process umask, and this run-command
+  # context runs at umask 077, which left /opt/fm-azure-validation itself
+  # 0700 root-only and untraversable for fmvalidate even with a correct
+  # runtime tree below it. Name the parent explicitly.
+  install -d -m 0755 -o root -g root /opt/fm-azure-validation "$RUNTIME"
   tar -xzf "$EXTRACT/runtime.tar.gz" -C "$RUNTIME" --no-same-owner --no-same-permissions
   # --no-same-permissions applies this process's umask, and the Azure run
   # command context runs with umask 077, so every runtime file lands
