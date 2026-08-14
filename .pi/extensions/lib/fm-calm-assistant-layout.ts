@@ -56,7 +56,9 @@ function isOperationalTurnAcknowledgement(message: AssistantMessage): boolean {
 }
 
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
-// double-patch a live process.
+// double-patch a live process. The pin therefore no longer distinguishes later
+// behaviour changes such as operational-reply hiding: after an in-process upgrade the
+// already-installed wrapper stays in charge, so those take effect on the next restart.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-assistant-layout:pi-0.81.1",
 );

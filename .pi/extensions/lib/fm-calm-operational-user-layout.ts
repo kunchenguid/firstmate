@@ -120,7 +120,16 @@ export function installCalmOperationalUserLayout(): void {
     message: UserMessageLike,
     options?: AddMessageOptions,
   ): void {
-    if (message.role !== "user" || !contentIsTextOnly(message.content)) {
+    if (message.role !== "user") {
+      originalAddMessageToChat.call(this, message, options);
+      return;
+    }
+
+    if (!contentIsTextOnly(message.content)) {
+      // Captain input carrying an attachment or an image is still captain input, so the
+      // flag has to describe what was just rendered instead of surviving from an earlier
+      // internal turn and hiding this turn's reply.
+      setCalmOperationalTurn(false);
       originalAddMessageToChat.call(this, message, options);
       return;
     }

@@ -1369,14 +1369,18 @@ test_calm_hides_operational_turn_acknowledgement() {
   fixture="$TMP_ROOT/calm-operational-reply"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
   printf '{"type":"module"}\n' >"$fixture/package.json"
   output_file="$fixture/node-output"
 
-  (cd "$fixture" && PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+  (cd "$fixture" && PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$OPERATIONAL_INPUT" \
+    node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -1445,6 +1449,60 @@ if (!renderedText("captainRelevant").includes("pull/7")) {
 if (!renderedText("substantive").includes("needs a decision")) {
   throw new Error("a captain-relevant outcome was hidden from the captain");
 }
+
+// The internal-turn flag is set from what the user layout just rendered and from nowhere
+// else, so a captain message that is not text-only - one carrying an image - clears it and
+// its reply stays on screen even when the previous turn was internal.
+const userLayout = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-operational-user-layout.ts`).href);
+const operationalInput = await import(pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href);
+const { InteractiveMode } = await import(pathToFileURL(`${packageRoot}/dist/index.js`).href);
+userLayout.installCalmOperationalUserLayout();
+const chatMode = {
+  chatContainer: { children: [], addChild(component) { this.children.push(component); } },
+  editor: { addToHistory() {} },
+  getMarkdownTransformers: () => [],
+  getMarkdownThemeWithSettings: () => undefined,
+  getUserMessageText: (message) => typeof message.content === "string"
+    ? message.content
+    : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
+  outputPad: 1,
+};
+const operationalText = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status",
+);
+InteractiveMode.prototype.addMessageToChat.call(
+  chatMode,
+  { role: "user", content: [{ type: "text", text: operationalText }] },
+);
+if (!visibility.calmOperationalTurnIsActive()) {
+  throw new Error("a hidden operational input did not mark its turn internal");
+}
+if (rendered("acknowledgement").length !== 0) {
+  throw new Error("the internal turn's acknowledgement was rendered");
+}
+InteractiveMode.prototype.addMessageToChat.call(
+  chatMode,
+  { role: "user", content: [{ type: "image", data: "AAAA", mimeType: "image/png" }] },
+);
+if (visibility.calmOperationalTurnIsActive()) {
+  throw new Error("captain input that is not text-only left the previous turn marked internal");
+}
+if (!renderedText("acknowledgement").includes("shipshape")) {
+  throw new Error("a reply to captain input carrying an image was hidden from the captain");
+}
+
+// The acknowledgement predicate means the contract phrase and nothing else.
+if (visibility.calmReplyIsBareAcknowledgement("")) {
+  throw new Error("empty reply text matched the no-action acknowledgement phrase");
+}
+if (visibility.calmReplyIsBareAcknowledgement("   \n ")) {
+  throw new Error("whitespace-only reply text matched the no-action acknowledgement phrase");
+}
+if (!visibility.calmReplyIsBareAcknowledgement("Captain, shipshape.")) {
+  throw new Error("the no-action acknowledgement phrase stopped matching");
+}
+visibility.setCalmOperationalTurn(true);
 
 // Presentation only: the objects the model and the session see are untouched.
 if (JSON.stringify(messages) !== messagesBefore) {

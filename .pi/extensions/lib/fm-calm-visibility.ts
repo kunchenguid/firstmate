@@ -94,12 +94,13 @@ export function calmOperationalTurnIsActive(): boolean {
 // So this matches the contract phrase and nothing else, and everything unrecognised
 // stays on screen. The cost is that a reply which ignores that contract and improvises
 // its own no-action wording still shows, because presentation cannot tell such a reply
-// apart from a real outcome without reading intent that is not in the text.
+// apart from a real outcome without reading intent that is not in the text. Text with no
+// words is not that phrase either, so it does not match.
 const CALM_NO_ACTION_REPLY = "captain, shipshape";
 
 export function calmReplyIsBareAcknowledgement(text: string): boolean {
   const reply = text.trim();
-  if (!reply) return true;
+  if (!reply) return false;
   const normalised = reply.replace(/\s+/g, " ").replace(/[.!\s]+$/, "").toLowerCase();
   return normalised === CALM_NO_ACTION_REPLY;
 }
