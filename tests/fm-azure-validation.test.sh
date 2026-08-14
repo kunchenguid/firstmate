@@ -381,13 +381,13 @@ m.expected_tags=lambda *_args:{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha
 state={"cell":"azv-aaaaaaaaaaaa","attempt":1,"input_digest":"sha256:"+"i"*64,"request_digest":"sha256:"+"r"*64,"allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},"request":{"fence":"sha256:"+"f"*64,"protocol":{"guest_digest":m.sha256_file(m.GUEST)},"limits":{"wall_seconds":60}},"resources":{"vm_id":"/vm","vm_instance_id":"vm-instance","worktree_disk_id":"/work","credential_disk_id":"/credential","identity_client_id":"client","run_commands":[]},"staging":{"container":"container"}}
 m.create_run_command({"storage":"storage","owner":"owner"},state,"start")
 protected={item["name"]:item["value"] for item in captured["properties"]["protectedParameters"]}
-assert protected["fm_azure_validation_worktree_key_file"]==("a"*64+"\n")
+assert protected["fm_azure_validation_worktree_key_file"]==("a"*64)
 assert protected["fm_azure_validation_credential_key_file"]==("b"*64+"\n")
 assert m.replacement_run_mode({"phase":"failed-retained","control_error":"No key available with this passphrase.\n"})=="reattach"
 assert m.replacement_run_mode({"phase":"failed-retained","control_error":"different failure\n"})=="start"
 assert m.replacement_run_mode({"phase":"running","run_id":"01AAAAAAAAAAAAAAAAAAAAAAAA"})=="reattach"
 PY
-  pass "controller preserves 65-byte key text and reattaches the initialized passphrase-failure disk"
+  pass "controller preserves asymmetric 64/65-byte keys and reattaches the initialized passphrase-failure disk"
 }
 
 retail_price_transport_contract() {

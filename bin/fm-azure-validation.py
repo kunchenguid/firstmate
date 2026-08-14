@@ -1496,9 +1496,16 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
         protected.append({"name": "output_url", "value": output_url})
     if response is not None:
         protected.append({"name": "response", "value": response})
-    for name in ("FM_AZURE_VALIDATION_WORKTREE_KEY_FILE", "FM_AZURE_VALIDATION_CREDENTIAL_KEY_FILE"):
-        _, secret = ensure_secret_file(name)
-        protected.append({"name": name.lower(), "value": secret.decode("utf-8")})
+    _, worktree_key = ensure_secret_file("FM_AZURE_VALIDATION_WORKTREE_KEY_FILE")
+    protected.append({
+        "name": "fm_azure_validation_worktree_key_file",
+        "value": worktree_key.decode("utf-8").rstrip("\n"),
+    })
+    _, credential_key = ensure_secret_file("FM_AZURE_VALIDATION_CREDENTIAL_KEY_FILE")
+    protected.append({
+        "name": "fm_azure_validation_credential_key_file",
+        "value": credential_key.decode("utf-8"),
+    })
     selected = {
         "sku": state["allocation"]["sku"],
         "family": state["allocation"]["sku_family"],
