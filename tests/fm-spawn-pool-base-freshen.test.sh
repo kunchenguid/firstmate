@@ -6,6 +6,9 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
 # unreachable.
+# A project with no origin remote has no tip to freshen against, so these tests
+# also prove that spawn skips only the freshen there, says so once on stderr,
+# and still refuses a dirty pool.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -34,8 +37,17 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# make_case <name> <id> [default-branch] [origin|no-origin]
+#
+# The no-origin variant is the same fixture minus the bare origin clone, the
+# `remote add origin`, and the publisher push that advances the default branch,
+# so the two shapes cannot drift apart.
 make_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
+  local name=$1 id=$2 default=${3:-main} origin_mode=${4:-origin} case_dir home project origin pool publisher fakebin initial
+  case "$origin_mode" in
+    origin|no-origin) : ;;
+    *) fail "make_case: unknown origin mode '$origin_mode'" ;;
+  esac
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -53,16 +65,20 @@ make_case() {
   printf 'base\n' > "$project/README.md"
   git -C "$project" add README.md
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
-  git clone --quiet --bare "$project" "$origin"
-  git -C "$project" remote add origin "file://$origin"
+  if [ "$origin_mode" = origin ]; then
+    git clone --quiet --bare "$project" "$origin"
+    git -C "$project" remote add origin "file://$origin"
+  fi
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
-  git clone --quiet "file://$origin" "$publisher"
-  printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
-  git -C "$publisher" add advanced-main.txt
-  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
-  git -C "$publisher" push --quiet origin "$default"
+  if [ "$origin_mode" = origin ]; then
+    git clone --quiet "file://$origin" "$publisher"
+    printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
+    git -C "$publisher" add advanced-main.txt
+    git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
+    git -C "$publisher" push --quiet origin "$default"
+  fi
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -73,7 +89,10 @@ $1
 EOF
 }
 
-run_spawn() {
+# spawn_env leaves both streams alone so a caller that cares which stream a
+# message lands on can redirect them separately; run_spawn is the merged form
+# most cases want.
+spawn_env() {
   local id=$1
   shift
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -81,7 +100,11 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+    "$SPAWN" "$id" "$PROJECT_DIR" "$@"
+}
+
+run_spawn() {
+  spawn_env "$@" 2>&1
 }
 
 test_stale_pool_base_refreshes_before_branching() {
@@ -206,50 +229,60 @@ test_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty pooled worktree is refused without discarding its local work"
 }
 
-make_no_origin_case() {
-  local name=$1 id=$2 case_dir home project pool fakebin initial
-  case_dir="$TMP_ROOT/$name"
-  home="$case_dir/home"
-  project="$case_dir/project"
-  pool="$case_dir/pool"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
-
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'codex\n' > "$home/config/crew-harness"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
-  touch "$home/state/.last-watcher-beat"
-
-  git init --quiet -b main "$project"
-  printf 'base\n' > "$project/README.md"
-  git -C "$project" add README.md
-  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
-  initial=$(git -C "$project" rev-parse HEAD)
-  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
-
-  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
-}
-
 test_no_origin_remote_skips_freshen_and_succeeds() {
-  local rec id out status before
+  local rec id out status before errfile notices
   id='pool-no-origin-r6'
-  rec=$(make_no_origin_case no-origin "$id")
+  rec=$(make_case no-origin "$id" main no-origin)
   read_case_record "$rec"
   git -C "$POOL_DIR" remote 2>/dev/null | grep -qx origin \
     && fail "fixture unexpectedly configured an origin remote"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  errfile="$CASE_DIR/spawn.stderr"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(spawn_env "$id" --mode no-mistakes --yolo off 2>"$errfile")
   status=$?
   expect_code 0 "$status" "spawn should succeed on a pooled worktree with no origin remote"
   assert_contains "$out" "spawned $id" "spawn did not report success"
-  assert_contains "$out" "was not freshened because the project has no remote" \
-    "spawn did not print a clear no-remote notice"
+  notices=$(grep -c "^notice: .*was not freshened because the project has no remote$" "$errfile" || true)
+  [ "$notices" = 1 ] \
+    || fail "the no-remote notice should be exactly one complete stderr line, found $notices"$'\n'"--- stderr ---"$'\n'"$(cat "$errfile")"
+  assert_not_contains "$out" "was not freshened because the project has no remote" \
+    "the no-remote notice leaked onto stdout"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD in a pooled worktree with no remote to freshen from"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed no-origin spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed no-origin notice: %s\n' \
+      "$(grep 'was not freshened' "$errfile")"
   fi
   pass "a pooled worktree with no origin remote skips the freshen and still spawns"
+}
+
+# The clean-pool guard is remote-independent, so skipping the freshen must not
+# skip it. A no-origin pool that came back dirty would otherwise start a worker
+# on top of foreign uncommitted work and commit it into fm/<id>.
+test_no_origin_dirty_pool_refuses_without_discarding_work() {
+  local rec id out status before
+  id='pool-no-origin-dirty-r6'
+  rec=$(make_case no-origin-dirty "$id" main no-origin)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded on a dirty pooled worktree with no origin remote"
+  assert_contains "$out" "is not clean" \
+    "spawn did not refuse a dirty pooled worktree when there was no remote to freshen from"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty no-remote pooled worktree"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while refusing a no-remote pool"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin dirty refusal: %s; preserved=%s\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
+  fi
+  pass "a dirty pooled worktree with no origin remote is refused without discarding its local work"
 }
 
 test_unresolved_remote_default_refuses_pool() {
@@ -280,5 +313,6 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_no_origin_remote_skips_freshen_and_succeeds
+test_no_origin_dirty_pool_refuses_without_discarding_work
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

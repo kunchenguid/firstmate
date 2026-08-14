@@ -138,6 +138,10 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A project with no origin remote (positively detected, never inferred from a
+#   failed fetch) skips only that fetch-and-reset machinery and launches with one
+#   notice that its base was not freshened; the non-clean worktree refusal is
+#   remote-independent and still applies.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1727,9 +1731,25 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# A pooled worktree carrying uncommitted work is never a safe base for a fresh
+# worker, with or without an origin to freshen against, so this guard is
+# remote-independent and every freshen path owes it.
+require_clean_spawn_worktree() {  # <worktree>
+  local worktree=$1 status
+  status=$(git -C "$worktree" status --porcelain) || {
+    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+    return 1
+  fi
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual
   if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    require_clean_spawn_worktree "$worktree" || return 1
     echo "notice: pooled worktree '$worktree' base was not freshened because the project has no remote" >&2
     return 0
   fi
@@ -1754,14 +1774,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  status=$(git -C "$worktree" status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
-  }
-  if [ -n "$status" ]; then
-    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
-    return 1
-  fi
+  require_clean_spawn_worktree "$worktree" || return 1
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
