@@ -509,6 +509,9 @@ case "${1:-} ${2:-}" in
       exit 1
     fi
     ;;
+  "pane process-info")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p-old","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"pi","argv":["pi"],"executable":"/usr/local/bin/pi"}]}}}'
+    ;;
   "agent get")
     if [ "${3:-}" = p-new ] && [ -e "$spawned" ]; then
       printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'

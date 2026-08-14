@@ -632,7 +632,7 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
-test_sweep_skips_shell_without_positive_identity() {
+test_sweep_recovers_proven_dead_shell() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead)
   add_sm_home "$w" sm1 firstmate:fm-sm1
@@ -641,10 +641,13 @@ test_sweep_skips_shell_without_positive_identity() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: existing endpoint has ambiguous agent process" \
-    "a shell relaunch must remain non-actionable without positive identity"
-  [ ! -s "$log" ] || fail "an ambiguous shell endpoint must never be killed or relaunched: $(cat "$log")"
-  pass "sweep: a shell endpoint without positive identity stays untouched"
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 relaunched after confirmed agent absence on existing endpoint (backend=tmux)" \
+    "a proven bare-shell endpoint was not reported as recovered"
+  assert_contains "$(cat "$log")" "kill-window" \
+    "the proven dead shell endpoint was not removed before respawn"
+  assert_contains "$(cat "$log")" "new-window" \
+    "the proven dead shell endpoint was not relaunched"
+  pass "sweep: a proven bare-shell endpoint is recovered exactly once"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -834,7 +837,7 @@ test_agent_state_dispatcher_and_compatibility
 test_shared_input_dispatch_preserves_unproved_backends
 test_tmux_submit_rechecks_endpoint_before_each_enter
 test_tmux_submit_rechecks_endpoint_before_literal
-test_sweep_skips_shell_without_positive_identity
+test_sweep_recovers_proven_dead_shell
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

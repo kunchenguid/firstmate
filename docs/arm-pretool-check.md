@@ -220,7 +220,7 @@ All six sentinel files remained absent.
 The Codex transcript showed `PreToolUse Completed` for all three originally reported false-positive shapes and `PreToolUse Blocked` only for the backgrounded arm.
 The Grok debug transcript showed four exit-0 results from `project/fm-primary-pretool-check`, then exit 2 with 145 stdout bytes, 214 stderr bytes, and `hook denied` for the backgrounded arm.
 OpenCode displayed the four allowed command outputs and then `bin/fm-watch-arm.sh & failed` with the stderr deny object.
-Claude and Pi both reported that calls one through four ran and the final call was blocked.
+Claude, Pi, and OMP all reported that calls one through four ran and the final call was blocked.
 
 Native supervision paths were also validated in the same scratch project:
 
@@ -229,6 +229,7 @@ Native supervision paths were also validated in the same scratch project:
 - Codex ran the foreground checkpoint above and produced `CHECKPOINT_EXECUTED`.
 - OpenCode ran in an interactive TUI on `tmux -L fm-pretool-smoke`, reached `session.idle`, and its unchanged watch-arm plugin created the scratch automatic-arm marker.
 - Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
+- OMP loaded both tracked primary extensions, called `fm_watch_arm_omp`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 
