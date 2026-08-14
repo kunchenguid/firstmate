@@ -591,7 +591,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # composer this way. If only a solid rule counts, the untitled bottom rule is
 # left unpaired and cursorless selection rejects the real composer as stale.
 # The strict two-ended ASCII-printable form admits that title without admitting
-# one-ended transcript prose or non-ASCII content as a composer boundary.
+# one-ended transcript prose or non-whitespace non-ASCII content as a composer
+# boundary.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1 residue LC_ALL=C
   [ -n "$row" ] || return 1
@@ -657,9 +658,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
-    # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
-    # closes the preceding candidate and immediately opens the next, so an
-    # earlier transcript rule can never outrank the live bottom composer pair.
+    # Horizontal separator rows use a `─` rule at least 8 columns wide, either
+    # solid or carrying the bounded title accepted by the owner above. A
+    # separator closes the preceding candidate and immediately opens the next,
+    # so an earlier transcript rule can never outrank the live bottom composer
+    # pair.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then

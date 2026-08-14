@@ -522,7 +522,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 
 Real captures verified these active distinctions:
 
-- Claude and Codex use bare `❯` and `›` agent composers, and Claude may embed its session title in the top horizontal rule around that bare row.
+- Claude and Codex use bare `❯` and `›` agent composers, and Claude may embed its agent name in the top horizontal rule around that bare row.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
