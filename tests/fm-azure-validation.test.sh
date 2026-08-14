@@ -137,6 +137,7 @@ assert "def shared_capacity_demand" not in host
 assert '"ttl_schedule_id": base + "/Microsoft.DevTestLab/schedules/shutdown-computevm-{}".format(vm)' in host
 assert 'fresh_start = state.get("run_id") is None' in host
 assert 'create_run_command(env, state, "start", input_url=input_url, output_url=output_url)' in host
+assert '"running", "reattaching")' in host
 for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","cryptsetup luksUUID","provider account-binding marker mismatch","credential disk content binding mismatch","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
     assert value in guest
 for value in ('INPUT_URL=${input_url:-}','WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}','unset input_url output_url response'):

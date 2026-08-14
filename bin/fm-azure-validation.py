@@ -2193,7 +2193,7 @@ def fail_retain(env, args):
         raise ValidationError("retained failure cleanup requires exact confirmation")
     with lock(env, require_cell(args.cell)):
         state = load_state(env, args.cell)
-        if state["phase"] not in ("failed-retained", "result-published", "needs-decision", "running"):
+        if state["phase"] not in ("failed-retained", "result-published", "needs-decision", "running", "reattaching"):
             raise ValidationError("cell phase does not own retainable failure capacity")
         cleanup_compute(env, state)
         state["resources"]["identities"]["worktree"] = wait_exact_disk_detached(
