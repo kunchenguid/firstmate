@@ -1903,7 +1903,9 @@ case "$BACKEND" in
         echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is not an isolated worktree root; refusing to recreate a vanished Herdr endpoint" >&2
         exit 1
       fi
+      HERDR_MISSING_PANE_PRESENTATION_JOURNAL=
       if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
+        HERDR_MISSING_PANE_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
         spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
           echo "error: herdr missing-pane relaunch could not acquire its presentation session lock" >&2
           exit 1
@@ -1911,7 +1913,8 @@ case "$BACKEND" in
         HERDR_MISSING_PANE_PRESENTATION_LOCK=1
       fi
       HERDR_TASK_IDS=$(fm_backend_herdr_relaunch_missing_pane \
-        "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$W" "$RELAUNCH_WT") || exit 1
+        "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$W" "$RELAUNCH_WT" \
+        "$HERDR_MISSING_PANE_PRESENTATION_JOURNAL" "$ID" "$FM_HOME") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF

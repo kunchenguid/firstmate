@@ -160,10 +160,12 @@ pass "real herdr: an agent that does not stop fails closed instead of being repo
 # public relaunch path must recreate exactly one replacement pane in the
 # recorded workspace, preserving the task record's non-endpoint fields.
 MISSING_ID=hmissing
+MISSING_TOKEN=0123456789ABCDEFGHIJKL
+MISSING_SPACE_LABEL="└ $MISSING_ID · p:$MISSING_TOKEN"
 mkdir -p "$HOME_DIR/data/$MISSING_ID"
 printf '# brief\n\nDelivery contract: mode=no-mistakes\n' > "$HOME_DIR/data/$MISSING_ID/brief.md"
 MISSING_SPACE=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" workspace create \
-  --cwd "$WT" --label "fm-control-missing-pane" --no-focus) \
+  --cwd "$WT" --label "$MISSING_SPACE_LABEL" --no-focus) \
   || fail "could not create the vanished-pane workspace"
 MISSING_WORKSPACE_ID=$(printf '%s' "$MISSING_SPACE" | jq -r '.result.workspace.workspace_id // empty')
 [ -n "$MISSING_WORKSPACE_ID" ] || fail "vanished-pane workspace returned no id"
@@ -174,6 +176,21 @@ read -r MISSING_TAB MISSING_PANE <<EOF
 $(printf '%s' "$MISSING_IDS" | jq -r '[.result.tab.tab_id, .result.root_pane.pane_id] | @tsv')
 EOF
 [ -n "$MISSING_TAB" ] && [ -n "$MISSING_PANE" ] || fail "vanished-pane fixture returned incomplete ids"
+MISSING_JOURNAL="$HOME_DIR/state/$MISSING_ID.herdr-presentation"
+{
+  echo 'version=2'
+  echo "task_id=$MISSING_ID"
+  echo "projection_id=$MISSING_TOKEN"
+  echo "home=$HOME_DIR"
+  echo "session=$SESSION"
+  echo "workspace_id=$MISSING_WORKSPACE_ID"
+  echo "tab_id=$MISSING_TAB"
+  echo "pane_id=$MISSING_PANE"
+  echo "parent_workspace_id=$WORKSPACE_ID"
+  echo 'parent_label=firstmate'
+  echo "workspace_label=$MISSING_SPACE_LABEL"
+  echo "task_label=fm-$MISSING_ID"
+} > "$MISSING_JOURNAL"
 {
   echo "window=$SESSION:$MISSING_PANE"
   echo "endpoint_task_id=$MISSING_ID"
@@ -215,6 +232,9 @@ NEW_MISSING_TAB=$(grep '^herdr_tab_id=' "$HOME_DIR/state/$MISSING_ID.meta" | cut
   || fail "vanished-pane relaunch did not publish a distinct replacement endpoint: $OUT"
 "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" pane get "$NEW_MISSING_PANE" >/dev/null \
   || fail "vanished-pane relaunch did not create its recorded replacement pane"
+grep -qx "tab_id=$NEW_MISSING_TAB" "$MISSING_JOURNAL" \
+  && grep -qx "pane_id=$NEW_MISSING_PANE" "$MISSING_JOURNAL" \
+  || fail "vanished-pane relaunch did not advance its presentation binding"
 [ -f "$WT/uncommitted-missing-pane.txt" ] \
   || fail "vanished-pane relaunch lost an uncommitted worktree file"
 grep -qx 'pr=https://example.invalid/firstmate/pull/1' "$HOME_DIR/state/$MISSING_ID.meta" \

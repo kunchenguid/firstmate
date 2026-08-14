@@ -137,13 +137,18 @@ if [ "${#args[@]}" -ge 2 ] && [ "${args[$penultimate]}" = --session ]; then
 fi
 case "${args[0]:-} ${args[1]:-}" in
   'pane get')
+    if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = conflicting-pane ]; then
+      printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}'
+      exit 0
+    fi
     if [ "${args[2]:-}" = w1:p2 ]; then
       reads_file="$dir/herdr-old-pane-reads"
       reads=0
       [ -f "$reads_file" ] && reads=$(cat "$reads_file")
       reads=$((reads + 1))
       printf '%s\n' "$reads" > "$reads_file"
-      if [ "$case_name" = stale-readable ] && [ "$reads" -gt 1 ]; then
+      if [ "$case_name" = live-agent ] \
+         || { [ "$case_name" = stale-readable ] && [ "$reads" -gt 1 ]; }; then
         printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}'
       else
         printf '%s\n' '{"error":{"code":"pane_not_found"}}'
@@ -152,6 +157,14 @@ case "${args[0]:-} ${args[1]:-}" in
     fi
     ;;
   'agent get')
+    if [ "${args[2]:-}" = w1:p2 ] && [ "$case_name" = live-agent ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+      exit 0
+    fi
+    if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = conflicting-pane ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+      exit 0
+    fi
     [ "${args[2]:-}" = w1:p2 ] && {
       printf '%s\n' '{"error":{"code":"agent_not_found"}}'
       exit 0
@@ -165,6 +178,48 @@ case "${args[0]:-} ${args[1]:-}" in
         exit 0
         ;;
     esac
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"}}}'
+    exit 0
+    ;;
+  'tab list')
+    case "$case_name" in
+      tabs-unavailable) exit 1 ;;
+      tabs-malformed)
+        printf '%s\n' '{}'
+        exit 0
+        ;;
+      changed-tab)
+        printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"foreign"}]}}'
+        exit 0
+        ;;
+      ambiguous-tab)
+        printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+        exit 0
+        ;;
+      conflicting-pane)
+        reads_file="$dir/herdr-tab-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        if [ "$reads" -gt 1 ]; then
+          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}'
+        else
+          printf '%s\n' '{"result":{"tabs":[]}}'
+        fi
+        exit 0
+        ;;
+    esac
+    printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+    exit 0
+    ;;
+  'pane list')
+    case "$case_name" in
+      mismatched-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t2"}]}}' ;;
+      conflicting-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' ;;
+      *) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' ;;
+    esac
+    exit 0
     ;;
   'tab create'|'tab close'|'pane close')
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
@@ -1395,18 +1450,33 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
   local case_name dir out rc before expected
-  for case_name in workspace-unreadable workspace-changed stale-readable; do
+  for case_name in live-agent workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane non-isolated-worktree; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
+    if [ "$case_name" = non-isolated-worktree ]; then
+      awk -F= -v project="$dir/proj" '
+        $1 == "worktree" { print "worktree=" project; next }
+        { print }
+      ' "$dir/home/state/hr1.meta" > "$dir/home/state/hr1.meta.next"
+      mv "$dir/home/state/hr1.meta.next" "$dir/home/state/hr1.meta"
+    fi
     before="$dir/meta-before"
     cp "$dir/home/state/hr1.meta" "$before"
     out=$(FM_FAKE_HERDR_CASE="$case_name" run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
     expect_code 1 "$rc" "a missing Herdr pane with $case_name must refuse"
     case "$case_name" in
+      live-agent) expected='positively agent-free endpoint' ;;
       workspace-unreadable) expected='cannot verify recorded workspace' ;;
       workspace-changed) expected='recorded workspace w1 is ambiguous or changed' ;;
+      tabs-unavailable) expected='cannot inspect recorded workspace w1' ;;
+      tabs-malformed) expected='recorded workspace w1 is unreadable' ;;
+      changed-tab) expected='recorded tab w1:t2 changed identity' ;;
+      ambiguous-tab) expected='recorded tab w1:t2 is ambiguous' ;;
+      mismatched-pane) expected='no longer owns recorded pane w1:p2' ;;
       stale-readable) expected='requires the recorded pane to remain gone, got no-agent' ;;
+      conflicting-pane) expected="herdr tab 'fm-hr1' already exists" ;;
+      non-isolated-worktree) expected='not an isolated worktree root' ;;
     esac
     assert_contains "$out" "$expected" "the $case_name refusal should name its failed proof"
     cmp -s "$before" "$dir/home/state/hr1.meta" \

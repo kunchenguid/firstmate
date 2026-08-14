@@ -2054,13 +2054,31 @@ EOF
 # creation, and the recorded workspace/tab relation must not have changed.
 # After that preflight it delegates duplicate-label handling to create_task, the
 # existing create-before-close husk-replacement boundary. Echoes "<tab> <pane>".
-fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd>
-  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 info tabs old_count old_pane_now state
+fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd> [<journal> <task-id> <home>]
+  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 journal=${7:-} id=${8:-} home=${9:-}
+  local info tabs old_count old_pane_now state canonical_home replacement new_tab new_pane
   state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
   [ "$state" = dead ] || {
     echo "error: herdr missing-pane relaunch requires the recorded pane to remain gone, got $state" >&2
     return 1
   }
+  if [ -n "$journal" ]; then
+    canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
+      echo "error: herdr missing-pane relaunch cannot verify the presentation home for $id" >&2
+      return 1
+    }
+    if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$workspace" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$old_tab" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$old_pane" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$label" ]; then
+      echo "error: herdr missing-pane relaunch presentation binding for $id is ambiguous or changed" >&2
+      return 1
+    fi
+  fi
   info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || {
     echo "error: herdr missing-pane relaunch cannot verify recorded workspace $workspace" >&2
     return 1
@@ -2105,7 +2123,25 @@ fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <o
       return 1
       ;;
   esac
-  fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd"
+  replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd") || return 1
+  [ -n "$journal" ] || {
+    printf '%s' "$replacement"
+    return 0
+  }
+  read -r new_tab new_pane <<EOF
+$replacement
+EOF
+  if [ -z "$new_tab" ] || [ -z "$new_pane" ] \
+     || ! fm_backend_herdr_projection_journal_replace_endpoint \
+       "$journal" "$id" "$old_tab" "$old_pane" "$new_tab" "$new_pane"; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || {
+      echo "error: herdr missing-pane relaunch could not roll back its unbound replacement for $id" >&2
+      return 1
+    }
+    echo "error: herdr missing-pane relaunch could not publish the presentation binding for $id" >&2
+    return 1
+  fi
+  printf '%s' "$replacement"
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
