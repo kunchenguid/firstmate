@@ -106,6 +106,8 @@ LOCK_OWNER_PID=
 LOCK_STATE_IDENTITY=
 LOCK_IDENTITY=
 LOCK_OWNER_IDENTITY=
+REC_IDENTITY=
+GEN_IDENTITY=
 
 busy_lock_snapshot() {
   command -v python3 >/dev/null 2>&1 || return 1
@@ -124,6 +126,38 @@ busy_lock_remove_snapshot() {
     "$state_identity" "$lock_identity" \
     "$expected_owner" \
     "$owner_pid" "$owner_token"
+}
+
+state_entry_identity() {
+  local path=$1
+  python3 "$FS_HELPER" identity-file "$STATE" "${path##*/}" "$LOCK_STATE_IDENTITY"
+}
+
+state_remove_file() {
+  local path=$1 expected_entry=$2
+  [ -n "$expected_entry" ] || return 0
+  python3 "$FS_HELPER" remove-file "$STATE" "${path##*/}" \
+    "$LOCK_STATE_IDENTITY" "$expected_entry"
+}
+
+write_state_file() {
+  local path=$1 expected_target=$2 value=$3
+  local target=${path##*/} temp temp_identity
+  temp="$target.tmp.${BASHPID:-$$}.$RANDOM"
+  temp_identity=$(python3 "$FS_HELPER" create-file "$STATE" "$temp" \
+    "$LOCK_STATE_IDENTITY") || return 1
+  if ! printf '%s' "$value" | python3 "$FS_HELPER" write-file "$STATE" "$temp" \
+    "$LOCK_STATE_IDENTITY" "$temp_identity"; then
+    python3 "$FS_HELPER" remove-file "$STATE" "$temp" \
+      "$LOCK_STATE_IDENTITY" "$temp_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! python3 "$FS_HELPER" replace-file "$STATE" "$temp" \
+    "$LOCK_STATE_IDENTITY" "$temp_identity" "$target" "$expected_target"; then
+    python3 "$FS_HELPER" remove-file "$STATE" "$temp" \
+      "$LOCK_STATE_IDENTITY" "$temp_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
 }
 
 lock_owner_write() {
@@ -222,11 +256,10 @@ lock_release() {
 }
 
 write_record() {  # <gen> <seq>
-  local tmp
-  tmp="$REC.tmp.$$"
-  printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
-    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" > "$tmp" || return 1
-  mv -f "$tmp" "$REC"
+  local content
+  printf -v content 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
+    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)"
+  write_state_file "$REC" "$REC_IDENTITY" "$content"
 }
 
 old_umask=$(umask)
@@ -235,8 +268,11 @@ umask 077
 if [ "$CMD" = arm ]; then
   GEN="g$(date +%s).$$.$RANDOM"
   lock_acquire || exit 1
+  REC_IDENTITY=$(state_entry_identity "$REC" 2>/dev/null || true)
+  GEN_IDENTITY=$(state_entry_identity "$GEN_FILE" 2>/dev/null || true)
+  printf -v GEN_CONTENT '%s\n' "$GEN"
   {
-    printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
+    write_state_file "$GEN_FILE" "$GEN_IDENTITY" "$GEN_CONTENT" \
       && write_record "$GEN" 1
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
@@ -260,7 +296,8 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" || {
+    REC_IDENTITY=$(state_entry_identity "$REC" 2>/dev/null || true)
+    state_remove_file "$REC" "$REC_IDENTITY" || {
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
@@ -284,8 +321,25 @@ if [ "$GEN" != "$CURRENT" ]; then
   echo "error: stale busy-state gen for $ID (event rejected)" >&2
   exit 1
 fi
+if ! GEN_IDENTITY=$(state_entry_identity "$GEN_FILE" 2>/dev/null); then
+  lock_release
+  umask "$old_umask"
+  echo "error: busy-state gen identity changed for $ID" >&2
+  exit 1
+fi
+if REC_IDENTITY=$(state_entry_identity "$REC" 2>/dev/null); then
+  :
+elif [ -e "$REC" ] || [ -L "$REC" ]; then
+  lock_release
+  umask "$old_umask"
+  echo "error: busy-state record identity changed for $ID" >&2
+  exit 1
+else
+  REC_IDENTITY=
+fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" || {
+  state_remove_file "$GEN_FILE" "$GEN_IDENTITY" && \
+    state_remove_file "$REC" "$REC_IDENTITY" || {
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
@@ -310,8 +364,9 @@ if [ -n "$RUN_TOKEN" ]; then
   fi
 fi
 OLD_SEQ=0
-if [ -f "$REC" ]; then
-  old_line=$(head -n 1 "$REC" 2>/dev/null || true)
+if [ -n "$REC_IDENTITY" ]; then
+  old_line=$(python3 "$FS_HELPER" read-file "$STATE" "${REC##*/}" \
+    "$LOCK_STATE_IDENTITY" 2>/dev/null | head -n 1 || true)
   case "$old_line" in
     *" gen=$GEN "*)
       old_seq_field=${old_line##* seq=}

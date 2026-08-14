@@ -127,6 +127,62 @@ test_lock_release_cannot_remove_replacement() {
   pass "busy lock release is bound to its owning incarnation"
 }
 
+test_record_and_retire_preserve_replacements() {
+  local state gen gate original apply_pid rc i=0 retire_pid
+  state=$(new_state_dir record-replacement)
+  gen=$($EV arm "$state" t1)
+  gate="$state/record-gate"
+  original="$state/t1.busy-state.original"
+  : > "$gate.hold"
+  FM_OMP_FS_REPLACE_GATE="$gate" FM_OMP_FS_REPLACE_TARGET=t1.busy-state \
+    "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop \
+    >/dev/null 2>&1 &
+  apply_pid=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$gate.ready" ] || fail "busy record writer did not reach its replacement gate"
+  mv "$state/t1.busy-state" "$original"
+  printf 'foreign-record\n' > "$state/t1.busy-state"
+  rm -f "$gate.hold"
+  set +e
+  wait "$apply_pid"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "busy record replacement must fail closed"
+  [ "$(cat "$state/t1.busy-state")" = foreign-record ] \
+    || fail "busy record replacement was overwritten"
+  [ -f "$original" ] || fail "busy record replacement displaced the original record"
+
+  state=$(new_state_dir retire-replacement)
+  gen=$($EV arm "$state" t1)
+  gate="$state/retire-gate"
+  original="$state/t1.busy-gen.original"
+  : > "$gate.hold"
+  FM_OMP_FS_REMOVE_COMMIT_GATE="$gate" \
+    "$EV" retire "$state" t1 --gen "$gen" >/dev/null 2>&1 &
+  retire_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$gate.ready" ] || fail "busy retirement did not reach its removal gate"
+  mv "$state/t1.busy-gen" "$original"
+  printf 'foreign-generation\n' > "$state/t1.busy-gen"
+  rm -f "$gate.hold"
+  set +e
+  wait "$retire_pid"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "busy generation replacement must fail closed"
+  [ "$(cat "$state/t1.busy-gen")" = foreign-generation ] \
+    || fail "busy generation replacement was removed"
+  [ -e "$state/t1.busy-state" ] || fail "busy retirement removed the record after generation collision"
+  pass "busy record writes and retirement preserve replaced state"
+}
+
 test_retire_serializes_and_rejects_stale_gen() {
   local state old_gen new_gen out retire_pid i=0
   state=$(new_state_dir retire)
@@ -464,6 +520,7 @@ test_apply_current_gen_reset
 test_lock_recovers_empty_owner
 test_apply_unarmed_refused
 test_lock_release_cannot_remove_replacement
+test_record_and_retire_preserve_replacements
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
 test_stale_gen_event_rejected

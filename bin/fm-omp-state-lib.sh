@@ -365,11 +365,12 @@ fm_omp_session_evidence_temp_registry_content_valid() {
   done <<< "$rest"
 }
 
-fm_omp_session_evidence_temp_proof_matches() {
+fm_omp_session_evidence_temp_proof_record_matches() {
   local path=$1 state=$2 id=$3 name=$4 generation=$5 process_id=$6 uuid=$7
-  local registry actual proof_actual content normalized expected_proof
+  local registry actual proof_actual
   local line marker record_name record_generation record_pid record_uuid dev ino record_proof_uuid proof_dev proof_ino extra
   local matched_proof_uuid=
+  FM_OMP_SESSION_EVIDENCE_MATCHED_PROOF_UUID=
   registry=$(fm_omp_session_evidence_temp_registry_path "$state" "$id")
   actual=$(fm_omp_session_evidence_path_identity "$path") || return 1
   proof_actual=$(fm_omp_session_evidence_path_identity "$path.owner") || return 1
@@ -389,17 +390,35 @@ fm_omp_session_evidence_temp_proof_matches() {
     fi
   done < <(fm_harness_read_regular_nofollow "$registry" 2>/dev/null | tail -n +4)
   [ -n "$matched_proof_uuid" ] || return 1
+  FM_OMP_SESSION_EVIDENCE_MATCHED_PROOF_UUID=$matched_proof_uuid
+}
+
+fm_omp_session_evidence_temp_proof_content_state() {
+  local path=$1 state=$2 id=$3 name=$4 generation=$5 process_id=$6 uuid=$7
+  local content normalized expected_proof
+  fm_omp_session_evidence_temp_proof_record_matches \
+    "$path" "$state" "$id" "$name" "$generation" "$process_id" "$uuid" || return 1
   content=$(fm_harness_read_regular_nofollow "$path.owner" 2>/dev/null) || return 1
   case "$content" in *$'\n') normalized=${content%$'\n'} ;; *) normalized=$content ;; esac
   case "$normalized" in *$'\n'*) return 1 ;; esac
-  expected_proof="$FM_OMP_SESSION_EVIDENCE_PROOF_MARKER $matched_proof_uuid $name $generation $process_id $uuid"
-  case "$expected_proof" in "$normalized"*) return 0 ;; esac
+  expected_proof="$FM_OMP_SESSION_EVIDENCE_PROOF_MARKER $FM_OMP_SESSION_EVIDENCE_MATCHED_PROOF_UUID $name $generation $process_id $uuid"
+  if [ "$normalized" = "$expected_proof" ]; then
+    printf 'complete\n'
+    return 0
+  fi
+  case "$expected_proof" in "$normalized"*) printf 'partial\n'; return 0 ;; esac
   return 1
+}
+
+fm_omp_session_evidence_temp_proof_matches() {
+  local state
+  state=$(fm_omp_session_evidence_temp_proof_content_state "$@") || return 1
+  [ "$state" = complete ]
 }
 
 fm_omp_session_evidence_temp_proof_valid() {
   local proof_path=$1 state=$2 id=$3 current_generation=$4
-  local name temp_path temp_name uuid generation process_id
+  local name temp_path temp_name uuid generation process_id proof_state
   name=${proof_path##*/}
   [[ "$name" =~ ^(.+)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp\.owner$ ]] || return 1
   temp_path=${proof_path%.owner}
@@ -411,8 +430,13 @@ fm_omp_session_evidence_temp_proof_valid() {
   fm_omp_session_evidence_uuid "$uuid" || return 1
   fm_omp_session_evidence_decimal "$process_id" || return 1
   [ "$process_id" -gt 0 ] 2>/dev/null || return 1
-  fm_omp_session_evidence_temp_proof_matches \
-    "$temp_path" "$state" "$id" "$temp_name" "$generation" "$process_id" "$uuid" || return 1
+  proof_state=$(fm_omp_session_evidence_temp_proof_content_state \
+    "$temp_path" "$state" "$id" "$temp_name" "$generation" "$process_id" "$uuid") || return 1
+  case "$proof_state" in
+    complete) : ;;
+    partial) : ;;
+    *) return 1 ;;
+  esac
   fm_omp_session_evidence_owner_incarnation_registered \
     "$state" "$id" "$generation" "$process_id" "$uuid"
 }
@@ -442,10 +466,8 @@ fm_omp_session_evidence_temp_valid() {
   [ "$incarnation_pid" -gt 0 ] 2>/dev/null || return 1
   [ "$temp_sequence" -gt 0 ] 2>/dev/null || return 1
   fm_omp_session_evidence_token_valid "$token" "$current_generation" || return 1
-  fm_omp_session_evidence_temp_proof_matches \
-    "$path" "$state" "$id" "$name" "$generation" "$incarnation_pid" "$uuid" || return 1
-  fm_omp_session_evidence_owner_incarnation_registered \
-    "$state" "$id" "$current_generation" "$incarnation_pid" "$uuid"
+  fm_omp_session_evidence_temp_proof_valid \
+    "$path.owner" "$state" "$id" "$current_generation"
 }
 
 fm_omp_session_evidence_validate() {

@@ -113,6 +113,16 @@ def removal_final_test_pause():
         time.sleep(0.01)
 
 
+def removal_commit_test_pause():
+    gate = os.environ.get("FM_OMP_FS_REMOVE_COMMIT_GATE")
+    if not gate:
+        return
+    with open(gate + ".ready", "w", encoding="utf-8"):
+        pass
+    while os.path.exists(gate + ".hold"):
+        time.sleep(0.01)
+
+
 def replacement_test_pause(name):
     gate = os.environ.get("FM_OMP_FS_REPLACE_GATE")
     target = os.environ.get("FM_OMP_FS_REPLACE_TARGET")
@@ -136,6 +146,8 @@ def discard_file(fd, name, expected):
     finally:
         os.close(child)
     exchanged = False
+    quarantine_fd = -1
+    quarantine = ""
     try:
         regular_entry(fd, name, expected)
         exchange(fd, placeholder, name)
@@ -150,11 +162,32 @@ def discard_file(fd, name, expected):
         removal_final_test_pause()
         regular_entry(fd, placeholder, expected)
         regular_entry(fd, name, placeholder_identity)
+        removal_commit_test_pause()
+        quarantine = temporary_name("remove-file")
+        os.mkdir(quarantine, 0o700, dir_fd=fd)
+        quarantine_fd = os.open(quarantine, READ_FLAGS, dir_fd=fd)
+        os.rename(name, "entry", src_dir_fd=fd, dst_dir_fd=quarantine_fd)
+        try:
+            moved = regular_entry(quarantine_fd, "entry")
+        except (OSError, ValueError):
+            os.rename("entry", name, src_dir_fd=quarantine_fd, dst_dir_fd=fd)
+            raise
+        if identity(moved) != placeholder_identity:
+            os.rename("entry", name, src_dir_fd=quarantine_fd, dst_dir_fd=fd)
+            raise ValueError("entry changed during removal commit")
+        regular_entry(fd, placeholder, expected)
         os.unlink(placeholder, dir_fd=fd)
-        regular_entry(fd, name, placeholder_identity)
-        os.unlink(name, dir_fd=fd)
+        regular_entry(quarantine_fd, "entry", placeholder_identity)
+        os.unlink("entry", dir_fd=quarantine_fd)
+        quarantine_identity = identity(directory_entry(fd, quarantine))
+        os.close(quarantine_fd)
+        quarantine_fd = -1
+        directory_entry(fd, quarantine, quarantine_identity)
+        os.rmdir(quarantine, dir_fd=fd)
         exchanged = False
     finally:
+        if quarantine_fd >= 0:
+            os.close(quarantine_fd)
         rolled_back = False
         if exchanged:
             try:
@@ -193,6 +226,8 @@ def discard_directory(fd, name, expected):
     os.mkdir(temporary, 0o700, dir_fd=fd)
     temporary_identity = identity(directory_entry(fd, temporary))
     exchanged = False
+    quarantine_fd = -1
+    quarantine = ""
     try:
         directory_entry(fd, name, expected)
         exchange(fd, temporary, name)
@@ -207,11 +242,32 @@ def discard_directory(fd, name, expected):
         removal_final_test_pause()
         directory_entry(fd, temporary, expected)
         directory_entry(fd, name, temporary_identity)
+        removal_commit_test_pause()
+        quarantine = temporary_name("remove-directory")
+        os.mkdir(quarantine, 0o700, dir_fd=fd)
+        quarantine_fd = os.open(quarantine, READ_FLAGS, dir_fd=fd)
+        os.rename(name, "entry", src_dir_fd=fd, dst_dir_fd=quarantine_fd)
+        try:
+            moved = directory_entry(quarantine_fd, "entry")
+        except (OSError, ValueError):
+            os.rename("entry", name, src_dir_fd=quarantine_fd, dst_dir_fd=fd)
+            raise
+        if identity(moved) != temporary_identity:
+            os.rename("entry", name, src_dir_fd=quarantine_fd, dst_dir_fd=fd)
+            raise ValueError("directory changed during removal commit")
+        directory_entry(fd, temporary, expected)
         os.rmdir(temporary, dir_fd=fd)
-        directory_entry(fd, name, temporary_identity)
-        os.rmdir(name, dir_fd=fd)
+        directory_entry(quarantine_fd, "entry", temporary_identity)
+        os.rmdir("entry", dir_fd=quarantine_fd)
+        quarantine_identity = identity(directory_entry(fd, quarantine))
+        os.close(quarantine_fd)
+        quarantine_fd = -1
+        directory_entry(fd, quarantine, quarantine_identity)
+        os.rmdir(quarantine, dir_fd=fd)
         exchanged = False
     finally:
+        if quarantine_fd >= 0:
+            os.close(quarantine_fd)
         rolled_back = False
         if exchanged:
             try:
@@ -435,6 +491,14 @@ def identity_file(parent, name, expected_parent):
         os.close(fd)
 
 
+def identity_directory(path, expected):
+    fd = open_directory(path, expected)
+    try:
+        sys.stdout.write(identity(os.fstat(fd)) + "\n")
+    finally:
+        os.close(fd)
+
+
 def replace_file(parent, source, expected_parent, expected_source, target, expected_target):
     fd = open_directory(parent, expected_parent)
     exchanged = False
@@ -538,6 +602,8 @@ def main():
         append_file(*args)
     elif command == "identity-file" and len(args) == 3:
         identity_file(*args)
+    elif command == "identity-directory" and len(args) == 2:
+        identity_directory(*args)
     elif command == "replace-file" and len(args) == 6:
         replace_file(*args)
     elif command == "read-file" and len(args) == 3:

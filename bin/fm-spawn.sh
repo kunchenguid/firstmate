@@ -3502,20 +3502,34 @@ const evidenceTempOwnershipRecord = (path: string) => {
     candidate.proofDev === proofStat.dev && candidate.proofIno === proofStat.ino);
   return record || false;
 };
-const evidenceProofContentMatches = (content: string, record: {
+const evidenceProofContentState = (content: string, record: {
   name: string; generation: string; processId: string; uuid: string; proofUuid: string;
 }) => {
   const normalized = content.endsWith("\\n") ? content.slice(0, -1) : content;
   if (normalized.includes("\\n")) return false;
   const expected = TEMP_PROOF_MARKER + " " + record.proofUuid + " " + record.name + " " +
     record.generation + " " + record.processId + " " + record.uuid;
-  return expected.startsWith(normalized);
+  if (normalized === expected) return "complete";
+  if (expected.startsWith(normalized)) return "partial";
+  return false;
 };
+const evidenceProofContentMatches = (content: string, record: {
+  name: string; generation: string; processId: string; uuid: string; proofUuid: string;
+}) => evidenceProofContentState(content, record) === "complete";
+const evidenceProofContentPartialMatches = (content: string, record: {
+  name: string; generation: string; processId: string; uuid: string; proofUuid: string;
+}) => evidenceProofContentState(content, record) === "partial";
+const evidenceProofContentOwnedMatches = (content: string, record: {
+  name: string; generation: string; processId: string; uuid: string; proofUuid: string;
+}) => evidenceProofContentMatches(content, record) || evidenceProofContentPartialMatches(content, record);
 const evidenceTempOwnershipMatches = (path: string) => {
   const record = evidenceTempOwnershipRecord(path);
   if (!record) return false;
   try {
-    return evidenceProofContentMatches(readRegularFile(path + ".owner"), record);
+    const content = readRegularFile(path + ".owner");
+    if (evidenceProofContentMatches(content, record)) return true;
+    return evidenceProofContentPartialMatches(content, record) &&
+      incarnationRegistered(record.generation, record.processId, record.uuid);
   } catch {
     return false;
   }
@@ -3539,9 +3553,10 @@ const evidenceTempProofMatches = (path: string) => {
     candidate.dev === tempStat.dev && candidate.ino === tempStat.ino);
   if (!record) return false;
   try {
+    const content = readRegularFile(path);
+    if (!evidenceProofContentOwnedMatches(content, record)) return false;
     return incarnationRegistered(current[3], current[4], current[2]) &&
-      activeIncarnationMatches(current[3], current[4], current[2]) &&
-      evidenceProofContentMatches(readRegularFile(path), record);
+      activeIncarnationMatches(current[3], current[4], current[2]);
   } catch {
     return false;
   }

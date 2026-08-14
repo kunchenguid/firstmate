@@ -1563,7 +1563,7 @@ test_omp_fs_removal_preserves_replacement() {
   : > "$gate.hold"
   (
     . "$ROOT/bin/fm-session-lock-lib.sh"
-    FM_OMP_FS_REMOVE_FINAL_GATE="$gate" \
+    FM_OMP_FS_REMOVE_COMMIT_GATE="$gate" \
       fm_harness_unlink_regular_nofollow_at "$parent" entry "$parent_identity" "$entry_identity"
   ) > "$gate.output" 2>&1 &
   remover=$!
@@ -1589,7 +1589,7 @@ test_omp_fs_removal_preserves_replacement() {
   : > "$directory_gate.hold"
   (
     . "$ROOT/bin/fm-session-lock-lib.sh"
-    FM_OMP_FS_REMOVE_FINAL_GATE="$directory_gate" \
+    FM_OMP_FS_REMOVE_COMMIT_GATE="$directory_gate" \
       fm_harness_rmdir_nofollow_at "$parent" directory "$parent_identity" "$directory_identity"
   ) > "$directory_gate.output" 2>&1 &
   directory_remover=$!
