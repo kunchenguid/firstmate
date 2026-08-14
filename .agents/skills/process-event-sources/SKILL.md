@@ -7,7 +7,7 @@ description: >-
   Owns the arming commands, the durable result read, which wakes must be
   routed to their adapter instead of acknowledged generically, the handled
   acknowledgement contract, the one-owner rule, the precise durability
-  boundary, and the Lavish adapter's loss limitation.
+  boundary, the AIME applying path, and the Lavish adapter's loss limitation.
 user-invocable: false
 metadata:
   internal: true
@@ -33,7 +33,11 @@ A configured remote secondmate reply source is armed and handled through `bin/fm
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
 A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+An AIME cloud research source is armed and handled through `bin/fm-procevent-aime.sh`.
+Load `cloud-research-worker` first; that skill owns AIME intake, provider-result, restart, document, cancellation, and retirement procedure.
+The AIME adapter owns authoritative event replay, session and output readback, durable cursor continuity, duplicate handling, acknowledgement, and re-arming.
+
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-aime.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 
@@ -44,13 +48,21 @@ Two rules the commands cannot enforce for you:
 
 `procevent <adapter> <source-id> <sequence>`
 : The named durable result is waiting at `state/procevent-inbox/<source-id>.<sequence>.result`. Read that exact result; separate wakes identify later results independently.
-: **When the adapter owns applying the result, run the adapter, not the generic acknowledgement below.** The `<adapter>` field of the wake decides this, and `remote-reply` is such an adapter: a captured delta is applied only by
+: **When the adapter owns applying the result, run the adapter, not the generic acknowledgement below.** The `<adapter>` field of the wake decides this.
+: For `remote-reply`, a captured delta is applied only by
   ```sh
   bin/fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
   ```
   Here `<secondmate-id>` is the `<source-id>` with its `remote-reply-` prefix removed.
   The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
+: For `aime`, a captured observation is applied only by
+  ```sh
+  bin/fm-procevent-aime.sh handle <task-id> <sequence> <result-file>
+  ```
+  Here `<task-id>` is the `<source-id>` with its `aime-` prefix removed.
+  The runner normally applies the observation on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
+  Never acknowledge an `aime` wake through the generic command, because only the adapter validates the recorded provider identity, advances the event cursor, writes or preserves the result, acknowledges it, and re-arms when needed.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
@@ -69,6 +81,7 @@ Supported by tests:
 
 - output that reached the runner is stored atomically at mode `0600` **before** any event referencing it is published;
 - the remote-reply adapter reads its append-only source non-destructively from an offset plus prefix hash, so a pre-capture retry can derive the same bytes again, while source truncation or replacement is detected rather than silently rebased;
+- the AIME adapter replays from its durable provider cursor and binds session and output readback to the recorded session and message identities, while unavailable readback is preserved and re-armed rather than treated as completion;
 - proactive delivery, adapter-owned terminal retirement, and adapter-owned automatic application follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;

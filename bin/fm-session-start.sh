@@ -43,9 +43,10 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, provider-aware current task state,
+#                       a bounded state/*.status tail, state/.afk, and a cheap
+#                       endpoint-liveness read for local tasks: read-only,
+#                       always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -696,17 +697,28 @@ for meta in "$STATE"/*.meta; do
   printf '\n--- %s ---\n' "$id"
   cat "$meta"
 
-  window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+  executor=$(fm_meta_get "$meta" executor)
+  [ -n "$executor" ] || executor=local-agent
+  if [ "$executor" = cloud-worker ]; then
+    provider=$(fm_meta_get "$meta" provider)
+    printf 'endpoint: not applicable (executor=cloud-worker provider=%s)\n' "${provider:-unknown}"
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null \
+      || printf 'state: unknown · source: cloud-readback · provider-aware state read failed\n'
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    window=$(fm_meta_get "$meta" window)
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$window" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
+    else
+      printf 'endpoint: unknown (no window recorded)\n'
+    fi
   fi
 
   status="$STATE/$id.status"

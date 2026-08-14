@@ -139,8 +139,10 @@ Without this launcher, reconcile would silently fail to start a runner on macOS 
 ## Scope
 
 The runner is domain-neutral and creates no endpoint, task metadata, or backlog item, so the supported primary harnesses and runtime backends are unaffected except through the `check` wake they already consume.
-Lavish is the first adapter; adding another requires only a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
+Current adapters include Lavish review polling, remote-secondmate reply relay, and AIME cloud research readback.
+Adding another requires a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
 Its `autohandle` command is optional in the same way and defaults to leaving the captured result unacknowledged, so it keeps being announced to a handler exactly as before.
+AIME-specific replay, cursor, result, and restart evidence lives in [`aime-cloud-worker.md`](aime-cloud-worker.md).
 
 Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.

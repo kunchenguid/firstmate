@@ -17,7 +17,8 @@ When a canonical validated PR poll returns exactly `merged`, the watcher appends
 The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
-No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
+No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-task-state.sh` reports positive evidence that the task is still working.
+The provider-aware reader delegates local tasks unchanged to `bin/fm-crew-state.sh`, where positive evidence remains an actively running no-mistakes step attributed to that crew's current code or an exact busy verdict from the semantic busy-state contract.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
@@ -31,7 +32,8 @@ A declared external wait trades that silence for one bounded recheck per pause w
 Crew status files are append-only wake-event logs, not current-state fields.
 Because of that, a per-wake read of only the latest line can bury an earlier still-open `needs-decision`/`blocked` under later unrelated appends; `fm-wake-drain.sh` prints a separate, fleet-wide OPEN DECISIONS section on every drain (including the empty-queue path session-start relies on), built through `fm-classify-lib.sh`'s cursor-backed incremental scan using the authoritative `status_open_decisions` fold semantics so the buried decision keeps surfacing until it is explicitly resolved while each drain reads only new status-log appends.
 The explicit resolution is written by the actor that answers, not the busy worker: `fm-send`'s `--resolve-key` appends the closing `resolved` line to this home's own copy of the ledger at answer time, which covers crewmates, local secondmates, and remote secondmates identically because a remote mate's escalations reach that local copy through the parent-replies ingest and only the answer message itself crosses the transport.
-`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
+`bin/fm-task-state.sh <id>` is the cheap provider-aware current-state read for an actionable heartbeat review.
+For a local task it delegates to `bin/fm-crew-state.sh`, which attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
@@ -106,6 +108,33 @@ Endpoint death is the only process-level override and yields dead; child process
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
 Three rendered-text readers deliberately remain outside this contract because they answer delivery questions: the submit acknowledgement and away-mode supervisor-pane busy guard in `bin/fm-tmux-lib.sh`, and the secondmate delivery-confirmation observation in `bin/fm-pending-reply-lib.sh`.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
+
+## Task executors
+
+`bin/fm-task-dispatch.sh` is the narrow executor boundary above task execution.
+The default `local-agent` executor delegates argument ownership to `bin/fm-spawn.sh`, so every existing harness, runtime backend, endpoint, semantic busy-state source, and isolated-worktree assertion remains on its established path.
+The `cloud-worker/aime` executor instead delegates to `bin/fm-cloud-research-aime.sh` and creates no harness, runtime backend, endpoint, terminal, or worktree.
+AIME is therefore neither a harness nor a runtime backend.
+
+Both executors reuse the ordinary Firstmate task identity and lifecycle.
+An AIME research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, decision-hold gate, and completion handling, while its metadata discriminates `executor=cloud-worker` and `provider=aime` instead of faking local fields.
+`bin/fm-task-state.sh` and `bin/fm-task-retire.sh` are the matching provider-aware read and retirement boundaries.
+Legacy or explicit local task records delegate unchanged to `fm-crew-state.sh` and `fm-teardown.sh`.
+
+The AIME executor checkpoints provider, site, space, identity, instruction digest, session identity, message identity, event cursor, and remote-write phase in private local state.
+It records a possible create or send acceptance before issuing that write, so a restart adopts a known session and never converts an uncertain distributed outcome into an automatic retry.
+Once a side effect may have occurred, no provider or site fallback is permitted.
+An interrupted local waiter is not cloud cancellation because the supported CLI exposes no cancellation operation.
+
+Asynchronous monitoring uses the existing process-to-event transport.
+`bin/fm-procevent-aime.sh` owns AIME event replay, session and output readback, cursor continuity, duplicate handling, provider classification, deterministic report generation, and re-arming.
+The generic runner remains transport only and wakes Firstmate through the existing durable check path.
+No local LLM Scout is required for monitoring, readback, or report wrapping.
+
+In document mode AIME creates the requested Feishu document itself.
+Firstmate validates and records the returned canonical URL, identity, and revision, but performs no local document creation, copying, rewriting, sharing, or permission change.
+Provider output remains evidence and input rather than implementation, publication, merge, destructive, or security authority.
+[`configuration.md`](configuration.md#aime-cloud-research-worker-configaime-cloud-worker) owns the operator contract, the [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the conditional procedure, and [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md) owns current empirical evidence.
 
 ## Runtime session backends
 

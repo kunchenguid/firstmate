@@ -132,7 +132,7 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-aime-cloud-worker.test.sh|fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -874,8 +874,12 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-classify-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      ;;
     bin/fm-watch*|bin/fm-wake*|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)
@@ -898,7 +902,11 @@ families_for_changed_path() {
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
       ;;
-    bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
+    bin/fm-session-start.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      ;;
+    bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
@@ -915,6 +923,10 @@ families_for_changed_path() {
       # context-reset stdout injection) only show up against a real harness.
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-aime-cloud-lib.sh|bin/fm-cloud-research-aime.sh|bin/fm-procevent-aime.sh|\
+    bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
@@ -941,7 +953,11 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
-    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
+    bin/fm-fleet-snapshot.sh)
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
+      ;;
+    bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
