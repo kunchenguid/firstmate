@@ -3,6 +3,7 @@
 
   const decisionForms = document.querySelectorAll("form[data-fm-decision]");
   const COPY_BUTTON_LABEL = "Copy visible answer";
+  const stateGenerations = new WeakMap();
 
   function answerFrom(form) {
     return [...new FormData(form).entries()]
@@ -14,11 +15,16 @@
     return form.querySelector("[data-fm-decision-state]");
   }
 
+  function stateGeneration(form) {
+    return stateGenerations.get(form) || 0;
+  }
+
   function setState(form, message, queued = false) {
     const output = stateFor(form);
     if (!output) return;
     output.textContent = message;
     output.classList.toggle("is-queued", queued);
+    stateGenerations.set(form, stateGeneration(form) + 1);
     const copyButton = form.querySelector("[data-fm-copy-answer]");
     if (copyButton) copyButton.textContent = COPY_BUTTON_LABEL;
   }
@@ -58,12 +64,18 @@
     copyButton.addEventListener("click", async () => {
       const output = stateFor(form);
       if (!output || !output.textContent.trim()) return;
+      const snapshotGeneration = stateGeneration(form);
+      const snapshotText = output.textContent;
       try {
-        await navigator.clipboard.writeText(output.textContent);
-        copyButton.textContent = "Copied";
+        await navigator.clipboard.writeText(snapshotText);
+        if (stateGeneration(form) === snapshotGeneration) {
+          copyButton.textContent = "Copied";
+        }
       } catch {
-        output.focus();
-        setState(form, `${output.textContent}\nCopy was unavailable; select this visible answer manually.`, output.classList.contains("is-queued"));
+        if (stateGeneration(form) === snapshotGeneration) {
+          output.focus();
+          setState(form, `${snapshotText}\nCopy was unavailable; select this visible answer manually.`, output.classList.contains("is-queued"));
+        }
       }
     });
   }
