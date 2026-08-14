@@ -10,38 +10,62 @@ metadata:
 
 # Implementation-ready technical designs and solution research
 
-This skill owns the evidence model, mandatory review presentation, design content, and revision discipline for implementation-ready technical design documents and technical-solution research.
+This skill owns the evidence model, review presentation intent, design content, and revision discipline for implementation-ready technical design documents and technical-solution research.
 It does not own generic project intake, implementation delivery, review, or merge procedure.
-For a Feishu document, load `lark-doc` and follow its current scenario reference before reading history, creating, or editing; `lark-doc` owns document API mechanics, block selection, revision preconditions, and update verification commands.
+For a Feishu document, load `lark-doc` and follow its current scenario reference before reading history, creating, editing, or manipulating a whiteboard; `lark-doc` owns Feishu API, XML, block selection, create, update, revision-precondition, whiteboard, export, preview, and readback mechanics.
 Load `lark-drive` and follow its current comment references before reading, locating, replying to, resolving, restoring, or rechecking Feishu comments; `lark-drive` owns comment identity, pagination, location, reply, and resolution mechanics.
 Before completing an investigation or review that exposed a genuine captain decision, or when routing the answer, load `decision-hold-lifecycle`; it owns the durable decision-record mechanics.
 
-## Mandatory Feishu review contract
+## Review shape and template fidelity
 
 Apply this content and presentation contract to every Feishu technical design and every Feishu technical-solution research deliverable intended to guide a product or implementation decision.
-It is a completion requirement, not an optional style example.
+It is a completion requirement within the categories and scope accepted for that document.
 Use another language only when the requested review audience requires it.
 
+- When the captain supplies a template, treat its information categories, hierarchy, order, scope, review density, and presentation pattern as the authority for the maintained document.
+- Preserve the template's section purposes rather than merely copying its heading text.
+- Do not add boilerplate sections because a generic checklist mentions them.
+- Omit tests, rollout, monitoring, PPE or BOE, deployment, completion checklists, or any other category when the accepted template excludes that category.
+- Keep the supporting task evidence, analysis, and verification private when they remain necessary but do not belong in the accepted document shape.
 - Write concise Chinese prose that leads with the outcome, decision, or implementation consequence before the supporting mechanics.
-- Open with a decision summary that states the chosen shape, rejected alternatives that matter, and the evidence behind the choice.
-- Use highlighted callouts for load-bearing invariants, decisions, risks, or owner boundaries rather than decoration.
+- Use an existing summary or callout slot for load-bearing outcomes, invariants, decisions, risks, or owner boundaries rather than adding a new decorative section.
 - Present exact document, repository, revision, commit, dependency, and generated-code baselines in compact evidence tables.
-- Use architecture and sequence views only when they clarify ownership, state transitions, side-effect ordering, or failure boundaries.
-- Give every affected module an exact repository path or symbol, proven current behavior, change rationale, owner contract, and review evidence.
-- Show Proto, TypeScript, Go, SQL, JSON Schema, or other relevant code contracts at subsystem boundaries with exact types, optionality, and call order.
-- Include explicit compatibility, failure, rollback, observability, automated-test, PPE, delivery-order, non-goal, evidence-limit, and unresolved-decision sections when they affect correctness.
 - Use stable terminology for identities, cardinalities, states, and owners, and define a term once before reusing it.
 - Mark current behavior, proposed behavior, accepted decisions, and unknowns distinctly.
-- Include enough concrete code and call-site detail for implementation review without copying irrelevant implementations or creating a second source owner in prose.
-- Keep tables reviewable, headings outcome-oriented, and code blocks adjacent to the contract they prove.
+- Keep tables compact and reviewable, headings outcome-oriented, and exact code evidence adjacent to the contract it proves.
+- Use visuals semantically to reduce review cost rather than decoratively.
+- State unchanged ownership boundaries and forward-compatibility consequences explicitly when they constrain the change.
+- Keep implementation chronology, command transcripts, validation theater, and delivery proof out of the maintained design.
 
-A research deliverable may stop short of an implementation commitment, but it still needs the same baseline, evidence, ownership, conflict, alternative, testability, evidence-limit, and decision clarity.
-A technical document that cannot tell a reviewer what changes, where it changes, why that owner is correct, and how the result will be proven is not implementation-ready.
+### Two-layer readability
+
+Write product and requirement sections for a reader with no prior subsystem background.
+Explain the business background, the user-visible behavior before and after the change, important product or platform variants, and behavior that deliberately remains unchanged.
+Keep repository paths, symbols, DTO rules, persistence mechanics, internal call order, and similar implementation detail out of that product layer.
+Place implementation detail under the template's code-level section using the review-sized H3 units defined below.
+Show Proto, TypeScript, Go, SQL, JSON Schema, or other relevant code contracts at subsystem boundaries with exact types, optionality, and call order when the template's technical scope needs them.
+Include enough concrete code and call-site detail for implementation review without copying irrelevant implementations or creating a second source owner in prose.
+
+### Semantic diagrams and render proof
+
+Use a diagram only when architecture, current implementation, or a core flow is meaningfully complex and a visual will reduce review cost.
+Prefer an overall architecture view, a sequence or core-flow view, and current frontend or backend UML-style views only when each view answers a distinct review question.
+For a Feishu deliverable, use real Feishu whiteboards rather than inline diagram text that may not render.
+Visually distinguish changed owners from unchanged owners and place each diagram beside the prose it explains.
+Keep a simple document in prose and tables when a diagram would add ceremony without clarity.
+Follow `lark-doc` for all whiteboard creation, update, export, preview, and attachment mechanics rather than copying those mechanics here.
+A diagram is complete only after the remote board is written, exported or previewed from Feishu, and visually inspected for readability, missing content, overlap, clipping, and changed-versus-unchanged distinction.
+Local diagram-source validation is useful but never substitutes for inspecting the rendered remote artifact.
+Keep the exact document revision, board token, preview or export evidence, and visual inspection result in the private task report unless a reviewer needs that evidence in the maintained document.
+
+A research deliverable may stop short of an implementation commitment, but it still needs the same baseline, evidence, ownership, conflict, alternative, testability, evidence-limit, and decision clarity within its accepted scope.
+A technical document that cannot explain the business intent without prior context, locate material implementation owners, distinguish change from unchanged behavior, and show how the result will be proven is not implementation-ready.
 
 ## Evidence pack before prose
 
 Build a compact evidence pack before proposing document text.
 Keep task chronology outside the maintained design unless a concise rationale is needed to explain a current boundary.
+Keep required evidence in the private task report when the accepted template excludes its category from the maintained design.
 
 ### Exact baselines
 
@@ -49,10 +73,13 @@ Record the following facts together so evidence from different moments cannot be
 
 - Pin the document identity, exact revision, revision read time, and any earlier revision being corrected.
 - Pin every relevant repository to its canonical remote identity, default branch, and exact commit.
+- Refresh live merge-request metadata and repository heads immediately before writing so the document cannot inherit a stale planning baseline.
 - Pin generated-code sources, checked-in API artifacts, dependency versions, SDK declarations, and runtime package versions when they constrain the design.
 - Distinguish the repository head from the version actually consumed by another repository.
+- Distinguish implemented behavior at the pinned baseline from proposed behavior that has not landed there.
 - Mark unavailable, stale, or permission-limited evidence explicitly rather than silently substituting a nearby checkout or latest package.
 - Refresh a baseline before relying on volatile facts, and state when a design intentionally remains based on an older accepted revision.
+- Preserve the canonical document identity for an in-place revision and verify that identity after the final write.
 
 A baseline table should identify the source, immutable revision, why it matters, and which claims depend on it.
 Line numbers are useful evidence at that revision, while repository path, symbol, and owner module are the more durable locator.
@@ -86,10 +113,11 @@ A new correct section does not resolve an old contradictory section elsewhere in
 
 ## Diagnose the design before patching
 
-### Module-by-module code map
+### Review-sized code map
 
-Create a reviewable map by repository and runtime module.
-For each row, record the exact file or symbol, proven current behavior, required change, contract or state it owns, callers and consumers, compatibility effect, and executable evidence.
+Create a reviewable map by repository and runtime module using the template's existing implementation-detail section.
+Use review-sized H3 units grouped by semantic owner or logical flow rather than implementation phase or delivery chronology.
+For each unit, record exact paths and symbols, proven current behavior, implemented or proposed changed behavior, the owner boundary, call flow, edge and failure behavior, interactions, compatibility effect, and executable evidence.
 Include generated repositories and ignored generated clients only when they are part of the actual delivery chain.
 Mark a module unchanged when that conclusion depends on inspected evidence and matters to scope control.
 Do not turn the map into a file wishlist that lacks call-site or ownership reasoning.
@@ -145,6 +173,7 @@ Document that reason and prevent the exception from becoming a second general ow
 ### Automated tests
 
 Specify tests through public or executable interfaces and observable behavior.
+Place the test plan in the maintained document only when its accepted template and scope include that category, while retaining the executable evidence in the private task record otherwise.
 
 - Cover every invariant with positive, boundary, and disallowed cases.
 - Cover direct-write or alternate-entry bypasses that could skip a preflight or frontend rule.
@@ -162,6 +191,7 @@ For a machine-consumed declarative artifact, use the real consumer when feasible
 ### PPE and rollout evidence
 
 Write PPE scenarios as reproducible decisions, not as aspirations.
+Place PPE, BOE, rollout, rollback, deployment, and monitoring material in the maintained document only when its accepted template and scope include those categories, while retaining required execution evidence privately otherwise.
 Each scenario should name preconditions, input, action, observable system evidence, forbidden side effects, pass criteria, cleanup owner, and recovery path.
 Use disposable external resources where the test mutates another system.
 Separate claims that automation can prove from claims that require PPE, production observation, or another owner.
@@ -176,7 +206,8 @@ Material revisions use this loop until the conflict inventory is empty.
 ### Observe
 
 Read the latest revision identity, outline, target section, dependent sections, and relevant history using the document owner's smallest sufficient read mode.
-Confirm the exact code and requirement baselines that the pending edit relies on.
+Confirm the template's information categories, hierarchy, order, and scope before deciding which maintained-document sections are allowed.
+Refresh the live sources required by the exact-baseline contract immediately before writing.
 Recheck the conflict inventory because an earlier patch or another editor may have changed its blast radius.
 
 ### Diagnose
@@ -191,14 +222,18 @@ Use the `lark-doc` editing workflow for Feishu documents, including its current 
 Patch the smallest coherent unit, but include all nearby dependent statements that would otherwise contradict it.
 Prefer replacing or deleting stale owners over appending another explanation.
 Keep a record of the revision returned by each successful patch.
+Preserve the target document's canonical identity when the task is an in-place revision.
 
 ### Verify
 
 Read back the edited section from the returned or latest revision and confirm the intended structure, code blocks, tables, and wording landed once.
-Search the whole document for retired terms, old decisions, opposite cardinality rules, duplicate matrices, and stale failure or rollout claims.
-Re-read the outline to catch duplicated sections or misplaced inserts.
+Read back the complete final body and outline before declaring success.
+Search the whole document for categories forbidden by the accepted template, retired terms, old decisions, opposite cardinality rules, duplicate matrices, duplicate sections, and stale failure or rollout claims.
+Re-read the outline to catch hierarchy drift, reordered categories, duplicated sections, or misplaced inserts.
 Reconcile every conflict-inventory item and update the baseline to the verified revision before the next patch.
 When a patch changes an invariant, verify its consequences in wire contracts, module maps, compatibility, tests, PPE, monitoring, rollout, decisions, and completion criteria.
+Confirm that unresolved decisions are either visibly retained in the accepted decision location or absent because they were durably resolved.
+Confirm that the final revision still has the intended canonical document identity and exact refreshed code baselines.
 Do not declare success from a locally correct inserted section while stale contradictory prose remains elsewhere.
 
 If a revision conflict or partial document update occurs, stop and follow the document owner's recovery guidance before another write.
@@ -270,15 +305,19 @@ Verify the whole document and the durable decision record before treating the de
 
 An implementation-ready design is complete only when all of the following are true:
 
-- The document and every code source have exact immutable baselines.
-- Product invariants, non-goals, and unsupported claims are explicit and consistent.
+- The maintained document preserves the accepted template's information categories, hierarchy, order, and scope without checklist-driven boilerplate.
+- A reader without prior subsystem context can understand the business intent, before and after behavior, important variants, and unchanged behavior.
+- The document and every code source have exact immutable baselines refreshed immediately before writing, with implemented and proposed behavior distinguished.
+- Product invariants, non-goals, and unsupported claims are explicit and consistent in the maintained document or private evidence according to the accepted scope.
 - The conflict inventory is empty or contains only durably routed genuine decisions.
-- The module map reaches every relevant caller, consumer, persistence boundary, execution path, and recovery path.
+- Review-sized implementation units identify every material path, symbol, owner, call flow, edge and failure behavior, interaction, compatibility effect, and deliberately unchanged boundary.
 - Frontend, backend, IDL, generated clients, and error semantics agree in code.
 - Every schema, validation rule, compatibility transform, and identity has one named owner.
 - Legacy behavior is handled at the lowest sufficient shared boundary with explicit failure semantics.
-- Automated tests and PPE scenarios are executable and prove observable outcomes and forbidden side effects.
-- Rollout, rollback, monitoring, decisions, and completion criteria express the same invariants as the architecture.
-- Feishu content follows the mandatory Chinese outcome-first, evidence-table, highlighted-decision, review-oriented presentation contract.
+- Required automated tests and PPE scenarios are executable and prove observable outcomes and forbidden side effects, whether they live in the accepted document scope or the private task record.
+- Required rollout, rollback, monitoring, decisions, and completion evidence express the same invariants as the architecture without forcing excluded categories into the maintained document.
+- Complex Feishu visuals exist only where they reduce review cost, distinguish changed from unchanged owners, sit beside their explanatory prose, and have passed remote render inspection.
+- Feishu content follows the concise Chinese outcome-first, compact-evidence, semantically visual, review-oriented presentation contract.
 - Every addressed Feishu comment has a verified evidence reply and changed-block link, while every unresolved comment remains visible and durably routed when required.
-- The final verified revision has no duplicate sections, stale conflicts, or unresolved decision language outside the durable decision inventory.
+- The final full-body and outline checks find no forbidden categories, retired terms, duplicate sections, stale conflicts, or unresolved decision language outside the durable decision inventory.
+- The final revision preserves the intended canonical document identity and matches the exact refreshed code baselines.
