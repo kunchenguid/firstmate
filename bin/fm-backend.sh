@@ -820,7 +820,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 }
 
 fm_backend_composer_observation() {  # <backend> <target>
-  local backend=$1
+  local backend=$1 plain_screen
   shift
   FM_BACKEND_COMPOSER_SCREEN=
   FM_BACKEND_COMPOSER_VERDICT=unknown
@@ -833,7 +833,8 @@ fm_backend_composer_observation() {  # <backend> <target>
   printf 'composer verdict: %s\n' "$FM_BACKEND_COMPOSER_VERDICT"
   printf 'captured screen:\n'
   if [ -n "$FM_BACKEND_COMPOSER_SCREEN" ]; then
-    printf '%s\n' "$FM_BACKEND_COMPOSER_SCREEN"
+    plain_screen=$(printf '%s\n' "$FM_BACKEND_COMPOSER_SCREEN" | fm_composer_strip_ansi)
+    printf '%s\n' "$plain_screen"
   else
     printf '(capture failed)\n'
   fi

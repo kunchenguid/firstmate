@@ -1556,6 +1556,21 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
+test_backend_composer_observation_emits_plain_screen() {
+  local dir fakebin capture esc out
+  dir=$(make_supercase composer-observation-plain)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"; esc=$(printf '\033')
+  printf '%s[38;2;136;136;136m❯%s[0m\n' "$esc" "$esc" > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_backend_composer_observation tmux fakepane)
+  assert_contains "$out" 'composer verdict: empty' "composer observation lost its styled-capture verdict"
+  assert_contains "$out" $'captured screen:\n❯' "composer observation lost its captured screen"
+  case "$out" in
+    *"$esc"*) fail "composer observation emitted ANSI control sequences" ;;
+  esac
+  pass "fm_backend_composer_observation emits a plain screen from its styled snapshot"
+}
+
 test_inject_wedge_alarm_uses_single_composer_observation() {
   local dir state log count marker
   dir=$(make_wedge_case wedge-single-observation)
@@ -1971,6 +1986,7 @@ test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
+test_backend_composer_observation_emits_plain_screen
 test_inject_wedge_alarm_uses_single_composer_observation
 test_inject_wedge_alarm_notifies_before_bounded_observation
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
