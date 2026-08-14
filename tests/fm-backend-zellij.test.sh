@@ -945,7 +945,7 @@ test_teardown_rejects_uninspectable_project_before_zellij_kill() {
 }
 
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
-  local dir state data config home project child_worktree fixture_remote source_default_tip source_remote fb out status child_title
+  local dir state data config home project child_worktree fixture_remote source_default_tip source_checkout fb out status child_title
   dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
   child_worktree="$dir/treehouse-pool/1/worktree"
   mkdir -p "$state" "$data" "$config" "$project" "$dir/responses" "$dir/source-projects"
@@ -955,8 +955,13 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   source_default_tip=$(git -C "$ROOT" rev-parse refs/remotes/origin/main)
   git -C "$ROOT" push -q "$fixture_remote" "$source_default_tip":refs/heads/main
   git clone -q --no-local --depth 1 --single-branch --branch main "$fixture_remote" "$home"
-  source_remote=$(git -C "$ROOT" remote get-url origin)
-  git -C "$home" remote set-url origin "$source_remote"
+  # The source checkout stands in for FM_ROOT so the landed-state proof's live
+  # upstream probe resolves against the local fixture bare, not the moving real
+  # origin: a CI checkout is a snapshot, and comparing its cached default tip
+  # against the live remote fails whenever main advances between checkout and
+  # this test.
+  source_checkout="$dir/source-checkout"
+  git clone -q --no-local "$fixture_remote" "$source_checkout"
   git init -q "$project"
   git -C "$project" -c user.name=fmtest -c user.email=fmtest@example.invalid \
     commit -q --allow-empty -m initial
@@ -1019,7 +1024,7 @@ SH
   chmod +x "$dir/fakebin/treehouse"
   fb="$dir/fakebin"
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_ROOT_OVERRIDE="$source_checkout" \
     FM_PROJECTS_OVERRIDE="$dir/source-projects" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_CHILD_TITLE="$child_title" FM_ZELLIJ_CHILD_PROJECT="$project" \
     "$ROOT/bin/fm-teardown.sh" smz --force 2>&1 )
