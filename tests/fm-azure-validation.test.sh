@@ -152,6 +152,8 @@ assert '[ "$RUN_LOG" -ef run.log ] || cp "$RUN_LOG" run.log' in guest
 assert "0o755 if member.mode & 0o111 else 0o644" in guest
 assert 'for path in root.rglob("*"):' in guest
 assert "launch diagnostics (exit" in guest
+assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest
+assert '"$LAUNCH" "$GIT_HELPER"' in guest
 assert 'install -d -m 0755 -o root -g root /opt/fm-azure-validation "$RUNTIME"' in guest
 assert guest.index("--no-same-permissions") < guest.index("0o755 if member.mode & 0o111")
 assert guest.index('new cell found a pre-existing LUKS worktree') < guest.index('WORKTREE_FS_TYPE=$(blkid') < guest.index('mount -o nodev,nosuid /dev/mapper/fm-validation-work')

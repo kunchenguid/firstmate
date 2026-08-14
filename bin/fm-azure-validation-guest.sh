@@ -457,8 +457,12 @@ case "\${1:-}" in
 esac
 EOF
 chmod 0700 "$GIT_HELPER"
-git -C "$REPO" config credential.helper "$GIT_HELPER"
-git -C "$REPO" config credential.useHttpPath true
+# A root git config rewrites .git/config through a lockfile created at this
+# process's umask (077), leaving the file root-owned and unreadable to the
+# fmvalidate run (generation 011 ground truth: fatal: unable to access
+# '.git/config': Permission denied). Write repo-local config as the owner.
+runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"
+runuser -u fmvalidate -- git -C "$REPO" config credential.useHttpPath true
 
 IDENTITY=$STATE/identity.json
 CURRENT_HEAD=$(git -C "$REPO" rev-parse HEAD)
@@ -561,7 +565,9 @@ chown fmvalidate:fmvalidate "$RUN_LOG" 2>/dev/null || true
 INTENT_FILE=$STATE/intent.txt
 jq -r '.intent' "$REQUEST" >"$INTENT_FILE"
 chmod 0600 "$INTENT_FILE"
-chown fmvalidate:fmvalidate "$INTENT_FILE" "$ENV_FILE" "$IDENTITY" "$LAUNCH"
+# The credential helper is executed by fmvalidate's git during fetch/push,
+# so it must be owned by the run user like the other run inputs.
+chown fmvalidate:fmvalidate "$INTENT_FILE" "$ENV_FILE" "$IDENTITY" "$LAUNCH" "$GIT_HELPER"
 
 MEMORY_MAX=$(jq -r '.limits.memory_max_bytes' "$REQUEST")
 TASKS_MAX=$(jq -r '.limits.tasks_max' "$REQUEST")
