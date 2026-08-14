@@ -166,6 +166,14 @@ case "${args[0]:-} ${args[1]:-}" in
     exit 0
     ;;
   'pane get')
+    if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = postcreate-conflicting-pane ]; then
+      if [ -e "$dir/herdr-new-pane-closed" ]; then
+        printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+      else
+        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}}}'
+      fi
+      exit 0
+    fi
     if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = conflicting-pane ]; then
       printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}'
       exit 0
@@ -190,6 +198,10 @@ case "${args[0]:-} ${args[1]:-}" in
     fi
     ;;
   'agent get')
+    if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = postcreate-conflicting-pane ]; then
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+      exit 0
+    fi
     if [ "${args[2]:-}" = w1:p2 ] && [ "$case_name" = live-agent ]; then
       printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
       exit 0
@@ -216,6 +228,28 @@ case "${args[0]:-} ${args[1]:-}" in
     ;;
   'tab list')
     case "$case_name" in
+      postcreate-conflicting-pane)
+        reads_file="$dir/herdr-tab-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        case "$reads" in
+          1|2)
+            printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+            ;;
+          3)
+            printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}'
+            ;;
+          *)
+            case " ${args[*]} " in
+              *' --workspace w0 '*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w0:t0","focused":true}]}}' ;;
+              *) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+            esac
+            ;;
+        esac
+        exit 0
+        ;;
       tabs-unavailable) exit 1 ;;
       tabs-malformed)
         printf '%s\n' '{}'
@@ -254,8 +288,28 @@ case "${args[0]:-} ${args[1]:-}" in
     esac
     exit 0
     ;;
-  'tab create'|'tab close'|'pane close')
+  'workspace list')
+    if [ "$case_name" = postcreate-conflicting-pane ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w0","active_tab_id":"w0:t0","focused":true},{"workspace_id":"w1","active_tab_id":"w1:t3","focused":false}]}}'
+      exit 0
+    fi
+    ;;
+  'tab create')
+    if [ "$case_name" = postcreate-conflicting-pane ]; then
+      printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
+      exit 0
+    fi
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+    exit 1
+    ;;
+  'tab close'|'pane close')
+    printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+    if [ "${args[0]:-} ${args[1]:-} ${args[2]:-}" = 'pane close w1:p3' ] \
+       && [ "$case_name" = postcreate-conflicting-pane ]; then
+      : > "$dir/herdr-new-pane-closed"
+      exit 0
+    fi
     exit 1
     ;;
 esac
@@ -1585,6 +1639,31 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
   pass "fm-spawn --relaunch: missing Herdr pane ambiguity refuses without endpoint or metadata mutation"
 }
 
+test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict() {
+  local dir out rc before mutations
+  dir=$(new_case herdr-postcreate-conflict hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" postcreate-conflicting-pane
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=postcreate-conflicting-pane run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a Herdr conflict that appears after tab create must refuse"
+  assert_contains "$out" "appeared during replacement" \
+    "the post-create conflict should identify its concurrent endpoint"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "a post-create conflict changed the task's serialized metadata"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  assert_contains "$mutations" 'tab create' \
+    "the post-create conflict fixture did not cross the replacement-create boundary"
+  assert_contains "$mutations" 'pane close w1:p3' \
+    "the post-create conflict did not reclaim its unlaunched replacement pane"
+  assert_not_contains "$mutations" 'tab close w1:t2' \
+    "the post-create conflict must not close the recorded vanished tab"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a post-create conflict must not deliver a second worker launch"
+  pass "fm-spawn --relaunch: a post-create Herdr conflict reclaims the unlaunched replacement"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refreshes_the_published_endpoint_before_confirmation
 test_relaunch_preserves_durable_task_metadata
@@ -1633,3 +1712,4 @@ test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
+test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict

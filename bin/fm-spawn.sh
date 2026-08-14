@@ -650,6 +650,7 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_MISSING_PANE_PRESENTATION_LOCK=0
+HERDR_SESSION_LAUNCH_LOCK=0
 HERDR_MISSING_PANE_REPLACEMENT_PENDING=0
 HERDR_MISSING_PANE_REPLACEMENT_JOURNAL=
 HERDR_MISSING_PANE_REPLACEMENT_OLD_TAB=
@@ -1932,12 +1933,12 @@ case "$BACKEND" in
       HERDR_MISSING_PANE_PRESENTATION_JOURNAL=
       if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
         HERDR_MISSING_PANE_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr missing-pane relaunch could not acquire its presentation session lock" >&2
-          exit 1
-        }
-        HERDR_MISSING_PANE_PRESENTATION_LOCK=1
       fi
+      spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+        echo "error: herdr missing-pane relaunch could not acquire its presentation session lock" >&2
+        exit 1
+      }
+      HERDR_MISSING_PANE_PRESENTATION_LOCK=1
       HERDR_MISSING_PANE_REPLACEMENT_OLD_TAB=$HERDR_TAB_ID
       HERDR_MISSING_PANE_REPLACEMENT_OLD_PANE=$HERDR_PANE_ID
       HERDR_TASK_IDS=$(fm_backend_herdr_relaunch_missing_pane \
@@ -2114,6 +2115,13 @@ EOF
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr task create could not acquire its session lock" >&2
+          exit 1
+        }
+        HERDR_SESSION_LAUNCH_LOCK=1
+      fi
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
@@ -2897,14 +2905,17 @@ fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
+spawn_send_key "$T" Enter
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 elif [ "$HERDR_MISSING_PANE_PRESENTATION_LOCK" -eq 1 ]; then
   HERDR_MISSING_PANE_PRESENTATION_LOCK=0
   spawn_herdr_presentation_order_lock_release
+elif [ "$HERDR_SESSION_LAUNCH_LOCK" -eq 1 ]; then
+  HERDR_SESSION_LAUNCH_LOCK=0
+  spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
