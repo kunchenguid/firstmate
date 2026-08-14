@@ -33,6 +33,7 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 case "$*" in
   *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
 esac
@@ -88,6 +89,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_WORKTREE="$POOL_DIR" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
@@ -207,6 +209,8 @@ test_dirty_pool_refuses_without_discarding_work() {
     || fail "spawn moved HEAD while refusing a dirty pooled worktree"
   assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
     "spawn discarded uncommitted work while refusing the pool"
+  assert_no_grep 'return' "$CASE_DIR/treehouse.log" \
+    "spawn returned the leased worktree after refusing the dirty pool"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed dirty refusal: %s; preserved=%s\n' \
       "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"

@@ -744,9 +744,7 @@ spawn_abort_cleanup() {
   if [ "$TREEHOUSE_LEASE_ACTIVE" = 1 ] && [ -n "${WT:-}" ] \
      && [ -n "${TREEHOUSE_LEASE_HOLDER:-}" ]; then
     TREEHOUSE_LEASE_ACTIVE=0
-    if ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$TREEHOUSE_LEASE_HOLDER" "$WT" >/dev/null 2>&1); then
-      echo "warning: could not return the uncommitted Treehouse lease for $ID at $WT" >&2
-    fi
+    echo "warning: preserving Treehouse lease for $ID at $WT after aborted spawn; inspect and reconcile before reuse" >&2
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
