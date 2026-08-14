@@ -4,8 +4,9 @@
 # Usage: fm-session-usage.sh [--run-label <label>] [--role <role>]
 #   [--task <task>] [--attempt <number>] [--settle-ms <number>] <session.jsonl>
 #
-# Reads only a regular Pi JSONL artifact. final is true only for one header,
-# valid records, and an unchanged identity and size during read and settle.
+# Reads only a regular Pi JSONL artifact. final means observed-stable: one
+# first header, valid records, and unchanged identity and size during read and settle.
+# It does not prove permanent closure because Pi JSONL has no closed marker.
 # Measures only top-level usage entries and emits no prompts, tool output,
 # credentials, authenticated content, or paths. Caller metadata is tag-only;
 # identity and correlation are never inferred or sidecar-backed.
@@ -14,7 +15,7 @@
 set -eu
 command -v python3 >/dev/null 2>&1 || { printf 'fm-session-usage: python3 is required\n' >&2; exit 2; }
 exec python3 - "$@" <<'PY'
-import json, math, os, re, stat, sys, time
+import hashlib, json, math, os, re, stat, sys, time
 
 TAG = re.compile(r"[A-Za-z0-9._:+,@-]{1,128}\Z")
 SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
@@ -86,6 +87,11 @@ def text(value):
     return value if isinstance(value, str) and value else None
 
 
+def session_id_digest(value):
+    value = text(value)
+    return hashlib.sha256(value.encode()).hexdigest() if value and SESSION_ID.fullmatch(value) else None
+
+
 def provider_values(usage):
     return {key: number(usage.get(source)) for key, source in TOKENS.items()} \
         if isinstance(usage, dict) else None
@@ -112,10 +118,11 @@ def measurements(entries):
         if entry.get("type") == "message" and isinstance(message, dict):
             role = message.get("role")
             if role == "assistant":
-                result.append(measurement(entry, "assistant", message, message.get("provider"), message.get("model")))
-            elif role == "toolResult":
+                model = text(message.get("responseModel")) or text(message.get("model"))
+                result.append(measurement(entry, "assistant", message, message.get("provider"), model))
+            elif role == "toolResult" and "usage" in message:
                 result.append(measurement(entry, "tool_result", message))
-        elif entry.get("type") in ("compaction", "branch_summary"):
+        elif entry.get("type") in ("compaction", "branch_summary") and "usage" in entry:
             result.append(measurement(entry, entry["type"], entry))
     return result
 
@@ -170,12 +177,15 @@ def report(values, path):
     records = measurements(entries)
     headers = [entry for entry in entries if entry.get("type") == "session"]
     header = headers[0] if headers else {}
+    first_is_header = bool(entries and entries[0].get("type") == "session")
     for record in records:
         warnings.extend(usage_warnings(record))
     if not headers:
         warnings.append(dict(code="missing_session_header"))
     elif len(headers) > 1:
         warnings.append(dict(code="multiple_session_headers"))
+    if headers and not first_is_header:
+        warnings.append(dict(code="session_header_not_first", line=headers[0]["_line"]))
     warnings.extend(dict(code="embedded_history_ignored", entry_class="compaction", line=entry["_line"])
                     for entry in entries if entry.get("type") == "compaction" and isinstance(entry.get("retainedTail"), list))
     if not stable:
@@ -201,17 +211,17 @@ def report(values, path):
                  measured=sum(record["has_usage"] for record in records))
     provider = {key: aggregate(records, "provider_usage", key, key not in ("reasoning", "provider_total")) for key in TOKENS}
     model_cost = {key: aggregate(records, "model_rate_cost_estimate", key, True) for key in COSTS}
-    session_id = text(header.get("id"))
     report_data = dict(schema=1,
         artifact=dict(format="pi-session-jsonl", stability="stable" if stable else "unstable",
-                      final=stable and malformed == 0 and len(headers) == 1),
-        session=dict(id=session_id if session_id and SESSION_ID.fullmatch(session_id) else None,
+                      final=stable and malformed == 0 and len(headers) == 1 and first_is_header),
+        session=dict(id=session_id_digest(header.get("id")),
                      version=header.get("version") if isinstance(header.get("version"), (int, float)) and not isinstance(header.get("version"), bool) else None),
         metadata=dict(run_label=values["run_label"], role=values["role"], task=values["task"],
                       attempt=int(values["attempt"]) if values["attempt"] is not None else None),
         entry_counts=counts, calls=calls, records=records,
         totals=dict(provider_usage=provider, model_rate_cost_estimate=model_cost), warnings=warnings,
-        limitations=["final means the regular file stayed unchanged during this read and settle check; Pi JSONL has no closed marker.",
+        limitations=["final means observed-stable: the first record is the only session header, all records are valid, and the regular file stayed unchanged during this read and settle check. It does not prove permanent closure because Pi JSONL has no closed marker.",
+                     "Session IDs are emitted only as SHA-256 digests; source paths and session content are never emitted.",
                      "Provider usage is not subscription or quota consumption, and model-rate cost is an estimate rather than a billing record.",
                      "Worker identity and run correlation are caller-supplied only; this parser does not infer primary versus worker or create a sidecar."])
     json.dump(report_data, sys.stdout, indent=2); print()
