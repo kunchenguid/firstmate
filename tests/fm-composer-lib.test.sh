@@ -234,27 +234,31 @@ test_matrix_claude_titled_rule_composer() {
   pass "matrix: claude 2.1.232's titled composer rule still pairs and reads empty (afk-wedge)"
 }
 
-test_titled_rule_requires_rule_glyphs_at_both_ends() {
-  # The titled-rule tolerance is bounded exactly like a titled bottom BORDER:
-  # rule glyphs at both ends and an ASCII-printable interior. Anything looser
-  # would promote ordinary transcript prose into a composer boundary.
-  local base tail_only lead_only wide_title tab_title
+test_titled_rule_requires_normalized_ascii_printable_interior() {
+  # The titled rule uses the same two-ended shape as a titled bottom BORDER:
+  # rule glyphs at both ends and an interior that is ASCII-printable after the
+  # standard Unicode-whitespace normalization. Anything looser would promote
+  # ordinary transcript prose into a composer boundary.
+  local ascii_title nbsp_title tail_only lead_only non_ascii_title tab_title
   # A titled rule pairs with the composer's closing rule, so the bare row
   # between them is classified and reads empty.
-  base=$'chatter\n──────────── orchestrator ──\n❯\n────────────────────────'
-  assert_screen "titled rule pairs" empty "$CAPS_STYLED" "$base" '' probe-absent
+  ascii_title=$'chatter\n──────────── orchestrator title ──\n❯\n────────────────────────'
+  assert_screen "ASCII-printable titled rule pairs after normalization" empty "$CAPS_STYLED" "$ascii_title" '' probe-absent
+  nbsp_title=$'chatter\n──────────── orchestrator'"$NBSP"$'title ──\n❯\n────────────────────────'
+  [ "$nbsp_title" != "$ascii_title" ] || fail "NBSP fixture did not differ from the plain-space title"
+  assert_screen "NBSP-bearing title normalizes like a plain-space title" empty "$CAPS_STYLED" "$nbsp_title" '' probe-absent
   # A row that only ENDS with the rule glyph is prose, not a rule, so the
   # composer's own closing rule stays unpaired and the screen stays unreadable.
   lead_only=$'chatter\nrunning the build ──────────\n❯\n────────────────────────'
   assert_screen "prose ending in a rule is not a rule" unknown "$CAPS_STYLED" "$lead_only" '' probe-absent
   tail_only=$'chatter\n──────────── still working\n❯\n────────────────────────'
   assert_screen "prose after a rule is not a rule" unknown "$CAPS_STYLED" "$tail_only" '' probe-absent
-  # A non-ASCII title is outside the proven tolerance and must not qualify.
-  wide_title=$'chatter\n──────────── ✻ пример ──\n❯\n────────────────────────'
-  assert_screen "non-ASCII rule title is not a rule" unknown "$CAPS_STYLED" "$wide_title" '' probe-absent
-  tab_title=$'chatter\n──────────── orchestrator\t ──\n❯\n────────────────────────'
+  # A non-whitespace non-ASCII title is outside the proven tolerance and must not qualify.
+  non_ascii_title=$'chatter\n──────────── ✻ пример ──\n❯\n────────────────────────'
+  assert_screen "non-whitespace non-ASCII rule title is not a rule" unknown "$CAPS_STYLED" "$non_ascii_title" '' probe-absent
+  tab_title=$'chatter\n──────────── orchestrator\ttitle ──\n❯\n────────────────────────'
   assert_screen "TAB-bearing rule title is not a rule" unknown "$CAPS_STYLED" "$tab_title" '' probe-absent
-  pass "fm_composer_classify_screen: a titled rule needs rule glyphs at both ends and an ASCII title"
+  pass "fm_composer_classify_screen: a titled rule needs a normalized ASCII-printable interior and glyphs at both ends"
 }
 
 test_matrix_codex_dim_hint_row() {
@@ -678,7 +682,7 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_titled_rule_composer
-test_titled_rule_requires_rule_glyphs_at_both_ends
+test_titled_rule_requires_normalized_ascii_printable_interior
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
