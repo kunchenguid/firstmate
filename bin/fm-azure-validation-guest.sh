@@ -551,6 +551,14 @@ if [ "$rc" -eq 0 ]; then
   esac
   rc=$?
 fi
+if [ "$rc" -ne 0 ] && grep -q 'code: recover_custody' "$RUN_LOG"; then
+  # A terminal run can complete with outcome passed while preserving
+  # unpublished pipeline commits in the local gate; its structured
+  # next_action prescribes exactly one guarded recovery. Run it so the
+  # post-run status read reflects the true pipeline outcome instead of
+  # the custody hand-back exit code.
+  "$NM_BIN" axi sync --recover >>"$RUN_LOG" 2>&1
+fi
 set -e
 if [ "$rc" -ne 0 ]; then
   # A refused run's one-line error rarely names the failing layer; capture
@@ -650,6 +658,9 @@ SHARD_RECEIPTS=$SHARD_EXCHANGE/receipts.json
 [ -f "$SHARD_RECEIPTS" ] || printf '[]\n' >"$SHARD_RECEIPTS"
 install -d -m 0700 -o fmvalidate -g fmvalidate "$EVIDENCE/attempt-$ATTEMPT"
 cp "$SHARD_RECEIPTS" "$EVIDENCE/attempt-$ATTEMPT/behavior-shards.json"
+# The outcome derivation reads the status log; archive it with the evidence
+# so a misclassified outcome is diagnosable from the result alone.
+cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log" 2>/dev/null || true
 cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/no-mistakes-status.log"
 python3 - "$EVIDENCE/attempt-$ATTEMPT/cell-metrics.json" "$START_EPOCH" "$END_EPOCH" \
   "$START_LOAD" "$END_LOAD" "$START_MEM_AVAILABLE_KIB" "$END_MEM_AVAILABLE_KIB" <<'PY'

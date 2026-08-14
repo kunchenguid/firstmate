@@ -152,6 +152,9 @@ assert '[ "$RUN_LOG" -ef run.log ] || cp "$RUN_LOG" run.log' in guest
 assert "0o755 if member.mode & 0o111 else 0o644" in guest
 assert 'for path in root.rglob("*"):' in guest
 assert "launch diagnostics (exit" in guest
+assert "code: recover_custody" in guest
+assert '"$NM_BIN" axi sync --recover' in guest
+assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
 assert '"$NM_BIN" init >"$RUN_LOG" 2>&1' in guest
 assert guest.index('"$NM_BIN" init >"$RUN_LOG"') < guest.index('start) "$NM_BIN" axi run')
 assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest
