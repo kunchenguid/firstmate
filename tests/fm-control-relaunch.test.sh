@@ -122,6 +122,61 @@ SH
   chmod +x "$fb/sleep"
 }
 
+make_herdr_missing_pane_stub() {  # <case-dir> <case>
+  local dir=$1 case_name=$2
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+dir=$FM_FAKE_DIR
+case_name=$FM_FAKE_HERDR_CASE
+args=("$@")
+last=$(( ${#args[@]} - 1 ))
+penultimate=$((last - 1))
+if [ "${#args[@]}" -ge 2 ] && [ "${args[$penultimate]}" = --session ]; then
+  unset "args[$last]" "args[$penultimate]"
+fi
+case "${args[0]:-} ${args[1]:-}" in
+  'pane get')
+    if [ "${args[2]:-}" = w1:p2 ]; then
+      reads_file="$dir/herdr-old-pane-reads"
+      reads=0
+      [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+      reads=$((reads + 1))
+      printf '%s\n' "$reads" > "$reads_file"
+      if [ "$case_name" = stale-readable ] && [ "$reads" -gt 1 ]; then
+        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}'
+      else
+        printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+      fi
+      exit 0
+    fi
+    ;;
+  'agent get')
+    [ "${args[2]:-}" = w1:p2 ] && {
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+      exit 0
+    }
+    ;;
+  'workspace get')
+    case "$case_name" in
+      workspace-unreadable) exit 1 ;;
+      workspace-changed)
+        printf '%s\n' '{"result":{"workspace":{"workspace_id":"other"}}}'
+        exit 0
+        ;;
+    esac
+    ;;
+  'tab create'|'tab close'|'pane close')
+    printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+    exit 1
+    ;;
+esac
+printf 'unexpected fake herdr command: %s\n' "${args[*]}" >&2
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+}
+
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
@@ -157,6 +212,32 @@ add_ship_task() {
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
+  TASK_TMPS+=("/tmp/fm-$id")
+}
+
+add_herdr_missing_pane_task() {  # <case-dir> <id>
+  local dir=$1 id=$2 home="$1/home" proj="$1/proj" wt="$1/wt"
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  mkdir -p "$home/data/$id"
+  printf '# brief for %s\n\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  {
+    echo 'window=hses:w1:p2'
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=claude'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo "tasktmp=/tmp/fm-$id"
+    echo 'model=default'
+    echo 'effort=default'
+    echo 'backend=herdr'
+    echo 'herdr_session=hses'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t2'
+    echo 'herdr_pane_id=w1:p2'
+  } > "$home/state/$id.meta"
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
@@ -1312,6 +1393,30 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
+  local case_name dir out rc before expected
+  for case_name in workspace-unreadable workspace-changed stale-readable; do
+    dir=$(new_case "herdr-$case_name" hr1)
+    add_herdr_missing_pane_task "$dir" hr1
+    make_herdr_missing_pane_stub "$dir" "$case_name"
+    before="$dir/meta-before"
+    cp "$dir/home/state/hr1.meta" "$before"
+    out=$(FM_FAKE_HERDR_CASE="$case_name" run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+    expect_code 1 "$rc" "a missing Herdr pane with $case_name must refuse"
+    case "$case_name" in
+      workspace-unreadable) expected='cannot verify recorded workspace' ;;
+      workspace-changed) expected='recorded workspace w1 is ambiguous or changed' ;;
+      stale-readable) expected='requires the recorded pane to remain gone, got no-agent' ;;
+    esac
+    assert_contains "$out" "$expected" "the $case_name refusal should name its failed proof"
+    cmp -s "$before" "$dir/home/state/hr1.meta" \
+      || fail "the $case_name refusal changed the task's serialized metadata"
+    [ ! -e "$dir/fake/herdr-mutations" ] \
+      || fail "the $case_name refusal created or closed a Herdr endpoint"
+  done
+  pass "fm-spawn --relaunch: missing Herdr pane ambiguity refuses without endpoint or metadata mutation"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1358,3 +1463,4 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
