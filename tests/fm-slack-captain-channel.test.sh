@@ -335,6 +335,41 @@ grep -F "channel=$CHANNEL_ID" "$log" >/dev/null \
   || fail "poll must never call conversations.list"
 pass "fm-slack-poll reads only the configured channel"
 
+# --- argv must not carry the bot token --------------------------------------
+
+home="$TMP_ROOT/argv"
+make_home "$home"
+argv_token=xoxb-SENTINEL-DO-NOT-LOG-9999
+printf 'FM_SLACK_BOT_TOKEN=%s\n' "$argv_token" > "$home/.env"
+chmod 600 "$home/.env"
+argvlog="$home/argv-capture.log"
+: > "$argvlog"
+cat > "$home/capture-curl" <<SH
+#!/usr/bin/env bash
+printf '=== invocation ===\n' >> "$argvlog"
+for a in "\$@"; do printf '%s\n' "\$a" >> "$argvlog"; done
+ofile=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) ofile=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+body='{"ok":true,"user_id":"U_BOT12345"}'
+if [ -n "\$ofile" ]; then printf '%s' "\$body" > "\$ofile"; else printf '%s' "\$body"; fi
+exit 0
+SH
+chmod +x "$home/capture-curl"
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[]}'
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$home/capture-curl" \
+  PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-slack-poll.sh" >/dev/null 2>&1
+if rg -q -- "$argv_token" "$argvlog" 2>/dev/null; then
+  fail "poll must keep the bot token out of curl argv"
+fi
+pass "fm-slack-poll keeps the bot token out of curl argv"
+
 # --- API allowlist ----------------------------------------------------------
 
 home="$TMP_ROOT/allowlist"
@@ -470,5 +505,3 @@ if fms_poll_shim_valid "$shim" "$home" "$ROOT" 2>/dev/null; then
   fail "tampered slack-watch.check.sh shim must not validate"
 fi
 pass "slack-watch.check.sh shim rejects tampering"
-
-printf 'ok - %s tests passed\n' 19

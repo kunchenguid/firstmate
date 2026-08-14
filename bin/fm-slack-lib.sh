@@ -85,34 +85,48 @@ fms_configured() {
     && fms_channel_id_valid "$FMS_CHANNEL_ID"
 }
 
-fms_auth_header_spec() {
-  local token=${FMS_TOKEN:-}
+fms_auth_header_file() {
+  local tmp token=${FMS_TOKEN:-}
   [ -n "$token" ] || return 1
   case "$token" in
     *$'\n'*|*'"'*|*"'"*) return 1 ;;
   esac
-  printf 'Authorization: Bearer %s' "$token"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-slack-auth.XXXXXX") || return 1
+  printf 'Authorization: Bearer %s\n' "$token" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$tmp"
+}
+
+fms_auth_header_release() {
+  local auth_header=$1
+  [ -n "$auth_header" ] || return 0
+  rm -f -- "$auth_header" 2>/dev/null || true
 }
 
 # POST application/x-www-form-urlencoded to one Slack method.
 # Prints the response body to stdout; returns curl's exit code.
 # FM_SLACK_CURL_LOG may record argv summaries for tests.
 fms_api_post() {
-  local method=$1 data=$2 ofile=$3 curl_bin=${FM_SLACK_CURL_BIN:-curl}
+  local method=$1 data=$2 ofile=$3 auth_header curl_bin=${FM_SLACK_CURL_BIN:-curl} rc
   case "$method" in
     auth.test|chat.postMessage|chat.update|conversations.history|conversations.replies) ;;
     *) return 1 ;;
   esac
   command -v "$curl_bin" >/dev/null 2>&1 || return 1
-  fms_auth_header_spec >/dev/null || return 1
+  auth_header=$(fms_auth_header_file) || return 1
+  trap 'fms_auth_header_release "$auth_header"' INT TERM HUP
   if [ -n "${FM_SLACK_CURL_LOG:-}" ]; then
     printf 'method=%s data=%s\n' "$method" "$data" >> "$FM_SLACK_CURL_LOG"
   fi
   "$curl_bin" -m 10 -sS -o "${ofile:-/dev/stdout}" \
-    -H "$(fms_auth_header_spec)" \
+    -H "@$auth_header" \
     -H 'Content-Type: application/x-www-form-urlencoded; charset=utf-8' \
     --data "$data" \
     "${FMS_API}/${method}" 2>/dev/null
+  rc=$?
+  fms_auth_header_release "$auth_header"
+  trap - INT TERM HUP
+  return "$rc"
 }
 
 fms_api_json_ok() {
