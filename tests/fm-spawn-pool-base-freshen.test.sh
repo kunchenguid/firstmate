@@ -8,7 +8,8 @@
 # unreachable.
 # A project with no origin remote has no tip to freshen against, so these tests
 # also prove that spawn skips only the freshen there, says so once on stderr,
-# and still refuses a dirty pool.
+# and still refuses a dirty pool in wording that names the missing remote, while
+# an origin that is configured but unusable keeps the unchanged refusal.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -217,7 +218,8 @@ test_dirty_pool_refuses_without_discarding_work() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree"
-  assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
+  assert_contains "$out" "is not clean; refusing to discard uncommitted work while refreshing its base" \
+    "the origin path's dirty refusal no longer reads exactly as it did"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a dirty pooled worktree"
   assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
@@ -260,9 +262,11 @@ test_no_origin_remote_skips_freshen_and_succeeds() {
 
 # The clean-pool guard is remote-independent, so skipping the freshen must not
 # skip it. A no-origin pool that came back dirty would otherwise start a worker
-# on top of foreign uncommitted work and commit it into fm/<id>.
+# on top of foreign uncommitted work and commit it into fm/<id>. Nothing is
+# fetched or reset here, so the refusal must name the missing remote rather than
+# blame a refresh that never ran.
 test_no_origin_dirty_pool_refuses_without_discarding_work() {
-  local rec id out status before
+  local rec id out status before refusals
   id='pool-no-origin-dirty-r6'
   rec=$(make_case no-origin-dirty "$id" main no-origin)
   read_case_record "$rec"
@@ -272,8 +276,12 @@ test_no_origin_dirty_pool_refuses_without_discarding_work() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded on a dirty pooled worktree with no origin remote"
-  assert_contains "$out" "is not clean" \
-    "spawn did not refuse a dirty pooled worktree when there was no remote to freshen from"
+  refusals=$(printf '%s\n' "$out" \
+    | grep -c "^error: .*is not clean; the project has no remote, so refusing to launch a worker on top of uncommitted work$" || true)
+  [ "$refusals" = 1 ] \
+    || fail "the no-remote dirty refusal should be exactly one complete line naming the missing remote, found $refusals"$'\n'"--- output ---"$'\n'"$out"
+  assert_not_contains "$out" "refreshing its base" \
+    "the no-remote refusal blamed a refresh that never ran"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a dirty no-remote pooled worktree"
   assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
@@ -283,6 +291,35 @@ test_no_origin_dirty_pool_refuses_without_discarding_work() {
       "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
   fi
   pass "a dirty pooled worktree with no origin remote is refused without discarding its local work"
+}
+
+# A configured origin that cannot be fetched from is not an absent origin.
+# Absence is read off the remote list, so this pool still owes the fetch and
+# still gets the unchanged staleness refusal rather than the no-remote skip.
+test_configured_but_unusable_origin_still_refuses() {
+  local rec id out status before
+  id='pool-unusable-origin-r7'
+  rec=$(make_case unusable-origin "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" remote set-url --push origin "file://$CASE_DIR/origin.git"
+  git -C "$POOL_DIR" config --unset remote.origin.url
+  git -C "$POOL_DIR" remote | grep -qx origin \
+    || fail "fixture no longer lists an origin remote to fetch from"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an origin with no fetch address"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an origin that is configured but has no fetch address"
+  assert_not_contains "$out" "the project has no remote" \
+    "spawn mistook a configured but unusable origin for an absent one"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after failing to fetch a configured origin"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed unusable-origin refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "an origin configured without a fetch address still refuses instead of skipping the freshen"
 }
 
 test_unresolved_remote_default_refuses_pool() {
@@ -314,5 +351,6 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_no_origin_remote_skips_freshen_and_succeeds
 test_no_origin_dirty_pool_refuses_without_discarding_work
+test_configured_but_unusable_origin_still_refuses
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

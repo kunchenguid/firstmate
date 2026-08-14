@@ -138,10 +138,12 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
-#   A project with no origin remote (positively detected, never inferred from a
-#   failed fetch) skips only that fetch-and-reset machinery and launches with one
-#   notice that its base was not freshened; the non-clean worktree refusal is
-#   remote-independent and still applies.
+#   A project with no origin remote (read positively off the configured remote
+#   list, never inferred from a failed fetch, so an origin that is configured but
+#   unusable still refuses) skips only that fetch-and-reset machinery and launches
+#   with one notice that its base was not freshened; the non-clean worktree
+#   refusal is remote-independent and still applies, in its own wording that names
+#   the missing remote instead of claiming a refresh that never ran.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1733,23 +1735,31 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 # A pooled worktree carrying uncommitted work is never a safe base for a fresh
 # worker, with or without an origin to freshen against, so this guard is
-# remote-independent and every freshen path owes it.
-require_clean_spawn_worktree() {  # <worktree>
-  local worktree=$1 status
+# remote-independent and every freshen path owes it. Each caller supplies the
+# tail that states its own situation, because only the origin path is about to
+# refresh anything and a refusal must never claim a refresh that never ran.
+require_clean_spawn_worktree() {  # <worktree> <inspect-failure-tail> <not-clean-tail>
+  local worktree=$1 inspect_tail=$2 not_clean_tail=$3 status
   status=$(git -C "$worktree" status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
+    echo "error: could not inspect pooled worktree '$worktree' $inspect_tail" >&2
     return 1
   }
   if [ -n "$status" ]; then
-    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+    echo "error: pooled worktree '$worktree' is not clean; $not_clean_tail" >&2
     return 1
   fi
 }
 
+# Absence of origin is read positively off the configured remote list, never
+# inferred from a command that failed: an unreadable remote list, or an origin
+# that is configured but unusable, falls through to the fetch, whose refusal is
+# the real staleness guard.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual
-  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
-    require_clean_spawn_worktree "$worktree" || return 1
+  local worktree=$1 default target expected actual remotes
+  if remotes=$(git -C "$worktree" remote 2>/dev/null) && ! printf '%s\n' "$remotes" | grep -qx origin; then
+    require_clean_spawn_worktree "$worktree" \
+      'before launching from it; the project has no remote' \
+      'the project has no remote, so refusing to launch a worker on top of uncommitted work' || return 1
     echo "notice: pooled worktree '$worktree' base was not freshened because the project has no remote" >&2
     return 0
   fi
@@ -1774,7 +1784,9 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  require_clean_spawn_worktree "$worktree" || return 1
+  require_clean_spawn_worktree "$worktree" \
+    'before refreshing its base' \
+    'refusing to discard uncommitted work while refreshing its base' || return 1
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
