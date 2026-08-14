@@ -206,6 +206,52 @@ test_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty pooled worktree is refused without discarding its local work"
 }
 
+make_no_origin_case() {
+  local name=$1 id=$2 case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
+}
+
+test_no_origin_remote_skips_freshen_and_succeeds() {
+  local rec id out status before
+  id='pool-no-origin-r6'
+  rec=$(make_no_origin_case no-origin "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" remote 2>/dev/null | grep -qx origin \
+    && fail "fixture unexpectedly configured an origin remote"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed on a pooled worktree with no origin remote"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_contains "$out" "was not freshened because the project has no remote" \
+    "spawn did not print a clear no-remote notice"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD in a pooled worktree with no remote to freshen from"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a pooled worktree with no origin remote skips the freshen and still spawns"
+}
+
 test_unresolved_remote_default_refuses_pool() {
   local rec id out status before
   id='pool-unresolved-default-r5'
@@ -233,5 +279,6 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_no_origin_remote_skips_freshen_and_succeeds
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
