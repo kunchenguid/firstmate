@@ -928,6 +928,23 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
+fmx_meta_pr_lines_last() {
+  local file=$1 normalized
+  normalized=$(fmx_meta_tmp "$file") || return 1
+  if ! awk -F= '
+    $1 == "pr" || $1 == "pr_head" { pr_lines[++pr_count] = $0; next }
+    { print }
+    END { for (i = 1; i <= pr_count; i++) print pr_lines[i] }
+  ' "$file" > "$normalized"; then
+    rm -f "$normalized"
+    return 1
+  fi
+  if ! mv -f "$normalized" "$file"; then
+    rm -f "$normalized"
+    return 1
+  fi
+}
+
 # fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
@@ -955,6 +972,7 @@ fmx_meta_link_set() {
     ''|*[!0-9]*) ;;
     *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
   esac
+  fmx_meta_pr_lines_last "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }
@@ -973,6 +991,7 @@ fmx_meta_followups_set() {
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  fmx_meta_pr_lines_last "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }
@@ -991,6 +1010,7 @@ fmx_meta_link_clear() {
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
+  fmx_meta_pr_lines_last "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }

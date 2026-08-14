@@ -200,6 +200,19 @@ make_x_linked_metadata() {  # <metadata-path>
     _ "$ROOT" "$meta"
 }
 
+make_x_followups_metadata() {  # <metadata-path>
+  local meta=$1 state home
+  state=${meta%/*}
+  home=${state%/*}
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-x-lib.sh"
+      fmx_meta_followups_set "$2" 1
+    ' \
+    _ "$ROOT" "$meta"
+}
+
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
@@ -316,6 +329,10 @@ test_relaunch_preserves_durable_task_metadata() {
   traceparent=$(meta_field "$dir" rl19 traceparent)
   fm_trace_context_valid "$traceparent" \
     || fail "the trace-enabled relaunch must record a valid trace carrier"
+  make_x_linked_metadata "$meta" \
+    || fail "the shared link writer should update metadata after trace publication"
+  make_x_followups_metadata "$meta" \
+    || fail "the shared follow-up writer should update metadata after trace publication"
   [ "$(tail -n 2 "$meta")" = $'pr=https://github.com/example/repo/pull/19\npr_head=0123456789abcdef0123456789abcdef01234567' ] \
     || fail "PR metadata must remain the final lines after relaunch"
   fm_pr_metadata_identity_parse "$meta" \
