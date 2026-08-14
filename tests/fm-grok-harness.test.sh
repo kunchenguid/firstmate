@@ -26,7 +26,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   printf '%s\n' "$fakebin"
 }
 
@@ -51,7 +60,7 @@ run_grok_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" grok --mode no-mistakes --yolo off 2>&1
 }

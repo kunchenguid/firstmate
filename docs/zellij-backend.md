@@ -62,13 +62,13 @@ An explicit raw `session:pane` target remains a pane-existence-only operator esc
 
 Zellij's CLI action commands return exit 0 even for missing sessions or panes.
 The adapter therefore verifies session, terminal pane, and expected title before an operation and validates JSON or integer response shapes afterward.
-A pane can still disappear between verification and the operation; downstream submit, worktree-discovery, and stale detection report that narrow race rather than treating exit 0 as success.
+A pane can still disappear between verification and the operation; downstream submit, post-lease worktree-cd verification, and stale detection report that narrow race rather than treating exit 0 as success.
 
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
-`pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
-This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
+`pane_cwd` follows a top-level shell `cd` but not a foreground subshell.
+Firstmate acquires the worktree with `treehouse get --lease`, sends a top-level `cd` into the returned path, and uses the marker-delimited `pwd` probe only to verify that the pane landed there.
+This active probe is scoped to spawn-time post-lease verification and is not advertised as a general live-cwd API.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.

@@ -78,7 +78,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -113,7 +121,7 @@ run_spawn() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
@@ -131,7 +139,7 @@ run_spawn_tc() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
 }
@@ -225,7 +233,7 @@ run_two_level() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wwt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wwt" FM_FAKE_PANE_PATH="$wwt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$wlog" PATH="$wfake:$PATH" \
     "$SPAWN" "$worker_id" "$wproj" --mode no-mistakes --yolo off >/dev/null 2>&1 || true
 

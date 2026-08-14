@@ -87,8 +87,8 @@ A genuinely fresh surface returns an internal error from `read-screen` until som
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
-`current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+`current_directory` follows a top-level shell `cd` but not a foreground subshell.
+Firstmate acquires the worktree with `treehouse get --lease`, sends a top-level `cd` into the returned path, and uses the marker-delimited `pwd` probe only to verify that the pane landed there.
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.

@@ -150,9 +150,8 @@ test_brief_assertion_precedes_branch() {
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
-# A fake tmux that reports FM_FAKE_PANE_PATH as the post-`treehouse get` pane cwd
-# (so the spawn's worktree-resolution loop resolves to a path we control), names
-# the session on '#S', and swallows window ops. Echoes the fakebin dir.
+# A fake tmux that reports FM_FAKE_PANE_PATH as the post-lease pane cwd,
+# names the session on '#S', and swallows window ops. Echoes the fakebin dir.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -170,7 +169,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -181,7 +188,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$pane" FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
@@ -225,11 +232,11 @@ test_spawn_isolation_abort() {
 #     tmux appends at the next free index instead of the active window index, which
 #     collides under base-index 1;
 #   - the window id is captured (-P -F #{window_id}) and automatic-rename/allow-rename
-#     are disabled so the fm-<id> name survives treehouse cd'ing into the worktree;
-#   - the treehouse-get send-keys and the worktree wait loop target that stable
-#     window id, never the (possibly-renamed) name - a lost name would let
-#     display-message fall back to the active client's window and misread firstmate's
-#     OWN pane as the worktree, tangling a hook into the primary checkout.
+#     are disabled so the fm-<id> name survives Firstmate's cd into the worktree;
+#   - the leased-worktree cd and its verification query target that stable window
+#     id, never the (possibly-renamed) name - a lost name would let display-message
+#     fall back to the active client's window and misread firstmate's OWN pane as
+#     the worktree, tangling a hook into the primary checkout.
 make_spawn_record_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -238,18 +245,41 @@ make_spawn_record_fakebin() {
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_CWD_LANDED:-}" ] && [ -e "$FM_FAKE_CWD_LANDED" ]; then
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PROJECT:-}"
+    fi
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+  has-session|new-session|set-window-option) exit 0 ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        cd\ *) [ -n "${FM_FAKE_CWD_LANDED:-}" ] && : > "$FM_FAKE_CWD_LANDED" ;;
+      esac
+    done
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -260,9 +290,9 @@ run_spawn_record() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-    FM_TMUX_REC="$rec" \
-    PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$pane" FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_TMUX_REC="$rec" FM_FAKE_PANE_PROJECT="$proj" \
+    FM_FAKE_CWD_LANDED="$rec.cdl" PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
 
@@ -293,11 +323,11 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): the leased-worktree cd and cwd verification target the stable id.
+  assert_grep "send-keys -t @spawnwid cd '$wt' Enter" "$rec" \
+    "the leased-worktree cd must target the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
-    "the worktree wait loop must query the stable window id, not the name"
+    "the post-lease cwd verification must query the stable window id, not the name"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }

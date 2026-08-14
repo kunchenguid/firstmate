@@ -134,10 +134,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   Before a fresh non-Orca ship or scout worker starts, Firstmate acquires a
+#   durable worktree with `treehouse get --lease --lease-holder <task-id>` from
+#   the project directory, validates that exact returned path, and sends a
+#   verified, retried `cd` into the worker endpoint. The allocator's path is the
+#   worktree identity; pane-current-path reads only prove that the endpoint
+#   entered it and never replace it. Its clean task worktree then fetches origin,
+#   resolves the current remote default branch, and resets to its tip. An
+#   unreachable origin, unresolved default branch, or non-clean worktree refuses
+#   the spawn rather than risking a PR based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -648,6 +653,8 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+TREEHOUSE_LEASE_ACTIVE=0
+TREEHOUSE_LEASE_HOLDER=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -733,6 +740,13 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "$TREEHOUSE_LEASE_ACTIVE" = 1 ] && [ -n "${WT:-}" ] \
+     && [ -n "${TREEHOUSE_LEASE_HOLDER:-}" ]; then
+    TREEHOUSE_LEASE_ACTIVE=0
+    if ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$TREEHOUSE_LEASE_HOLDER" "$WT" >/dev/null 2>&1); then
+      echo "warning: could not return the uncommitted Treehouse lease for $ID at $WT" >&2
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -1684,12 +1698,10 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
 # Every backend's own current-path read (tmux's pane_current_path, herdr's
 # foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
-# below never notices the pane left the project) or false-positive (the
-# isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
-# (docs/herdr-backend.md "Known gaps").
+# report the OS-level, physically-resolved cwd, so the post-lease cd check and
+# isolation guard must compare physical paths rather than a still-symlinked
+# PROJ_ABS. Canonicalize once here so every downstream comparison uses the same
+# physical form (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
 real_path_or_raw() {  # <path>
@@ -2097,8 +2109,8 @@ fi
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
+# WT_TARGET to $T for them (and for any future backend) - the shared post-lease cd
+# verification below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
@@ -2212,53 +2224,44 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Lease the worktree in this process, exactly as fm-home-seed.sh does for a
+  # persistent secondmate home. Treehouse returns the selected path on stdout,
+  # so task identity comes from the allocator rather than a potentially stale
+  # pane-current-path observation.
+  TREEHOUSE_LEASE_HOLDER=$ID
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$TREEHOUSE_LEASE_HOLDER") || {
+    echo "error: treehouse get --lease failed to lease a worktree for $ID; inspect window $T" >&2
+    exit 1
+  }
+  [ -n "$WT" ] || {
+    echo "error: treehouse get --lease did not report a worktree for $ID; inspect window $T" >&2
+    exit 1
+  }
+  TREEHOUSE_LEASE_ACTIVE=1
+  validate_spawn_worktree "treehouse get --lease" "$T"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
+  # Move the pane into the leased worktree so every harness starts in the same
+  # path that Firstmate will publish. A fresh pane can drop the first keystroke,
+  # so verify the physical cwd and retry the cd rather than accepting a send
+  # acknowledgement as proof.
+  WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL="$WT"
+  cd_landed=
+  for _ in $(seq 1 30); do
+    p=$(spawn_current_path "$WT_TARGET" 2>/dev/null || true)
     if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+      p_real=$(cd "$p" 2>/dev/null && pwd -P) || p_real="$p"
+      if [ "$p_real" = "$WT_REAL" ]; then
+        cd_landed=1
+        break
       fi
-    else
-      candidate=""
     fi
-    sleep 1
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
+    sleep 0.5
   done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  if [ -z "$cd_landed" ]; then
+    echo "error: task pane for $ID did not enter the leased worktree $WT after repeated cd; inspect window $T" >&2
     exit 1
   fi
-
-  validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
@@ -2687,6 +2690,10 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+# The task record now owns the exact leased path. A later failure must preserve
+# that record for normal teardown rather than returning a lease another process
+# could mistake for an unowned slot.
+TREEHOUSE_LEASE_ACTIVE=0
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"

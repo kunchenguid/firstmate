@@ -59,7 +59,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -124,7 +132,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
@@ -200,7 +208,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
     CDPATH="$CASE_DIR/cdpath" FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$WT_DIR" FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -229,7 +237,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
     FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$WT_DIR" FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -249,7 +257,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$WT_DIR" FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -277,7 +285,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$WT_DIR" FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1

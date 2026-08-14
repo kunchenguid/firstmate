@@ -387,8 +387,7 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 }
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
-# Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get`.
+# Mirrors tmux's pane_current_path read used for post-lease `cd` verification.
 #
 # Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
@@ -401,10 +400,10 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 # (unlike herdr's `foreground_cwd`), so passive JSON polling cannot solve
 # this. Active probe instead: print the pane's `$PWD` with a unique marker
 # (atomically submitted, mirroring send_text_line), briefly settle, then capture
-# and read only that marker line. Scoped to fm-spawn.sh's own worktree-discovery
-# poll loop (the only caller of this op), where injecting a harmless extra
-# command before the harness ever launches is an acceptable trade for a reliable
-# answer.
+# and read only that marker line. Scoped to fm-spawn.sh's post-lease `cd`
+# verification loop (the only caller of this op), where injecting a harmless
+# extra command before the harness ever launches is an acceptable trade for a
+# reliable answer.
 fm_backend_zellij_current_path() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} out line marker_begin="__FM_ZELLIJ_CWD_BEGIN__" marker_end="__FM_ZELLIJ_CWD_END__" in_block=0 chunk="" last=""
   fm_backend_zellij_target_ready "$target" "$expected_label" || return 0

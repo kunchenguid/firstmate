@@ -30,7 +30,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -79,7 +87,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_WORKTREE="$POOL_DIR" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }

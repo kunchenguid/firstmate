@@ -629,8 +629,8 @@ meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 # `send-keys -l <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
-# `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
-# for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
+# post-lease cwd verification from FM_FAKE_PANE_PATH so this same stub works
+# for a crew/scout (non-secondmate) spawn's leased-worktree cd.
 make_launch_capturing_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
@@ -660,6 +660,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *get*--lease*) printf '%s\n' "${FM_FAKE_WORKTREE:?FM_FAKE_WORKTREE unset}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   fm_fake_exit0 "$fakebin" pi
   printf '%s\n' "$fakebin"
 }
@@ -965,7 +974,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
