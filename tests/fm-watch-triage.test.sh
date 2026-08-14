@@ -1925,6 +1925,33 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_busy_task_reconciles_observer_without_staleness() {
+  local dir state fakebin out capture_file observer_bin observer_log window pid i=0
+  dir=$(make_case observer-busy); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  capture_file="$dir/pane.txt"; observer_bin="$fakebin/observer"; observer_log="$dir/observer.log"
+  window="test:fm-observer-busy"
+  printf 'working\n' > "$capture_file"
+  printf 'window=%s\nbackend=tmux\nkind=ship\n' "$window" > "$state/observer-busy.meta"
+  cat > "$observer_bin" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_OBSERVER_LOG:?}"
+SH
+  chmod +x "$observer_bin"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_HERDR_NM_OBSERVER_BIN="$observer_bin" \
+    FM_FAKE_OBSERVER_LOG="$observer_log" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  while [ ! -s "$observer_log" ] && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$observer_log" ] || { reap "$pid"; fail 'watcher did not reconcile a busy observer task'; }
+  grep -Fx 'reconcile observer-busy' "$observer_log" >/dev/null || { reap "$pid"; fail 'watcher reconciled the wrong observer task'; }
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail 'watcher exited before a busy task could remain supervised'; }
+  reap "$pid"
+  pass 'a busy task reconciles its observer without waiting for staleness'
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1974,3 +2001,4 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_busy_task_reconciles_observer_without_staleness

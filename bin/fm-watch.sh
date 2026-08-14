@@ -250,6 +250,13 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+reconcile_no_mistakes_observer() {  # <task-id>
+  local task=$1 observer_bin
+  [ -n "$task" ] || return 0
+  observer_bin=${FM_HERDR_NM_OBSERVER_BIN:-$SCRIPT_DIR/fm-herdr-no-mistakes-observer.sh}
+  [ -x "$observer_bin" ] && "$observer_bin" reconcile "$task" >/dev/null 2>&1 || true
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -1007,6 +1014,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    reconcile_no_mistakes_observer "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}

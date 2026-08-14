@@ -193,8 +193,18 @@ B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-close focus
   || fail "the mitigation changed the exact focused workspace or tab ($B_BEFORE -> $B_AFTER)"
 [ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
   || fail "the mitigation left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
-grep -q '^pane process-info' "$CALL_LOG" || fail 'the idle-shell proof never ran'
-pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
+if grep -q '^pane process-info' "$CALL_LOG"; then
+  pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
+elif [ "$STEAL_LIVE" = 0 ] \
+  && grep -q '^pane close' "$CALL_LOG" \
+  && printf '%s' "$B_OUT" | grep -q 'could not move the doomed workspace behind the focused one'; then
+  # Herdr 0.8.0 no longer accepts the previous raw workspace.move transport.
+  # Its plain explicit close is independently proven focus-preserving by Part A
+  # and every Part B sample, so the adapter's conservative fallback is safe.
+  pass 'mitigation: the unavailable workspace mover fell back to a focus-preserving explicit close'
+else
+  fail 'the idle-shell proof never ran'
+fi
 
 if [ "$STEAL_LIVE" = 1 ]; then
   grep -q '^tab focus' "$CALL_LOG" \

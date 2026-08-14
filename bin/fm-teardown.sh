@@ -180,6 +180,9 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+OBSERVER_TASK_LOCK=
+OBSERVER_TASK_LOCK_HELD=0
+OBSERVER_TASK_LOCK_IDENTITY=
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -197,6 +200,10 @@ teardown_release_locks() {
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
+  fi
+  if [ "$OBSERVER_TASK_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$OBSERVER_TASK_LOCK" || true
+    OBSERVER_TASK_LOCK_HELD=0
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
@@ -2383,7 +2390,25 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
+  if [ "$BACKEND" = herdr ]; then
+    OBSERVER_TASK_LOCK="$STATE/.spawn-$ID.lock"
+    fm_lock_try_acquire "$OBSERVER_TASK_LOCK" || {
+      echo "error: observer lifecycle is already running for task $ID; nothing was changed" >&2
+      exit 1
+    }
+    OBSERVER_TASK_LOCK_HELD=1
+    OBSERVER_TASK_LOCK_IDENTITY=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null) || {
+      echo "error: observer lifecycle lock identity could not be verified for task $ID; nothing was changed" >&2
+      exit 1
+    }
+  fi
   conclude_task_no_mistakes_run "$WT"
+  # The optional Herdr validation viewer is a visual child only. Retire it
+  # through its focused helper before returning the worktree or closing the
+  # authoritative task pane; missing or ambiguous sidecars are preserved.
+  if [ "$BACKEND" = herdr ]; then
+    "$SCRIPT_DIR/fm-herdr-no-mistakes-observer.sh" retire-locked "$ID" "${BASHPID:-$$}" "$OBSERVER_TASK_LOCK_IDENTITY" || true
+  fi
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 

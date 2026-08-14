@@ -1102,14 +1102,21 @@ signal_reason_is_actionable() {  # <file> ...
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src observer_bin
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  # The watcher already obtained a current, branch-and-head-attributed run-step.
+  # Reconcile the optional Herdr observer only on that path, keeping all Herdr
+  # lifecycle operations in its focused helper rather than in watcher logic.
+  if [ "$src" = run-step ]; then
+    observer_bin=${FM_HERDR_NM_OBSERVER_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-herdr-no-mistakes-observer.sh}
+    [ -x "$observer_bin" ] && "$observer_bin" reconcile "$id" >/dev/null 2>&1 || true
+  fi
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
