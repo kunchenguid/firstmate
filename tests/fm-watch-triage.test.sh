@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -107,6 +109,14 @@ record_pi_busy() {  # <state-dir> <id>
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
     --source pi-ext --event agent-start
+}
+
+record_cursor_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" \
+    --state idle --source fm-recovery --event fixture-baseline)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source cursor-hook --event before-submit-prompt
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
@@ -1234,6 +1244,62 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # over, so escalation reuses the identical stale reason, escalation counter, and
 # demand-deep-inspection marker - never an automatic interrupt or restart.
 
+# 2026-08-14 Cursor incident regression: a healthy worker was surfaced as
+# "idle 413s, possible wedge" during one semantic turn. Its file activity was
+# recent, but file mtimes are rendering-adjacent evidence and are deliberately
+# not the oracle here. The Cursor hook lifecycle is: beforeSubmitPrompt makes
+# the exact semantic verdict busy, so the watcher clears the stale timer; stop
+# makes it idle, so the same unchanged pane becomes actionable again.
+test_cursor_busy_turn_absorbs_observed_413s_false_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid gen verdict
+  dir=$(make_case cursor-busy-413s); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-cursor-busy"
+  printf 'reasoning about the requested change\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=cursor-agent\n' "$window" > "$state/cursor-busy.meta"
+  record_cursor_busy "$state" cursor-busy
+  printf 'working: implementing semantic lifecycle\n' > "$state/cursor-busy.status"
+  sig=$(seen_sig "$state/cursor-busy.status"); printf '%s' "$sig" > "$state/.seen-cursor-busy_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "reasoning about the requested change")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' $(( $(date +%s) - 413 )) > "$state/.stale-since-$key"
+
+  verdict=$(fm_busy_classify tmux "$window" cursor-agent cursor-busy "$state" '')
+  [ "$verdict" = "busy cursor-hook" ] \
+    || fail "Cursor beforeSubmitPrompt did not classify the observed turn busy: $verdict"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "Cursor's semantic busy turn produced the observed 413s false wedge: $(<"$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "Cursor's semantic busy turn printed a wake: $(<"$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "Cursor's semantic busy turn enqueued a wake"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "Cursor's semantic busy turn retained the 413s wedge timer"; }
+  reap "$pid"
+
+  gen=$(fm_busy_current_gen "$state" cursor-busy)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" cursor-busy idle --gen "$gen" \
+    --source cursor-hook --event stop
+  verdict=$(fm_busy_classify tmux "$window" cursor-agent cursor-busy "$state" '')
+  [ "$verdict" = "idle cursor-hook" ] \
+    || fail "Cursor stop did not classify the observed turn idle: $verdict"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the same Cursor pane did not surface after stop classified it idle"
+  rg -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the post-stop Cursor stale wake was not surfaced: $(<"$out")"
+  rg -F "possible wedge" "$out" >/dev/null \
+    && fail "the post-stop Cursor stale was mislabeled as a busy-turn wedge"
+  pass "Cursor's semantic busy turn absorbs the observed 413s false wedge, then stop makes the same pane actionable"
+}
+
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1952,6 +2018,7 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_cursor_busy_turn_absorbs_observed_413s_false_wedge
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
