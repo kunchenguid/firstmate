@@ -255,6 +255,39 @@ SH
   pass "harness identity: dash-leading ps command names are basename operands, not options"
 }
 
+test_cursor_agent_process_ancestry_detection() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cursor-agent-process-ancestry"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/Users/test/.local/bin/cursor-agent' ;;
+  4242:args=) printf '%s\n' '/Users/test/.local/bin/cursor-agent --force' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' zsh ;;
+  *:args=) printf '%s\n' zsh ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = cursor-agent ] \
+    || fail "cursor-agent ancestry resolved '$got', expected cursor-agent"
+  pass "fm-harness identifies cursor-agent from its verified command name"
+}
+
 # ===========================================================================
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
@@ -561,6 +594,31 @@ test_spawn_unverified_secondmate_harness_refused() {
     "unverified: error names the secondmate-harness source"
   [ -e "$w/home/state/sm.meta" ] && fail "unverified: a meta was written despite the abort"
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
+}
+
+test_spawn_cursor_agent_secondmate_refused() {
+  local w sm fakebin err rc
+  w="$TMP_ROOT/spawn-cursor-agent-secondmate"
+  sm="$w/sm"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'cursor-agent\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux")
+  err="$w/spawn.err"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "cursor-agent secondmate spawn should have failed"
+  assert_contains "$(cat "$err")" \
+    "cursor-agent is verified for crewmates and scouts, not secondmates" \
+    "cursor-agent secondmate refusal did not name the verified support boundary"
+  [ -e "$w/home/state/sm.meta" ] && fail "cursor-agent secondmate refusal still wrote metadata"
+  pass "cursor-agent remains unavailable for secondmates until primary supervision is verified"
 }
 
 # ===========================================================================
@@ -2458,12 +2516,14 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
+test_cursor_agent_process_ancestry_detection
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
+test_spawn_cursor_agent_secondmate_refused
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag

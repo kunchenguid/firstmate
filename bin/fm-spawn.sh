@@ -100,7 +100,8 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare ordinary-worker adapter name
+#   (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -1041,6 +1042,19 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Cursor Agent accepts a positional prompt. --force is its unattended
+    # command-approval mode, while --trust bypasses the separate first-workspace
+    # dialog that --force does not cover. Cursor effort is encoded in the model
+    # selector itself, so __EFFORTFLAG__ is deliberately absent and the requested
+    # axis remains metadata-only. Cursor has no verified primary watcher adapter,
+    # so it cannot host a persistent secondmate yet.
+    cursor-agent)
+      if [ "$kind" = secondmate ]; then
+        echo "error: cursor-agent is verified for crewmates and scouts, not secondmates; primary supervision remains unverified" >&2
+        return 1
+      fi
+      printf '%s' 'cursor-agent --trust --force __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1153,7 +1167,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1196,7 +1210,9 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # task metadata but never reaches the launch command. Cursor Agent expresses
+    # effort in the selected model id or its bracket parameters, so firstmate
+    # records the separate effort axis but emits no second CLI flag.
   esac
 }
 

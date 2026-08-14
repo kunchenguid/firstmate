@@ -272,6 +272,23 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
+test_cursor_agent_unverified_gate() {
+  local state gen out
+  state=$(new_state_dir cursor-agent-gate)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source cursor-hook --event before-submit-prompt
+  out=$(fm_busy_classify tmux w1 cursor-agent t1 "$state")
+  [ "$out" = "unknown cursor-agent-unverified" ] \
+    || fail "cursor-agent must classify unknown without a semantic source, got '$out'"
+  out=$(fm_busy_classify tmux w1 cursor-agent t1 "$state" 'Working
+ctrl+c to stop')
+  [ "$out" = "unknown cursor-agent-unverified" ] \
+    || fail "cursor-agent must not classify from rendered TUI text, got '$out'"
+  [ -z "$(fm_busy_sources_for_harness cursor-agent)" ] \
+    || fail "cursor-agent must trust no semantic source until one is verified"
+  pass "cursor-agent classifies unknown until a semantic source passes its verification gate"
+}
+
 # --- endpoint death and native fallbacks ----------------------------------------
 
 test_dead_endpoint_overrides() {
@@ -372,6 +389,7 @@ test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_cursor_agent_unverified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact

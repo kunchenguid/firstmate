@@ -34,6 +34,7 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
+#   cursor-hook      reserved: Cursor Agent, gated by fm_busy_cursor_agent_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     a firstmate-controlled interruption of the worker
@@ -41,18 +42,20 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, missing, malformed,
 #   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
-#   capture-failed, no-target
+#   cursor-agent-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   3. Codex before verification                 -> unknown codex-unverified
+#   4. Cursor Agent before verification          -> unknown cursor-agent-unverified
+#   5. a valid, gen-matching, source-trusted record -> its state and source
+#   6. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      Grok-only temporary regex fallback classifies a grok task from its
 #      rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   7. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -94,6 +97,21 @@ FM_BUSY_KIMI_VERIFIED_VERSIONS=""
 
 fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
+}
+
+# Cursor Agent verification gate. Empty means no installed version has exposed
+# a semantic turn-lifecycle source that firstmate can own without modifying the
+# captain's personal global Cursor config. On 2026.08.11-e8db854, a project
+# .cursor/hooks.json shadowed ~/.cursor/hooks.json instead of composing with it,
+# so a project-local writer would silently disable the captain's existing hooks.
+# The rendered spinner, Working label, and ctrl+c footer are presentation and are
+# deliberately never trusted. Open this gate only after a machine-readable source
+# brackets a live firstmate-launched turn and the interrupt path without that
+# config collision, then record the version and evidence before wiring cursor-hook.
+FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS=""
+
+fm_busy_cursor_agent_verified() {
+  [ -n "$FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS" ]
 }
 
 # fm_busy_codex_appserver_observable: capability/version negotiation for the
@@ -176,6 +194,10 @@ fm_busy_sources_for_harness() {  # <harness>
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
+      ;;
+    cursor-agent*)
+      fm_busy_cursor_agent_verified || { printf ''; return 0; }
+      adapter=cursor-hook
       ;;
     *) printf ''; return 0 ;;
   esac
@@ -274,6 +296,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     codex*)
       if ! fm_busy_codex_semantic_source; then
         printf 'unknown codex-unverified'
+        return 0
+      fi
+      ;;
+    cursor-agent*)
+      if ! fm_busy_cursor_agent_verified; then
+        printf 'unknown cursor-agent-unverified'
         return 0
       fi
       ;;

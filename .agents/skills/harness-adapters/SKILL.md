@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor-agent.
 user-invocable: false
 metadata:
   internal: true
@@ -139,9 +139,9 @@ Choose intermediate levels proportionally as complexity, uncertainty, blast radi
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
 Never select `max` from this fallback; use it only when the captain has explicitly expressed that per-task or standing preference.
 
-The supported launch-profile flags below are verified locally; each row records its evidence.
+The supported launch-profile transports below are verified locally; each row records its evidence.
 
-| Harness | Model flag | Effort flag | Notes |
+| Harness | Model transport | Effort transport | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
@@ -149,6 +149,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| cursor-agent | `--model <model-variant>` or a parameterized model selector | Model-id suffix (`-low`, `-medium`, `-high`, or `-xhigh`); `-fast` remains part of the selected model id. There is no separate effort flag. | Verified 2026-08-14 on Cursor Agent 2026.08.11-e8db854. `fm-spawn` records the selected effort axis in metadata and passes the selected model id unchanged. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -166,6 +167,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| cursor-agent | Run `cursor-agent models`, which lists the models available to the current Cursor account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -183,6 +185,7 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- cursor-agent: project skill integration is not yet ported or verified; use natural language.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 
@@ -378,6 +381,42 @@ The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.
 The tracked Claude Stop hooks skip themselves under `GROK_AGENT`, because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
+
+## cursor-agent (VERIFIED 2026-08-14 for crewmates and scouts only, Cursor Agent 2026.08.11-e8db854)
+
+Cursor Agent launches with a positional prompt as `cursor-agent --trust --force --model <model> <brief>`.
+`--force` is the unattended command-approval mode, while `--trust` bypasses the separate first-workspace confirmation that still appears under `--force` alone.
+
+| Fact | Value |
+|---|---|
+| Busy state | Unknown until a semantic source is live-verified. A spinner, `Working`, and `ctrl+c to stop` are rendered presentation and are not state sources. |
+| Exit command | One `Ctrl+D` from the empty composer exits after a short delay. |
+| Interrupt | Single Escape, live-verified by cancelling an active `sleep 30` tool call. |
+| Resume | `cursor-agent --continue` resumes the most recent session for the workspace. The CLI also exposes `--resume [chatId]`, `cursor-agent resume`, and `cursor-agent ls`. |
+| Skill invocation | Unverified. Use natural language until firstmate's skills are ported to Cursor and an invocation is confirmed. |
+| Autonomy | `--force`, with `--yolo` documented by the CLI as its alias. |
+| Trust dialog | A fresh worktree asks for workspace trust even under `--force`; firstmate includes `--trust` in every launch. |
+| Environment marker | None verified. Detection uses the exact `cursor-agent` command name in process ancestry. |
+| Composer | The idle bordered `→ Add a follow-up` placeholder is dim text and the shared composer reader already classifies it as empty. No `FM_COMPOSER_IDLE_RE` override or new bare glyph is needed. |
+| Effort | Effort lives in the selected model id or parameterized model selector, never in a separate flag. `fm-spawn` records the requested effort metadata while passing the model unchanged. |
+| Secondmate support | None. Cursor has no verified primary watcher, session-start delivery, turn-end guard, or recovery-grade process integration, so `fm-spawn` refuses Cursor secondmates. |
+
+The model-routing principle is: do not pay Cursor for capacity that a standalone subscription already provides.
+A future model id is classified by asking whether Pedro's standalone Claude Max or Codex Pro subscription already serves that capacity, not merely by checking whether Anthropic or OpenAI made it.
+Current-generation `claude-opus-5-*`, `claude-fable-5-*`, `claude-sonnet-5-*`, `gpt-5.6-*`, and `gpt-5.3-codex-*` are excluded because those standalone subscriptions already serve them.
+The abundant Cursor Models pool currently permits `cursor-grok-4.6-*`, `cursor-grok-4.5-high`, and `composer-2.5*`.
+The metered Other-Models pool permits `kimi-k3-{low,high,max}`, `kimi-k2.7-code`, `glm-5.2-*`, and `gemini-*-flash*` when their spend is justified.
+Older `claude-4.5-sonnet`, `claude-4-sonnet`, `gpt-5.1*`, `gpt-5-mini`, and `gpt-5.4-mini/nano` remain eligible only when there is a concrete reason to test capacity the standalone plans do not serve.
+Always confirm current availability with `cursor-agent models`, because the account-backed catalog can change.
+
+Cursor project hooks and Pedro's existing global hooks do not compose on 2026.08.11-e8db854.
+A controlled run with project `sessionStart` and `beforeShellExecution` probes fired the project hooks but no observable global-hook control, while the same global hook and control environment fired when invoked directly.
+The project `.cursor/hooks.json` therefore shadows `~/.cursor/hooks.json` instead of extending it.
+Firstmate must not install a project deny or turn-end hook that silently disables Pedro's personal global setup, and it must never modify his global Cursor files.
+`bin/fm-busy-lib.sh` consequently keeps the Cursor semantic-source gate closed and unattended dispatch gated even though the launch adapter itself is verified.
+
+Cursor's MCP and skill portability are separate follow-up work.
+The current global Cursor MCP configuration is Pedro's personal file and is never a firstmate write target.
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 

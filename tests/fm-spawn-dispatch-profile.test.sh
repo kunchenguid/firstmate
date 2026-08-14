@@ -502,6 +502,27 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_cursor_agent_threads_model_variant_and_records_effort() {
+  local rec id out status launch
+  id=profile-cursor-agent-z7b
+  rec=$(make_spawn_case profile-cursor-agent cursor-agent "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.6-high --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor-agent spawn with a model-variant effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent cursor-grok-4.6-high high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high'" \
+    "cursor-agent launch did not thread the selected model variant"
+  assert_not_contains "$launch" "--effort" \
+    "cursor-agent launch must not invent a separate effort flag"
+  assert_not_contains "$launch" "--reasoning-effort" \
+    "cursor-agent launch must not borrow another harness's effort flag"
+  pass "cursor-agent receives the model variant while metadata preserves the selected effort axis"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -851,6 +872,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_cursor_agent_threads_model_variant_and_records_effort
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
