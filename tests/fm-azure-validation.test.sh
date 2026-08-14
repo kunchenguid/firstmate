@@ -327,6 +327,25 @@ PY
   pass "validation accepts Azure CLI's exact operator /32 ipAddressOrRange shape"
 }
 
+retail_price_transport_contract() {
+  python3 - "$HOST" <<'PY' || fail "validation retail-price transport contract failed"
+import importlib.util,io,json,sys
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+payload={"Items":[{"productName":"Virtual Machines Dasv6 Series","meterName":"D8as v6","unitOfMeasure":"1 Hour","retailPrice":0.4}]}
+class Reply(io.BytesIO):
+ def __enter__(self): return self
+ def __exit__(self,*_args): return False
+seen=[]
+def urlopen(request,timeout):
+ seen.append((request.full_url,request.headers,timeout)); return Reply(json.dumps(payload).encode())
+m.urllib.request.urlopen=urlopen
+m.az_command=lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("Azure CLI must not proxy the public retail API"))
+assert m.retail_rate({},"Standard_D8as_v6")==0.4
+assert seen[0][2]==20 and seen[0][1]["User-agent"]=="firstmate-azure-validation/1"
+PY
+  pass "validation reads the public retail API directly with a bounded identified request"
+}
+
 admission_contract() {
   local tmp fixture out
   fm_test_tmproot_into tmp fm-azure-validation-admission
@@ -598,6 +617,7 @@ submit_contract
 security_negative_contract
 credential_disk_identity_contract
 storage_network_access_contract
+retail_price_transport_contract
 admission_contract
 identity_and_recovery_contract
 trusted_manifest_verifier_contract

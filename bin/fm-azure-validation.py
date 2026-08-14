@@ -24,6 +24,8 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 
 
@@ -1057,9 +1059,17 @@ def retail_rate(env, sku):
         "https://prices.azure.com/api/retail/prices?%24filter="
         "armRegionName%20eq%20%27eastus%27%20and%20armSkuName%20eq%20%27{}%27%20and%20priceType%20eq%20%27Consumption%27"
     ).format(escaped)
-    result, _, _ = az_command(env, [
-        "rest", "--method", "get", "--url", url, "--skip-authorization-header",
-    ])
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "firstmate-azure-validation/1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise ValidationError("Azure retail rate request failed with HTTP {}".format(exc.code))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValidationError("Azure retail rate request is unreadable: {}".format(exc))
     rates = []
     for item in result.get("Items", []):
         product = str(item.get("productName", "")).lower()
