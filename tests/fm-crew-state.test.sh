@@ -13,6 +13,8 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
+#       checks-passed is done only with scored green evidence; cancelled,
+#       skipped, never-run, or zero checks stay non-success
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
@@ -278,6 +280,19 @@ outcome: passed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -441,7 +456,7 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+test_ci_ready_done_log_without_evidence_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
@@ -450,11 +465,10 @@ test_ci_ready_done_log_beats_monitoring_run() {
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  assert_contains "$out" "state: working" "uncorroborated ci-ready status log stays working"
+  assert_not_contains "$out" "state: done" "a checks-green claim without evidence must not be done"
+  assert_not_contains "$out" "checks green" "a checks-green claim without evidence must not read as checks green"
+  pass "uncorroborated ci-ready status log does not beat a monitoring run"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
@@ -499,7 +513,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+test_ci_monitoring_no_checks_terminal_is_not_green() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -508,9 +522,53 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "terminal no-checks ci-monitor run -> working"
+  assert_not_contains "$out" "state: done" "zero checks must not read as done"
+  assert_not_contains "$out" "checks green" "zero checks must not read as checks green"
+  pass "terminal no-checks ci-monitor marker is not green"
+}
+
+test_ci_monitoring_cancelled_only_is_not_green() {
+  reset_fakes
+  local d; d=$(new_case ci-cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cicancelled
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cicancelled.meta" "window=fm:fm-feat-cicancelled" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cicancelled)"
+  FM_FAKE_CI_LOGS="CI checks were cancelled without reporting a verdict"
+  local out; out=$(run_crew_state "$d" feat-cicancelled)
+  assert_contains "$out" "state: working" "cancelled-only ci-monitor run -> working"
+  assert_not_contains "$out" "state: done" "cancelled checks must not read as done"
+  assert_not_contains "$out" "checks green" "cancelled checks must not read as checks green"
+  pass "cancelled-only ci-monitor marker is not green"
+}
+
+test_checks_passed_without_green_evidence_is_not_done() {
+  reset_fakes
+  local d; d=$(new_case checks-passed-empty)
+  make_repo_on_branch "$d/wt" fm/feat-cpassedempty
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpassedempty.meta" "window=fm:fm-feat-cpassedempty" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-cpassedempty)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cpassedempty)
+  assert_not_contains "$out" "state: done" "checks-passed with zero checks must not be done"
+  assert_not_contains "$out" "checks green" "checks-passed with zero checks must not read as checks green"
+  pass "a checks-passed claim with zero check evidence is not done"
+}
+
+test_checks_passed_with_success_evidence_is_done() {
+  reset_fakes
+  local d; d=$(new_case checks-passed-green)
+  make_repo_on_branch "$d/wt" fm/feat-cpassedgreen
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpassedgreen.meta" "window=fm:fm-feat-cpassedgreen" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-cpassedgreen)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cpassedgreen)
+  assert_contains "$out" "state: done" "corroborated checks-passed -> done"
+  assert_contains "$out" "checks green" "corroborated checks-passed names checks green"
+  pass "a checks-passed claim corroborated by success evidence is done"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -754,10 +812,9 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: working" "coarse ready status without evidence stays working"
+  assert_not_contains "$out" "state: done" "another branch's pending log must not corroborate a checks-green claim"
+  pass "coarse run does not treat another branch's ci log as this crew's green evidence"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1414,10 +1471,13 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_without_evidence_stays_working
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_terminal_is_not_green
+test_ci_monitoring_cancelled_only_is_not_green
+test_checks_passed_without_green_evidence_is_not_done
+test_checks_passed_with_success_evidence_is_done
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
