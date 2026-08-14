@@ -203,7 +203,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | Policy class | Pi transcript path | Calm result (baseline verified on Pi 0.81.1 through 0.82.0; newer evidence noted per row) |
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
-| `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
+| `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible, apart from the `operational-turn-reply` case below. |
+| `operational-turn-reply` | Assistant text in the `AssistantMessageComponent` message the model ended a turn with, when that turn was started by a hidden operational user input | The text blocks are removed from the shallow presentation copy before layout, so the turn's bare acknowledgement occupies zero rows. Matched only against the exact no-action phrase `AGENTS.md` section 9 prescribes, so any decision, blocker, finding, review-ready outcome, or PR link on the same turn stays visible; the row latches its verdict when first laid out, so a re-layout or rebuild never re-judges it. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The text blocks are removed from the shallow presentation copy before layout, so a `toolUse` message carrying only narration occupies zero rows (verified on Pi 0.84.1); a still-streaming `pending` message is never filtered, so narration is briefly visible before the marker flips. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins and `fm_watch_arm_pi` hidden; arbitrary custom tools remain an unsupported boundary. |
@@ -225,7 +226,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
+Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant message layout (thinking, mid-turn working notes, and an internal turn's bare acknowledgement) and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -267,6 +268,7 @@ A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
+The internal-turn reply path covers Calm off, a genuine captain turn, an internal turn's bare acknowledgement, a review-ready PR link and a decision escalation produced on that same internal turn, captain input carrying an image, re-layout of an already-rendered row in both directions, a resume-style rebuild replayed through `addMessageToChat`, the empty and whitespace-only acknowledgement predicate cases, unchanged message objects, and Calm-off restoration.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
 

@@ -13,7 +13,7 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, mid-turn assistant working notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, mid-turn assistant working notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, canonically classified Firstmate operational user rows, and the bare no-action acknowledgement that closes a turn one of those rows started.
 A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
 Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
@@ -22,7 +22,10 @@ The operational inputs remain ordinary user-role messages, while Pi's transcript
 The reply that closes such a turn is dropped from the rendered rows too, so an internal exchange does not leave half of itself in the captain's chat.
 That match is deliberately narrow: only the exact no-action acknowledgement `AGENTS.md` section 9 prescribes is treated as internal chatter, and every other reply stays visible so a decision, blocker, finding, review-ready outcome, or PR link can never be hidden by presentation.
 A reply that improvises its own no-action wording instead of using that phrase therefore still shows, because rendering cannot tell it apart from a real outcome.
+While such a reply streams its accumulated text can momentarily equal that phrase, so it can flicker before the rest arrives; the settled message renders correctly.
 None of this changes delivery: the message, the model's context, the session entry, and the export all stay exactly as vanilla Firstmate produced them.
+Each rendered reply keeps the verdict it was first laid out with, so a terminal resize, a screen switch, a resume, or a compaction rebuild never re-judges a row the captain has already seen under a later turn.
+Which turn is internal is recorded even while Calm is off, so toggling Calm mid-session repaints both halves of an internal exchange consistently; the only reply that can newly disappear that way is the exact no-action phrase.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
@@ -40,6 +43,7 @@ These are supported-API boundaries rather than hidden-content failures.
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
 The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
+Each adapter is pinned to the API shape it patches rather than to a Calm behaviour revision, so a compatible in-process upgrade keeps the already-installed wrapper in charge and a newer Calm's presentation changes take effect on the next restart.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.
@@ -51,7 +55,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, including the internal-turn flag and the exact no-action acknowledgement phrase, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter and sets that flag from what it just rendered, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns thinking, working-note, and internal-acknowledgement hiding, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
 
 Regression entry points:
 
