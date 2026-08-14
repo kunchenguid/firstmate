@@ -121,10 +121,11 @@ export function installCalmOperationalUserLayout(): void {
     options?: AddMessageOptions,
   ): void {
     if (message.role !== "user") {
-      // Captain-run bash, compaction summaries and custom messages all arrive here, so
-      // the flag must not survive them either: it may only stay set for an operational
-      // input this layout actually hid.
-      setCalmOperationalTurn(false);
+      // Only a genuine captain input clears the flag. Pi replays assistant rows through
+      // this same method when it rebuilds the chat after a resume or a compaction, and
+      // the assistant component latches its verdict from its constructor, so clearing
+      // here would wipe the operational turn a moment before its own reply latched and
+      // put an already-hidden acknowledgement back on screen.
       originalAddMessageToChat.call(this, message, options);
       return;
     }
@@ -150,6 +151,11 @@ export function installCalmOperationalUserLayout(): void {
     // assistant layout can recognise that turn's bare acknowledgement as the other half
     // of the same hidden exchange. Delivery, model context and session storage are
     // untouched either way; only rendering differs.
+    //
+    // Accepted quirk: this is recorded even while Calm is off, so a reply can be hidden
+    // after Calm is toggled on mid-session although its input was visible. Only the
+    // prescribed no-action phrase is ever hidden, so nothing captain-relevant is at risk,
+    // and it is what makes a mid-session toggle repaint both halves consistently.
     setCalmOperationalTurn(true);
 
     const component = new CalmOperationalUserMessageComponent(

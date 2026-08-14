@@ -1465,7 +1465,10 @@ const chatMode = {
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
+  hideThinkingBlock: false,
+  hiddenThinkingLabel: "",
   outputPad: 1,
+  toolOutputExpanded: false,
 };
 const operationalText = operationalInput.encodeFirstmateOperationalInput(
   "watcher",
@@ -1512,15 +1515,24 @@ if (internalTurnRow.render(100).length !== 0) {
   throw new Error("an internal turn's acknowledgement reappeared after a re-layout");
 }
 
-// Captain-run bash and other non-user rows are captain-side input too, so they clear the
-// internal-turn flag instead of letting it survive into the next reply.
-visibility.setCalmOperationalTurn(true);
-InteractiveMode.prototype.addMessageToChat.call(
-  chatMode,
-  { role: "bashExecution", content: [{ type: "text", text: "!git status" }] },
-);
-if (visibility.calmOperationalTurnIsActive()) {
-  throw new Error("captain-run bash left the previous turn marked internal");
+// A rebuild - what Pi does on a resume or after a compaction - replays every item back
+// through addMessageToChat in order, and each assistant row latches its verdict as it is
+// constructed. The internal turn must survive from its operational input to its own reply,
+// and a genuine captain turn replayed the same way must still reach the captain.
+const replay = (message) => {
+  InteractiveMode.prototype.addMessageToChat.call(chatMode, message);
+  return chatMode.chatContainer.children[chatMode.chatContainer.children.length - 1];
+};
+visibility.setCalmOperationalTurn(false);
+replay({ role: "user", content: [{ type: "text", text: operationalText }] });
+const replayedInternalReply = replay({ ...messages.acknowledgement, role: "assistant" });
+if (replayedInternalReply.render(100).length !== 0) {
+  throw new Error("a rebuild put the internal turn's acknowledgement back on screen");
+}
+replay({ role: "user", content: [{ type: "text", text: "Captain here, carry on." }] });
+const replayedCaptainReply = replay({ ...messages.acknowledgement, role: "assistant" });
+if (!replayedCaptainReply.render(100).join("\n").includes("shipshape")) {
+  throw new Error("a rebuild hid a reply to a genuine captain prompt");
 }
 
 // The acknowledgement predicate means the contract phrase and nothing else.
