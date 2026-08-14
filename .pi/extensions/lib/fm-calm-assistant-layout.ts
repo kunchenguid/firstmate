@@ -20,6 +20,7 @@ type AssistantMessagePresentationState = {
   hiddenThinkingLabel: string;
   hideThinkingBlock: boolean;
   lastMessage?: AssistantMessage;
+  calmOperationalTurn?: boolean;
 };
 
 type CalmAssistantLayoutPatch = {
@@ -44,9 +45,18 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
 
 // The reply that closes a turn started by a hidden operational input, and that says
 // nothing the captain needs. A mid-turn message is left to the working-note rule above,
-// so this only ever matches the message the model ended its response with.
-function isOperationalTurnAcknowledgement(message: AssistantMessage): boolean {
-  if (!calmOperationalTurnIsActive()) return false;
+// so this only ever matches the message the model ended its response with. Which turn
+// this message belongs to is decided by the caller's latched value, never by the current
+// global flag, so a later internal turn cannot re-filter an already-rendered row.
+//
+// Accepted quirk: while a reply streams, the accumulated text can momentarily equal the
+// no-action phrase before the rest arrives, so such a reply flickers before it settles.
+// The final message renders correctly and latching does not change that.
+function isOperationalTurnAcknowledgement(
+  message: AssistantMessage,
+  operationalTurn: boolean,
+): boolean {
+  if (!operationalTurn) return false;
   if (isMidTurnAssistantMessage(message)) return false;
   const spoken = message.content
     .filter((block) => block.type === "text")
@@ -97,6 +107,13 @@ export function installCalmAssistantLayout(): void {
     message: AssistantMessage,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
+    // Latch which turn this row belongs to the first time this component receives a
+    // message. A re-layout re-calls updateContent, and Pi cascades that to every chat
+    // child on a terminal resize or a screen switch, so reading the live flag here would
+    // re-judge an already-rendered row under a later turn and could drop a genuine reply
+    // the captain has already seen. Whether Calm hides at all stays live, so toggling
+    // Calm still repaints correctly.
+    state.calmOperationalTurn ??= calmOperationalTurnIsActive();
     const hideThinking =
       state.hiddenThinkingLabel === "" &&
       state.hideThinkingBlock &&
@@ -110,7 +127,8 @@ export function installCalmAssistantLayout(): void {
     // so a decision, blocker, finding, review-ready outcome or PR link produced by the
     // same turn still reaches the captain.
     const hideOperationalReply =
-      patch.hidesOperationalReply() && isOperationalTurnAcknowledgement(message);
+      patch.hidesOperationalReply() &&
+      isOperationalTurnAcknowledgement(message, state.calmOperationalTurn);
     const presentationMessage =
       hideThinking || hideWorkingNote || hideOperationalReply
         ? {

@@ -121,6 +121,10 @@ export function installCalmOperationalUserLayout(): void {
     options?: AddMessageOptions,
   ): void {
     if (message.role !== "user") {
+      // Captain-run bash, compaction summaries and custom messages all arrive here, so
+      // the flag must not survive them either: it may only stay set for an operational
+      // input this layout actually hid.
+      setCalmOperationalTurn(false);
       originalAddMessageToChat.call(this, message, options);
       return;
     }

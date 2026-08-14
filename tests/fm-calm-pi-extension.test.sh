@@ -1492,6 +1492,37 @@ if (!renderedText("acknowledgement").includes("shipshape")) {
   throw new Error("a reply to captain input carrying an image was hidden from the captain");
 }
 
+// A row decides its visibility from the turn it was laid out for, not from whatever turn
+// is current when it is laid out again. A re-layout - which Pi triggers on a terminal
+// resize or a screen switch - must not drop a reply the captain has already seen.
+visibility.setCalmOperationalTurn(false);
+const captainTurnRow = new AssistantMessageComponent(messages.acknowledgement);
+if (!captainTurnRow.render(100).join("\n").includes("shipshape")) {
+  throw new Error("a reply to a genuine captain prompt was hidden when first laid out");
+}
+visibility.setCalmOperationalTurn(true);
+captainTurnRow.updateContent(messages.acknowledgement);
+if (!captainTurnRow.render(100).join("\n").includes("shipshape")) {
+  throw new Error("a later internal turn hid an already-rendered reply to a captain prompt");
+}
+const internalTurnRow = new AssistantMessageComponent(messages.acknowledgement);
+visibility.setCalmOperationalTurn(false);
+internalTurnRow.updateContent(messages.acknowledgement);
+if (internalTurnRow.render(100).length !== 0) {
+  throw new Error("an internal turn's acknowledgement reappeared after a re-layout");
+}
+
+// Captain-run bash and other non-user rows are captain-side input too, so they clear the
+// internal-turn flag instead of letting it survive into the next reply.
+visibility.setCalmOperationalTurn(true);
+InteractiveMode.prototype.addMessageToChat.call(
+  chatMode,
+  { role: "bashExecution", content: [{ type: "text", text: "!git status" }] },
+);
+if (visibility.calmOperationalTurnIsActive()) {
+  throw new Error("captain-run bash left the previous turn marked internal");
+}
+
 // The acknowledgement predicate means the contract phrase and nothing else.
 if (visibility.calmReplyIsBareAcknowledgement("")) {
   throw new Error("empty reply text matched the no-action acknowledgement phrase");
