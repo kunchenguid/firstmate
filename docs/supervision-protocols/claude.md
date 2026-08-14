@@ -16,7 +16,7 @@ When this session owns supervision and away mode is not active:
    Every subsequent unchanged Stop passes silently, while changed supervision evidence starts a fresh count as specified in [`turnend-guard.md`](../turnend-guard.md).
 6. Treat `watcher: started ...` and `watcher: attached ...` inside automatic arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
-7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm and remains a supervision need until drained, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
+7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm and remains a supervision need until the printed post-handling acknowledgement consumes them, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
    No PreToolUse hook denies fleet commands based on watcher status.
    [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.

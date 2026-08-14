@@ -32,7 +32,7 @@ After the configured retry bound is exhausted, it delivers the original wake wit
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi and OpenCode do.
-The durable wake queue preserves actionable events during the residual active-turn window and remains a supervision need until drained, so source retirement cannot strand an undelivered result, and the bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
+The durable wake queue preserves actionable events during the residual active-turn window and remains a supervision need until post-handling acknowledgement consumes them, so source retirement cannot strand an undelivered result, and the bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
 For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
 That recovery presentation includes all unacknowledged queue rows, the cursor-folded OPEN DECISIONS set, and still-unread informational status lines, so a still-open decision or a buried `note:` answer reappears even when recovery has no queue row of its own.
 The model no longer re-arms after ordinary wakes.
@@ -93,4 +93,4 @@ No zero-latency guarantee is claimed because lock verification, watcher startup,
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
-[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
+[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-08-14 two-session Claude auto-arm result, and exact opt-in commands.

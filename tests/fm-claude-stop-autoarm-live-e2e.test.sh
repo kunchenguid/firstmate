@@ -29,6 +29,7 @@ fail() {
 }
 
 command -v claude >/dev/null 2>&1 || fail "claude not found"
+command -v jq >/dev/null 2>&1 || fail "jq not found"
 
 LAB="$ROOT/.claude-autoarm-live-e2e.$$"
 PROJECT="$LAB/project"
@@ -132,6 +133,11 @@ wait_for_exit "$COMPETING_PID" 300 \
   || fail "read-only Claude session did not finish after deferring supervision to the live lock owner"
 wait "$COMPETING_PID" || fail "read-only Claude session exited unsuccessfully: $(tail -20 "$COMPETING_TRANSCRIPT")"
 COMPETING_PID=
+jq -e -s 'any(.[];
+  .type == "assistant"
+  and any(.message.content[]?; .type == "text" and .text == "COMPETING_READ_ONLY")
+)' "$COMPETING_TRANSCRIPT" >/dev/null \
+  || fail "read-only Claude session did not produce its exact completion response"
 
 grep -q 'event=gate-live-session-owner' "$HOME_DIR/state/.claude-autoarm-entry-trace" \
   || fail "real competing Stop hook did not trace the live-session-owner gate"
@@ -152,8 +158,19 @@ grep -q 'event=claimed' "$HOME_DIR/state/.claude-autoarm-entry-trace" \
   || fail "lock-owning Stop hook never traced its auto-arm claim"
 [ "$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)" = rewake ] \
   || fail "lock-owning Stop hook did not record outcome=rewake: $(cat "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)"
-grep -q 'Stop hook feedback' "$OWNER_TRANSCRIPT" \
-  || fail "owner-hook actionable result was not delivered as a real Claude rewake"
+jq -e -s 'any(.[];
+  .type == "system"
+  and .subtype == "hook_response"
+  and .hook_event == "Stop"
+  and .exit_code == 2
+  and ((.output // "") | contains("firstmate watcher wake"))
+)' "$OWNER_TRANSCRIPT" >/dev/null \
+  || fail "owner-hook actionable result was not delivered as a real exit-2 Stop response"
+jq -e -s 'any(.[];
+  .type == "assistant"
+  and any(.message.content[]?; .type == "text" and .text == "OWNER_RECOVERED")
+)' "$OWNER_TRANSCRIPT" >/dev/null \
+  || fail "real Stop feedback did not continue the owner session through recovery"
 [ ! -e "$HOME_DIR/state/task.meta" ] \
   || fail "live fixture did not complete its in-flight supervision need"
 

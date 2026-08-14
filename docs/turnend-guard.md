@@ -13,7 +13,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
-When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+When work, a process-event source, Relay polling, or queued wake delivery needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
@@ -28,7 +28,7 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
-Non-empty `state/.wake-queue` delivery remains a supervision need after its producing task or process source retires and until the queue is drained.
+Non-empty `state/.wake-queue` delivery remains a supervision need after its producing task or process source retires and until post-handling acknowledgement consumes the queued records.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same PID-strict identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`: a stale beacon blocks even when a watcher pid is live, and a fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
@@ -81,7 +81,8 @@ The auto-arm itself rechecks the healthy watcher predicate and retries a bounded
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears and no automatic-failure state exists, the first no-claim observation blocks for that session and evidence signature.
 On the second genuinely identical observation, the guard emits exactly one captain-facing `systemMessage` question and ends the continuation loop itself.
-Every later unchanged Stop passes silently through `state/.turnend-claude-escalated`, while changed task or process-source identities or queued-delivery state reset the count, and only a supervision need that disappears during the claim wait without leaving a queued wake clears the episode before passing.
+Every later unchanged Stop passes silently through `state/.turnend-claude-escalated`, while any evidence-signature change resets the count, including task or process-source identities, queued-delivery state, Relay or AFK state, and auto-arm epoch outcome.
+Only a supervision need that disappears during the claim wait without leaving a queued wake clears the episode before passing.
 A verified automatic failure retains the separate `FM_CLAUDE_TURNEND_BLOCK_BUDGET` progression (default 3, below Claude's 8-block override) and its stronger attended alarm.
 In Claude mode, positive watcher recovery clears the block budget, one-shot escalation, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
@@ -160,4 +161,4 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
-[`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.
+[`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-08-14 two-session Claude ownership and `asyncRewake` revalidation.

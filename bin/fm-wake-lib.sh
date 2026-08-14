@@ -1196,7 +1196,7 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 }
 
 # Print supplemental drain-time context only after the caller has committed the
-# raw queue consumption and released the append lock.
+# raw queue presentation and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
   local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line

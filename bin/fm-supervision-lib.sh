@@ -33,7 +33,7 @@ fm_sup_stat_mtime() {
 #                         so it has no metadata)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
-#   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
+#   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unacknowledged records
 #   FM_SUP_QUEUE_FINGERPRINT stable fingerprint of the pending wake records
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.

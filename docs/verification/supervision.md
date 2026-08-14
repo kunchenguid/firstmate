@@ -480,11 +480,11 @@ fm-claude-stop-autoarm: ok
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-08-14, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
-Claude Code 2.1.219
+Claude Code 2.1.232
 codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
