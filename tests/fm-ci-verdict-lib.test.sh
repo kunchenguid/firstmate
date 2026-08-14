@@ -16,7 +16,7 @@ set -u
 VERDICT="$ROOT/bin/fm-ci-verdict-lib.sh"
 
 score() {
-  "$VERDICT" "$@"
+  "$VERDICT" "$@" < /dev/null
 }
 
 test_cancelled_only_is_not_passed() {

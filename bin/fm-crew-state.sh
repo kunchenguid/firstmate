@@ -37,7 +37,10 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed -> done, failed/cancelled -> failed. A checks-passed outcome is
+#      passed -> done, failed/cancelled -> failed. A terminal run that carries
+#      no outcome at all (a bare `completed` status, whether from `axi status`
+#      or the coarse runs list) reads unknown, never done: there is no verdict
+#      to score. A checks-passed outcome is
 #      done only when the CI-ready scorer in bin/fm-ci-verdict-lib.sh confirms
 #      at least one successful check and no pending, failed, cancelled,
 #      skipped, or never-run conclusions; zero checks is a distinct non-success
@@ -559,7 +562,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)      RUN_STATE=unknown; RUN_DETAIL="run completed without an outcome" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;

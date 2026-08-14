@@ -306,6 +306,20 @@ outcome: failed
 EOF
 }
 
+# A completed run whose answer carries no outcome field at all: terminal status
+# word, zero verdict evidence.
+run_completed_no_outcome() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/3"
+  findings: none
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -610,6 +624,23 @@ test_checks_passed_with_success_evidence_is_done() {
   assert_contains "$out" "state: done" "corroborated checks-passed -> done"
   assert_contains "$out" "checks green" "corroborated checks-passed names checks green"
   pass "a checks-passed claim corroborated by success evidence is done"
+}
+
+# Same shape as the coarse `completed` row: a terminal status word with no
+# outcome and no scored check evidence must not reach done.
+test_completed_without_outcome_is_not_done() {
+  reset_fakes
+  local d; d=$(new_case completed-no-outcome)
+  make_repo_on_branch "$d/wt" fm/feat-cnoout
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cnoout.meta" "window=fm:fm-feat-cnoout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_completed_no_outcome fm/feat-cnoout)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cnoout)
+  assert_contains "$out" "source: run-step" "completed-without-outcome run is still attributed"
+  assert_not_contains "$out" "state: done" "a completed run with no outcome must not be done"
+  assert_contains "$out" "run completed without an outcome" "the missing outcome is named"
+  pass "a completed run with no outcome is not done"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1547,6 +1578,7 @@ test_prefixed_red_marker_after_green_is_not_green
 test_ci_failures_phrase_after_green_is_not_green
 test_checks_passed_without_green_evidence_is_not_done
 test_checks_passed_with_success_evidence_is_done
+test_completed_without_outcome_is_not_done
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
