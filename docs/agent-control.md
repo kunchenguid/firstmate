@@ -70,6 +70,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   Relaunch publication and the shared Relay metadata writers keep preserved `pr=` and `pr_head=` lines at the end of `state/<id>.meta`, so the strict PR identity parser continues to accept the record after replacement and follow-up updates.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
