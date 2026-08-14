@@ -1666,7 +1666,21 @@ def itemized_cost_bound(rate, hours, limits, parent_managed=False):
 
 def budget_gate(env, limits, outstanding_reservations=0.0, parent_managed=False):
     actual = cost_query(env, forecast=False)
-    forecast = cost_query(env, forecast=True)
+    try:
+        forecast = cost_query(env, forecast=True)
+    except RunnerError as exc:
+        # A young subscription has no cost training data and the forecast
+        # endpoint fails with HTTP 424 until it trains. Commissioning-bounded
+        # admission substitutes the readable actual as the forecast, mirroring
+        # the worker lifecycle's released commissioning seam; strict admission
+        # keeps failing closed.
+        if (
+            env.get("cost_admission_mode") == COMMISSIONING_COST_ADMISSION_MODE
+            and "failed with HTTP 424" in str(exc)
+        ):
+            forecast = actual
+        else:
+            raise
     rate = retail_rate(env, limits["sku"])
     first_hour = itemized_cost_bound(rate, 1, limits, parent_managed=parent_managed)
     first_day = itemized_cost_bound(
