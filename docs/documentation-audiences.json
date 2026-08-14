@@ -321,6 +321,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/task-metrics.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
