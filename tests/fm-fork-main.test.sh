@@ -63,6 +63,17 @@ new_world() { # <name>
   printf '%s\n' "$w"
 }
 
+seed_firstmate_surface() { # <world>
+  local w=$1
+  printf '# Fixture firstmate\n' > "$w/seed/AGENTS.md"
+  mkdir -p "$w/seed/bin"
+  printf '#!/usr/bin/env bash\n' > "$w/seed/bin/fixture.sh"
+  git -C "$w/seed" add AGENTS.md bin/fixture.sh
+  git -C "$w/seed" commit -qm 'Add fixture Firstmate surface'
+  git -C "$w/seed" push -q origin main
+  git -C "$w/seed" push -q "$w/fork.git" main
+}
+
 configure_fork_clone() { # <repo> <world>
   local repo=$1 w=$2
   git -C "$repo" remote add upstream "$w/upstream.git"
@@ -96,7 +107,7 @@ add_topic_and_merge() { # <world> <id> <path> <content> [class]
   pr="https://github.com/example/firstmate/pull/1"
   tmp="$w/manifest.$id"
   jq --arg id "$id" --arg class "$class" --arg path "$path" --arg pr "$pr" '
-    .divergences += [{id:$id,summary:("Carries " + $id + " behavior."),class:$class,topic:("fm/divergence/" + $id),introduced:"2026-08-08",upstream_pr:(if $class == "private" then null else {url:$pr,disposition:"open"} end),retire_when:("Upstream ships equivalent " + $id + " behavior."),paths:[$path]}]
+    .divergences += [{id:$id,summary:("Carries " + $id + " behavior."),class:$class,topic:("fm/divergence/" + $id),introduced:"2026-08-08",upstream_pr:(if $class == "private" then null elif $class == "rejected-but-retained" then {url:$pr,disposition:"rejected"} else {url:$pr,disposition:"open"} end),retire_when:("Upstream ships equivalent " + $id + " behavior."),paths:[$path]}]
   ' "$repo/fork-divergences.json" > "$tmp" || fail "could not build manifest fixture"
   mv "$tmp" "$repo/fork-divergences.json"
   git -C "$repo" add fork-divergences.json
@@ -412,6 +423,109 @@ test_self_update_stays_fast_forward_only() {
   pass "fm-update: homes remain fast-forward-only and upstream integration is separate"
 }
 
+# Every code root with an official-upstream remote is validated once before its
+# first origin fetch, and subordinate homes import that validated root's exact
+# commit without consulting their own origin. An invalid root leaves the whole
+# local update group unchanged, while classic single-origin updates keep their
+# established behavior and do not invoke the fork validator.
+test_self_update_validates_roots_before_propagating_exact_commits() {
+  local w repo home subordinate publisher before_repo before_sub out rc fork_tip wrapper log classic classic_home classic_sub classic_tip
+
+  w=$(new_world update-invalid-topology)
+  seed_firstmate_surface "$w"
+  repo="$w/primary"
+  home="$w/home"
+  subordinate="$w/subordinate"
+  mkdir -p "$home/state" "$home/data"
+  touch "$home/state/.last-watcher-beat"
+  git clone -q "$w/fork.git" "$repo"
+  configure_fork_clone "$repo" "$w"
+  git clone -q "$w/fork.git" "$subordinate"
+  printf 'local\n' > "$subordinate/.fm-secondmate-home"
+  printf -- '- local - fixture (home: %s; scope: fixture; projects: ; added 2026-08-14)\n' \
+    "$subordinate" > "$home/data/secondmates.md"
+  publisher="$w/publisher"
+  git clone -q "$w/fork.git" "$publisher"
+  git -C "$publisher" config commit.gpgsign false
+  printf 'validated fork update\n' > "$publisher/update.txt"
+  git -C "$publisher" add update.txt
+  git -C "$publisher" commit -qm 'validated fork update'
+  git -C "$publisher" push -q origin main
+  before_repo=$(git -C "$repo" rev-parse HEAD)
+  before_sub=$(git -C "$subordinate" rev-parse HEAD)
+  git -C "$repo" config rerere.autoupdate true
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" "$UPDATE" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "self-update mutated a fork root with invalid rerere.autoupdate"
+  assert_contains "$out" 'rerere.autoupdate is not explicitly false' \
+    "invalid topology refusal did not name the exact failed fact"
+  assert_contains "$out" "git -C '$repo' config rerere.autoupdate false" \
+    "invalid topology refusal did not print the exact safe setting correction"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$before_repo" ] || fail "invalid topology moved the primary code root"
+  [ "$(git -C "$subordinate" rev-parse HEAD)" = "$before_sub" ] || fail "invalid topology moved a subordinate home"
+
+  git -C "$repo" config rerere.autoupdate false
+  git init -q --bare "$w/untrusted.git"
+  git -C "$subordinate" remote set-url origin "$w/untrusted.git"
+  wrapper="$w/check-once"
+  log="$w/check.log"
+  cat > "$wrapper" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "${2:?}" >> "${VALIDATION_LOG:?}"
+[ "$(wc -l < "$VALIDATION_LOG" | tr -d ' ')" -eq 1 ] || {
+  printf 'topology validator was invoked more than once\n' >&2
+  exit 91
+}
+exec "${REAL_REMOTES:?}" "$@"
+SH
+  chmod +x "$wrapper"
+  out=$(VALIDATION_LOG="$log" REAL_REMOTES="$REMOTES" FM_FORK_REMOTES_CMD="$wrapper" \
+    FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" "$UPDATE" 2>&1) \
+    || fail "validated fork update failed: $out"
+  fork_tip=$(git -C "$w/fork.git" rev-parse main)
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ] || fail "primary code root was not validated exactly once"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$fork_tip" ] || fail "validated primary did not reach fork main"
+  [ "$(git -C "$subordinate" rev-parse HEAD)" = "$fork_tip" ] \
+    || fail "subordinate did not import the validated primary's exact commit"
+  [ "$(git -C "$subordinate" remote get-url origin)" = "$w/untrusted.git" ] \
+    || fail "exact-commit propagation rewrote the subordinate origin"
+
+  w=$(new_world update-classic)
+  seed_firstmate_surface "$w"
+  classic="$w/primary"
+  classic_home="$w/home"
+  classic_sub="$w/subordinate"
+  mkdir -p "$classic_home/state" "$classic_home/data"
+  touch "$classic_home/state/.last-watcher-beat"
+  git clone -q "$w/fork.git" "$classic"
+  git -C "$classic" remote set-head origin main >/dev/null 2>&1 || true
+  git clone -q "$w/fork.git" "$classic_sub"
+  printf 'classic\n' > "$classic_sub/.fm-secondmate-home"
+  printf -- '- classic - fixture (home: %s; scope: fixture; projects: ; added 2026-08-14)\n' \
+    "$classic_sub" > "$classic_home/data/secondmates.md"
+  git -C "$w/seed" remote set-url origin "$w/fork.git"
+  printf 'classic update\n' > "$w/seed/classic.txt"
+  git -C "$w/seed" add classic.txt
+  git -C "$w/seed" commit -qm 'classic update'
+  git -C "$w/seed" push -q origin main
+  classic_tip=$(git -C "$w/fork.git" rev-parse main)
+  : > "$log"
+  cat > "$wrapper" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected fork topology validation\n' >> "${VALIDATION_LOG:?}"
+exit 92
+SH
+  chmod +x "$wrapper"
+  out=$(VALIDATION_LOG="$log" FM_FORK_REMOTES_CMD="$wrapper" FM_ROOT_OVERRIDE="$classic" \
+    FM_HOME="$classic_home" "$UPDATE" 2>&1) || fail "classic single-origin update changed behavior: $out"
+  [ ! -s "$log" ] || fail "classic single-origin update invoked the fork topology validator"
+  [ "$(git -C "$classic" rev-parse HEAD)" = "$classic_tip" ] || fail "classic primary did not fast-forward"
+  [ "$(git -C "$classic_sub" rev-parse HEAD)" = "$classic_tip" ] || fail "classic subordinate did not fast-forward"
+  pass "fm-update: code roots validate once before exact-commit propagation, with classic updates unchanged"
+}
+
 # A topic based on newer official upstream must not smuggle those unvalidated
 # upstream commits into fork main through its second parent.
 test_topic_waits_for_validated_upstream() {
@@ -579,6 +693,81 @@ test_health_attributes_pipeline_fixes_and_supports_disposition_transition() {
   jq -e '.divergences[0].class == "rejected-but-retained" and .divergences[0].upstream_pr.disposition == "rejected"' \
     "$candidate/fork-divergences.json" >/dev/null || fail "disposition interface did not update both manifest fields"
   pass "fork health: pipeline fixes and disposition transitions are attributable non-divergence artifacts"
+}
+
+# Active manifest states are the three states produced by supported topic
+# flows: pending/open, rejected-but-retained/rejected, and private without a PR.
+# The integration CLI and tracked-manifest health boundary both reject crossed
+# class/disposition pairs rather than preserving an impossible active state.
+test_manifest_class_disposition_pairs_are_enforced() {
+  local w repo out rc saved admin candidate before
+  w=$(new_world manifest-pairs)
+  add_topic_and_merge "$w" pending pending.txt pending pending
+  add_topic_and_merge "$w" retained retained.txt retained rejected-but-retained
+  add_topic_and_merge "$w" private private.txt private private
+  repo="$w/admin"
+  out=$("$STATUS" --repo "$repo") || fail "valid produced manifest states were rejected: $out"
+  assert_contains "$out" 'pending=1 rejected-but-retained=1 private=1' \
+    "health did not preserve every valid active class/disposition state"
+  saved="$w/valid-manifest.json"
+  cp "$repo/fork-divergences.json" "$saved"
+
+  jq '(.divergences[] | select(.id == "pending") | .upstream_pr.disposition) = "rejected"' \
+    "$saved" > "$repo/fork-divergences.json"
+  set +e
+  out=$("$STATUS" --repo "$repo" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "health accepted pending/rejected"
+  assert_contains "$out" 'manifest does not satisfy firstmate.fork-divergences.v1' \
+    "health did not reject pending/rejected at the manifest boundary"
+
+  jq '(.divergences[] | select(.id == "retained") | .upstream_pr.disposition) = "open"' \
+    "$saved" > "$repo/fork-divergences.json"
+  set +e
+  out=$("$STATUS" --repo "$repo" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "health accepted rejected-but-retained/open"
+
+  jq '(.divergences[] | select(.id == "private") | .upstream_pr) = {url:"https://github.com/example/firstmate/pull/9",disposition:"open"}' \
+    "$saved" > "$repo/fork-divergences.json"
+  set +e
+  out=$("$STATUS" --repo "$repo" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "health accepted a private divergence with an upstream PR"
+  cp "$saved" "$repo/fork-divergences.json"
+
+  w=$(new_world manifest-pair-cli)
+  admin="$w/admin"
+  git clone -q "$w/fork.git" "$admin"
+  configure_fork_clone "$admin" "$w"
+  git -C "$admin" switch -qc fm/divergence/pair upstream/main
+  printf 'pair\n' > "$admin/pair.txt"
+  git -C "$admin" add pair.txt
+  git -C "$admin" commit -qm pair
+  git -C "$admin" push -q origin fm/divergence/pair
+  candidate=$(new_candidate "$w" manifest-pair-cli)
+  before=$(git -C "$candidate" rev-parse HEAD)
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id pair \
+    --summary 'Adds pair behavior.' --class pending --topic fm/divergence/pair \
+    --retire-when 'Upstream ships equivalent pair behavior.' --path pair.txt \
+    --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition rejected 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "topic integration accepted pending/rejected"
+  assert_contains "$out" 'pending requires pull-request disposition open' \
+    "topic integration did not name the valid pending pair"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id pair \
+    --summary 'Adds pair behavior.' --class rejected-but-retained --topic fm/divergence/pair \
+    --retire-when 'Upstream ships equivalent pair behavior.' --path pair.txt \
+    --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition open 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "topic integration accepted rejected-but-retained/open"
+  assert_contains "$out" 'rejected-but-retained requires pull-request disposition rejected' \
+    "topic integration did not name the valid rejected pair"
+  [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "refused class/disposition pairs moved the candidate"
+  [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "refused class/disposition pairs dirtied the candidate"
+  pass "fork manifest: supported class/disposition pairs are enforced at production and health boundaries"
 }
 
 # gh-axi 0.1.29 wraps a selected scalar in an api_response TOON envelope.
@@ -961,9 +1150,10 @@ test_clean_upstream_merge_is_isolated_and_validated_as_candidate() {
 # A conflict stops before commit, requires every affected unit to be justified,
 # then records and reuses the resolution while leaving it unstaged next time.
 test_conflict_requires_rejustification_and_rerere_stays_reviewable() {
-  local w candidate candidate2 origin_before out rc decisions bad_decisions receipt head
+  local w candidate candidate2 origin_before out rc decisions bad_decisions remove_decisions receipt head
   w=$(new_world conflict)
   add_topic_and_merge "$w" conflict config.txt fork
+  advance_upstream "$w" config.txt fork upstream-equivalent
   advance_upstream "$w" config.txt upstream upstream-conflict
   advance_upstream "$w" clean.txt upstream-clean upstream-clean
   candidate=$(new_candidate "$w" upstream-conflict-one)
@@ -980,9 +1170,20 @@ test_conflict_requires_rejustification_and_rerere_stays_reviewable() {
   assert_present "$receipt" "conflict did not publish re-justification receipt"
   [ -n "$(git -C "$candidate" diff --name-only --diff-filter=U)" ] || fail "conflict was silently staged"
 
+  remove_decisions="$w/remove-decisions.json"
+  cat > "$remove_decisions" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"conflict","action":"remove","reason":"The complete divergence should be discarded outside this merge."}]}
+JSON
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" continue --repo "$candidate" --decisions "$remove_decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "upstream conflict continuation accepted a remove decision"
+  assert_contains "$out" 'may only retain affected units; discard complete divergences through fm-fork-topic.sh discard' \
+    "remove refusal did not name the independent discard path"
+
   bad_decisions="$w/bad-decisions.json"
   cat > "$bad_decisions" <<'JSON'
-{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"conflict","action":"retain","reason":"The fork behavior remains required after the upstream change."},{"id":"unrelated","action":"remove","reason":"This unrelated unit must not enter a conflict decision."}]}
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"conflict","action":"retain","reason":"The fork behavior remains required after the upstream change."},{"id":"unrelated","action":"retain","reason":"This unrelated unit must not enter a conflict decision."}]}
 JSON
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" continue --repo "$candidate" --decisions "$bad_decisions" 2>&1); rc=$?
@@ -1009,6 +1210,8 @@ JSON
     || fail "justified conflict did not continue: $out"
   assert_contains "$out" "prepared: upstream merge candidate" "continued conflict did not reach candidate"
   assert_absent "$receipt" "successful continue left conflict receipt"
+  jq -e 'any(.divergences[]; .id == "conflict")' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "explicit retain decision lost its active manifest owner to accepted-upstream retirement"
   head=$(git -C "$candidate" rev-parse HEAD)
   [ "$(git -C "$candidate" rev-list --parents -n1 "$head" | wc -w | tr -d ' ')" -eq 3 ] \
     || fail "continued conflict did not make a merge commit"
@@ -1025,6 +1228,56 @@ JSON
   [ -n "$(git -C "$candidate2" ls-files -u)" ] || fail "rerere.autoupdate staged a reused resolution"
   git -C "$candidate2" merge --abort >/dev/null 2>&1 || true
   pass "fork merge: conflicts require re-justification and rerere reuse stays unstaged"
+}
+
+# A conflicted upstream merge can be receipt-bound aborted so complete removal
+# stays in the existing independent discard path. The discarded candidate then
+# advances fork main, and retrying upstream preparation integrates cleanly with
+# no carried unit or manifest owner left behind.
+test_conflicted_upstream_merge_aborts_into_independent_discard() {
+  local w candidate retry out rc receipt before health
+  w=$(new_world conflict-discard-retry)
+  add_topic_and_merge "$w" discard-me config.txt fork
+  advance_upstream "$w" config.txt upstream upstream-conflict
+  candidate=$(new_candidate "$w" discard-stop)
+  before=$(git -C "$candidate" rev-parse HEAD)
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" prepare --repo "$candidate" 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "upstream conflict did not stop before discard replacement: $out"
+  receipt=$(git -C "$candidate" rev-parse --git-path fm-fork-rejustify.json)
+  assert_present "$receipt" "upstream conflict did not create its bound receipt"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" abort --repo "$candidate" 2>&1) \
+    || fail "receipt-bound upstream abort failed: $out"
+  assert_contains "$out" 'aborted: upstream merge candidate restored' "upstream abort did not report the restored candidate"
+  assert_absent "$receipt" "upstream abort left its receipt behind"
+  [ "$(git -C "$candidate" rev-parse HEAD)" = "$before" ] || fail "upstream abort did not restore the recorded fork head"
+  [ -z "$(git -C "$candidate" rev-parse --verify --quiet MERGE_HEAD 2>/dev/null || true)" ] \
+    || fail "upstream abort left a merge active"
+  [ -z "$(git -C "$candidate" status --porcelain)" ] || fail "upstream abort did not restore a clean candidate"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" discard --id discard-me --repo "$candidate" 2>&1) \
+    || fail "independent discard after upstream abort failed: $out"
+  assert_contains "$out" 'prepared: divergence discard-me discarded independently' \
+    "replacement path did not use the independent discard owner"
+  jq -e '.divergences | length == 0' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "independent discard retained the manifest unit"
+  git -C "$candidate" push -q origin HEAD:main
+
+  retry=$(new_candidate "$w" discard-retry)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" prepare --repo "$retry" 2>&1) \
+    || fail "upstream preparation did not succeed after independent discard: $out"
+  assert_contains "$out" 'prepared: upstream merge candidate' "upstream retry did not produce an integration candidate"
+  git -C "$retry" merge-base --is-ancestor upstream/main HEAD \
+    || fail "retried candidate did not integrate official upstream"
+  jq -e '.divergences | length == 0' "$retry/fork-divergences.json" >/dev/null \
+    || fail "retried upstream integration restored the discarded manifest unit"
+  health=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$retry" --fork-ref HEAD --json) \
+    || fail "final discarded-and-integrated candidate was unhealthy: $health"
+  printf '%s' "$health" | jq -e '.healthy == true and .retained.units == 0 and (.errors | length) == 0' >/dev/null \
+    || fail "final health did not prove the divergence gone and upstream integrated: $health"
+  pass "fork merge: receipt-bound abort routes complete removal through independent discard before retry"
 }
 
 # Upstream acceptance is the divergence set's main retirement path, and it must
@@ -1234,10 +1487,12 @@ test_remote_topology_inheritance_refuses_unrelated_clones
 test_remote_provisioning_inherits_fork_topology
 test_brief_supports_explicit_upstream_start_ref
 test_self_update_stays_fast_forward_only
+test_self_update_validates_roots_before_propagating_exact_commits
 test_topic_waits_for_validated_upstream
 test_health_uses_git_cherry_equivalence_and_exposes_drift
 test_health_requires_declared_paths_to_cover_the_canonical_patch
 test_health_attributes_pipeline_fixes_and_supports_disposition_transition
+test_manifest_class_disposition_pairs_are_enforced
 test_refresh_parses_current_gh_axi_scalar_envelope
 test_topics_are_independently_revertible_units
 test_topic_integration_conflict_has_receipt_bound_continuation
@@ -1246,6 +1501,7 @@ test_topic_discard_conflict_has_receipt_bound_continuation
 test_topic_discard_continuation_finishes_an_empty_resolved_revert
 test_clean_upstream_merge_is_isolated_and_validated_as_candidate
 test_conflict_requires_rejustification_and_rerere_stays_reviewable
+test_conflicted_upstream_merge_aborts_into_independent_discard
 test_upstream_acceptance_retires_a_divergence_with_evidence
 test_no_mistakes_registration_isolation_is_proven
 

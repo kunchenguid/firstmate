@@ -81,8 +81,10 @@ if [ -z "$upstream_url" ]; then
 fi
 [ -n "$origin_url" ] || die "origin remote is missing"
 [ "$origin_url" != "$upstream_url" ] || die "origin and upstream resolve to the same URL"
-"$SCRIPT_DIR/fm-fork-remotes.sh" check "$REPO" >/dev/null \
-  || die "fork remote topology is not validated"
+if [ "${FM_FORK_TOPOLOGY_VALIDATED_REPO:-}" != "$REPO" ]; then
+  topology_out=$("${FM_FORK_REMOTES_CMD:-$SCRIPT_DIR/fm-fork-remotes.sh}" check "$REPO" 2>&1) \
+    || die "fork remote topology is not validated: ${topology_out#fm-fork-remotes: }"
+fi
 
 if [ "$REFRESH" -eq 1 ]; then
   GIT_TERMINAL_PROMPT=0 git -C "$REPO" fetch --quiet --prune origin || die "origin fetch failed"
@@ -129,7 +131,9 @@ if ! jq -e '
     (.introduced | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
     (.retire_when | type == "string" and length >= 12 and (test("[[:cntrl:]]") | not) and (test("(?i)(review periodically|revisit later|monitor this|^tbd$|^todo$)") | not)) and
     (.paths | type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and (test("[[:cntrl:]]") | not) and (startswith("/") | not) and (contains("..") | not))) and
-    (if .class == "private" then (.upstream_pr == null or (.upstream_pr | type == "object"))
+    (if .class == "private" then .upstream_pr == null
+     elif .class == "pending" then (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and .disposition == "open")
+     elif .class == "rejected-but-retained" then (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and .disposition == "rejected")
      else (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and (.disposition == "open" or .disposition == "rejected" or .disposition == "merged" or .disposition == "closed")) end)
   ) and
   all((.retired_upstream // [])[];

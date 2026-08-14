@@ -84,6 +84,7 @@ Report the named requirement to the captain and, once they confirm, complete the
 6. Load `ask-user-authority` before deciding whether routine authority can answer a re-justification.
    A material behavior expansion, destructive choice, security-sensitive choice, or captain-owned product trade-off still goes to the captain.
 7. Resolve files only after the decision is settled, write the complete `firstmate.fork-rejustify.v1` decision file outside the candidate working tree, and run `continue`.
+   If the settled decision is complete removal, use the receipt-bound upstream `abort`, then the independent topic `discard` path, land that candidate, and retry upstream preparation instead of continuing the conflict.
 8. Drive no-mistakes through the private fork registration and process every gate.
 9. Require fork CI green and captain merge approval.
 10. Use the regular merge method, then run `/updatefirstmate`.

@@ -38,12 +38,46 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
+FORK_REMOTES_CMD="${FM_FORK_REMOTES_CMD:-$SCRIPT_DIR/fm-fork-remotes.sh}"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 usage() { echo "usage: fm-update.sh [--help]" >&2; }
+
+quote_arg() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+refuse_invalid_fork_topology() {
+  local repo=$1 label=$2 out fact correction origin_url upstream_url
+  out=$("$FORK_REMOTES_CMD" check "$repo" 2>&1) || {
+    fact=$(first_line "$out")
+    fact=${fact#fm-fork-remotes: }
+    case "$fact" in
+      'rerere.enabled is not true')
+        correction="git -C $(quote_arg "$repo") config rerere.enabled true"
+        ;;
+      'rerere.autoupdate is not explicitly false')
+        correction="git -C $(quote_arg "$repo") config rerere.autoupdate false"
+        ;;
+      *)
+        origin_url=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
+        upstream_url=$(git -C "$repo" remote get-url upstream 2>/dev/null || true)
+        if [ -n "$origin_url" ] && [ -n "$upstream_url" ] && [ "$origin_url" != "$upstream_url" ]; then
+          correction="$(quote_arg "$SCRIPT_DIR/fm-fork-remotes.sh") plan $(quote_arg "$origin_url") $(quote_arg "$upstream_url") $(quote_arg "$repo"), then run only its printed apply command after captain approval"
+        else
+          correction="supply the exact captain-approved personal-fork and official-upstream URLs to $(quote_arg "$SCRIPT_DIR/fm-fork-remotes.sh") plan for $(quote_arg "$repo"), then run only its printed apply command"
+        fi
+        ;;
+    esac
+    printf '%s: refused before origin update: %s; safe correction: %s\n' "$label" "$fact" "$correction" >&2
+    return 1
+  }
+}
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
@@ -54,17 +88,27 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
+validated_fork_root=
+if git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1; then
+  refuse_invalid_fork_topology "$FM_ROOT" firstmate || exit 1
+  validated_fork_root=$(cd "$FM_ROOT" && pwd -P)
+fi
 ff_target "$FM_ROOT" "firstmate" origin no no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi
+root_commit=$(primary_head_commit "$FM_ROOT") || {
+  printf 'firstmate: refused subordinate propagation: cannot read the validated default-branch commit\n' >&2
+  exit 1
+}
 
 # A real upstream merge must be validated before it becomes fork main. Keep the
 # live-home updater fast-forward-only and surface the separate integration need.
 # The probe is inert for classic single-origin homes.
 upstream_out=
 if [ "${FM_SKIP_FORK_UPSTREAM_CHECK:-0}" != 1 ]; then
-  if upstream_out=$("$SCRIPT_DIR/fm-fork-status.sh" --repo "$FM_ROOT" --check-upstream --refresh 2>&1); then
+  if upstream_out=$(FM_FORK_TOPOLOGY_VALIDATED_REPO="$validated_fork_root" \
+    "$SCRIPT_DIR/fm-fork-status.sh" --repo "$FM_ROOT" --check-upstream --refresh 2>&1); then
     printf '%s\n' "$upstream_out"
   else
     echo "upstream-integration: failed: $(first_line "$upstream_out")"
@@ -81,7 +125,7 @@ FF_SEEN_HOMES=""
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
 # authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin no
+sweep_live_secondmate_metas "$STATE" "$root_commit" no "$SECONDMATES_MD" "$FM_ROOT"
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -114,7 +158,7 @@ if [ -f "$SECONDMATES_MD" ]; then
         echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
       fi
     else
-      process_secondmate "$id" "$home" "" origin no
+      process_secondmate "$id" "$home" "" "$root_commit" no "$FM_ROOT"
     fi
   done < "$SECONDMATES_MD"
 fi

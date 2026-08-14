@@ -6,7 +6,7 @@
 #   fm-fork-topic.sh integrate --id <id> --summary <sentence>
 #     --class <pending|rejected-but-retained|private> --topic <ref>
 #     --retire-when <falsifiable-condition> --path <path-or-prefix>...
-#     [--pr-url <github-pr-url> --pr-disposition <open|rejected|closed|merged>]
+#     [--pr-url <github-pr-url> --pr-disposition <open|rejected>]
 #     [--repo <isolated-worktree>]
 #   fm-fork-topic.sh disposition --id <id>
 #     --class rejected-but-retained --pr-disposition rejected
@@ -161,13 +161,17 @@ validate_integrate_inputs() {
   PATHS_JSON=$(printf '%s\n' "${PATHS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')
   jq -en --argjson paths "$PATHS_JSON" '$paths | length > 0 and all(.[]; (test("[[:cntrl:]]") | not) and (startswith("/") | not) and (contains("..") | not))' >/dev/null \
     || die "owned paths must be safe non-empty repository-relative paths or prefixes"
-  if [ "$CLASS" != private ]; then
-    jq -en --arg url "$PR_URL" '$url | test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")' >/dev/null \
-      || die "non-private divergence requires a full GitHub upstream PR URL"
-    case "$PR_DISPOSITION" in open|rejected|closed|merged) ;; *) die "non-private divergence requires a valid PR disposition" ;; esac
-  elif [ -n "$PR_URL$PR_DISPOSITION" ]; then
-    die "private divergence must not carry an upstream pull-request record"
+  if [ "$CLASS" = private ]; then
+    [ -z "$PR_URL$PR_DISPOSITION" ] || die "private divergence must not carry an upstream pull-request record"
+    return 0
   fi
+  jq -en --arg url "$PR_URL" '$url | test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")' >/dev/null \
+    || die "non-private divergence requires a full GitHub upstream PR URL"
+  case "$CLASS:$PR_DISPOSITION" in
+    pending:open|rejected-but-retained:rejected) ;;
+    pending:*) die "pending requires pull-request disposition open" ;;
+    rejected-but-retained:*) die "rejected-but-retained requires pull-request disposition rejected" ;;
+  esac
 }
 
 manifest_add_integrated_unit() {

@@ -139,9 +139,9 @@ Every divergence records:
 - the concrete falsifiable condition that retires it;
 - every exact path or directory prefix its patch touches.
 
-`pending` means upstream review remains open.
-`rejected-but-retained` means upstream declined it but current evidence still justifies carrying it.
-`private` means it is intentionally not proposed upstream and should remain small.
+`pending` means upstream review remains open and therefore pairs only with pull-request disposition `open`.
+`rejected-but-retained` means upstream declined it but current evidence still justifies carrying it, so it pairs only with pull-request disposition `rejected`.
+`private` means it is intentionally not proposed upstream, carries no pull-request record, and should remain small.
 `superseded` is immediate removal debt and must be empty after an upstream integration.
 
 An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upstream SHA, date, and touched divergence IDs.
@@ -203,7 +203,8 @@ Export one topic's portable patch with `git format-patch upstream/main..fm/diver
 ## Upstream integration
 
 `/updatefirstmate` keeps live homes fast-forward-only.
-It fetches and advances safe homes from already validated fork `origin/main`, then reports whether official upstream still needs a separate integration.
+Before the first origin-based fast-forward, each code root with an `upstream` remote must pass the fork topology check exactly once; a failure names the missing fact and the guarded correction before any code commit moves.
+It advances each code root from validated fork `origin/main`, then advances subordinate homes to that root's exact commit without trusting their own origin, and finally reports whether official upstream still needs a separate integration.
 It never merges in the operating checkout.
 
 Locked startup performs the same read-only need check as part of its deferred network work and emits `UPSTREAM_SYNC:` only when a validated merge is needed or the check failed.
@@ -247,15 +248,24 @@ Keep the decision file outside the candidate's working tree, then run:
 bin/fm-fork-merge.sh continue --repo <isolated-worktree> --decisions <file>
 ```
 
-The decision action is `retain` or `remove`.
+The decision action is only `retain`, and a retained unit remains an active manifest owner even when its historical patch is equivalent upstream.
 An upstream conflict with no manifest path owner uses the explicit `__unowned__` ID and still requires a reason.
 The helper refuses a changed branch, changed merge head, missing decision, short reason, or unresolved index.
+
+If the conflict evidence instead justifies complete removal, settle the stopped operation without publishing a merge:
+
+```sh
+bin/fm-fork-merge.sh abort --repo <isolated-worktree>
+```
+
+Then use `bin/fm-fork-topic.sh discard --id <id>` from that restored candidate, advance fork main through the ordinary validated pull-request path, and retry upstream preparation.
+The receipt-bound abort refuses any branch, head, or merge that differs from the stopped operation and removes its receipt only after Git restores the recorded clean fork head.
 
 Rerere records the accepted resolution and can replay it on the next equivalent conflict.
 Because `rerere.autoupdate=false`, replay changes the working tree but keeps unmerged index stages, preserving the review and re-justification barrier.
 Rerere cannot recover conflict resolutions made before it was enabled.
 
-After the fork pull request lands, `/updatefirstmate` performs only safe fast-forwards from fork main into the operating primary, local secondmate homes, remote code roots, and remote homes.
+After the fork pull request lands, `/updatefirstmate` performs only safe fast-forwards from fork main into each validated code root and propagates that exact commit into its local or remote subordinate homes.
 
 ## Upstream review after local adoption
 

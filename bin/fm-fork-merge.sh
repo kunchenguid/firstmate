@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Prepare or continue one validated upstream-to-fork-main merge candidate.
+# Prepare, continue, or abort one validated upstream-to-fork-main merge candidate.
 #
 # Usage:
 #   fm-fork-merge.sh prepare [--repo <isolated-worktree>]
 #   fm-fork-merge.sh continue --decisions <json> [--repo <isolated-worktree>]
+#   fm-fork-merge.sh abort [--repo <isolated-worktree>]
 #   fm-fork-merge.sh range-diff [--repo <isolated-worktree>]
 #
 # prepare requires a clean named feature branch whose HEAD exactly equals
@@ -16,7 +17,7 @@
 # its Git directory, lists matching manifest units, and exits 3. Rerere may have
 # populated known working-tree resolutions, but topology setup keeps
 # rerere.autoupdate=false, so they remain unstaged. continue refuses until every
-# listed unit has one explicit retain/remove decision with a reason and all
+# listed unit has one explicit retain decision with a reason and all
 # conflicts have been resolved and staged.
 #
 # A successful merge updates fork-divergences.json in the merge commit itself:
@@ -32,7 +33,7 @@
 #
 # Decision file schema:
 #   {"schema":"firstmate.fork-rejustify.v1","decisions":[
-#     {"id":"<manifest-id-or-__unowned__>","action":"retain|remove","reason":"..."}
+#     {"id":"<manifest-id-or-__unowned__>","action":"retain","reason":"..."}
 #   ]}
 set -eu
 
@@ -121,15 +122,16 @@ write_json_atomic() { # <dest>, stdin
   return 1
 }
 
-accepted_records() { # one JSON retirement record per unit accepted upstream
+accepted_records() { # [retained-ids-file], one JSON retirement record per accepted unit
   # Once this merge lands, upstream becomes an ancestor of fork main and
   # `git cherry`'s <head>..<upstream> equivalence search space is empty, so the
   # fork's own copy of an accepted patch can never be proved equivalent from the
   # merged refs again. This is the last moment the proof exists, so capture the
   # concrete commits and patch identity rather than only the verdict.
-  local id class topic summary ref cherry plus minus fork_patch patch_id upstream_patch
+  local retained_ids=${1:-} id class topic summary ref cherry plus minus fork_patch patch_id upstream_patch
   while IFS=$'\t' read -r id class topic summary; do
     [ "$class" != superseded ] || continue
+    if [ -n "$retained_ids" ] && grep -Fxq "$id" "$retained_ids"; then continue; fi
     ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
     [ -n "$ref" ] || continue
     # A failed `git cherry` prints nothing, which would otherwise count as zero
@@ -174,15 +176,6 @@ record_retirements() { # <json-lines-file>
   mv -f "$tmp" "$MANIFEST"
 }
 
-remove_manifest_ids() { # ids on stdin
-  local ids_json tmp
-  ids_json=$(jq -Rsc 'split("\n") | map(select(length > 0))')
-  tmp=$(mktemp "$MANIFEST.XXXXXX") || die "cannot create manifest update"
-  jq --argjson ids "$ids_json" '.divergences |= map(select(.id as $id | ($ids | index($id)) == null))' \
-    "$MANIFEST" > "$tmp" || { rm -f "$tmp"; die "cannot remove accepted manifest units"; }
-  mv -f "$tmp" "$MANIFEST"
-}
-
 record_sync() { # <fork-before> <upstream-before> <upstream-after> <touched-file>
   local fork_before=$1 upstream_before=$2 upstream_after=$3 touched_file=$4 touched_json date tmp
   touched_json=$(jq -Rsc 'split("\n") | map(select(length > 0)) | unique' "$touched_file")
@@ -196,13 +189,10 @@ record_sync() { # <fork-before> <upstream-before> <upstream-after> <touched-file
   mv -f "$tmp" "$MANIFEST"
 }
 
-commit_merge_and_review() { # <fork-before> <upstream-before> <upstream-after> <touched-file> [removed-file] [accepted-file]
-  local fork_before=$1 upstream_before=$2 upstream_after=$3 touched_file=$4 removed_file=${5:-} accepted_file=${6:-}
+commit_merge_and_review() { # <fork-before> <upstream-before> <upstream-after> <touched-file> [accepted-file]
+  local fork_before=$1 upstream_before=$2 upstream_after=$3 touched_file=$4 accepted_file=${5:-}
   if [ -n "$accepted_file" ] && [ -s "$accepted_file" ]; then
     record_retirements "$accepted_file"
-  fi
-  if [ -n "$removed_file" ] && [ -s "$removed_file" ]; then
-    remove_manifest_ids < "$removed_file"
   fi
   record_sync "$fork_before" "$upstream_before" "$upstream_after" "$touched_file"
   git -C "$REPO" add -- "$MANIFEST"
@@ -271,22 +261,13 @@ cmd_prepare() {
   fi
 
   accepted_records > "$TMP/accepted"
-  commit_merge_and_review "$local_head" "$upstream_before" "$upstream_after" "$TMP/touched" '' "$TMP/accepted"
+  commit_merge_and_review "$local_head" "$upstream_before" "$upstream_after" "$TMP/touched" "$TMP/accepted"
 }
 
-cmd_continue() {
-  require_topology
-  require_isolated_candidate
-  [ -n "$DECISIONS" ] || die "continue requires --decisions <json>"
-  [ -f "$DECISIONS" ] && [ ! -L "$DECISIONS" ] || die "decision file is missing or unsafe"
+load_conflict_receipt() {
   [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || die "no conflict re-justification receipt exists"
   jq -e '.schema == "firstmate.fork-rejustify-receipt.v1" and (.branch|type=="string" and length>0) and (.fork_before|test("^[0-9a-f]{40,64}$")) and (.upstream_before|test("^[0-9a-f]{40,64}$")) and (.upstream_after|test("^[0-9a-f]{40,64}$")) and (.clean_index_hash|test("^[0-9a-f]{40,64}$")) and (.affected|type=="array" and length>0) and (.conflicts|type=="array" and length>0) and (.touched|type=="array")' \
     "$RECEIPT" >/dev/null || die "conflict re-justification receipt is malformed"
-  jq -e '.schema == "firstmate.fork-rejustify.v1" and (.decisions | type == "array") and ([.decisions[].id] | length == (unique | length)) and all(.decisions[]; (.id|type=="string" and (. == "__unowned__" or test("^[a-z0-9][a-z0-9-]*$"))) and (.action=="retain" or .action=="remove") and (.reason|type=="string" and length>=12 and (test("[[:cntrl:]]")|not)))' \
-    "$DECISIONS" >/dev/null || die "decision file does not satisfy firstmate.fork-rejustify.v1"
-  expected_ids=$(jq -r '.affected[]' "$RECEIPT" | sort)
-  decision_ids=$(jq -r '.decisions[].id' "$DECISIONS" | sort)
-  [ "$decision_ids" = "$expected_ids" ] || die "decision file must name exactly the affected units and no others"
   receipt_branch=$(jq -r .branch "$RECEIPT")
   [ "$(git -C "$REPO" symbolic-ref --short HEAD)" = "$receipt_branch" ] || die "candidate branch differs from the receipt"
   fork_before=$(jq -r .fork_before "$RECEIPT")
@@ -294,6 +275,22 @@ cmd_continue() {
   upstream_after=$(jq -r .upstream_after "$RECEIPT")
   [ "$(git -C "$REPO" rev-parse HEAD)" = "$fork_before" ] || die "candidate HEAD differs from the recorded pre-merge fork"
   [ "$(git -C "$REPO" rev-parse MERGE_HEAD 2>/dev/null || true)" = "$upstream_after" ] || die "active merge differs from the receipt"
+}
+
+cmd_continue() {
+  require_topology
+  require_isolated_candidate
+  [ -n "$DECISIONS" ] || die "continue requires --decisions <json>"
+  [ -f "$DECISIONS" ] && [ ! -L "$DECISIONS" ] || die "decision file is missing or unsafe"
+  load_conflict_receipt
+  if jq -e 'any(.decisions[]?; .action == "remove")' "$DECISIONS" >/dev/null 2>&1; then
+    die "upstream merge conflicts may only retain affected units; discard complete divergences through fm-fork-topic.sh discard"
+  fi
+  jq -e '.schema == "firstmate.fork-rejustify.v1" and (.decisions | type == "array") and ([.decisions[].id] | length == (unique | length)) and all(.decisions[]; (.id|type=="string" and (. == "__unowned__" or test("^[a-z0-9][a-z0-9-]*$"))) and .action=="retain" and (.reason|type=="string" and length>=12 and (test("[[:cntrl:]]")|not)))' \
+    "$DECISIONS" >/dev/null || die "decision file does not satisfy firstmate.fork-rejustify.v1"
+  expected_ids=$(jq -r '.affected[]' "$RECEIPT" | sort)
+  decision_ids=$(jq -r '.decisions[].id' "$DECISIONS" | sort)
+  [ "$decision_ids" = "$expected_ids" ] || die "decision file must name exactly the affected units and no others"
   [ -z "$(git -C "$REPO" diff --name-only --diff-filter=U)" ] || die "conflicts remain unresolved or unstaged"
   git -C "$REPO" diff --quiet || die "unstaged changes remain after conflict resolution"
   [ -z "$(git -C "$REPO" ls-files --others --exclude-standard)" ] || die "untracked files are present in the merge candidate"
@@ -303,12 +300,36 @@ cmd_continue() {
   [ "$(fm_fork_index_without_paths_hash "$REPO" "$TMP/conflicts")" = "$(jq -r .clean_index_hash "$RECEIPT")" ] \
     || die "non-conflict index entries changed after the merge stopped"
   jq -r '.touched[]' "$RECEIPT" > "$TMP/touched"
-  jq -r '.decisions[] | select(.action == "remove" and .id != "__unowned__") | .id' "$DECISIONS" | sort -u > "$TMP/remove"
-  accepted_records > "$TMP/accepted"
+  jq -r '.decisions[] | select(.id != "__unowned__") | .id' "$DECISIONS" | sort -u > "$TMP/retained"
+  accepted_records "$TMP/retained" > "$TMP/accepted"
   # Ensure rerere records the manually staged result before the merge commit.
   git -C "$REPO" rerere >/dev/null 2>&1 || true
-  commit_merge_and_review "$fork_before" "$upstream_before" "$upstream_after" "$TMP/touched" "$TMP/remove" "$TMP/accepted"
+  commit_merge_and_review "$fork_before" "$upstream_before" "$upstream_after" "$TMP/touched" "$TMP/accepted"
   rm -f "$RECEIPT"
+}
+
+cmd_abort() {
+  local conflicts_file changed_path
+  require_topology
+  require_isolated_candidate
+  load_conflict_receipt
+  [ -z "$(git -C "$REPO" ls-files --others --exclude-standard)" ] || die "untracked files are present in the merge candidate"
+  conflicts_file=$(mktemp "${TMPDIR:-/tmp}/fm-fork-abort.XXXXXX") || die "cannot create abort state"
+  trap 'rm -f "$conflicts_file"' EXIT
+  jq -r '.conflicts[]' "$RECEIPT" > "$conflicts_file"
+  [ "$(fm_fork_index_without_paths_hash "$REPO" "$conflicts_file")" = "$(jq -r .clean_index_hash "$RECEIPT")" ] \
+    || die "non-conflict index entries changed after the merge stopped"
+  while IFS= read -r changed_path; do
+    grep -Fqx -- "$changed_path" "$conflicts_file" || die "non-conflict working-tree path changed after the merge stopped: $changed_path"
+  done < <(git -C "$REPO" diff --name-only)
+  git -C "$REPO" merge --abort || die "could not abort the receipt-bound upstream merge"
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$fork_before" ] || die "aborted merge did not restore the recorded fork head"
+  [ -z "$(git -C "$REPO" rev-parse --verify --quiet MERGE_HEAD 2>/dev/null || true)" ] || die "aborted merge still has an active merge head"
+  [ -z "$(git -C "$REPO" status --porcelain)" ] || die "aborted merge did not restore a clean candidate"
+  rm -f "$RECEIPT"
+  trap - EXIT
+  rm -f "$conflicts_file"
+  printf 'aborted: upstream merge candidate restored to %s and conflict receipt settled\n' "$fork_before"
 }
 
 cmd_range_diff() {
@@ -323,6 +344,7 @@ cmd_range_diff() {
 case "$MODE" in
   prepare) cmd_prepare ;;
   continue) cmd_continue ;;
+  abort) cmd_abort ;;
   range-diff) cmd_range_diff ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;
