@@ -2,6 +2,7 @@
   "use strict";
 
   const decisionForms = document.querySelectorAll("form[data-fm-decision]");
+  const COPY_BUTTON_LABEL = "Copy visible answer";
 
   function answerFrom(form) {
     return [...new FormData(form).entries()]
@@ -18,6 +19,8 @@
     if (!output) return;
     output.textContent = message;
     output.classList.toggle("is-queued", queued);
+    const copyButton = form.querySelector("[data-fm-copy-answer]");
+    if (copyButton) copyButton.textContent = COPY_BUTTON_LABEL;
   }
 
   for (const form of decisionForms) {
